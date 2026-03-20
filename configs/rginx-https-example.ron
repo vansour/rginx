@@ -14,9 +14,20 @@ Config(
                 ),
             ],
             server_name_override: Some("example.com"),
+            request_timeout_secs: Some(30),
         ),
     ],
     locations: [
+        LocationConfig(
+            matcher: Exact("/status"),
+            handler: Status,
+            allow_cidrs: ["127.0.0.1/32", "::1/128"],
+        ),
+        LocationConfig(
+            matcher: Exact("/metrics"),
+            handler: Metrics,
+            allow_cidrs: ["127.0.0.1/32", "::1/128"],
+        ),
         LocationConfig(
             matcher: Prefix("/"),
             handler: Proxy(

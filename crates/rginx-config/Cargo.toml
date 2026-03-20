@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 http.workspace = true
+ipnet.workspace = true
 ron.workspace = true
 rginx-core = { path = "../rginx-core" }
 rustls.workspace = true

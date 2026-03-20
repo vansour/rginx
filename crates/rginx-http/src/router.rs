@@ -7,7 +7,7 @@ pub fn select_route<'a>(routes: &'a [Route], path: &str) -> Option<&'a Route> {
 #[cfg(test)]
 mod tests {
     use http::StatusCode;
-    use rginx_core::{Route, RouteAction, RouteMatcher, StaticResponse};
+    use rginx_core::{Route, RouteAccessControl, RouteAction, RouteMatcher, StaticResponse};
 
     use super::select_route;
 
@@ -21,6 +21,8 @@ mod tests {
                     content_type: "text/plain".to_string(),
                     body: "exact".to_string(),
                 }),
+                access_control: RouteAccessControl::default(),
+                rate_limit: None,
             },
             Route {
                 matcher: RouteMatcher::Prefix("/".to_string()),
@@ -29,6 +31,8 @@ mod tests {
                     content_type: "text/plain".to_string(),
                     body: "prefix".to_string(),
                 }),
+                access_control: RouteAccessControl::default(),
+                rate_limit: None,
             },
         ];
 
@@ -45,6 +49,8 @@ mod tests {
                 content_type: "text/plain".to_string(),
                 body: "prefix".to_string(),
             }),
+            access_control: RouteAccessControl::default(),
+            rate_limit: None,
         }];
 
         assert!(select_route(&routes, "/api/demo").is_some());

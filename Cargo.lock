@@ -212,7 +212,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -393,6 +393,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "ipnet"
+version = "2.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
+
+[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -539,12 +545,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
-name = "rginx-app"
+name = "rginx"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "libc",
  "rginx-config",
+ "rginx-http",
  "rginx-observability",
  "rginx-runtime",
  "tokio",
@@ -555,6 +563,7 @@ name = "rginx-config"
 version = "0.1.0"
 dependencies = [
  "http",
+ "ipnet",
  "rginx-core",
  "ron",
  "rustls",
@@ -566,6 +575,7 @@ name = "rginx-core"
 version = "0.1.0"
 dependencies = [
  "http",
+ "ipnet",
  "thiserror",
 ]
 
@@ -579,10 +589,14 @@ dependencies = [
  "hyper",
  "hyper-rustls",
  "hyper-util",
+ "pin-project-lite",
  "rginx-core",
  "rustls",
  "rustls-pemfile",
+ "serde",
+ "serde_json",
  "tokio",
+ "tokio-rustls",
  "tracing",
 ]
 
@@ -597,6 +611,7 @@ dependencies = [
 name = "rginx-runtime"
 version = "0.1.0"
 dependencies = [
+ "rginx-config",
  "rginx-core",
  "rginx-http",
  "tokio",
@@ -748,6 +763,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "serde_json"
+version = "1.0.149"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83fc039473c5595ace860d8c4fafa220ff474b3fc6bfdb4293327f1a37e94d86"
+dependencies = [
+ "itoa",
+ "memchr",
+ "serde",
+ "serde_core",
+ "zmij",
 ]
 
 [[package]]
@@ -1105,3 +1133,9 @@ name = "zeroize"
 version = "1.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b97154e67e32c85465826e8bcc1c59429aaaf107c1e4a9e53c8d8ccd5eff88d0"
+
+[[package]]
+name = "zmij"
+version = "1.0.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"

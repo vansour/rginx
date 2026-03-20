@@ -1,14 +1,20 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use rginx_core::ConfigSnapshot;
+use rginx_core::{ConfigSnapshot, Result};
 
 #[derive(Clone)]
 pub struct RuntimeState {
-    pub config: Arc<ConfigSnapshot>,
+    pub config_path: PathBuf,
+    pub http: rginx_http::SharedState,
 }
 
 impl RuntimeState {
-    pub fn new(config: ConfigSnapshot) -> Self {
-        Self { config: Arc::new(config) }
+    pub fn new(config_path: PathBuf, config: ConfigSnapshot) -> Result<Self> {
+        Ok(Self { config_path, http: rginx_http::SharedState::from_config(config)? })
+    }
+
+    pub async fn current_config(&self) -> Arc<ConfigSnapshot> {
+        self.http.current_config().await
     }
 }

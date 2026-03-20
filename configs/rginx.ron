@@ -13,6 +13,7 @@ Config(
                     url: "http://127.0.0.1:9000",
                 ),
             ],
+            request_timeout_secs: Some(30),
         ),
     ],
     locations: [
@@ -33,10 +34,22 @@ Config(
             ),
         ),
         LocationConfig(
+            matcher: Exact("/status"),
+            handler: Status,
+            allow_cidrs: ["127.0.0.1/32", "::1/128"],
+        ),
+        LocationConfig(
+            matcher: Exact("/metrics"),
+            handler: Metrics,
+            allow_cidrs: ["127.0.0.1/32", "::1/128"],
+        ),
+        LocationConfig(
             matcher: Prefix("/api"),
             handler: Proxy(
                 upstream: "backend",
             ),
+            requests_per_sec: Some(20),
+            burst: Some(10),
         ),
     ],
 )

@@ -1,17 +1,29 @@
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use http::StatusCode;
+use ipnet::IpNet;
 use rginx_core::{
-    ConfigSnapshot, Error, ProxyTarget, Result, Route, RouteAction, RouteMatcher, RuntimeSettings,
-    Server, StaticResponse, Upstream, UpstreamPeer, UpstreamTls,
+    ActiveHealthCheck, ConfigSnapshot, Error, ProxyTarget, Result, Route, RouteAccessControl,
+    RouteAction, RouteMatcher, RouteRateLimit, RuntimeSettings, Server, ServerTls, StaticResponse,
+    Upstream, UpstreamPeer, UpstreamTls,
 };
 use rustls::pki_types::ServerName;
 
-use crate::model::{Config, HandlerConfig, MatcherConfig, UpstreamTlsConfig};
+use crate::model::{Config, HandlerConfig, MatcherConfig, ServerTlsConfig, UpstreamTlsConfig};
 use crate::validate::validate;
+
+const DEFAULT_UPSTREAM_REQUEST_TIMEOUT_SECS: u64 = 30;
+const DEFAULT_MAX_REPLAYABLE_REQUEST_BODY_BYTES: u64 = 64 * 1024;
+const DEFAULT_UNHEALTHY_AFTER_FAILURES: u32 = 2;
+const DEFAULT_UNHEALTHY_COOLDOWN_SECS: u64 = 10;
+const DEFAULT_HEALTH_CHECK_INTERVAL_SECS: u64 = 5;
+const DEFAULT_HEALTH_CHECK_TIMEOUT_SECS: u64 = 2;
+const DEFAULT_HEALTHY_SUCCESSES_REQUIRED: u32 = 2;
 
 pub fn compile(raw: Config) -> Result<ConfigSnapshot> {
     compile_with_base(raw, Path::new("."))
@@ -22,12 +34,28 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
     let base_dir = base_dir.as_ref();
 
     let Config { runtime, server, upstreams: raw_upstreams, locations } = raw;
+    let crate::model::ServerConfig { listen, trusted_proxies, tls } = server;
 
-    let listen_addr = server.listen.parse()?;
+    let listen_addr = listen.parse()?;
+    let trusted_proxies = compile_trusted_proxies(trusted_proxies)?;
+    let tls = compile_server_tls(tls, base_dir)?;
     let upstreams = raw_upstreams
         .into_iter()
         .map(|upstream| {
-            let crate::model::UpstreamConfig { name, peers, tls, server_name_override } = upstream;
+            let crate::model::UpstreamConfig {
+                name,
+                peers,
+                tls,
+                server_name_override,
+                request_timeout_secs,
+                max_replayable_request_body_bytes,
+                unhealthy_after_failures,
+                unhealthy_cooldown_secs,
+                health_check_path,
+                health_check_interval_secs,
+                health_check_timeout_secs,
+                healthy_successes_required,
+            } = upstream;
 
             let peers = peers
                 .into_iter()
@@ -35,8 +63,37 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
                 .collect::<Result<Vec<_>>>()?;
             let tls = compile_tls(&name, tls, base_dir)?;
             let server_name_override = compile_server_name_override(&name, server_name_override)?;
+            let request_timeout = Duration::from_secs(
+                request_timeout_secs.unwrap_or(DEFAULT_UPSTREAM_REQUEST_TIMEOUT_SECS),
+            );
+            let max_replayable_request_body_bytes = compile_max_replayable_request_body_bytes(
+                &name,
+                max_replayable_request_body_bytes,
+            )?;
+            let unhealthy_after_failures =
+                unhealthy_after_failures.unwrap_or(DEFAULT_UNHEALTHY_AFTER_FAILURES);
+            let unhealthy_cooldown = Duration::from_secs(
+                unhealthy_cooldown_secs.unwrap_or(DEFAULT_UNHEALTHY_COOLDOWN_SECS),
+            );
+            let active_health_check = compile_active_health_check(
+                &name,
+                health_check_path,
+                health_check_interval_secs,
+                health_check_timeout_secs,
+                healthy_successes_required,
+            )?;
 
-            let compiled = Arc::new(Upstream::new(name.clone(), peers, tls, server_name_override));
+            let compiled = Arc::new(Upstream::new(
+                name.clone(),
+                peers,
+                tls,
+                server_name_override,
+                request_timeout,
+                max_replayable_request_body_bytes,
+                unhealthy_after_failures,
+                unhealthy_cooldown,
+                active_health_check,
+            ));
             Ok((name, compiled))
         })
         .collect::<Result<HashMap<_, _>>>()?;
@@ -44,12 +101,22 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
     let mut routes = locations
         .into_iter()
         .map(|location| {
-            let matcher = match location.matcher {
+            let crate::model::LocationConfig {
+                matcher,
+                handler,
+                allow_cidrs,
+                deny_cidrs,
+                requests_per_sec,
+                burst,
+            } = location;
+            let matcher = match matcher {
                 MatcherConfig::Exact(path) => RouteMatcher::Exact(path),
                 MatcherConfig::Prefix(path) => RouteMatcher::Prefix(path),
             };
+            let access_control = compile_route_access_control(&matcher, allow_cidrs, deny_cidrs)?;
+            let rate_limit = compile_route_rate_limit(&matcher, requests_per_sec, burst)?;
 
-            let action = match location.handler {
+            let action = match handler {
                 HandlerConfig::Static { status, content_type, body } => {
                     RouteAction::Static(StaticResponse {
                         status: StatusCode::from_u16(status.unwrap_or(200))?,
@@ -65,9 +132,11 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
 
                     RouteAction::Proxy(ProxyTarget { upstream_name: upstream, upstream: compiled })
                 }
+                HandlerConfig::Status => RouteAction::Status,
+                HandlerConfig::Metrics => RouteAction::Metrics,
             };
 
-            Ok(Route { matcher, action })
+            Ok(Route { matcher, action, access_control, rate_limit })
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -77,7 +146,7 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
         runtime: RuntimeSettings {
             shutdown_timeout: Duration::from_secs(runtime.shutdown_timeout_secs),
         },
-        server: Server { listen_addr },
+        server: Server { listen_addr, trusted_proxies, tls },
         routes,
         upstreams,
     })
@@ -135,6 +204,30 @@ fn compile_tls(
     }
 }
 
+fn compile_server_tls(tls: Option<ServerTlsConfig>, base_dir: &Path) -> Result<Option<ServerTls>> {
+    let Some(ServerTlsConfig { cert_path, key_path }) = tls else {
+        return Ok(None);
+    };
+
+    let cert_path = resolve_path(base_dir, cert_path);
+    if !cert_path.is_file() {
+        return Err(Error::Config(format!(
+            "server TLS certificate file `{}` does not exist or is not a file",
+            cert_path.display()
+        )));
+    }
+
+    let key_path = resolve_path(base_dir, key_path);
+    if !key_path.is_file() {
+        return Err(Error::Config(format!(
+            "server TLS private key file `{}` does not exist or is not a file",
+            key_path.display()
+        )));
+    }
+
+    Ok(Some(ServerTls { cert_path, key_path }))
+}
+
 fn compile_server_name_override(
     upstream_name: &str,
     server_name_override: Option<String>,
@@ -151,6 +244,138 @@ fn compile_server_name_override(
     })?;
 
     Ok(Some(normalized))
+}
+
+fn compile_max_replayable_request_body_bytes(
+    upstream_name: &str,
+    max_replayable_request_body_bytes: Option<u64>,
+) -> Result<usize> {
+    let bytes =
+        max_replayable_request_body_bytes.unwrap_or(DEFAULT_MAX_REPLAYABLE_REQUEST_BODY_BYTES);
+    usize::try_from(bytes).map_err(|_| {
+        Error::Config(format!(
+            "upstream `{upstream_name}` max_replayable_request_body_bytes `{bytes}` exceeds platform limits"
+        ))
+    })
+}
+
+fn compile_active_health_check(
+    upstream_name: &str,
+    health_check_path: Option<String>,
+    health_check_interval_secs: Option<u64>,
+    health_check_timeout_secs: Option<u64>,
+    healthy_successes_required: Option<u32>,
+) -> Result<Option<ActiveHealthCheck>> {
+    let Some(path) = health_check_path else {
+        return Ok(None);
+    };
+
+    http::uri::PathAndQuery::from_str(&path).map_err(|error| {
+        Error::Config(format!(
+            "upstream `{upstream_name}` health_check_path `{path}` is invalid: {error}"
+        ))
+    })?;
+
+    Ok(Some(ActiveHealthCheck {
+        path,
+        interval: Duration::from_secs(
+            health_check_interval_secs.unwrap_or(DEFAULT_HEALTH_CHECK_INTERVAL_SECS),
+        ),
+        timeout: Duration::from_secs(
+            health_check_timeout_secs.unwrap_or(DEFAULT_HEALTH_CHECK_TIMEOUT_SECS),
+        ),
+        healthy_successes_required: healthy_successes_required
+            .unwrap_or(DEFAULT_HEALTHY_SUCCESSES_REQUIRED),
+    }))
+}
+
+fn compile_route_access_control(
+    matcher: &RouteMatcher,
+    allow_cidrs: Vec<String>,
+    deny_cidrs: Vec<String>,
+) -> Result<RouteAccessControl> {
+    let matcher_label = match matcher {
+        RouteMatcher::Exact(path) | RouteMatcher::Prefix(path) => path.as_str(),
+    };
+
+    Ok(RouteAccessControl::new(
+        compile_cidrs(matcher_label, "allow_cidrs", allow_cidrs)?,
+        compile_cidrs(matcher_label, "deny_cidrs", deny_cidrs)?,
+    ))
+}
+
+fn compile_route_rate_limit(
+    matcher: &RouteMatcher,
+    requests_per_sec: Option<u32>,
+    burst: Option<u32>,
+) -> Result<Option<RouteRateLimit>> {
+    let matcher_label = match matcher {
+        RouteMatcher::Exact(path) | RouteMatcher::Prefix(path) => path.as_str(),
+    };
+
+    match requests_per_sec {
+        Some(requests_per_sec) => {
+            Ok(Some(RouteRateLimit::new(requests_per_sec, burst.unwrap_or(0))))
+        }
+        None if burst.is_some() => Err(Error::Config(format!(
+            "route matcher `{matcher_label}` burst requires requests_per_sec to be set"
+        ))),
+        None => Ok(None),
+    }
+}
+
+fn compile_trusted_proxies(values: Vec<String>) -> Result<Vec<IpNet>> {
+    values
+        .into_iter()
+        .map(|value| {
+            let normalized = normalize_trusted_proxy(&value).ok_or_else(|| {
+                Error::Config(format!(
+                    "server trusted_proxies entry `{value}` must be a valid IP address or CIDR"
+                ))
+            })?;
+
+            normalized.parse::<IpNet>().map_err(|error| {
+                Error::Config(format!("server trusted_proxies entry `{value}` is invalid: {error}"))
+            })
+        })
+        .collect()
+}
+
+fn normalize_trusted_proxy(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if trimmed.contains('/') {
+        return Some(trimmed.to_string());
+    }
+
+    let ip = trimmed.parse::<IpAddr>().ok()?;
+    Some(match ip {
+        IpAddr::V4(_) => format!("{trimmed}/32"),
+        IpAddr::V6(_) => format!("{trimmed}/128"),
+    })
+}
+
+fn compile_cidrs(route_matcher: &str, field: &str, cidrs: Vec<String>) -> Result<Vec<IpNet>> {
+    cidrs
+        .into_iter()
+        .map(|cidr| {
+            let normalized = cidr.trim();
+            if normalized.is_empty() {
+                return Err(Error::Config(format!(
+                    "route matcher `{route_matcher}` {field} entries must not be empty"
+                )));
+            }
+
+            normalized.parse::<IpNet>().map_err(|error| {
+                Error::Config(format!(
+                    "route matcher `{route_matcher}` {field} entry `{cidr}` is invalid: {error}"
+                ))
+            })
+        })
+        .collect()
 }
 
 fn normalize_server_name_override(value: &str) -> String {
@@ -174,29 +399,51 @@ fn resolve_path(base_dir: &Path, path: String) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::time::Duration;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::model::{
         Config, HandlerConfig, LocationConfig, MatcherConfig, RuntimeConfig, ServerConfig,
-        UpstreamConfig, UpstreamPeerConfig, UpstreamTlsConfig,
+        ServerTlsConfig, UpstreamConfig, UpstreamPeerConfig, UpstreamTlsConfig,
     };
 
-    use super::{compile, compile_with_base};
+    use super::{
+        compile, compile_with_base, DEFAULT_HEALTHY_SUCCESSES_REQUIRED,
+        DEFAULT_HEALTH_CHECK_INTERVAL_SECS, DEFAULT_HEALTH_CHECK_TIMEOUT_SECS,
+        DEFAULT_MAX_REPLAYABLE_REQUEST_BODY_BYTES, DEFAULT_UNHEALTHY_AFTER_FAILURES,
+        DEFAULT_UNHEALTHY_COOLDOWN_SECS, DEFAULT_UPSTREAM_REQUEST_TIMEOUT_SECS,
+    };
 
     #[test]
     fn compile_accepts_https_upstreams() {
         let config = Config {
             runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
-            server: ServerConfig { listen: "127.0.0.1:8080".to_string() },
+            server: ServerConfig {
+                listen: "127.0.0.1:8080".to_string(),
+                trusted_proxies: Vec::new(),
+                tls: None,
+            },
             upstreams: vec![UpstreamConfig {
                 name: "secure-backend".to_string(),
                 peers: vec![UpstreamPeerConfig { url: "https://example.com".to_string() }],
                 tls: None,
                 server_name_override: None,
+                request_timeout_secs: None,
+                max_replayable_request_body_bytes: None,
+                unhealthy_after_failures: None,
+                unhealthy_cooldown_secs: None,
+                health_check_path: Some("/healthz".to_string()),
+                health_check_interval_secs: None,
+                health_check_timeout_secs: None,
+                healthy_successes_required: None,
             }],
             locations: vec![LocationConfig {
                 matcher: MatcherConfig::Prefix("/api".to_string()),
                 handler: HandlerConfig::Proxy { upstream: "secure-backend".to_string() },
+                allow_cidrs: Vec::new(),
+                deny_cidrs: Vec::new(),
+                requests_per_sec: None,
+                burst: None,
             }],
         };
 
@@ -210,6 +457,28 @@ mod tests {
         assert_eq!(proxy.upstream_name, "secure-backend");
         assert_eq!(peer.scheme, "https");
         assert_eq!(peer.authority, "example.com");
+        assert_eq!(
+            proxy.upstream.request_timeout,
+            Duration::from_secs(DEFAULT_UPSTREAM_REQUEST_TIMEOUT_SECS)
+        );
+        assert_eq!(
+            proxy.upstream.max_replayable_request_body_bytes,
+            DEFAULT_MAX_REPLAYABLE_REQUEST_BODY_BYTES as usize
+        );
+        assert_eq!(proxy.upstream.unhealthy_after_failures, DEFAULT_UNHEALTHY_AFTER_FAILURES);
+        assert_eq!(
+            proxy.upstream.unhealthy_cooldown,
+            Duration::from_secs(DEFAULT_UNHEALTHY_COOLDOWN_SECS)
+        );
+        let active_health = proxy
+            .upstream
+            .active_health_check
+            .as_ref()
+            .expect("active health-check config should compile");
+        assert_eq!(active_health.path, "/healthz");
+        assert_eq!(active_health.interval, Duration::from_secs(DEFAULT_HEALTH_CHECK_INTERVAL_SECS));
+        assert_eq!(active_health.timeout, Duration::from_secs(DEFAULT_HEALTH_CHECK_TIMEOUT_SECS));
+        assert_eq!(active_health.healthy_successes_required, DEFAULT_HEALTHY_SUCCESSES_REQUIRED);
     }
 
     #[test]
@@ -225,16 +494,32 @@ mod tests {
 
         let config = Config {
             runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
-            server: ServerConfig { listen: "127.0.0.1:8080".to_string() },
+            server: ServerConfig {
+                listen: "127.0.0.1:8080".to_string(),
+                trusted_proxies: Vec::new(),
+                tls: None,
+            },
             upstreams: vec![UpstreamConfig {
                 name: "dev-backend".to_string(),
                 peers: vec![UpstreamPeerConfig { url: "https://localhost:9443".to_string() }],
                 tls: Some(UpstreamTlsConfig::CustomCa { ca_cert_path: "dev-ca.pem".to_string() }),
                 server_name_override: Some("dev.internal".to_string()),
+                request_timeout_secs: Some(5),
+                max_replayable_request_body_bytes: Some(1024),
+                unhealthy_after_failures: Some(3),
+                unhealthy_cooldown_secs: Some(15),
+                health_check_path: Some("/ready".to_string()),
+                health_check_interval_secs: Some(7),
+                health_check_timeout_secs: Some(3),
+                healthy_successes_required: Some(4),
             }],
             locations: vec![LocationConfig {
                 matcher: MatcherConfig::Prefix("/".to_string()),
                 handler: HandlerConfig::Proxy { upstream: "dev-backend".to_string() },
+                allow_cidrs: Vec::new(),
+                deny_cidrs: Vec::new(),
+                requests_per_sec: None,
+                burst: None,
             }],
         };
 
@@ -250,6 +535,19 @@ mod tests {
             rginx_core::UpstreamTls::CustomCa { ca_cert_path } if ca_cert_path == &ca_path
         ));
         assert_eq!(proxy.upstream.server_name_override.as_deref(), Some("dev.internal"));
+        assert_eq!(proxy.upstream.request_timeout, Duration::from_secs(5));
+        assert_eq!(proxy.upstream.max_replayable_request_body_bytes, 1024);
+        assert_eq!(proxy.upstream.unhealthy_after_failures, 3);
+        assert_eq!(proxy.upstream.unhealthy_cooldown, Duration::from_secs(15));
+        let active_health = proxy
+            .upstream
+            .active_health_check
+            .as_ref()
+            .expect("custom active health-check config should compile");
+        assert_eq!(active_health.path, "/ready");
+        assert_eq!(active_health.interval, Duration::from_secs(7));
+        assert_eq!(active_health.timeout, Duration::from_secs(3));
+        assert_eq!(active_health.healthy_successes_required, 4);
 
         fs::remove_file(&ca_path).expect("temp CA file should be removed");
         fs::remove_dir(&base_dir).expect("temp base dir should be removed");
@@ -259,16 +557,32 @@ mod tests {
     fn compile_normalizes_server_name_override() {
         let config = Config {
             runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
-            server: ServerConfig { listen: "127.0.0.1:8080".to_string() },
+            server: ServerConfig {
+                listen: "127.0.0.1:8080".to_string(),
+                trusted_proxies: Vec::new(),
+                tls: None,
+            },
             upstreams: vec![UpstreamConfig {
                 name: "secure-backend".to_string(),
                 peers: vec![UpstreamPeerConfig { url: "https://[::1]:9443".to_string() }],
                 tls: None,
                 server_name_override: Some("[::1]".to_string()),
+                request_timeout_secs: None,
+                max_replayable_request_body_bytes: None,
+                unhealthy_after_failures: None,
+                unhealthy_cooldown_secs: None,
+                health_check_path: None,
+                health_check_interval_secs: None,
+                health_check_timeout_secs: None,
+                healthy_successes_required: None,
             }],
             locations: vec![LocationConfig {
                 matcher: MatcherConfig::Prefix("/".to_string()),
                 handler: HandlerConfig::Proxy { upstream: "secure-backend".to_string() },
+                allow_cidrs: Vec::new(),
+                deny_cidrs: Vec::new(),
+                requests_per_sec: None,
+                burst: None,
             }],
         };
 
@@ -285,20 +599,217 @@ mod tests {
     fn compile_rejects_invalid_server_name_override() {
         let config = Config {
             runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
-            server: ServerConfig { listen: "127.0.0.1:8080".to_string() },
+            server: ServerConfig {
+                listen: "127.0.0.1:8080".to_string(),
+                trusted_proxies: Vec::new(),
+                tls: None,
+            },
             upstreams: vec![UpstreamConfig {
                 name: "secure-backend".to_string(),
                 peers: vec![UpstreamPeerConfig { url: "https://127.0.0.1:9443".to_string() }],
                 tls: None,
                 server_name_override: Some("bad name".to_string()),
+                request_timeout_secs: None,
+                max_replayable_request_body_bytes: None,
+                unhealthy_after_failures: None,
+                unhealthy_cooldown_secs: None,
+                health_check_path: None,
+                health_check_interval_secs: None,
+                health_check_timeout_secs: None,
+                healthy_successes_required: None,
             }],
             locations: vec![LocationConfig {
                 matcher: MatcherConfig::Prefix("/".to_string()),
                 handler: HandlerConfig::Proxy { upstream: "secure-backend".to_string() },
+                allow_cidrs: Vec::new(),
+                deny_cidrs: Vec::new(),
+                requests_per_sec: None,
+                burst: None,
             }],
         };
 
         let error = compile(config).expect_err("invalid override should be rejected");
         assert!(error.to_string().contains("server_name_override"));
+    }
+
+    #[test]
+    fn compile_accepts_status_routes() {
+        let config = Config {
+            runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
+            server: ServerConfig {
+                listen: "127.0.0.1:8080".to_string(),
+                trusted_proxies: Vec::new(),
+                tls: None,
+            },
+            upstreams: Vec::new(),
+            locations: vec![LocationConfig {
+                matcher: MatcherConfig::Exact("/status".to_string()),
+                handler: HandlerConfig::Status,
+                allow_cidrs: Vec::new(),
+                deny_cidrs: Vec::new(),
+                requests_per_sec: None,
+                burst: None,
+            }],
+        };
+
+        let snapshot = compile(config).expect("status route should compile");
+        assert!(matches!(snapshot.routes[0].action, rginx_core::RouteAction::Status));
+    }
+
+    #[test]
+    fn compile_accepts_metrics_routes() {
+        let config = Config {
+            runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
+            server: ServerConfig {
+                listen: "127.0.0.1:8080".to_string(),
+                trusted_proxies: Vec::new(),
+                tls: None,
+            },
+            upstreams: Vec::new(),
+            locations: vec![LocationConfig {
+                matcher: MatcherConfig::Exact("/metrics".to_string()),
+                handler: HandlerConfig::Metrics,
+                allow_cidrs: Vec::new(),
+                deny_cidrs: Vec::new(),
+                requests_per_sec: None,
+                burst: None,
+            }],
+        };
+
+        let snapshot = compile(config).expect("metrics route should compile");
+        assert!(matches!(snapshot.routes[0].action, rginx_core::RouteAction::Metrics));
+    }
+
+    #[test]
+    fn compile_attaches_route_access_control() {
+        let config = Config {
+            runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
+            server: ServerConfig {
+                listen: "127.0.0.1:8080".to_string(),
+                trusted_proxies: Vec::new(),
+                tls: None,
+            },
+            upstreams: Vec::new(),
+            locations: vec![LocationConfig {
+                matcher: MatcherConfig::Exact("/status".to_string()),
+                handler: HandlerConfig::Status,
+                allow_cidrs: vec!["127.0.0.1/32".to_string(), "::1/128".to_string()],
+                deny_cidrs: vec!["127.0.0.2/32".to_string()],
+                requests_per_sec: None,
+                burst: None,
+            }],
+        };
+
+        let snapshot = compile(config).expect("access-controlled route should compile");
+        assert_eq!(snapshot.routes[0].access_control.allow_cidrs.len(), 2);
+        assert_eq!(snapshot.routes[0].access_control.deny_cidrs.len(), 1);
+    }
+
+    #[test]
+    fn compile_attaches_route_rate_limit() {
+        let config = Config {
+            runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
+            server: ServerConfig {
+                listen: "127.0.0.1:8080".to_string(),
+                trusted_proxies: Vec::new(),
+                tls: None,
+            },
+            upstreams: Vec::new(),
+            locations: vec![LocationConfig {
+                matcher: MatcherConfig::Prefix("/api".to_string()),
+                handler: HandlerConfig::Static {
+                    status: Some(200),
+                    content_type: Some("text/plain; charset=utf-8".to_string()),
+                    body: "ok\n".to_string(),
+                },
+                allow_cidrs: Vec::new(),
+                deny_cidrs: Vec::new(),
+                requests_per_sec: Some(20),
+                burst: Some(5),
+            }],
+        };
+
+        let snapshot = compile(config).expect("rate-limited route should compile");
+        let rate_limit = snapshot.routes[0].rate_limit.expect("route rate limit should exist");
+        assert_eq!(rate_limit.requests_per_sec, 20);
+        assert_eq!(rate_limit.burst, 5);
+    }
+
+    #[test]
+    fn compile_resolves_server_tls_paths_relative_to_config_base() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        let base_dir = std::env::temp_dir().join(format!("rginx-server-tls-config-test-{unique}"));
+        fs::create_dir_all(&base_dir).expect("temp base dir should be created");
+        let cert_path = base_dir.join("server.crt");
+        let key_path = base_dir.join("server.key");
+        fs::write(&cert_path, b"placeholder").expect("temp cert file should be written");
+        fs::write(&key_path, b"placeholder").expect("temp key file should be written");
+
+        let config = Config {
+            runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
+            server: ServerConfig {
+                listen: "127.0.0.1:8080".to_string(),
+                trusted_proxies: Vec::new(),
+                tls: Some(ServerTlsConfig {
+                    cert_path: "server.crt".to_string(),
+                    key_path: "server.key".to_string(),
+                }),
+            },
+            upstreams: Vec::new(),
+            locations: vec![LocationConfig {
+                matcher: MatcherConfig::Exact("/".to_string()),
+                handler: HandlerConfig::Static {
+                    status: Some(200),
+                    content_type: Some("text/plain; charset=utf-8".to_string()),
+                    body: "ok\n".to_string(),
+                },
+                allow_cidrs: Vec::new(),
+                deny_cidrs: Vec::new(),
+                requests_per_sec: None,
+                burst: None,
+            }],
+        };
+
+        let snapshot = compile_with_base(config, &base_dir).expect("server TLS should compile");
+        let tls = snapshot.server.tls.expect("compiled server TLS should exist");
+        assert_eq!(tls.cert_path, cert_path);
+        assert_eq!(tls.key_path, key_path);
+
+        fs::remove_file(cert_path).expect("temp cert file should be removed");
+        fs::remove_file(key_path).expect("temp key file should be removed");
+        fs::remove_dir(base_dir).expect("temp base dir should be removed");
+    }
+
+    #[test]
+    fn compile_normalizes_trusted_proxy_ips_and_cidrs() {
+        let config = Config {
+            runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
+            server: ServerConfig {
+                listen: "127.0.0.1:8080".to_string(),
+                trusted_proxies: vec!["10.0.0.0/8".to_string(), "127.0.0.1".to_string()],
+                tls: None,
+            },
+            upstreams: Vec::new(),
+            locations: vec![LocationConfig {
+                matcher: MatcherConfig::Exact("/".to_string()),
+                handler: HandlerConfig::Static {
+                    status: Some(200),
+                    content_type: Some("text/plain; charset=utf-8".to_string()),
+                    body: "ok\n".to_string(),
+                },
+                allow_cidrs: Vec::new(),
+                deny_cidrs: Vec::new(),
+                requests_per_sec: None,
+                burst: None,
+            }],
+        };
+
+        let snapshot = compile(config).expect("trusted proxies should compile");
+        assert_eq!(snapshot.server.trusted_proxies.len(), 2);
+        assert!(snapshot.server.is_trusted_proxy("10.1.2.3".parse().unwrap()));
+        assert!(snapshot.server.is_trusted_proxy("127.0.0.1".parse().unwrap()));
     }
 }

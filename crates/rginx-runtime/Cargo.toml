@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+rginx-config = { path = "../rginx-config" }
 rginx-core = { path = "../rginx-core" }
 rginx-http = { path = "../rginx-http" }
 tokio.workspace = true

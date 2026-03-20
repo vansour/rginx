@@ -17,6 +17,16 @@ pub struct RuntimeConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServerConfig {
     pub listen: String,
+    #[serde(default)]
+    pub trusted_proxies: Vec<String>,
+    #[serde(default)]
+    pub tls: Option<ServerTlsConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ServerTlsConfig {
+    pub cert_path: String,
+    pub key_path: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -26,6 +36,22 @@ pub struct UpstreamConfig {
     pub tls: Option<UpstreamTlsConfig>,
     #[serde(default)]
     pub server_name_override: Option<String>,
+    #[serde(default)]
+    pub request_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub max_replayable_request_body_bytes: Option<u64>,
+    #[serde(default)]
+    pub unhealthy_after_failures: Option<u32>,
+    #[serde(default)]
+    pub unhealthy_cooldown_secs: Option<u64>,
+    #[serde(default)]
+    pub health_check_path: Option<String>,
+    #[serde(default)]
+    pub health_check_interval_secs: Option<u64>,
+    #[serde(default)]
+    pub health_check_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub healthy_successes_required: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -44,6 +70,14 @@ pub enum UpstreamTlsConfig {
 pub struct LocationConfig {
     pub matcher: MatcherConfig,
     pub handler: HandlerConfig,
+    #[serde(default)]
+    pub allow_cidrs: Vec<String>,
+    #[serde(default)]
+    pub deny_cidrs: Vec<String>,
+    #[serde(default)]
+    pub requests_per_sec: Option<u32>,
+    #[serde(default)]
+    pub burst: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -56,4 +90,6 @@ pub enum MatcherConfig {
 pub enum HandlerConfig {
     Static { status: Option<u16>, content_type: Option<String>, body: String },
     Proxy { upstream: String },
+    Status,
+    Metrics,
 }

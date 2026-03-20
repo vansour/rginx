@@ -3,7 +3,7 @@ mod cli;
 use anyhow::{anyhow, Context};
 use clap::Parser;
 
-use crate::cli::Cli;
+use crate::cli::{Cli, Command};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -15,5 +15,22 @@ async fn main() -> anyhow::Result<()> {
     let config = rginx_config::load_and_compile(&cli.config)
         .with_context(|| format!("failed to load {}", cli.config.display()))?;
 
-    rginx_runtime::run(config).await.context("runtime exited with an error")
+    match cli.command {
+        Some(Command::Check) => {
+            rginx_http::SharedState::from_config(config.clone())
+                .context("failed to initialize runtime dependencies")?;
+
+            println!(
+                "configuration is valid: listen={} tls={} routes={} upstreams={}",
+                config.server.listen_addr,
+                if config.server.tls.is_some() { "enabled" } else { "disabled" },
+                config.routes.len(),
+                config.upstreams.len()
+            );
+            Ok(())
+        }
+        None => {
+            rginx_runtime::run(cli.config, config).await.context("runtime exited with an error")
+        }
+    }
 }

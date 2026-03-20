@@ -1,10 +1,18 @@
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(name = "rginx", about = "A Rust-first reverse proxy scaffold")]
 pub struct Cli {
-    #[arg(short, long, default_value = "configs/rginx.ron")]
+    #[arg(short, long, global = true, default_value = "configs/rginx.ron")]
     pub config: PathBuf,
+
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+#[derive(Debug, Clone, Copy, Subcommand)]
+pub enum Command {
+    Check,
 }

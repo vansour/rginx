@@ -1,5 +1,5 @@
 [package]
-name = "rginx-app"
+name = "rginx"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,6 +7,10 @@ edition = "2021"
 anyhow.workspace = true
 clap.workspace = true
 rginx-config = { path = "../rginx-config" }
+rginx-http = { path = "../rginx-http" }
 rginx-observability = { path = "../rginx-observability" }
 rginx-runtime = { path = "../rginx-runtime" }
 tokio.workspace = true
+
+[dev-dependencies]
+libc = "0.2"

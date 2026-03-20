@@ -1,8 +1,11 @@
 use std::collections::HashSet;
+use std::net::IpAddr;
 
+use http::uri::PathAndQuery;
+use ipnet::IpNet;
 use rginx_core::{Error, Result};
 
-use crate::model::{Config, HandlerConfig, MatcherConfig, UpstreamTlsConfig};
+use crate::model::{Config, HandlerConfig, MatcherConfig, ServerTlsConfig, UpstreamTlsConfig};
 
 pub fn validate(config: &Config) -> Result<()> {
     if config.runtime.shutdown_timeout_secs == 0 {
@@ -13,6 +16,20 @@ pub fn validate(config: &Config) -> Result<()> {
 
     if config.locations.is_empty() {
         return Err(Error::Config("at least one location must be configured".to_string()));
+    }
+
+    for value in &config.server.trusted_proxies {
+        validate_trusted_proxy(value)?;
+    }
+
+    if let Some(ServerTlsConfig { cert_path, key_path }) = &config.server.tls {
+        if cert_path.trim().is_empty() {
+            return Err(Error::Config("server TLS certificate path must not be empty".to_string()));
+        }
+
+        if key_path.trim().is_empty() {
+            return Err(Error::Config("server TLS private key path must not be empty".to_string()));
+        }
     }
 
     let mut upstream_names = HashSet::new();
@@ -58,26 +75,114 @@ pub fn validate(config: &Config) -> Result<()> {
                 )));
             }
         }
+
+        if upstream.request_timeout_secs.is_some_and(|timeout| timeout == 0) {
+            return Err(Error::Config(format!(
+                "upstream `{}` request_timeout_secs must be greater than 0",
+                upstream.name
+            )));
+        }
+
+        if upstream.max_replayable_request_body_bytes.is_some_and(|bytes| bytes == 0) {
+            return Err(Error::Config(format!(
+                "upstream `{}` max_replayable_request_body_bytes must be greater than 0",
+                upstream.name
+            )));
+        }
+
+        if upstream.unhealthy_after_failures.is_some_and(|failures| failures == 0) {
+            return Err(Error::Config(format!(
+                "upstream `{}` unhealthy_after_failures must be greater than 0",
+                upstream.name
+            )));
+        }
+
+        if upstream.unhealthy_cooldown_secs.is_some_and(|cooldown| cooldown == 0) {
+            return Err(Error::Config(format!(
+                "upstream `{}` unhealthy_cooldown_secs must be greater than 0",
+                upstream.name
+            )));
+        }
+
+        if let Some(path) = &upstream.health_check_path {
+            if path.trim().is_empty() {
+                return Err(Error::Config(format!(
+                    "upstream `{}` health_check_path must not be empty",
+                    upstream.name
+                )));
+            }
+
+            if !path.starts_with('/') {
+                return Err(Error::Config(format!(
+                    "upstream `{}` health_check_path must start with `/`",
+                    upstream.name
+                )));
+            }
+
+            PathAndQuery::from_maybe_shared(path.clone()).map_err(|error| {
+                Error::Config(format!(
+                    "upstream `{}` health_check_path `{path}` is invalid: {error}",
+                    upstream.name
+                ))
+            })?;
+        }
+
+        let has_active_health_overrides = upstream.health_check_interval_secs.is_some()
+            || upstream.health_check_timeout_secs.is_some()
+            || upstream.healthy_successes_required.is_some();
+        if upstream.health_check_path.is_none() && has_active_health_overrides {
+            return Err(Error::Config(format!(
+                "upstream `{}` active health-check tuning requires health_check_path to be set",
+                upstream.name
+            )));
+        }
+
+        if upstream.health_check_interval_secs.is_some_and(|interval| interval == 0) {
+            return Err(Error::Config(format!(
+                "upstream `{}` health_check_interval_secs must be greater than 0",
+                upstream.name
+            )));
+        }
+
+        if upstream.health_check_timeout_secs.is_some_and(|timeout| timeout == 0) {
+            return Err(Error::Config(format!(
+                "upstream `{}` health_check_timeout_secs must be greater than 0",
+                upstream.name
+            )));
+        }
+
+        if upstream.healthy_successes_required.is_some_and(|successes| successes == 0) {
+            return Err(Error::Config(format!(
+                "upstream `{}` healthy_successes_required must be greater than 0",
+                upstream.name
+            )));
+        }
     }
 
     let mut exact_routes = HashSet::new();
 
     for location in &config.locations {
-        match &location.matcher {
+        let matcher_label = match &location.matcher {
             MatcherConfig::Exact(path) | MatcherConfig::Prefix(path) => {
                 if !path.starts_with('/') {
                     return Err(Error::Config(format!(
                         "route matcher `{path}` must start with `/`"
                     )));
                 }
+
+                path.as_str()
             }
-        }
+        };
 
         if let MatcherConfig::Exact(path) = &location.matcher {
             if !exact_routes.insert(path.clone()) {
                 return Err(Error::Config(format!("duplicate exact route `{path}`")));
             }
         }
+
+        validate_route_cidrs(matcher_label, "allow_cidrs", &location.allow_cidrs)?;
+        validate_route_cidrs(matcher_label, "deny_cidrs", &location.deny_cidrs)?;
+        validate_route_rate_limit(matcher_label, location.requests_per_sec, location.burst)?;
 
         if let HandlerConfig::Proxy { upstream } = &location.handler {
             if upstream.trim().is_empty() {
@@ -91,4 +196,244 @@ pub fn validate(config: &Config) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn validate_route_cidrs(route_matcher: &str, field: &str, cidrs: &[String]) -> Result<()> {
+    for cidr in cidrs {
+        let normalized = cidr.trim();
+        if normalized.is_empty() {
+            return Err(Error::Config(format!(
+                "route matcher `{route_matcher}` {field} entries must not be empty"
+            )));
+        }
+
+        normalized.parse::<IpNet>().map_err(|error| {
+            Error::Config(format!(
+                "route matcher `{route_matcher}` {field} entry `{cidr}` is invalid: {error}"
+            ))
+        })?;
+    }
+
+    Ok(())
+}
+
+fn validate_route_rate_limit(
+    route_matcher: &str,
+    requests_per_sec: Option<u32>,
+    burst: Option<u32>,
+) -> Result<()> {
+    if requests_per_sec.is_some_and(|limit| limit == 0) {
+        return Err(Error::Config(format!(
+            "route matcher `{route_matcher}` requests_per_sec must be greater than 0"
+        )));
+    }
+
+    if requests_per_sec.is_none() && burst.is_some() {
+        return Err(Error::Config(format!(
+            "route matcher `{route_matcher}` burst requires requests_per_sec to be set"
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_trusted_proxy(value: &str) -> Result<()> {
+    let normalized = normalize_trusted_proxy(value).ok_or_else(|| {
+        Error::Config(format!(
+            "server trusted_proxies entry `{value}` must be a valid IP address or CIDR"
+        ))
+    })?;
+
+    normalized.parse::<IpNet>().map_err(|error| {
+        Error::Config(format!("server trusted_proxies entry `{value}` is invalid: {error}"))
+    })?;
+
+    Ok(())
+}
+
+fn normalize_trusted_proxy(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if trimmed.contains('/') {
+        return Some(trimmed.to_string());
+    }
+
+    let ip = trimmed.parse::<IpAddr>().ok()?;
+    Some(match ip {
+        IpAddr::V4(_) => format!("{trimmed}/32"),
+        IpAddr::V6(_) => format!("{trimmed}/128"),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::model::{
+        Config, HandlerConfig, LocationConfig, MatcherConfig, RuntimeConfig, ServerConfig,
+        ServerTlsConfig, UpstreamConfig, UpstreamPeerConfig,
+    };
+
+    use super::validate;
+
+    #[test]
+    fn validate_rejects_zero_max_replayable_body_size() {
+        let mut config = base_config();
+        config.upstreams[0].max_replayable_request_body_bytes = Some(0);
+
+        let error = validate(&config).expect_err("zero body size should be rejected");
+        assert!(error
+            .to_string()
+            .contains("max_replayable_request_body_bytes must be greater than 0"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_unhealthy_after_failures() {
+        let mut config = base_config();
+        config.upstreams[0].unhealthy_after_failures = Some(0);
+
+        let error = validate(&config).expect_err("zero failure threshold should be rejected");
+        assert!(error.to_string().contains("unhealthy_after_failures must be greater than 0"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_unhealthy_cooldown() {
+        let mut config = base_config();
+        config.upstreams[0].unhealthy_cooldown_secs = Some(0);
+
+        let error = validate(&config).expect_err("zero cooldown should be rejected");
+        assert!(error.to_string().contains("unhealthy_cooldown_secs must be greater than 0"));
+    }
+
+    #[test]
+    fn validate_rejects_invalid_route_allow_cidr() {
+        let mut config = base_config();
+        config.locations[0].allow_cidrs = vec!["not-a-cidr".to_string()];
+
+        let error = validate(&config).expect_err("invalid CIDR should be rejected");
+        assert!(error.to_string().contains("allow_cidrs entry `not-a-cidr` is invalid"));
+    }
+
+    #[test]
+    fn validate_rejects_invalid_trusted_proxy() {
+        let mut config = base_config();
+        config.server.trusted_proxies = vec!["bad-proxy".to_string()];
+
+        let error = validate(&config).expect_err("invalid trusted proxy should be rejected");
+        assert!(error.to_string().contains("server trusted_proxies entry `bad-proxy`"));
+    }
+
+    #[test]
+    fn validate_rejects_empty_server_tls_cert_path() {
+        let mut config = base_config();
+        config.server.tls = Some(ServerTlsConfig {
+            cert_path: " ".to_string(),
+            key_path: "server.key".to_string(),
+        });
+
+        let error = validate(&config).expect_err("empty cert path should be rejected");
+        assert!(error.to_string().contains("server TLS certificate path must not be empty"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_route_requests_per_sec() {
+        let mut config = base_config();
+        config.locations[0].requests_per_sec = Some(0);
+
+        let error = validate(&config).expect_err("zero requests_per_sec should be rejected");
+        assert!(error.to_string().contains("requests_per_sec must be greater than 0"));
+    }
+
+    #[test]
+    fn validate_rejects_burst_without_rate_limit() {
+        let mut config = base_config();
+        config.locations[0].burst = Some(2);
+
+        let error = validate(&config).expect_err("burst without rate limit should be rejected");
+        assert!(error.to_string().contains("burst requires requests_per_sec to be set"));
+    }
+
+    fn base_config() -> Config {
+        Config {
+            runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
+            server: ServerConfig {
+                listen: "127.0.0.1:8080".to_string(),
+                trusted_proxies: Vec::new(),
+                tls: None,
+            },
+            upstreams: vec![UpstreamConfig {
+                name: "backend".to_string(),
+                peers: vec![UpstreamPeerConfig { url: "http://127.0.0.1:9000".to_string() }],
+                tls: None,
+                server_name_override: None,
+                request_timeout_secs: None,
+                max_replayable_request_body_bytes: None,
+                unhealthy_after_failures: None,
+                unhealthy_cooldown_secs: None,
+                health_check_path: None,
+                health_check_interval_secs: None,
+                health_check_timeout_secs: None,
+                healthy_successes_required: None,
+            }],
+            locations: vec![LocationConfig {
+                matcher: MatcherConfig::Prefix("/".to_string()),
+                handler: HandlerConfig::Proxy { upstream: "backend".to_string() },
+                allow_cidrs: Vec::new(),
+                deny_cidrs: Vec::new(),
+                requests_per_sec: None,
+                burst: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn validate_rejects_active_health_tuning_without_path() {
+        let mut config = base_config();
+        config.upstreams[0].health_check_timeout_secs = Some(1);
+
+        let error = validate(&config).expect_err("active health tuning should require a path");
+        assert!(error
+            .to_string()
+            .contains("active health-check tuning requires health_check_path"));
+    }
+
+    #[test]
+    fn validate_rejects_invalid_health_check_path() {
+        let mut config = base_config();
+        config.upstreams[0].health_check_path = Some("healthz".to_string());
+
+        let error = validate(&config).expect_err("invalid health check path should be rejected");
+        assert!(error.to_string().contains("health_check_path must start with `/`"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_health_check_interval() {
+        let mut config = base_config();
+        config.upstreams[0].health_check_path = Some("/healthz".to_string());
+        config.upstreams[0].health_check_interval_secs = Some(0);
+
+        let error = validate(&config).expect_err("zero health check interval should be rejected");
+        assert!(error.to_string().contains("health_check_interval_secs must be greater than 0"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_health_check_timeout() {
+        let mut config = base_config();
+        config.upstreams[0].health_check_path = Some("/healthz".to_string());
+        config.upstreams[0].health_check_timeout_secs = Some(0);
+
+        let error = validate(&config).expect_err("zero health check timeout should be rejected");
+        assert!(error.to_string().contains("health_check_timeout_secs must be greater than 0"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_healthy_successes_required() {
+        let mut config = base_config();
+        config.upstreams[0].health_check_path = Some("/healthz".to_string());
+        config.upstreams[0].healthy_successes_required = Some(0);
+
+        let error = validate(&config).expect_err("zero recovery threshold should be rejected");
+        assert!(error.to_string().contains("healthy_successes_required must be greater than 0"));
+    }
 }

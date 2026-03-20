@@ -5,4 +5,5 @@ edition = "2021"
 
 [dependencies]
 http.workspace = true
+ipnet.workspace = true
 thiserror.workspace = true
