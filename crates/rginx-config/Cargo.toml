@@ -1,0 +1,11 @@
+[package]
+name = "rginx-config"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+http.workspace = true
+ron.workspace = true
+rginx-core = { path = "../rginx-core" }
+rustls.workspace = true
+serde.workspace = true

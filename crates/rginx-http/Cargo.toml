@@ -1,0 +1,17 @@
+[package]
+name = "rginx-http"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bytes.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-rustls.workspace = true
+hyper-util.workspace = true
+rginx-core = { path = "../rginx-core" }
+rustls.workspace = true
+rustls-pemfile.workspace = true
+tokio.workspace = true
+tracing.workspace = true

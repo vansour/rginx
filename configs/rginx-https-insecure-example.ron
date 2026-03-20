@@ -1,0 +1,27 @@
+Config(
+    runtime: RuntimeConfig(
+        shutdown_timeout_secs: 10,
+    ),
+    server: ServerConfig(
+        listen: "127.0.0.1:8083",
+    ),
+    upstreams: [
+        UpstreamConfig(
+            name: "dev-insecure",
+            peers: [
+                UpstreamPeerConfig(
+                    url: "https://localhost:9443",
+                ),
+            ],
+            tls: Some(Insecure),
+        ),
+    ],
+    locations: [
+        LocationConfig(
+            matcher: Prefix("/"),
+            handler: Proxy(
+                upstream: "dev-insecure",
+            ),
+        ),
+    ],
+)

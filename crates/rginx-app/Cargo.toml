@@ -1,0 +1,12 @@
+[package]
+name = "rginx-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+rginx-config = { path = "../rginx-config" }
+rginx-observability = { path = "../rginx-observability" }
+rginx-runtime = { path = "../rginx-runtime" }
+tokio.workspace = true

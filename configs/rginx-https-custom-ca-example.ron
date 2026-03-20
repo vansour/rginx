@@ -1,0 +1,29 @@
+Config(
+    runtime: RuntimeConfig(
+        shutdown_timeout_secs: 10,
+    ),
+    server: ServerConfig(
+        listen: "127.0.0.1:8082",
+    ),
+    upstreams: [
+        UpstreamConfig(
+            name: "dev-secure",
+            peers: [
+                UpstreamPeerConfig(
+                    url: "https://localhost:9443",
+                ),
+            ],
+            tls: Some(CustomCa(
+                ca_cert_path: "./certs/dev-ca.pem",
+            )),
+        ),
+    ],
+    locations: [
+        LocationConfig(
+            matcher: Prefix("/"),
+            handler: Proxy(
+                upstream: "dev-secure",
+            ),
+        ),
+    ],
+)

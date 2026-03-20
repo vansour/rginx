@@ -1,0 +1,42 @@
+Config(
+    runtime: RuntimeConfig(
+        shutdown_timeout_secs: 10,
+    ),
+    server: ServerConfig(
+        listen: "127.0.0.1:8080",
+    ),
+    upstreams: [
+        UpstreamConfig(
+            name: "backend",
+            peers: [
+                UpstreamPeerConfig(
+                    url: "http://127.0.0.1:9000",
+                ),
+            ],
+        ),
+    ],
+    locations: [
+        LocationConfig(
+            matcher: Exact("/"),
+            handler: Static(
+                status: Some(200),
+                content_type: Some("text/plain; charset=utf-8"),
+                body: "Rginx is running.\n",
+            ),
+        ),
+        LocationConfig(
+            matcher: Exact("/healthz"),
+            handler: Static(
+                status: Some(200),
+                content_type: Some("text/plain; charset=utf-8"),
+                body: "ok\n",
+            ),
+        ),
+        LocationConfig(
+            matcher: Prefix("/api"),
+            handler: Proxy(
+                upstream: "backend",
+            ),
+        ),
+    ],
+)

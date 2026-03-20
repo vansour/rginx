@@ -1,0 +1,27 @@
+Config(
+    runtime: RuntimeConfig(
+        shutdown_timeout_secs: 10,
+    ),
+    server: ServerConfig(
+        listen: "127.0.0.1:8081",
+    ),
+    upstreams: [
+        UpstreamConfig(
+            name: "example-secure",
+            peers: [
+                UpstreamPeerConfig(
+                    url: "https://example.com",
+                ),
+            ],
+            server_name_override: Some("example.com"),
+        ),
+    ],
+    locations: [
+        LocationConfig(
+            matcher: Prefix("/"),
+            handler: Proxy(
+                upstream: "example-secure",
+            ),
+        ),
+    ],
+)

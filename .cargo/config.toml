@@ -1,0 +1,2 @@
+[alias]
+rginx = "run -p rginx-app -- -c configs/rginx.ron"
