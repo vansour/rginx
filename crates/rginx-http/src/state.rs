@@ -29,7 +29,7 @@ impl SharedState {
     pub fn from_config(config: ConfigSnapshot) -> Result<Self> {
         let config = Arc::new(config);
         let clients = ProxyClients::from_config(config.as_ref())?;
-        let tls_acceptor = build_tls_acceptor(&config.server)?;
+        let tls_acceptor = build_tls_acceptor(&config.default_vhost, &config.vhosts)?;
         let revision = 0u64;
         let (revisions, _rx) = watch::channel(revision);
         let metrics = Metrics::default();
@@ -71,7 +71,7 @@ impl SharedState {
     pub async fn replace(&self, config: ConfigSnapshot) -> Result<Arc<ConfigSnapshot>> {
         let config = Arc::new(config);
         let clients = ProxyClients::from_config(config.as_ref())?;
-        let tls_acceptor = build_tls_acceptor(&config.server)?;
+        let tls_acceptor = build_tls_acceptor(&config.default_vhost, &config.vhosts)?;
         let next_revision = *self.revisions.borrow() + 1;
 
         {

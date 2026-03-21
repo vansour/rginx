@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -7,6 +9,8 @@ pub struct Config {
     #[serde(default)]
     pub upstreams: Vec<UpstreamConfig>,
     pub locations: Vec<LocationConfig>,
+    #[serde(default)]
+    pub servers: Vec<VirtualHostConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -18,7 +22,19 @@ pub struct RuntimeConfig {
 pub struct ServerConfig {
     pub listen: String,
     #[serde(default)]
+    pub server_names: Vec<String>,
+    #[serde(default)]
     pub trusted_proxies: Vec<String>,
+    #[serde(default)]
+    pub keep_alive: Option<bool>,
+    #[serde(default)]
+    pub max_headers: Option<u64>,
+    #[serde(default)]
+    pub max_request_body_bytes: Option<u64>,
+    #[serde(default)]
+    pub max_connections: Option<u64>,
+    #[serde(default)]
+    pub header_read_timeout_secs: Option<u64>,
     #[serde(default)]
     pub tls: Option<ServerTlsConfig>,
 }
@@ -89,7 +105,37 @@ pub enum MatcherConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub enum HandlerConfig {
     Static { status: Option<u16>, content_type: Option<String>, body: String },
-    Proxy { upstream: String },
+    Proxy {
+        upstream: String,
+        #[serde(default)]
+        preserve_host: Option<bool>,
+        #[serde(default)]
+        strip_prefix: Option<String>,
+        #[serde(default)]
+        proxy_set_headers: HashMap<String, String>,
+    },
+    File {
+        root: String,
+        #[serde(default)]
+        index: Option<String>,
+        #[serde(default)]
+        try_files: Option<Vec<String>>,
+    },
+    Return {
+        status: u16,
+        location: String,
+        #[serde(default)]
+        body: Option<String>,
+    },
     Status,
     Metrics,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct VirtualHostConfig {
+    #[serde(default)]
+    pub server_names: Vec<String>,
+    pub locations: Vec<LocationConfig>,
+    #[serde(default)]
+    pub tls: Option<ServerTlsConfig>,
 }

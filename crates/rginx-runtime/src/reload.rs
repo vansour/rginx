@@ -28,7 +28,7 @@ mod tests {
     use std::collections::HashMap;
     use std::time::Duration;
 
-    use rginx_core::{RuntimeSettings, Server};
+    use rginx_core::{RuntimeSettings, Server, VirtualHost};
 
     use super::{validate_reload, ConfigSnapshot};
 
@@ -38,8 +38,19 @@ mod tests {
             server: Server {
                 listen_addr: listen.parse().unwrap(),
                 trusted_proxies: Vec::new(),
+                keep_alive: true,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout: None,
                 tls: None,
             },
+            default_vhost: VirtualHost {
+                server_names: Vec::new(),
+                routes: Vec::new(),
+                tls: None,
+            },
+            vhosts: Vec::new(),
             routes: Vec::new(),
             upstreams: HashMap::new(),
         }

@@ -5,7 +5,7 @@ use http::uri::PathAndQuery;
 use ipnet::IpNet;
 use rginx_core::{Error, Result};
 
-use crate::model::{Config, HandlerConfig, MatcherConfig, ServerTlsConfig, UpstreamTlsConfig};
+use crate::model::{Config, HandlerConfig, MatcherConfig, ServerTlsConfig, UpstreamTlsConfig, VirtualHostConfig};
 
 pub fn validate(config: &Config) -> Result<()> {
     if config.runtime.shutdown_timeout_secs == 0 {
@@ -20,6 +20,26 @@ pub fn validate(config: &Config) -> Result<()> {
 
     for value in &config.server.trusted_proxies {
         validate_trusted_proxy(value)?;
+    }
+
+    if config.server.max_headers.is_some_and(|limit| limit == 0) {
+        return Err(Error::Config("server max_headers must be greater than 0".to_string()));
+    }
+
+    if config.server.max_request_body_bytes.is_some_and(|limit| limit == 0) {
+        return Err(Error::Config(
+            "server max_request_body_bytes must be greater than 0".to_string(),
+        ));
+    }
+
+    if config.server.max_connections.is_some_and(|limit| limit == 0) {
+        return Err(Error::Config("server max_connections must be greater than 0".to_string()));
+    }
+
+    if config.server.header_read_timeout_secs.is_some_and(|timeout| timeout == 0) {
+        return Err(Error::Config(
+            "server header_read_timeout_secs must be greater than 0".to_string(),
+        ));
     }
 
     if let Some(ServerTlsConfig { cert_path, key_path }) = &config.server.tls {
@@ -184,7 +204,7 @@ pub fn validate(config: &Config) -> Result<()> {
         validate_route_cidrs(matcher_label, "deny_cidrs", &location.deny_cidrs)?;
         validate_route_rate_limit(matcher_label, location.requests_per_sec, location.burst)?;
 
-        if let HandlerConfig::Proxy { upstream } = &location.handler {
+        if let HandlerConfig::Proxy { upstream, strip_prefix, proxy_set_headers, .. } = &location.handler {
             if upstream.trim().is_empty() {
                 return Err(Error::Config("proxy upstream name must not be empty".to_string()));
             }
@@ -192,8 +212,77 @@ pub fn validate(config: &Config) -> Result<()> {
             if !upstream_names.contains(upstream) {
                 return Err(Error::Config(format!("proxy upstream `{upstream}` is not defined")));
             }
+
+            if let Some(prefix) = strip_prefix {
+                if !prefix.starts_with('/') {
+                    return Err(Error::Config(format!(
+                        "route matcher `{matcher_label}` strip_prefix must start with `/`"
+                    )));
+                }
+            }
+
+            for name in proxy_set_headers.keys() {
+                if name.trim().is_empty() {
+                    return Err(Error::Config(format!(
+                        "route matcher `{matcher_label}` proxy_set_headers name must not be empty"
+                    )));
+                }
+                if name.parse::<http::header::HeaderName>().is_err() {
+                    return Err(Error::Config(format!(
+                        "route matcher `{matcher_label}` proxy_set_headers name `{name}` is invalid"
+                    )));
+                }
+            }
+        }
+
+        if let HandlerConfig::File { root, index, try_files } = &location.handler {
+            if root.trim().is_empty() {
+                return Err(Error::Config(format!(
+                    "route matcher `{matcher_label}` file root must not be empty"
+                )));
+            }
+
+            if let Some(index) = index {
+                if index.trim().is_empty() {
+                    return Err(Error::Config(format!(
+                        "route matcher `{matcher_label}` file index must not be empty"
+                    )));
+                }
+            }
+
+            if let Some(try_files) = try_files {
+                if try_files.is_empty() {
+                    return Err(Error::Config(format!(
+                        "route matcher `{matcher_label}` try_files must not be empty"
+                    )));
+                }
+                for candidate in try_files {
+                    if candidate.trim().is_empty() {
+                        return Err(Error::Config(format!(
+                            "route matcher `{matcher_label}` try_files entries must not be empty"
+                        )));
+                    }
+                }
+            }
+        }
+
+        if let HandlerConfig::Return { status, location, .. } = &location.handler {
+            if *status < 100 || *status > 599 {
+                return Err(Error::Config(format!(
+                    "route matcher `{matcher_label}` return status must be between 100 and 599"
+                )));
+            }
+
+            // For 3xx redirects, location should not be empty
+            if (300..=399).contains(status) && location.trim().is_empty() {
+                return Err(Error::Config(format!(
+                    "route matcher `{matcher_label}` return location must not be empty for redirect status {status}"
+                )));
+            }
         }
     }
+
+    validate_virtual_hosts(&config.servers, &upstream_names)?;
 
     Ok(())
 }
@@ -266,6 +355,164 @@ fn normalize_trusted_proxy(value: &str) -> Option<String> {
         IpAddr::V4(_) => format!("{trimmed}/32"),
         IpAddr::V6(_) => format!("{trimmed}/128"),
     })
+}
+
+fn validate_virtual_hosts(vhosts: &[VirtualHostConfig], upstream_names: &HashSet<String>) -> Result<()> {
+    let mut all_server_names: HashSet<String> = HashSet::new();
+
+    for (idx, vhost) in vhosts.iter().enumerate() {
+        let vhost_label = format!("servers[{idx}]");
+
+        for name in &vhost.server_names {
+            let normalized = name.trim().to_lowercase();
+            if normalized.is_empty() {
+                return Err(Error::Config(format!(
+                    "{vhost_label} server_name must not be empty"
+                )));
+            }
+
+            if normalized.contains('/') {
+                return Err(Error::Config(format!(
+                    "{vhost_label} server_name `{name}` should not contain path separator"
+                )));
+            }
+
+            if !all_server_names.insert(normalized) {
+                return Err(Error::Config(format!(
+                    "duplicate server_name `{name}` across servers"
+                )));
+            }
+        }
+
+        if vhost.locations.is_empty() {
+            return Err(Error::Config(format!(
+                "{vhost_label} must have at least one location"
+            )));
+        }
+
+        if let Some(tls) = &vhost.tls {
+            if tls.cert_path.trim().is_empty() {
+                return Err(Error::Config(format!(
+                    "{vhost_label} TLS certificate path must not be empty"
+                )));
+            }
+
+            if tls.key_path.trim().is_empty() {
+                return Err(Error::Config(format!(
+                    "{vhost_label} TLS private key path must not be empty"
+                )));
+            }
+        }
+
+        let mut vhost_exact_routes = HashSet::new();
+        for location in &vhost.locations {
+            let matcher_label = match &location.matcher {
+                MatcherConfig::Exact(path) | MatcherConfig::Prefix(path) => {
+                    if !path.starts_with('/') {
+                        return Err(Error::Config(format!(
+                            "{vhost_label} route matcher `{path}` must start with `/`"
+                        )));
+                    }
+                    path.as_str()
+                }
+            };
+
+            if let MatcherConfig::Exact(path) = &location.matcher {
+                if !vhost_exact_routes.insert(path.clone()) {
+                    return Err(Error::Config(format!(
+                        "{vhost_label} duplicate exact route `{path}`"
+                    )));
+                }
+            }
+
+            validate_route_cidrs(matcher_label, "allow_cidrs", &location.allow_cidrs)?;
+            validate_route_cidrs(matcher_label, "deny_cidrs", &location.deny_cidrs)?;
+            validate_route_rate_limit(matcher_label, location.requests_per_sec, location.burst)?;
+
+            if let HandlerConfig::Proxy { upstream, strip_prefix, proxy_set_headers, .. } = &location.handler {
+                if upstream.trim().is_empty() {
+                    return Err(Error::Config(
+                        "proxy upstream name must not be empty".to_string(),
+                    ));
+                }
+
+                if !upstream_names.contains(upstream) {
+                    return Err(Error::Config(format!(
+                        "{vhost_label} proxy upstream `{upstream}` is not defined"
+                    )));
+                }
+
+                if let Some(prefix) = strip_prefix {
+                    if !prefix.starts_with('/') {
+                        return Err(Error::Config(format!(
+                            "{vhost_label} route matcher `{matcher_label}` strip_prefix must start with `/`"
+                        )));
+                    }
+                }
+
+                for name in proxy_set_headers.keys() {
+                    if name.trim().is_empty() {
+                        return Err(Error::Config(format!(
+                            "{vhost_label} route matcher `{matcher_label}` proxy_set_headers name must not be empty"
+                        )));
+                    }
+                    if name.parse::<http::header::HeaderName>().is_err() {
+                        return Err(Error::Config(format!(
+                            "{vhost_label} route matcher `{matcher_label}` proxy_set_headers name `{name}` is invalid"
+                        )));
+                    }
+                }
+            }
+
+            if let HandlerConfig::File { root, index, try_files } = &location.handler {
+                if root.trim().is_empty() {
+                    return Err(Error::Config(format!(
+                        "{vhost_label} route matcher `{matcher_label}` file root must not be empty"
+                    )));
+                }
+
+                if let Some(index) = index {
+                    if index.trim().is_empty() {
+                        return Err(Error::Config(format!(
+                            "{vhost_label} route matcher `{matcher_label}` file index must not be empty"
+                        )));
+                    }
+                }
+
+                if let Some(try_files) = try_files {
+                    if try_files.is_empty() {
+                        return Err(Error::Config(format!(
+                            "{vhost_label} route matcher `{matcher_label}` try_files must not be empty"
+                        )));
+                    }
+                    for candidate in try_files {
+                        if candidate.trim().is_empty() {
+                            return Err(Error::Config(format!(
+                                "{vhost_label} route matcher `{matcher_label}` try_files entries must not be empty"
+                            )));
+                        }
+                    }
+                }
+            }
+
+            if let HandlerConfig::Return { status, location, .. } = &location.handler {
+                if *status < 100 || *status > 599 {
+                    return Err(Error::Config(format!(
+                        "{vhost_label} route matcher `{matcher_label}` return status must be between 100 and 599"
+                    )));
+                }
+
+                // For 3xx redirects, location should not be empty
+                if (300..=399).contains(status) && location.trim().is_empty() {
+                    return Err(Error::Config(format!(
+                        "{vhost_label} route matcher `{matcher_label}` return location must not be empty for redirect status {status}"
+                    )));
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -354,12 +601,56 @@ mod tests {
         assert!(error.to_string().contains("burst requires requests_per_sec to be set"));
     }
 
+    #[test]
+    fn validate_rejects_zero_server_max_connections() {
+        let mut config = base_config();
+        config.server.max_connections = Some(0);
+
+        let error = validate(&config).expect_err("zero max connections should be rejected");
+        assert!(error.to_string().contains("server max_connections must be greater than 0"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_server_header_read_timeout() {
+        let mut config = base_config();
+        config.server.header_read_timeout_secs = Some(0);
+
+        let error = validate(&config).expect_err("zero header timeout should be rejected");
+        assert!(error
+            .to_string()
+            .contains("server header_read_timeout_secs must be greater than 0"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_server_max_headers() {
+        let mut config = base_config();
+        config.server.max_headers = Some(0);
+
+        let error = validate(&config).expect_err("zero max headers should be rejected");
+        assert!(error.to_string().contains("server max_headers must be greater than 0"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_server_max_request_body_bytes() {
+        let mut config = base_config();
+        config.server.max_request_body_bytes = Some(0);
+
+        let error = validate(&config).expect_err("zero max request body should be rejected");
+        assert!(error.to_string().contains("server max_request_body_bytes must be greater than 0"));
+    }
+
     fn base_config() -> Config {
         Config {
             runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
             server: ServerConfig {
                 listen: "127.0.0.1:8080".to_string(),
+                server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
+                keep_alive: None,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout_secs: None,
                 tls: None,
             },
             upstreams: vec![UpstreamConfig {
@@ -378,12 +669,13 @@ mod tests {
             }],
             locations: vec![LocationConfig {
                 matcher: MatcherConfig::Prefix("/".to_string()),
-                handler: HandlerConfig::Proxy { upstream: "backend".to_string() },
+                handler: HandlerConfig::Proxy { upstream: "backend".to_string(), preserve_host: None, strip_prefix: None, proxy_set_headers: std::collections::HashMap::new() },
                 allow_cidrs: Vec::new(),
                 deny_cidrs: Vec::new(),
                 requests_per_sec: None,
                 burst: None,
             }],
+            servers: Vec::new(),
         }
     }
 

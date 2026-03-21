@@ -5,15 +5,41 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use http::StatusCode;
+use http::{HeaderName, HeaderValue, StatusCode};
 use ipnet::IpNet;
 
 #[derive(Debug, Clone)]
 pub struct ConfigSnapshot {
     pub runtime: RuntimeSettings,
     pub server: Server,
+    pub default_vhost: VirtualHost,
+    pub vhosts: Vec<VirtualHost>,
     pub routes: Vec<Route>,
     pub upstreams: HashMap<String, Arc<Upstream>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct VirtualHost {
+    pub server_names: Vec<String>,
+    pub routes: Vec<Route>,
+    pub tls: Option<ServerTls>,
+}
+
+impl VirtualHost {
+    pub fn matches_host(&self, host: &str) -> bool {
+        if self.server_names.is_empty() {
+            return true;
+        }
+        let hostname = host.split(':').next().unwrap_or(host).to_lowercase();
+        self.server_names.iter().any(|pattern| {
+            let pattern_lower = pattern.to_lowercase();
+            if let Some(suffix) = pattern_lower.strip_prefix("*.") {
+                hostname.ends_with(&format!(".{suffix}")) || hostname == suffix
+            } else {
+                hostname == pattern_lower
+            }
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -25,6 +51,11 @@ pub struct RuntimeSettings {
 pub struct Server {
     pub listen_addr: SocketAddr,
     pub trusted_proxies: Vec<IpNet>,
+    pub keep_alive: bool,
+    pub max_headers: Option<usize>,
+    pub max_request_body_bytes: Option<usize>,
+    pub max_connections: Option<usize>,
+    pub header_read_timeout: Option<Duration>,
     pub tls: Option<ServerTls>,
 }
 
@@ -110,6 +141,8 @@ impl RouteMatcher {
 pub enum RouteAction {
     Static(StaticResponse),
     Proxy(ProxyTarget),
+    File(FileTarget),
+    Return(ReturnAction),
     Status,
     Metrics,
 }
@@ -125,6 +158,23 @@ pub struct StaticResponse {
 pub struct ProxyTarget {
     pub upstream_name: String,
     pub upstream: Arc<Upstream>,
+    pub preserve_host: bool,
+    pub strip_prefix: Option<String>,
+    pub proxy_set_headers: Vec<(HeaderName, HeaderValue)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct FileTarget {
+    pub root: PathBuf,
+    pub index: Option<String>,
+    pub try_files: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReturnAction {
+    pub status: StatusCode,
+    pub location: String,
+    pub body: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -250,6 +300,11 @@ mod tests {
         let server = Server {
             listen_addr: "127.0.0.1:8080".parse().unwrap(),
             trusted_proxies: vec!["10.0.0.0/8".parse().unwrap(), "::1/128".parse().unwrap()],
+            keep_alive: true,
+            max_headers: None,
+            max_request_body_bytes: None,
+            max_connections: None,
+            header_read_timeout: None,
             tls: None,
         };
 

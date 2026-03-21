@@ -8,13 +8,15 @@ use std::time::Duration;
 use http::StatusCode;
 use ipnet::IpNet;
 use rginx_core::{
-    ActiveHealthCheck, ConfigSnapshot, Error, ProxyTarget, Result, Route, RouteAccessControl,
+    ActiveHealthCheck, ConfigSnapshot, Error, FileTarget, ProxyTarget, ReturnAction, Result, Route, RouteAccessControl,
     RouteAction, RouteMatcher, RouteRateLimit, RuntimeSettings, Server, ServerTls, StaticResponse,
-    Upstream, UpstreamPeer, UpstreamTls,
+    Upstream, UpstreamPeer, UpstreamTls, VirtualHost,
+};
+use crate::model::{
+    Config, HandlerConfig, MatcherConfig, ServerTlsConfig, UpstreamTlsConfig, VirtualHostConfig,
 };
 use rustls::pki_types::ServerName;
 
-use crate::model::{Config, HandlerConfig, MatcherConfig, ServerTlsConfig, UpstreamTlsConfig};
 use crate::validate::validate;
 
 const DEFAULT_UPSTREAM_REQUEST_TIMEOUT_SECS: u64 = 30;
@@ -33,12 +35,27 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
     validate(&raw)?;
     let base_dir = base_dir.as_ref();
 
-    let Config { runtime, server, upstreams: raw_upstreams, locations } = raw;
-    let crate::model::ServerConfig { listen, trusted_proxies, tls } = server;
+    let Config { runtime, server, upstreams: raw_upstreams, locations, servers: raw_servers } = raw;
+    let crate::model::ServerConfig {
+        listen,
+        server_names,
+        trusted_proxies,
+        keep_alive,
+        max_headers,
+        max_request_body_bytes,
+        max_connections,
+        header_read_timeout_secs,
+        tls,
+    } = server;
 
     let listen_addr = listen.parse()?;
     let trusted_proxies = compile_trusted_proxies(trusted_proxies)?;
-    let tls = compile_server_tls(tls, base_dir)?;
+    let keep_alive = keep_alive.unwrap_or(true);
+    let max_headers = compile_max_headers(max_headers)?;
+    let max_request_body_bytes = compile_max_request_body_bytes(max_request_body_bytes)?;
+    let max_connections = compile_max_connections(max_connections)?;
+    let header_read_timeout = header_read_timeout_secs.map(Duration::from_secs);
+    let server_tls = compile_server_tls(tls, base_dir)?;
     let upstreams = raw_upstreams
         .into_iter()
         .map(|upstream| {
@@ -125,12 +142,50 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
                         body,
                     })
                 }
-                HandlerConfig::Proxy { upstream } => {
+                HandlerConfig::Proxy { upstream, preserve_host, strip_prefix, proxy_set_headers } => {
                     let compiled = upstreams.get(&upstream).cloned().ok_or_else(|| {
                         Error::Config(format!("proxy upstream `{upstream}` is not defined"))
                     })?;
 
-                    RouteAction::Proxy(ProxyTarget { upstream_name: upstream, upstream: compiled })
+                    let preserve_host = preserve_host.unwrap_or(false);
+
+                    let strip_prefix = strip_prefix.and_then(|s| if s.is_empty() { None } else { Some(s) });
+
+                    let proxy_set_headers = proxy_set_headers
+                        .into_iter()
+                        .map(|(name, value)| {
+                            let header_name = name.parse::<http::header::HeaderName>().map_err(|e| {
+                                Error::Config(format!("invalid header name `{name}`: {e}"))
+                            })?;
+                            let header_value = value.parse::<http::header::HeaderValue>().map_err(|e| {
+                                Error::Config(format!("invalid header value for `{name}`: {e}"))
+                            })?;
+                            Ok((header_name, header_value))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+
+                    RouteAction::Proxy(ProxyTarget {
+                        upstream_name: upstream,
+                        upstream: compiled,
+                        preserve_host,
+                        strip_prefix,
+                        proxy_set_headers,
+                    })
+                }
+                HandlerConfig::File { root, index, try_files } => {
+                    let root = resolve_path(base_dir, root);
+                    RouteAction::File(FileTarget {
+                        root,
+                        index: index.and_then(|s| if s.trim().is_empty() { None } else { Some(s) }),
+                        try_files: try_files.unwrap_or_default(),
+                    })
+                }
+                HandlerConfig::Return { status, location, body } => {
+                    RouteAction::Return(ReturnAction {
+                        status: StatusCode::from_u16(status)?,
+                        location,
+                        body,
+                    })
                 }
                 HandlerConfig::Status => RouteAction::Status,
                 HandlerConfig::Metrics => RouteAction::Metrics,
@@ -142,14 +197,64 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
 
     routes.sort_by(|left, right| right.matcher.priority().cmp(&left.matcher.priority()));
 
+    let default_vhost = VirtualHost { server_names, routes: routes.clone(), tls: server_tls.clone() };
+
+    let vhosts = raw_servers
+        .into_iter()
+        .map(|vhost_config| compile_virtual_host(vhost_config, &upstreams, base_dir))
+        .collect::<Result<Vec<_>>>()?;
+
     Ok(ConfigSnapshot {
         runtime: RuntimeSettings {
             shutdown_timeout: Duration::from_secs(runtime.shutdown_timeout_secs),
         },
-        server: Server { listen_addr, trusted_proxies, tls },
+        server: Server {
+            listen_addr,
+            trusted_proxies,
+            keep_alive,
+            max_headers,
+            max_request_body_bytes,
+            max_connections,
+            header_read_timeout,
+            tls: server_tls,
+        },
+        default_vhost,
+        vhosts,
         routes,
         upstreams,
     })
+}
+
+fn compile_max_headers(max_headers: Option<u64>) -> Result<Option<usize>> {
+    max_headers
+        .map(|limit| {
+            usize::try_from(limit).map_err(|_| {
+                Error::Config(format!("server max_headers `{limit}` exceeds platform limits"))
+            })
+        })
+        .transpose()
+}
+
+fn compile_max_request_body_bytes(max_request_body_bytes: Option<u64>) -> Result<Option<usize>> {
+    max_request_body_bytes
+        .map(|limit| {
+            usize::try_from(limit).map_err(|_| {
+                Error::Config(format!(
+                    "server max_request_body_bytes `{limit}` exceeds platform limits"
+                ))
+            })
+        })
+        .transpose()
+}
+
+fn compile_max_connections(max_connections: Option<u64>) -> Result<Option<usize>> {
+    max_connections
+        .map(|limit| {
+            usize::try_from(limit).map_err(|_| {
+                Error::Config(format!("server max_connections `{limit}` exceeds platform limits"))
+            })
+        })
+        .transpose()
 }
 
 fn compile_peer(upstream_name: &str, url: String) -> Result<UpstreamPeer> {
@@ -226,6 +331,100 @@ fn compile_server_tls(tls: Option<ServerTlsConfig>, base_dir: &Path) -> Result<O
     }
 
     Ok(Some(ServerTls { cert_path, key_path }))
+}
+
+fn compile_virtual_host(
+    config: VirtualHostConfig,
+    upstreams: &HashMap<String, Arc<Upstream>>,
+    base_dir: &Path,
+) -> Result<VirtualHost> {
+    let VirtualHostConfig { server_names, locations, tls } = config;
+
+    let mut routes = locations
+        .into_iter()
+        .map(|location| {
+            let crate::model::LocationConfig {
+                matcher,
+                handler,
+                allow_cidrs,
+                deny_cidrs,
+                requests_per_sec,
+                burst,
+            } = location;
+            let matcher = match matcher {
+                MatcherConfig::Exact(path) => RouteMatcher::Exact(path),
+                MatcherConfig::Prefix(path) => RouteMatcher::Prefix(path),
+            };
+            let access_control = compile_route_access_control(&matcher, allow_cidrs, deny_cidrs)?;
+            let rate_limit = compile_route_rate_limit(&matcher, requests_per_sec, burst)?;
+
+            let action = match handler {
+                HandlerConfig::Static { status, content_type, body } => {
+                    RouteAction::Static(StaticResponse {
+                        status: StatusCode::from_u16(status.unwrap_or(200))?,
+                        content_type: content_type
+                            .unwrap_or_else(|| "text/plain; charset=utf-8".to_string()),
+                        body,
+                    })
+                }
+                HandlerConfig::Proxy { upstream, preserve_host, strip_prefix, proxy_set_headers } => {
+                    let compiled = upstreams.get(&upstream).cloned().ok_or_else(|| {
+                        Error::Config(format!("proxy upstream `{upstream}` is not defined"))
+                    })?;
+
+                    let preserve_host = preserve_host.unwrap_or(false);
+
+                    let strip_prefix = strip_prefix.and_then(|s| if s.is_empty() { None } else { Some(s) });
+
+                    let proxy_set_headers = proxy_set_headers
+                        .into_iter()
+                        .map(|(name, value)| {
+                            let header_name = name.parse::<http::header::HeaderName>().map_err(|e| {
+                                Error::Config(format!("invalid header name `{name}`: {e}"))
+                            })?;
+                            let header_value = value.parse::<http::header::HeaderValue>().map_err(|e| {
+                                Error::Config(format!("invalid header value for `{name}`: {e}"))
+                            })?;
+                            Ok((header_name, header_value))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+
+                    RouteAction::Proxy(ProxyTarget {
+                        upstream_name: upstream,
+                        upstream: compiled,
+                        preserve_host,
+                        strip_prefix,
+                        proxy_set_headers,
+                    })
+                }
+                HandlerConfig::File { root, index, try_files } => {
+                    let root = resolve_path(base_dir, root);
+                    RouteAction::File(FileTarget {
+                        root,
+                        index: index.and_then(|s| if s.trim().is_empty() { None } else { Some(s) }),
+                        try_files: try_files.unwrap_or_default(),
+                    })
+                }
+                HandlerConfig::Return { status, location, body } => {
+                    RouteAction::Return(ReturnAction {
+                        status: StatusCode::from_u16(status)?,
+                        location,
+                        body,
+                    })
+                }
+                HandlerConfig::Status => RouteAction::Status,
+                HandlerConfig::Metrics => RouteAction::Metrics,
+            };
+
+            Ok(Route { matcher, action, access_control, rate_limit })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    routes.sort_by(|left, right| right.matcher.priority().cmp(&left.matcher.priority()));
+
+    let tls = compile_server_tls(tls, base_dir)?;
+
+    Ok(VirtualHost { server_names, routes, tls })
 }
 
 fn compile_server_name_override(
@@ -420,7 +619,13 @@ mod tests {
             runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
             server: ServerConfig {
                 listen: "127.0.0.1:8080".to_string(),
+                server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
+                keep_alive: None,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout_secs: None,
                 tls: None,
             },
             upstreams: vec![UpstreamConfig {
@@ -439,12 +644,13 @@ mod tests {
             }],
             locations: vec![LocationConfig {
                 matcher: MatcherConfig::Prefix("/api".to_string()),
-                handler: HandlerConfig::Proxy { upstream: "secure-backend".to_string() },
+                handler: HandlerConfig::Proxy { upstream: "secure-backend".to_string(), preserve_host: None, strip_prefix: None, proxy_set_headers: std::collections::HashMap::new() },
                 allow_cidrs: Vec::new(),
                 deny_cidrs: Vec::new(),
                 requests_per_sec: None,
                 burst: None,
             }],
+            servers: Vec::new(),
         };
 
         let snapshot = compile(config).expect("https upstream should compile");
@@ -496,7 +702,13 @@ mod tests {
             runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
             server: ServerConfig {
                 listen: "127.0.0.1:8080".to_string(),
+                server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
+                keep_alive: None,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout_secs: None,
                 tls: None,
             },
             upstreams: vec![UpstreamConfig {
@@ -515,12 +727,13 @@ mod tests {
             }],
             locations: vec![LocationConfig {
                 matcher: MatcherConfig::Prefix("/".to_string()),
-                handler: HandlerConfig::Proxy { upstream: "dev-backend".to_string() },
+                handler: HandlerConfig::Proxy { upstream: "dev-backend".to_string(), preserve_host: None, strip_prefix: None, proxy_set_headers: std::collections::HashMap::new() },
                 allow_cidrs: Vec::new(),
                 deny_cidrs: Vec::new(),
                 requests_per_sec: None,
                 burst: None,
             }],
+            servers: Vec::new(),
         };
 
         let snapshot =
@@ -559,7 +772,13 @@ mod tests {
             runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
             server: ServerConfig {
                 listen: "127.0.0.1:8080".to_string(),
+                server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
+                keep_alive: None,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout_secs: None,
                 tls: None,
             },
             upstreams: vec![UpstreamConfig {
@@ -578,12 +797,13 @@ mod tests {
             }],
             locations: vec![LocationConfig {
                 matcher: MatcherConfig::Prefix("/".to_string()),
-                handler: HandlerConfig::Proxy { upstream: "secure-backend".to_string() },
+                handler: HandlerConfig::Proxy { upstream: "secure-backend".to_string(), preserve_host: None, strip_prefix: None, proxy_set_headers: std::collections::HashMap::new() },
                 allow_cidrs: Vec::new(),
                 deny_cidrs: Vec::new(),
                 requests_per_sec: None,
                 burst: None,
             }],
+            servers: Vec::new(),
         };
 
         let snapshot = compile(config).expect("server name override should compile");
@@ -601,7 +821,13 @@ mod tests {
             runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
             server: ServerConfig {
                 listen: "127.0.0.1:8080".to_string(),
+                server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
+                keep_alive: None,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout_secs: None,
                 tls: None,
             },
             upstreams: vec![UpstreamConfig {
@@ -620,12 +846,13 @@ mod tests {
             }],
             locations: vec![LocationConfig {
                 matcher: MatcherConfig::Prefix("/".to_string()),
-                handler: HandlerConfig::Proxy { upstream: "secure-backend".to_string() },
+                handler: HandlerConfig::Proxy { upstream: "secure-backend".to_string(), preserve_host: None, strip_prefix: None, proxy_set_headers: std::collections::HashMap::new() },
                 allow_cidrs: Vec::new(),
                 deny_cidrs: Vec::new(),
                 requests_per_sec: None,
                 burst: None,
             }],
+            servers: Vec::new(),
         };
 
         let error = compile(config).expect_err("invalid override should be rejected");
@@ -638,7 +865,13 @@ mod tests {
             runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
             server: ServerConfig {
                 listen: "127.0.0.1:8080".to_string(),
+                server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
+                keep_alive: None,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout_secs: None,
                 tls: None,
             },
             upstreams: Vec::new(),
@@ -650,6 +883,7 @@ mod tests {
                 requests_per_sec: None,
                 burst: None,
             }],
+            servers: Vec::new(),
         };
 
         let snapshot = compile(config).expect("status route should compile");
@@ -662,7 +896,13 @@ mod tests {
             runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
             server: ServerConfig {
                 listen: "127.0.0.1:8080".to_string(),
+                server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
+                keep_alive: None,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout_secs: None,
                 tls: None,
             },
             upstreams: Vec::new(),
@@ -674,6 +914,7 @@ mod tests {
                 requests_per_sec: None,
                 burst: None,
             }],
+            servers: Vec::new(),
         };
 
         let snapshot = compile(config).expect("metrics route should compile");
@@ -686,7 +927,13 @@ mod tests {
             runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
             server: ServerConfig {
                 listen: "127.0.0.1:8080".to_string(),
+                server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
+                keep_alive: None,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout_secs: None,
                 tls: None,
             },
             upstreams: Vec::new(),
@@ -698,6 +945,7 @@ mod tests {
                 requests_per_sec: None,
                 burst: None,
             }],
+            servers: Vec::new(),
         };
 
         let snapshot = compile(config).expect("access-controlled route should compile");
@@ -711,7 +959,13 @@ mod tests {
             runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
             server: ServerConfig {
                 listen: "127.0.0.1:8080".to_string(),
+                server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
+                keep_alive: None,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout_secs: None,
                 tls: None,
             },
             upstreams: Vec::new(),
@@ -727,6 +981,7 @@ mod tests {
                 requests_per_sec: Some(20),
                 burst: Some(5),
             }],
+            servers: Vec::new(),
         };
 
         let snapshot = compile(config).expect("rate-limited route should compile");
@@ -752,7 +1007,13 @@ mod tests {
             runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
             server: ServerConfig {
                 listen: "127.0.0.1:8080".to_string(),
+                server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
+                keep_alive: None,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout_secs: None,
                 tls: Some(ServerTlsConfig {
                     cert_path: "server.crt".to_string(),
                     key_path: "server.key".to_string(),
@@ -771,6 +1032,7 @@ mod tests {
                 requests_per_sec: None,
                 burst: None,
             }],
+            servers: Vec::new(),
         };
 
         let snapshot = compile_with_base(config, &base_dir).expect("server TLS should compile");
@@ -789,7 +1051,13 @@ mod tests {
             runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
             server: ServerConfig {
                 listen: "127.0.0.1:8080".to_string(),
+                server_names: Vec::new(),
                 trusted_proxies: vec!["10.0.0.0/8".to_string(), "127.0.0.1".to_string()],
+                keep_alive: None,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout_secs: None,
                 tls: None,
             },
             upstreams: Vec::new(),
@@ -805,11 +1073,51 @@ mod tests {
                 requests_per_sec: None,
                 burst: None,
             }],
+            servers: Vec::new(),
         };
 
         let snapshot = compile(config).expect("trusted proxies should compile");
         assert_eq!(snapshot.server.trusted_proxies.len(), 2);
         assert!(snapshot.server.is_trusted_proxy("10.1.2.3".parse().unwrap()));
         assert!(snapshot.server.is_trusted_proxy("127.0.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn compile_attaches_server_hardening_settings() {
+        let config = Config {
+            runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
+            server: ServerConfig {
+                listen: "127.0.0.1:8080".to_string(),
+                server_names: Vec::new(),
+                trusted_proxies: Vec::new(),
+                keep_alive: Some(false),
+                max_headers: Some(32),
+                max_request_body_bytes: Some(1024),
+                max_connections: Some(256),
+                header_read_timeout_secs: Some(3),
+                tls: None,
+            },
+            upstreams: Vec::new(),
+            locations: vec![LocationConfig {
+                matcher: MatcherConfig::Exact("/".to_string()),
+                handler: HandlerConfig::Static {
+                    status: Some(200),
+                    content_type: Some("text/plain; charset=utf-8".to_string()),
+                    body: "ok\n".to_string(),
+                },
+                allow_cidrs: Vec::new(),
+                deny_cidrs: Vec::new(),
+                requests_per_sec: None,
+                burst: None,
+            }],
+            servers: Vec::new(),
+        };
+
+        let snapshot = compile(config).expect("server hardening settings should compile");
+        assert!(!snapshot.server.keep_alive);
+        assert_eq!(snapshot.server.max_headers, Some(32));
+        assert_eq!(snapshot.server.max_request_body_bytes, Some(1024));
+        assert_eq!(snapshot.server.max_connections, Some(256));
+        assert_eq!(snapshot.server.header_read_timeout, Some(Duration::from_secs(3)));
     }
 }
