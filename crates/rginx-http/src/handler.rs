@@ -152,6 +152,29 @@ async fn build_route_response(
         }
         RouteAction::Status => status_response(&active),
         RouteAction::Metrics => metrics_response(&metrics),
+        RouteAction::File(ref target) => {
+            crate::file::serve_file(request, target).await
+        }
+        RouteAction::Return(ref action) => {
+            let body = action.body.clone().unwrap_or_else(|| {
+                format!(
+                    "{}\n",
+                    action.status.canonical_reason().unwrap_or("Redirect")
+                )
+            });
+
+            let mut builder = Response::builder()
+                .status(action.status)
+                .header("content-type", "text/plain; charset=utf-8");
+
+            if !action.location.is_empty() {
+                builder = builder.header("location", &action.location);
+            }
+
+            builder
+                .body(full_body(body))
+                .expect("return response builder should not fail")
+        }
     }
 }
 
@@ -275,7 +298,7 @@ mod tests {
     use rginx_core::{
         ActiveHealthCheck, ConfigSnapshot, Route, RouteAccessControl, RouteAction, RouteMatcher,
         RouteRateLimit, RuntimeSettings, Server, StaticResponse, Upstream, UpstreamPeer,
-        UpstreamTls,
+        UpstreamTls, VirtualHost,
     };
     use serde_json::Value;
 
@@ -315,6 +338,12 @@ mod tests {
                 header_read_timeout: None,
                 tls: None,
             },
+            default_vhost: VirtualHost {
+                server_names: Vec::new(),
+                routes: Vec::new(),
+                tls: None,
+            },
+            vhosts: Vec::new(),
             routes: Vec::new(),
             upstreams: HashMap::from([("backend".to_string(), upstream)]),
         });
@@ -402,6 +431,21 @@ mod tests {
                 header_read_timeout: None,
                 tls: None,
             },
+            default_vhost: VirtualHost {
+                server_names: Vec::new(),
+                routes: vec![Route {
+                    matcher: RouteMatcher::Exact("/api".to_string()),
+                    action: RouteAction::Static(StaticResponse {
+                        status: StatusCode::OK,
+                        content_type: "text/plain; charset=utf-8".to_string(),
+                        body: "ok\n".to_string(),
+                    }),
+                    access_control: RouteAccessControl::default(),
+                    rate_limit: Some(RouteRateLimit::new(1, 0)),
+                }],
+                tls: None,
+            },
+            vhosts: Vec::new(),
             routes: vec![Route {
                 matcher: RouteMatcher::Exact("/api".to_string()),
                 action: RouteAction::Static(StaticResponse {

@@ -5,8 +5,8 @@ pub mod service;
 pub mod types;
 
 pub use config::{
-    ActiveHealthCheck, ConfigSnapshot, ProxyTarget, Route, RouteAccessControl, RouteAction,
+    ActiveHealthCheck, ConfigSnapshot, FileTarget, ProxyTarget, ReturnAction, Route, RouteAccessControl, RouteAction,
     RouteMatcher, RouteRateLimit, RuntimeSettings, Server, ServerTls, StaticResponse, Upstream,
-    UpstreamPeer, UpstreamTls,
+    UpstreamPeer, UpstreamTls, VirtualHost,
 };
 pub use error::{Error, Result};

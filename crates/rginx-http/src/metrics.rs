@@ -70,6 +70,7 @@ impl Histogram {
         for (index, bucket) in HTTP_REQUEST_DURATION_BUCKETS_MS.iter().enumerate() {
             if value <= *bucket {
                 self.bucket_counts[index] += 1;
+                break;
             }
         }
     }
@@ -82,6 +83,10 @@ impl Metrics {
 
     pub fn decrement_active_connections(&self) {
         self.inner.active_connections.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    pub fn active_connections(&self) -> u64 {
+        self.inner.active_connections.load(Ordering::Relaxed)
     }
 
     pub fn observe_http_request(&self, route: &str, status: u16, elapsed_ms: u64) {
@@ -314,5 +319,28 @@ mod tests {
             "rginx_active_health_checks_total{upstream=\"backend\",peer=\"http://127.0.0.1:9000\",result=\"healthy\"} 1"
         ));
         assert!(rendered.contains("rginx_config_reloads_total{result=\"success\"} 1"));
+    }
+
+    #[test]
+    fn render_prometheus_uses_cumulative_histogram_buckets_once() {
+        let metrics = Metrics::default();
+        metrics.observe_http_request("exact:/status", 200, 12);
+
+        let rendered = metrics.render_prometheus();
+
+        assert!(rendered
+            .contains("rginx_http_request_duration_ms_bucket{route=\"exact:/status\",le=\"5\"} 0"));
+        assert!(rendered.contains(
+            "rginx_http_request_duration_ms_bucket{route=\"exact:/status\",le=\"10\"} 0"
+        ));
+        assert!(rendered.contains(
+            "rginx_http_request_duration_ms_bucket{route=\"exact:/status\",le=\"25\"} 1"
+        ));
+        assert!(rendered.contains(
+            "rginx_http_request_duration_ms_bucket{route=\"exact:/status\",le=\"50\"} 1"
+        ));
+        assert!(rendered.contains(
+            "rginx_http_request_duration_ms_bucket{route=\"exact:/status\",le=\"+Inf\"} 1"
+        ));
     }
 }

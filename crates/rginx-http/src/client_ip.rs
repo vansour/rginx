@@ -108,6 +108,11 @@ mod tests {
         let server = Server {
             listen_addr: "127.0.0.1:8080".parse().unwrap(),
             trusted_proxies: vec!["10.0.0.0/8".parse().unwrap()],
+            keep_alive: true,
+            max_headers: None,
+            max_request_body_bytes: None,
+            max_connections: None,
+            header_read_timeout: None,
             tls: None,
         };
         let mut headers = HeaderMap::new();
@@ -125,6 +130,11 @@ mod tests {
         let server = Server {
             listen_addr: "127.0.0.1:8080".parse().unwrap(),
             trusted_proxies: vec!["10.0.0.0/8".parse().unwrap()],
+            keep_alive: true,
+            max_headers: None,
+            max_request_body_bytes: None,
+            max_connections: None,
+            header_read_timeout: None,
             tls: None,
         };
         let mut headers = HeaderMap::new();
@@ -142,6 +152,11 @@ mod tests {
         let server = Server {
             listen_addr: "127.0.0.1:8080".parse().unwrap(),
             trusted_proxies: vec!["10.0.0.0/8".parse().unwrap()],
+            keep_alive: true,
+            max_headers: None,
+            max_request_body_bytes: None,
+            max_connections: None,
+            header_read_timeout: None,
             tls: None,
         };
         let mut headers = HeaderMap::new();
@@ -158,6 +173,11 @@ mod tests {
         let server = Server {
             listen_addr: "127.0.0.1:8080".parse().unwrap(),
             trusted_proxies: vec!["10.0.0.0/8".parse().unwrap()],
+            keep_alive: true,
+            max_headers: None,
+            max_request_body_bytes: None,
+            max_connections: None,
+            header_read_timeout: None,
             tls: None,
         };
         let mut headers = HeaderMap::new();
@@ -174,6 +194,11 @@ mod tests {
         let server = Server {
             listen_addr: "127.0.0.1:8080".parse().unwrap(),
             trusted_proxies: vec!["10.0.0.0/8".parse().unwrap()],
+            keep_alive: true,
+            max_headers: None,
+            max_request_body_bytes: None,
+            max_connections: None,
+            header_read_timeout: None,
             tls: None,
         };
         let mut headers = HeaderMap::new();

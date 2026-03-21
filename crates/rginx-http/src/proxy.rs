@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::time::Instant;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use http::header::{
     HeaderMap, HeaderName, HeaderValue, CONNECTION, HOST, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION,
     TE, TRAILER, TRANSFER_ENCODING, UPGRADE,
@@ -48,6 +48,43 @@ struct PreparedProxyRequest {
 enum PreparedRequestBody {
     Replayable(Bytes),
     Streaming(Option<Incoming>),
+}
+
+#[derive(Debug)]
+enum PrepareRequestError {
+    PayloadTooLarge { max_request_body_bytes: usize },
+    Other(Box<dyn std::error::Error + Send + Sync>),
+}
+
+impl PrepareRequestError {
+    fn payload_too_large(max_request_body_bytes: usize) -> Self {
+        Self::PayloadTooLarge { max_request_body_bytes }
+    }
+
+    fn other(error: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self::Other(Box::new(error))
+    }
+}
+
+impl std::fmt::Display for PrepareRequestError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PayloadTooLarge { max_request_body_bytes } => write!(
+                formatter,
+                "request body exceeded configured limit of {max_request_body_bytes} bytes"
+            ),
+            Self::Other(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for PrepareRequestError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::PayloadTooLarge { .. } => None,
+            Self::Other(error) => Some(error.as_ref()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -419,10 +456,16 @@ impl PreparedProxyRequest {
     async fn from_request(
         request: Request<Incoming>,
         max_replayable_request_body_bytes: usize,
-    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        max_request_body_bytes: Option<usize>,
+    ) -> Result<Self, PrepareRequestError> {
         let (parts, body) = request.into_parts();
-        let replayable =
-            prepare_request_body(&parts.method, body, max_replayable_request_body_bytes).await?;
+        let replayable = prepare_request_body(
+            &parts.method,
+            body,
+            max_replayable_request_body_bytes,
+            max_request_body_bytes,
+        )
+        .await?;
 
         Ok(Self {
             method: parts.method,
@@ -443,11 +486,23 @@ impl PreparedProxyRequest {
         peer: &UpstreamPeer,
         upstream_name: &str,
         client_address: &ClientAddress,
+        forwarded_proto: &str,
+        preserve_host: bool,
+        strip_prefix: Option<&str>,
+        proxy_set_headers: &[(HeaderName, HeaderValue)],
     ) -> Result<Request<HttpBody>, Box<dyn std::error::Error + Send + Sync>> {
         let original_host = self.headers.get(HOST).cloned();
         let mut headers = self.headers.clone();
-        let uri = build_proxy_uri(peer, &self.uri)?;
-        sanitize_request_headers(&mut headers, &peer.authority, original_host, client_address)?;
+        let uri = build_proxy_uri(peer, &self.uri, strip_prefix)?;
+        sanitize_request_headers(
+            &mut headers,
+            &peer.authority,
+            original_host,
+            client_address,
+            forwarded_proto,
+            preserve_host,
+            proxy_set_headers,
+        )?;
 
         tracing::debug!(
             upstream = %upstream_name,
@@ -583,6 +638,8 @@ pub async fn forward_request(
     request: Request<Incoming>,
     target: &ProxyTarget,
     client_address: ClientAddress,
+    downstream_proto: &str,
+    max_request_body_bytes: Option<usize>,
 ) -> HttpResponse {
     let client = match clients.for_upstream(target.upstream.as_ref()) {
         Ok(client) => client,
@@ -602,10 +659,21 @@ pub async fn forward_request(
     let mut prepared_request = match PreparedProxyRequest::from_request(
         request,
         target.upstream.max_replayable_request_body_bytes,
+        max_request_body_bytes,
     )
     .await
     {
         Ok(request) => request,
+        Err(PrepareRequestError::PayloadTooLarge { max_request_body_bytes }) => {
+            tracing::info!(
+                upstream = %target.upstream_name,
+                max_request_body_bytes,
+                "rejecting request body that exceeds configured server limit"
+            );
+            return payload_too_large(format!(
+                "request body exceeds server.max_request_body_bytes ({max_request_body_bytes} bytes)\n"
+            ));
+        }
         Err(error) => {
             tracing::warn!(
                 upstream = %target.upstream_name,
@@ -636,27 +704,32 @@ pub async fn forward_request(
         ));
     }
 
-    let deadline = tokio::time::Instant::now() + target.upstream.request_timeout;
     for (attempt_index, peer) in peers.iter().enumerate() {
-        let upstream_request =
-            match prepared_request.build_for_peer(peer, &target.upstream_name, &client_address) {
-                Ok(request) => request,
-                Err(error) => {
-                    tracing::warn!(
-                        upstream = %target.upstream_name,
-                        peer = %peer.url,
-                        %error,
-                        "failed to build upstream request"
-                    );
-                    return bad_gateway(format!(
-                        "failed to build upstream request for `{}`\n",
-                        target.upstream_name
-                    ));
-                }
-            };
+        let upstream_request = match prepared_request.build_for_peer(
+            peer,
+            &target.upstream_name,
+            &client_address,
+            downstream_proto,
+            target.preserve_host,
+            target.strip_prefix.as_deref(),
+            &target.proxy_set_headers,
+        ) {
+            Ok(request) => request,
+            Err(error) => {
+                tracing::warn!(
+                    upstream = %target.upstream_name,
+                    peer = %peer.url,
+                    %error,
+                    "failed to build upstream request"
+                );
+                return bad_gateway(format!(
+                    "failed to build upstream request for `{}`\n",
+                    target.upstream_name
+                ));
+            }
+        };
 
         match wait_for_upstream_stage(
-            deadline,
             target.upstream.request_timeout,
             &target.upstream_name,
             "request",
@@ -713,6 +786,22 @@ pub async fn forward_request(
                     target.upstream_name
                 ));
             }
+            Err(error) if can_retry_peer_request(&prepared_request, &peers, attempt_index) => {
+                let failure = clients.record_peer_failure(&target.upstream_name, &peer.url);
+                metrics.record_upstream_request(&target.upstream_name, &peer.url, "timeout");
+                let next_peer = &peers[attempt_index + 1];
+                tracing::warn!(
+                    upstream = %target.upstream_name,
+                    failed_peer = %peer.url,
+                    next_peer = %next_peer.url,
+                    attempt = attempt_index + 1,
+                    timeout_ms = target.upstream.request_timeout.as_millis() as u64,
+                    consecutive_failures = failure.consecutive_failures,
+                    entered_cooldown = failure.entered_cooldown,
+                    %error,
+                    "retrying idempotent upstream request on alternate peer after timeout"
+                );
+            }
             Err(error) => {
                 let failure = clients.record_peer_failure(&target.upstream_name, &peer.url);
                 metrics.record_upstream_request(&target.upstream_name, &peer.url, "timeout");
@@ -747,7 +836,7 @@ fn build_active_health_request(
             peer.url
         ))
     })?;
-    let uri = build_proxy_uri(peer, &path).map_err(|error| {
+    let uri = build_proxy_uri(peer, &path, None).map_err(|error| {
         Error::Server(format!("failed to build active health-check uri: {error}"))
     })?;
 
@@ -762,13 +851,12 @@ fn build_active_health_request(
 }
 
 async fn wait_for_upstream_stage<T>(
-    deadline: tokio::time::Instant,
     request_timeout: Duration,
     upstream_name: &str,
     stage: &str,
     future: impl Future<Output = T>,
 ) -> Result<T, Error> {
-    tokio::time::timeout_at(deadline, future).await.map_err(|_| {
+    tokio::time::timeout(request_timeout, future).await.map_err(|_| {
         Error::Server(format!(
             "upstream `{upstream_name}` {stage} timed out after {} ms",
             request_timeout.as_millis()
@@ -784,11 +872,33 @@ fn bad_gateway(message: String) -> HttpResponse {
     crate::handler::text_response(StatusCode::BAD_GATEWAY, "text/plain; charset=utf-8", message)
 }
 
+fn payload_too_large(message: String) -> HttpResponse {
+    crate::handler::text_response(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        "text/plain; charset=utf-8",
+        message,
+    )
+}
+
 async fn prepare_request_body(
     method: &Method,
     body: Incoming,
     max_replayable_request_body_bytes: usize,
-) -> Result<PreparedRequestBody, Box<dyn std::error::Error + Send + Sync>> {
+    max_request_body_bytes: Option<usize>,
+) -> Result<PreparedRequestBody, PrepareRequestError> {
+    if let Some(max_request_body_bytes) = max_request_body_bytes {
+        if body.is_end_stream() {
+            return Ok(PreparedRequestBody::Replayable(Bytes::new()));
+        }
+
+        if body.size_hint().lower() > max_request_body_bytes as u64 {
+            return Err(PrepareRequestError::payload_too_large(max_request_body_bytes));
+        }
+
+        let body = collect_request_body_with_limit(body, max_request_body_bytes).await?;
+        return Ok(PreparedRequestBody::Replayable(body));
+    }
+
     if !is_idempotent_method(method) {
         return Ok(PreparedRequestBody::Streaming(Some(body)));
     }
@@ -799,11 +909,32 @@ async fn prepare_request_body(
 
     match body.size_hint().upper() {
         Some(upper) if upper <= max_replayable_request_body_bytes as u64 => {
-            let body = body.collect().await?.to_bytes();
+            let body = body.collect().await.map_err(PrepareRequestError::other)?.to_bytes();
             Ok(PreparedRequestBody::Replayable(body))
         }
         _ => Ok(PreparedRequestBody::Streaming(Some(body))),
     }
+}
+
+async fn collect_request_body_with_limit(
+    mut body: Incoming,
+    max_request_body_bytes: usize,
+) -> Result<Bytes, PrepareRequestError> {
+    let mut collected = BytesMut::new();
+
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(PrepareRequestError::other)?;
+        let Ok(data) = frame.into_data() else {
+            continue;
+        };
+
+        if data.len() > max_request_body_bytes.saturating_sub(collected.len()) {
+            return Err(PrepareRequestError::payload_too_large(max_request_body_bytes));
+        }
+        collected.extend_from_slice(&data);
+    }
+
+    Ok(collected.freeze())
 }
 
 fn streaming_request_body(body: Incoming) -> HttpBody {
@@ -924,8 +1055,28 @@ fn load_custom_ca_store(path: &Path) -> Result<RootCertStore, Error> {
     Ok(roots)
 }
 
-fn build_proxy_uri(peer: &UpstreamPeer, original_uri: &Uri) -> Result<Uri, http::Error> {
-    let path_and_query = original_uri.path_and_query().map(|value| value.as_str()).unwrap_or("/");
+fn build_proxy_uri(
+    peer: &UpstreamPeer,
+    original_uri: &Uri,
+    strip_prefix: Option<&str>,
+) -> Result<Uri, http::Error> {
+    let original_path = original_uri.path_and_query().map(|value| value.as_str()).unwrap_or("/");
+
+    let path_and_query = if let Some(prefix) = strip_prefix {
+        if let Some(stripped) = original_path.strip_prefix(prefix) {
+            if stripped.is_empty() || stripped.starts_with('?') {
+                if stripped.is_empty() { "/" } else { stripped }
+            } else if stripped.starts_with('/') {
+                stripped
+            } else {
+                original_path
+            }
+        } else {
+            original_path
+        }
+    } else {
+        original_path
+    };
 
     Uri::builder()
         .scheme(peer.scheme.as_str())
@@ -939,16 +1090,33 @@ fn sanitize_request_headers(
     authority: &str,
     original_host: Option<HeaderValue>,
     client_address: &ClientAddress,
+    forwarded_proto: &str,
+    preserve_host: bool,
+    proxy_set_headers: &[(HeaderName, HeaderValue)],
 ) -> Result<(), http::header::InvalidHeaderValue> {
     remove_hop_by_hop_headers(headers);
-    headers.insert(HOST, HeaderValue::from_str(authority)?);
-    headers.insert("x-forwarded-proto", HeaderValue::from_static("http"));
+
+    if preserve_host {
+        if let Some(ref host) = original_host {
+            headers.insert(HOST, host.clone());
+        } else {
+            headers.insert(HOST, HeaderValue::from_str(authority)?);
+        }
+    } else {
+        headers.insert(HOST, HeaderValue::from_str(authority)?);
+    }
+
+    headers.insert("x-forwarded-proto", HeaderValue::from_str(forwarded_proto)?);
 
     if let Some(host) = original_host {
         headers.insert("x-forwarded-host", host);
     }
 
     headers.insert("x-forwarded-for", HeaderValue::from_str(&client_address.forwarded_for)?);
+
+    for (name, value) in proxy_set_headers {
+        headers.insert(name.clone(), value.clone());
+    }
 
     Ok(())
 }
@@ -1077,7 +1245,7 @@ mod tests {
             authority: "127.0.0.1:9000".to_string(),
         };
 
-        let uri = build_proxy_uri(&peer, &"/api/demo?x=1".parse().unwrap()).unwrap();
+        let uri = build_proxy_uri(&peer, &"/api/demo?x=1".parse().unwrap(), None).unwrap();
         assert_eq!(uri, "http://127.0.0.1:9000/api/demo?x=1".parse::<http::Uri>().unwrap());
     }
 
@@ -1089,7 +1257,7 @@ mod tests {
             authority: "example.com".to_string(),
         };
 
-        let uri = build_proxy_uri(&peer, &"/healthz".parse().unwrap()).unwrap();
+        let uri = build_proxy_uri(&peer, &"/healthz".parse().unwrap(), None).unwrap();
         assert_eq!(uri, "https://example.com/healthz".parse::<http::Uri>().unwrap());
     }
 
@@ -1111,12 +1279,16 @@ mod tests {
             "127.0.0.1:9000",
             Some(HeaderValue::from_static("client.example")),
             &client_address,
+            "https",
+            false,
+            &[],
         )
         .expect("header sanitization should succeed");
 
         assert_eq!(headers.get(HOST).unwrap(), "127.0.0.1:9000");
         assert_eq!(headers.get("x-forwarded-host").unwrap(), "client.example");
         assert_eq!(headers.get("x-forwarded-for").unwrap(), "198.51.100.9, 10.1.2.3, 10.2.3.4");
+        assert_eq!(headers.get("x-forwarded-proto").unwrap(), "https");
     }
 
     #[test]
@@ -1182,8 +1354,19 @@ mod tests {
             server: rginx_core::Server {
                 listen_addr: "127.0.0.1:8080".parse().unwrap(),
                 trusted_proxies: Vec::new(),
+                keep_alive: true,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout: None,
                 tls: None,
             },
+            default_vhost: rginx_core::VirtualHost {
+                server_names: Vec::new(),
+                routes: Vec::new(),
+                tls: None,
+            },
+            vhosts: Vec::new(),
             routes: Vec::new(),
             upstreams: HashMap::from([
                 ("insecure".to_string(), Arc::new(insecure)),
@@ -1253,8 +1436,19 @@ mod tests {
             server: rginx_core::Server {
                 listen_addr: "127.0.0.1:8080".parse().unwrap(),
                 trusted_proxies: Vec::new(),
+                keep_alive: true,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout: None,
                 tls: None,
             },
+            default_vhost: rginx_core::VirtualHost {
+                server_names: Vec::new(),
+                routes: Vec::new(),
+                tls: None,
+            },
+            vhosts: Vec::new(),
             routes: Vec::new(),
             upstreams: HashMap::from([
                 ("first".to_string(), Arc::new(first)),
@@ -1275,9 +1469,8 @@ mod tests {
     #[tokio::test]
     async fn wait_for_upstream_stage_times_out() {
         let timeout = Duration::from_millis(25);
-        let deadline = tokio::time::Instant::now() + timeout;
 
-        let error = wait_for_upstream_stage(deadline, timeout, "backend", "request", async {
+        let error = wait_for_upstream_stage(timeout, "backend", "request", async {
             tokio::time::sleep(Duration::from_millis(100)).await;
         })
         .await
@@ -1465,8 +1658,19 @@ mod tests {
             server: rginx_core::Server {
                 listen_addr: "127.0.0.1:8080".parse().unwrap(),
                 trusted_proxies: Vec::new(),
+                keep_alive: true,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout: None,
                 tls: None,
             },
+            default_vhost: rginx_core::VirtualHost {
+                server_names: Vec::new(),
+                routes: Vec::new(),
+                tls: None,
+            },
+            vhosts: Vec::new(),
             routes: Vec::new(),
             upstreams: HashMap::from([
                 ("fast-fail".to_string(), fast_fail.clone()),
@@ -1577,8 +1781,19 @@ mod tests {
             server: rginx_core::Server {
                 listen_addr: "127.0.0.1:8080".parse().unwrap(),
                 trusted_proxies: Vec::new(),
+                keep_alive: true,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout: None,
                 tls: None,
             },
+            default_vhost: rginx_core::VirtualHost {
+                server_names: Vec::new(),
+                routes: Vec::new(),
+                tls: None,
+            },
+            vhosts: Vec::new(),
             routes: Vec::new(),
             upstreams: HashMap::from([(name.to_string(), Arc::new(upstream))]),
         }
@@ -1612,8 +1827,19 @@ mod tests {
             server: rginx_core::Server {
                 listen_addr: "127.0.0.1:8080".parse().unwrap(),
                 trusted_proxies: Vec::new(),
+                keep_alive: true,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout: None,
                 tls: None,
             },
+            default_vhost: rginx_core::VirtualHost {
+                server_names: Vec::new(),
+                routes: Vec::new(),
+                tls: None,
+            },
+            vhosts: Vec::new(),
             routes: Vec::new(),
             upstreams: HashMap::from([(name.to_string(), Arc::new(upstream))]),
         }

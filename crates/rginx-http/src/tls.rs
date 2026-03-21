@@ -1,23 +1,109 @@
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
 use std::sync::Arc;
 
-use rginx_core::{Error, Result, Server, ServerTls};
+use rginx_core::{Error, Result, ServerTls, VirtualHost};
+use rustls::server::ResolvesServerCert;
+use rustls::server::ClientHello;
+use rustls::ServerConfig;
 use tokio_rustls::TlsAcceptor;
 
-pub fn build_tls_acceptor(server: &Server) -> Result<Option<TlsAcceptor>> {
-    let Some(tls) = &server.tls else {
-        return Ok(None);
-    };
+/// SNI 证书解析器，支持基于域名选择证书
+#[derive(Debug)]
+pub struct SniCertificateResolver {
+    default: Option<Arc<rustls::sign::CertifiedKey>>,
+    by_name: HashMap<String, Arc<rustls::sign::CertifiedKey>>,
+}
 
-    let certs = load_certificates(tls)?;
-    let key = load_private_key(tls)?;
-    let config = rustls::ServerConfig::builder()
+impl SniCertificateResolver {
+    pub fn new(
+        default: Option<Arc<rustls::sign::CertifiedKey>>,
+        by_name: HashMap<String, Arc<rustls::sign::CertifiedKey>>,
+    ) -> Self {
+        Self { default, by_name }
+    }
+}
+
+impl ResolvesServerCert for SniCertificateResolver {
+    fn resolve(&self, client_hello: ClientHello) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        if let Some(name) = client_hello.server_name() {
+            let name_lower = name.to_lowercase();
+            // 先尝试精确匹配
+            if let Some(cert) = self.by_name.get(&name_lower) {
+                return Some(cert.clone());
+            }
+            // 尝试通配符匹配
+            for (pattern, cert) in &self.by_name {
+                if let Some(suffix) = pattern.strip_prefix("*.") {
+                    if name_lower.ends_with(&format!(".{suffix}")) || name_lower == suffix {
+                        return Some(cert.clone());
+                    }
+                }
+            }
+        }
+        self.default.clone()
+    }
+}
+
+/// 构建支持 SNI 的 TLS acceptor
+pub fn build_tls_acceptor(
+    default_vhost: &VirtualHost,
+    vhosts: &[VirtualHost],
+) -> Result<Option<TlsAcceptor>> {
+    // 收集所有 vhost 的证书
+    let mut all_certs: HashMap<String, Arc<rustls::sign::CertifiedKey>> = HashMap::new();
+    let mut default_cert: Option<Arc<rustls::sign::CertifiedKey>> = None;
+
+    // 处理 default_vhost
+    if let Some(tls) = &default_vhost.tls {
+        let cert_key = load_certified_key(tls)?;
+        default_cert = Some(cert_key.clone());
+        // 为 default_vhost 的 server_names 注册证书
+        for name in &default_vhost.server_names {
+            all_certs.insert(name.to_lowercase(), cert_key.clone());
+        }
+    }
+
+    // 处理额外的 vhosts
+    for vhost in vhosts {
+        if let Some(tls) = &vhost.tls {
+            let cert_key = load_certified_key(tls)?;
+            for name in &vhost.server_names {
+                all_certs.insert(name.to_lowercase(), cert_key.clone());
+            }
+        }
+    }
+
+    // 如果没有默认证书且没有任何 vhost 证书，则不需要 TLS
+    if default_cert.is_none() && all_certs.is_empty() {
+        return Ok(None);
+    }
+
+    let resolver = Arc::new(SniCertificateResolver::new(default_cert, all_certs));
+
+    let config = ServerConfig::builder()
         .with_no_client_auth()
-        .with_single_cert(certs, key)
-        .map_err(|error| Error::Server(format!("failed to build server TLS config: {error}")))?;
+        .with_cert_resolver(resolver);
 
     Ok(Some(TlsAcceptor::from(Arc::new(config))))
+}
+
+fn load_certified_key(tls: &ServerTls) -> Result<Arc<rustls::sign::CertifiedKey>> {
+    let certs = load_certificates(tls)?;
+    let key = load_private_key(tls)?;
+
+    let certified_key = rustls::sign::CertifiedKey::new(
+        certs,
+        rustls::crypto::aws_lc_rs::sign::any_supported_type(&key).map_err(|_| {
+            Error::Server(format!(
+                "server TLS private key file `{}` uses unsupported algorithm",
+                tls.key_path.display()
+            ))
+        })?,
+    );
+
+    Ok(Arc::new(certified_key))
 }
 
 fn load_certificates(tls: &ServerTls) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
@@ -53,7 +139,7 @@ mod tests {
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use rginx_core::Server;
+    use rginx_core::VirtualHost;
 
     use super::build_tls_acceptor;
 
@@ -62,13 +148,14 @@ mod tests {
 
     #[test]
     fn build_tls_acceptor_returns_none_for_plain_http() {
-        let server = Server {
-            listen_addr: "127.0.0.1:8080".parse().unwrap(),
-            trusted_proxies: Vec::new(),
+        let default_vhost = VirtualHost {
+            server_names: Vec::new(),
+            routes: Vec::new(),
             tls: None,
         };
+        let vhosts: Vec<VirtualHost> = Vec::new();
 
-        assert!(build_tls_acceptor(&server).unwrap().is_none());
+        assert!(build_tls_acceptor(&default_vhost, &vhosts).unwrap().is_none());
     }
 
     #[test]
@@ -84,16 +171,17 @@ mod tests {
         fs::write(&cert_path, TEST_SERVER_CERT_PEM).expect("test cert should be written");
         fs::write(&key_path, TEST_SERVER_KEY_PEM).expect("test key should be written");
 
-        let server = Server {
-            listen_addr: "127.0.0.1:8080".parse().unwrap(),
-            trusted_proxies: Vec::new(),
+        let default_vhost = VirtualHost {
+            server_names: vec!["localhost".to_string()],
+            routes: Vec::new(),
             tls: Some(rginx_core::ServerTls {
                 cert_path: cert_path.clone(),
                 key_path: key_path.clone(),
             }),
         };
+        let vhosts: Vec<VirtualHost> = Vec::new();
 
-        let acceptor = build_tls_acceptor(&server).expect("TLS acceptor should load");
+        let acceptor = build_tls_acceptor(&default_vhost, &vhosts).expect("TLS acceptor should load");
         assert!(acceptor.is_some());
 
         fs::remove_file(cert_path).expect("test cert should be removed");

@@ -144,7 +144,7 @@ mod tests {
 
     use rginx_core::{
         ActiveHealthCheck, ConfigSnapshot, RuntimeSettings, Server, Upstream, UpstreamPeer,
-        UpstreamTls,
+        UpstreamTls, VirtualHost,
     };
     use rginx_http::SharedState;
 
@@ -185,8 +185,19 @@ mod tests {
             server: Server {
                 listen_addr: "127.0.0.1:8080".parse().unwrap(),
                 trusted_proxies: Vec::new(),
+                keep_alive: true,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout: None,
                 tls: None,
             },
+            default_vhost: VirtualHost {
+                server_names: Vec::new(),
+                routes: Vec::new(),
+                tls: None,
+            },
+            vhosts: Vec::new(),
             routes: Vec::new(),
             upstreams: HashMap::from([
                 ("healthy".to_string(), healthy),
