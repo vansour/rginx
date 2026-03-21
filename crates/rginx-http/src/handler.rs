@@ -137,8 +137,18 @@ async fn build_route_response(
             text_response(response.status, &response.content_type, response.body.clone())
         }
         RouteAction::Proxy(proxy) => {
-            crate::proxy::forward_request(active.clients, metrics, request, proxy, client_address)
-                .await
+            let downstream_proto =
+                if active.config.server.tls.is_some() { "https" } else { "http" };
+            crate::proxy::forward_request(
+                active.clients,
+                metrics,
+                request,
+                proxy,
+                client_address,
+                downstream_proto,
+                active.config.server.max_request_body_bytes,
+            )
+            .await
         }
         RouteAction::Status => status_response(&active),
         RouteAction::Metrics => metrics_response(&metrics),
@@ -298,6 +308,11 @@ mod tests {
             server: Server {
                 listen_addr: "127.0.0.1:8080".parse().unwrap(),
                 trusted_proxies: Vec::new(),
+                keep_alive: true,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout: None,
                 tls: None,
             },
             routes: Vec::new(),
@@ -380,6 +395,11 @@ mod tests {
             server: Server {
                 listen_addr: "127.0.0.1:8080".parse().unwrap(),
                 trusted_proxies: Vec::new(),
+                keep_alive: true,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout: None,
                 tls: None,
             },
             routes: vec![Route {
