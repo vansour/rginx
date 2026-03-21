@@ -193,7 +193,7 @@ fn forbidden_response() -> HttpResponse {
 }
 
 fn too_many_requests_response() -> HttpResponse {
-    text_response(StatusCode::TOO_MANY_REQUESTS, "text/plain; charset=utf-8", "too many requests\n")
+    text_response(StatusCode::TOO_MANY_REQUESTS, "text/plain; charset=utf-8", "hold your horses! too many requests\n")
 }
 
 pub(crate) fn text_response(
