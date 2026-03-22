@@ -1,0 +1,302 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  BIN_NAME: rginx
+  CARGO_PACKAGE: rginx
+
+jobs:
+  verify:
+    name: Verify Tag And Test
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      commit_sha: ${{ steps.meta.outputs.commit_sha }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+    steps:
+      - name: Check Out Source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate Tag Metadata
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG="${GITHUB_REF_NAME}"
+          if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$ ]]; then
+            echo "Unsupported release tag format: ${TAG}" >&2
+            exit 1
+          fi
+
+          COMMIT_SHA="$(git rev-list -n 1 "${TAG}")"
+          if [[ -z "${COMMIT_SHA}" ]]; then
+            echo "Unable to resolve commit SHA for tag ${TAG}" >&2
+            exit 1
+          fi
+
+          if [[ "${TAG}" == *-* ]]; then
+            PRERELEASE=true
+          else
+            PRERELEASE=false
+          fi
+
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+          echo "commit_sha=${COMMIT_SHA}" >> "${GITHUB_OUTPUT}"
+          echo "prerelease=${PRERELEASE}" >> "${GITHUB_OUTPUT}"
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Restore Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check Formatting
+        run: cargo fmt --all --check
+
+      - name: Run Workspace Tests
+        run: cargo test --workspace --locked
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+  build:
+    name: Build ${{ matrix.asset_name }}
+    needs: verify
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            os: linux
+            arch: amd64
+            archive_ext: tar.gz
+            asset_name: linux-amd64
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            os: linux
+            arch: arm64
+            archive_ext: tar.gz
+            asset_name: linux-arm64
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+            os: darwin
+            arch: amd64
+            archive_ext: tar.gz
+            asset_name: darwin-amd64
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            os: darwin
+            arch: arm64
+            archive_ext: tar.gz
+            asset_name: darwin-arm64
+    steps:
+      - name: Check Out Source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.verify.outputs.tag }}
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Restore Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Build Release Binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release -p "${CARGO_PACKAGE}" --target "${{ matrix.target }}"
+
+      - name: Package Release Archive
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG="${{ needs.verify.outputs.tag }}"
+          STAGING_ROOT="$(mktemp -d)"
+          PKG_DIR="rginx-${TAG#v}-${{ matrix.os }}-${{ matrix.arch }}"
+          INSTALL_DIR="${STAGING_ROOT}/${PKG_DIR}"
+          ARCHIVE_NAME="rginx-${TAG}-${{ matrix.os }}-${{ matrix.arch }}.${{ matrix.archive_ext }}"
+
+          mkdir -p "${INSTALL_DIR}"
+          install -m 755 "target/${{ matrix.target }}/release/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}"
+          cp README.md "${INSTALL_DIR}/README.md"
+          cp -R configs "${INSTALL_DIR}/configs"
+
+          mkdir -p dist
+          tar -C "${STAGING_ROOT}" -czf "dist/${ARCHIVE_NAME}" "${PKG_DIR}"
+
+          echo "archive_name=${ARCHIVE_NAME}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload Release Archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.asset_name }}
+          path: dist/${{ steps.package.outputs.archive_name }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs:
+      - verify
+      - build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check Out Source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.verify.outputs.tag }}
+
+      - name: Download Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/artifacts
+
+      - name: Collect Archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find dist/artifacts -type f -name '*.tar.gz' -exec mv {} dist/ \;
+          ls -1 dist/*.tar.gz >/dev/null
+
+      - name: Generate Checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          from pathlib import Path
+
+          dist = Path("dist")
+          archives = sorted(dist.glob("*.tar.gz"))
+          if not archives:
+              raise SystemExit("no release archives found")
+
+          with (dist / "SHA256SUMS.txt").open("w", encoding="utf-8") as fh:
+              for archive in archives:
+                  digest = hashlib.sha256()
+                  with archive.open("rb") as infile:
+                      for chunk in iter(lambda: infile.read(1024 * 1024), b""):
+                          digest.update(chunk)
+                  fh.write(f"{digest.hexdigest()}  {archive.name}\n")
+          PY
+
+      - name: Build Release Notes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          TAG="${{ needs.verify.outputs.tag }}"
+          COMMIT_SHA="${{ needs.verify.outputs.commit_sha }}"
+          SHORT_SHA="${COMMIT_SHA::7}"
+          COMMIT_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${COMMIT_SHA}"
+          PREVIOUS_TAG="$(git describe --tags --abbrev=0 "${COMMIT_SHA}^" 2>/dev/null || true)"
+
+          mkdir -p dist
+
+          {
+            echo "Release for \`${TAG}\`"
+            echo
+            echo "- Commit: [\`${SHORT_SHA}\`](${COMMIT_URL})"
+            if [[ -n "${PREVIOUS_TAG}" ]]; then
+              echo "- Previous tag: \`${PREVIOUS_TAG}\`"
+              echo "- Compare: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/compare/${PREVIOUS_TAG}...${TAG}"
+            fi
+            echo
+            echo "## Assets"
+            for archive in dist/*.tar.gz; do
+              echo "- \`$(basename "${archive}")\`"
+            done
+            echo "- \`SHA256SUMS.txt\`"
+            echo
+            if [[ -n "${PREVIOUS_TAG}" ]]; then
+              echo "## Included Commits"
+              git log --oneline --no-merges "${PREVIOUS_TAG}..${COMMIT_SHA}"
+              echo
+            fi
+          } > dist/release-summary.md
+
+          if [[ -n "${PREVIOUS_TAG}" ]]; then
+            gh api \
+              --method POST \
+              -H "Accept: application/vnd.github+json" \
+              "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+              -f tag_name="${TAG}" \
+              -f target_commitish="${COMMIT_SHA}" \
+              -f previous_tag_name="${PREVIOUS_TAG}" \
+              -f configuration_file_path=".github/release.yml" \
+              --jq '.body' > dist/generated-notes.md
+          else
+            gh api \
+              --method POST \
+              -H "Accept: application/vnd.github+json" \
+              "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+              -f tag_name="${TAG}" \
+              -f target_commitish="${COMMIT_SHA}" \
+              -f configuration_file_path=".github/release.yml" \
+              --jq '.body' > dist/generated-notes.md
+          fi
+
+          cat dist/release-summary.md > dist/release-body.md
+          printf '\n' >> dist/release-body.md
+          cat dist/generated-notes.md >> dist/release-body.md
+
+      - name: Create Or Update Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          TAG="${{ needs.verify.outputs.tag }}"
+          PRERELEASE="${{ needs.verify.outputs.prerelease }}"
+
+          release_args=(--title "${TAG}" --verify-tag --notes-file dist/release-body.md)
+          edit_args=(--title "${TAG}" --notes-file dist/release-body.md)
+
+          if [[ "${PRERELEASE}" == "true" ]]; then
+            release_args+=(--prerelease)
+            edit_args+=(--prerelease)
+          fi
+
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release edit "${TAG}" "${edit_args[@]}"
+            gh release upload "${TAG}" dist/*.tar.gz dist/SHA256SUMS.txt --clobber
+          else
+            gh release create "${TAG}" dist/*.tar.gz dist/SHA256SUMS.txt "${release_args[@]}"
+          fi

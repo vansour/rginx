@@ -7,6 +7,7 @@
 - 上游 HTTPS 访问
 - 基础访问控制与限流
 - 健康检查、状态页与 Prometheus 指标
+- 基于 `Host` 的多虚拟主机路由，支持 `*.example.com` 通配符
 - 平滑退出与热重载
 
 当前包名和可执行文件名统一为 `rginx`。
@@ -18,6 +19,9 @@
 - `Static` / `Proxy` / `Status` / `Metrics` 四种处理器
 - 多上游节点轮询转发
 - 幂等或可重放请求的上游重试
+- 入站 HTTP/2（TLS/ALPN）
+- 上游 HTTP/2（HTTPS/TLS + ALPN）
+- 支持 HTTP/1.1 `Upgrade` / WebSocket 透传
 - 被动健康检查与主动健康检查
 - 按路由做 CIDR 访问控制
 - 按路由做请求速率限制
@@ -61,6 +65,7 @@ cargo build -p rginx
 - `configs/rginx-https-example.ron`
 - `configs/rginx-https-custom-ca-example.ron`
 - `configs/rginx-https-insecure-example.ron`
+- `configs/rginx-vhosts-example.ron`
 
 ## 配置结构
 
@@ -73,6 +78,7 @@ Config(
     ),
     server: ServerConfig(
         listen: "0.0.0.0:8080",
+        server_names: [],
         trusted_proxies: [],
         tls: None,
     ),
@@ -85,6 +91,7 @@ Config(
             ),
         ),
     ],
+    servers: [],
 )
 ```
 
@@ -95,10 +102,26 @@ Config(
 ### `server`
 
 - `listen`: 监听地址，例如 `"0.0.0.0:8080"`
+- `server_names`: 可选。默认虚拟主机匹配的域名列表；为空时可作为兜底主机使用
 - `trusted_proxies`: 可选。只有当 `Rginx` 部署在另一层代理、LB 或 CDN 后面时才需要配置，可写单个 IP 或 CIDR
-- `tls`: 可选。启用后由 `Rginx` 直接终止入站 TLS
+- `tls`: 可选。启用后由 `Rginx` 直接终止入站 TLS，并通过 ALPN 自动协商 HTTP/2
 
 `trusted_proxies` 为空时，客户端 IP 直接取 TCP 对端地址，不会信任请求里自带的 `X-Forwarded-For`。
+
+### `servers`
+
+额外虚拟主机列表。每个 `VirtualHostConfig` 可配置：
+
+- `server_names`
+- `locations`
+- `tls`
+
+说明：
+
+- 请求会先按 `Host` 选择虚拟主机，再在该虚拟主机内按路径匹配路由
+- 如果没有任何额外虚拟主机匹配 `Host`，会回退到顶层 `server + locations` 组成的默认虚拟主机
+- `server_names` 支持精确域名和 `*.example.com` 这类通配符
+- 如果某个虚拟主机已命中 `Host`，但该虚拟主机里没有匹配路径，请求会返回 `404`，不会再回退默认虚拟主机
 
 ### `upstreams`
 
@@ -107,6 +130,7 @@ Config(
 - `name`
 - `peers`
 - `tls`
+- `protocol`
 - `server_name_override`
 - `request_timeout_secs`
 - `max_replayable_request_body_bytes`
@@ -120,6 +144,10 @@ Config(
 说明：
 
 - `peers[].url` 目前只支持 `http://` 和 `https://`
+- `protocol` 默认为 `Auto`
+- `protocol: Auto` 时，`https://` peer 会通过 ALPN 自动协商 HTTP/2；未协商到 `h2` 时回落到 HTTP/1.1
+- `protocol: Http1` 会固定使用 HTTP/1.1
+- `protocol: Http2` 会要求 upstream 使用 HTTP/2；当前只支持 `https://` peer，经 TLS/ALPN 建链，明文 `h2c` upstream 仍未支持
 - `health_check_path` 启用主动健康检查
 - 证书、私钥、自定义 CA 等相对路径，都是相对配置文件所在目录解析
 
@@ -201,8 +229,12 @@ locations: [
 
 - 当前配置修订号 `revision`
 - 监听地址 `listen`
-- 路由数与上游数
+- 虚拟主机数 `vhost_count`
+- 路由总数 `route_count`
+- 上游数 `upstream_count`
 - 每个上游的请求超时、主动健康检查参数、每个 peer 的健康状态
+
+其中 `route_count` 是默认虚拟主机和所有额外虚拟主机路由数的总和。
 
 `/metrics` 会暴露 Prometheus 文本格式指标，包含：
 
@@ -270,7 +302,67 @@ server: ServerConfig(
 
 证书和私钥需要是 PEM 文件。
 
-### 6. 上游 HTTPS
+### 6. 多虚拟主机
+
+```ron
+Config(
+    runtime: RuntimeConfig(
+        shutdown_timeout_secs: 10,
+    ),
+    server: ServerConfig(
+        listen: "0.0.0.0:8080",
+        server_names: ["default.example.com"],
+    ),
+    upstreams: [],
+    locations: [
+        LocationConfig(
+            matcher: Exact("/"),
+            handler: Static(
+                body: "default site\n",
+            ),
+        ),
+    ],
+    servers: [
+        VirtualHostConfig(
+            server_names: ["api.example.com"],
+            locations: [
+                LocationConfig(
+                    matcher: Exact("/"),
+                    handler: Static(
+                        body: "api root\n",
+                    ),
+                ),
+                LocationConfig(
+                    matcher: Prefix("/v1"),
+                    handler: Static(
+                        body: "api v1\n",
+                    ),
+                ),
+            ],
+        ),
+        VirtualHostConfig(
+            server_names: ["*.internal.example.com"],
+            locations: [
+                LocationConfig(
+                    matcher: Exact("/"),
+                    handler: Static(
+                        body: "internal site\n",
+                    ),
+                ),
+            ],
+        ),
+    ],
+)
+```
+
+行为规则：
+
+- `Host: api.example.com` 会进入 `api.example.com` 对应的虚拟主机
+- `Host: app.internal.example.com` 会命中通配符虚拟主机
+- 未命中任何 `server_names` 时，回退到顶层默认虚拟主机
+- `Host` 里的端口会被忽略，例如 `api.example.com:8080`
+
+### 7. 上游 HTTPS
 
 使用系统根证书：
 
@@ -283,6 +375,7 @@ UpstreamConfig(
         ),
     ],
     tls: Some(NativeRoots),
+    protocol: Auto,
     server_name_override: Some("example.com"),
 )
 ```
@@ -300,6 +393,7 @@ UpstreamConfig(
     tls: Some(CustomCa(
         ca_cert_path: "./certs/dev-ca.pem",
     )),
+    protocol: Auto,
 )
 ```
 
@@ -314,8 +408,86 @@ UpstreamConfig(
         ),
     ],
     tls: Some(Insecure),
+    protocol: Http2,
+    server_name_override: Some("localhost"),
 )
 ```
+
+## 维护与发版
+
+### 日常 CI
+
+仓库内置了独立的 CI workflow：
+
+- `.github/workflows/ci.yml`
+
+触发条件：
+
+- `pull_request`
+- push 到 `main`
+- 手动 `workflow_dispatch`
+
+CI 会在 `ubuntu-24.04` 上执行：
+
+- `cargo fmt --all --check`
+- `cargo test --workspace --locked --quiet`
+- `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`
+
+### 如何发版
+
+仓库内置了 tag 驱动的发布 workflow：
+
+- `.github/workflows/release.yml`
+
+触发方式：
+
+```bash
+git tag v1.2.3
+git push origin v1.2.3
+```
+
+tag 被 push 之后，GitHub Actions 会自动：
+
+- 校验 tag 格式是否符合 `v*`
+- 重新执行格式检查和全量测试
+- 构建多架构发布产物
+- 自动创建或更新同名 GitHub Release
+- 在 Release 页面写入当前 tag 对应的 commit、上一个 tag、compare 链接和本次包含的 commit 列表
+- 上传二进制压缩包和 `SHA256SUMS.txt`
+
+当前发布矩阵：
+
+- `x86_64-unknown-linux-gnu`
+- `aarch64-unknown-linux-gnu`
+- `x86_64-apple-darwin`
+- `aarch64-apple-darwin`
+
+Release Notes 分类规则来自：
+
+- `.github/release.yml`
+
+建议的本地发版前检查：
+
+```bash
+cargo fmt --all --check
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+```
+
+建议流程：
+
+1. 确认 `main` 上的 CI 通过。
+2. 确认工作区没有误提交的临时改动。
+3. 创建语义化版本 tag，例如 `v1.2.3` 或 `v1.2.3-rc.1`。
+4. push tag，等待 `release.yml` 完成。
+5. 到 GitHub Release 页面检查生成的 notes、commit 链接和各平台产物是否齐全。
+
+产物命名规则示例：
+
+- `rginx-v1.2.3-linux-amd64.tar.gz`
+- `rginx-v1.2.3-linux-arm64.tar.gz`
+- `rginx-v1.2.3-darwin-amd64.tar.gz`
+- `rginx-v1.2.3-darwin-arm64.tar.gz`
 
 ## 运维操作
 
@@ -340,9 +512,8 @@ kill -HUP <pid>
 
 ## 当前限制
 
-- 入站连接目前只支持 HTTP/1.x
-- 还没有 HTTP/2 支持
-- 还没有 WebSocket / `Upgrade` 代理支持
+- 明文 HTTP/2（h2c）入站仍未支持
+- 明文 HTTP/2（h2c）upstream 仍未支持
 - 热重载不能切换监听地址
 
 ## 目标定位
@@ -357,4 +528,4 @@ kill -HUP <pid>
 - 健康检查
 - 平滑退出与热重载
 
-但它还不是完整的 Nginx 等价物。HTTP/2、WebSocket、更丰富的负载均衡策略和更完整的运维能力，仍然需要继续补齐。
+但它还不是完整的 Nginx 等价物。更丰富的负载均衡策略和更完整的运维能力，仍然需要继续补齐。

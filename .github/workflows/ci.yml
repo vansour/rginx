@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check Out Source
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Restore Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check Formatting
+        run: cargo fmt --all --check
+
+  test:
+    name: Test
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check Out Source
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run Workspace Tests
+        run: cargo test --workspace --locked --quiet
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check Out Source
+        uses: actions/checkout@v4
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Restore Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings

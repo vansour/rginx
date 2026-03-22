@@ -27,7 +27,7 @@
 | :--- | :--- | :--- |
 | **HTTP/1.1 监听** | ✅ | 支持。 |
 | **HTTPS/TLS 监听** | ✅ | 支持 PEM 格式证书/密钥。 |
-| **HTTP/2 (h2)** | ❌ | **P2 优先**。需 ALPN 支持。 |
+| **HTTP/2 (h2)** | ✅ | 支持入站 TLS/ALPN 协商到 HTTP/2；明文 h2c 暂不支持。 |
 | **Server Name (SNI)** | ✅ | 支持多证书 SNI，基于 Host 头路由到不同 VirtualHost。 |
 | **监听端口复用** | ❌ | 当前一个端口对应一个配置实例。 |
 | **listen ... default_server** | ❌ | 依赖 Server Name 功能实现。 |
@@ -48,8 +48,9 @@
 | Nginx 能力 | Rginx 状态 | 说明 / 差异 |
 | :--- | :--- | :--- |
 | **HTTP 反向代理** | ✅ | 基础功能完备。 |
-| **Websocket 透传** | ❌ | **P2 优先**。需处理 Connection: Upgrade。 |
-| **gRPC 代理** | ❌ | 暂不支持 HTTP/2 trailer 等特性。 |
+| **Websocket 透传** | ✅ | 支持 HTTP/1.1 `Connection: Upgrade` / WebSocket 透传；暂不含 HTTP/2 extended CONNECT。 |
+| **上游 HTTP/2** | ✅ | 支持 `https://` upstream 通过 TLS/ALPN 自动协商到 HTTP/2，也可通过 `upstream.protocol = Http2` 强制要求；上游明文 `h2c` 暂不支持。 |
+| **gRPC 代理** | ❌ | 上游 h2 基础层已具备，但 trailer / streaming 等 gRPC 语义尚未补齐。 |
 | **Proxy Protocol** | ❌ | 暂不支持。 |
 | **上游 TLS** | ✅ | 支持系统根证书、自定义 CA、Insecure。 |
 | **上游连接池** | 🚧 | Hyper 自动管理，但缺乏精细控制（如 idle 数量）。 |
