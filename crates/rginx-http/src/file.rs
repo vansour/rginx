@@ -31,11 +31,7 @@ pub async fn serve_file(request: Request<Incoming>, target: &FileTarget) -> Http
             root = %target.root.display(),
             "file access blocked: path traversal attempt"
         );
-        return text_response(
-            StatusCode::FORBIDDEN,
-            "text/plain; charset=utf-8",
-            "forbidden\n",
-        );
+        return text_response(StatusCode::FORBIDDEN, "text/plain; charset=utf-8", "forbidden\n");
     }
 
     // Try to resolve the file path
@@ -63,11 +59,7 @@ pub async fn serve_file(request: Request<Incoming>, target: &FileTarget) -> Http
     };
 
     let Some(file_path) = resolved_path else {
-        return text_response(
-            StatusCode::NOT_FOUND,
-            "text/plain; charset=utf-8",
-            "not found\n",
-        );
+        return text_response(StatusCode::NOT_FOUND, "text/plain; charset=utf-8", "not found\n");
     };
 
     // Read file
@@ -101,11 +93,7 @@ fn resolve_file_path(root: &Path, request_path: &str) -> PathBuf {
     root.join(relative_path)
 }
 
-fn resolve_try_files(
-    root: &Path,
-    request_path: &str,
-    try_files: &[String],
-) -> Option<PathBuf> {
+fn resolve_try_files(root: &Path, request_path: &str, try_files: &[String]) -> Option<PathBuf> {
     for candidate in try_files {
         let resolved = if candidate == "$uri" {
             // Try the request path as a file
@@ -159,10 +147,7 @@ fn is_subpath(parent: &Path, child: &Path) -> bool {
         return false;
     }
 
-    parent_components
-        .iter()
-        .zip(child_components.iter())
-        .all(|(p, c)| p == c)
+    parent_components.iter().zip(child_components.iter()).all(|(p, c)| p == c)
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
@@ -183,10 +168,7 @@ fn normalize_path(path: &Path) -> PathBuf {
 }
 
 fn detect_content_type(path: &Path) -> String {
-    let extension = path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| ext.to_lowercase());
+    let extension = path.extension().and_then(|ext| ext.to_str()).map(|ext| ext.to_lowercase());
 
     match extension.as_deref() {
         Some("html") | Some("htm") => "text/html; charset=utf-8".to_string(),
@@ -238,18 +220,12 @@ mod tests {
 
     #[test]
     fn detect_content_type_handles_common_extensions() {
-        assert_eq!(
-            detect_content_type(Path::new("index.html")),
-            "text/html; charset=utf-8"
-        );
+        assert_eq!(detect_content_type(Path::new("index.html")), "text/html; charset=utf-8");
         assert_eq!(
             detect_content_type(Path::new("app.js")),
             "application/javascript; charset=utf-8"
         );
         assert_eq!(detect_content_type(Path::new("logo.png")), "image/png");
-        assert_eq!(
-            detect_content_type(Path::new("unknown.xyz")),
-            "application/octet-stream"
-        );
+        assert_eq!(detect_content_type(Path::new("unknown.xyz")), "application/octet-stream");
     }
 }

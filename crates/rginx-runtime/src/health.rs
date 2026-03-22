@@ -144,7 +144,7 @@ mod tests {
 
     use rginx_core::{
         ActiveHealthCheck, ConfigSnapshot, RuntimeSettings, Server, Upstream, UpstreamPeer,
-        UpstreamTls, VirtualHost,
+        UpstreamProtocol, UpstreamSettings, UpstreamTls, VirtualHost,
     };
     use rginx_http::SharedState;
 
@@ -156,28 +156,34 @@ mod tests {
             "healthy".to_string(),
             vec![peer("http://127.0.0.1:9000")],
             UpstreamTls::NativeRoots,
-            None,
-            Duration::from_secs(30),
-            64 * 1024,
-            2,
-            Duration::from_secs(10),
-            Some(ActiveHealthCheck {
-                path: "/healthz".to_string(),
-                interval: Duration::from_secs(5),
-                timeout: Duration::from_secs(2),
-                healthy_successes_required: 2,
-            }),
+            UpstreamSettings {
+                protocol: UpstreamProtocol::Auto,
+                server_name_override: None,
+                request_timeout: Duration::from_secs(30),
+                max_replayable_request_body_bytes: 64 * 1024,
+                unhealthy_after_failures: 2,
+                unhealthy_cooldown: Duration::from_secs(10),
+                active_health_check: Some(ActiveHealthCheck {
+                    path: "/healthz".to_string(),
+                    interval: Duration::from_secs(5),
+                    timeout: Duration::from_secs(2),
+                    healthy_successes_required: 2,
+                }),
+            },
         ));
         let passive_only = Arc::new(Upstream::new(
             "passive-only".to_string(),
             vec![peer("http://127.0.0.1:9010")],
             UpstreamTls::NativeRoots,
-            None,
-            Duration::from_secs(30),
-            64 * 1024,
-            2,
-            Duration::from_secs(10),
-            None,
+            UpstreamSettings {
+                protocol: UpstreamProtocol::Auto,
+                server_name_override: None,
+                request_timeout: Duration::from_secs(30),
+                max_replayable_request_body_bytes: 64 * 1024,
+                unhealthy_after_failures: 2,
+                unhealthy_cooldown: Duration::from_secs(10),
+                active_health_check: None,
+            },
         ));
 
         let snapshot = ConfigSnapshot {
@@ -193,12 +199,12 @@ mod tests {
                 tls: None,
             },
             default_vhost: VirtualHost {
+                id: "server".to_string(),
                 server_names: Vec::new(),
                 routes: Vec::new(),
                 tls: None,
             },
             vhosts: Vec::new(),
-            routes: Vec::new(),
             upstreams: HashMap::from([
                 ("healthy".to_string(), healthy),
                 ("passive-only".to_string(), passive_only),

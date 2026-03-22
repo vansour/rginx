@@ -21,10 +21,11 @@ async fn main() -> anyhow::Result<()> {
                 .context("failed to initialize runtime dependencies")?;
 
             println!(
-                "configuration is valid: listen={} tls={} routes={} upstreams={}",
+                "configuration is valid: listen={} tls={} vhosts={} routes={} upstreams={}",
                 config.server.listen_addr,
                 if config.server.tls.is_some() { "enabled" } else { "disabled" },
-                config.routes.len(),
+                config.total_vhost_count(),
+                config.total_route_count(),
                 config.upstreams.len()
             );
             Ok(())

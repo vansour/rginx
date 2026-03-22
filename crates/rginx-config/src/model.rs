@@ -51,6 +51,8 @@ pub struct UpstreamConfig {
     pub peers: Vec<UpstreamPeerConfig>,
     pub tls: Option<UpstreamTlsConfig>,
     #[serde(default)]
+    pub protocol: UpstreamProtocolConfig,
+    #[serde(default)]
     pub server_name_override: Option<String>,
     #[serde(default)]
     pub request_timeout_secs: Option<u64>,
@@ -82,6 +84,14 @@ pub enum UpstreamTlsConfig {
     Insecure,
 }
 
+#[derive(Debug, Clone, Deserialize, Default)]
+pub enum UpstreamProtocolConfig {
+    #[default]
+    Auto,
+    Http1,
+    Http2,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct LocationConfig {
     pub matcher: MatcherConfig,
@@ -104,7 +114,11 @@ pub enum MatcherConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub enum HandlerConfig {
-    Static { status: Option<u16>, content_type: Option<String>, body: String },
+    Static {
+        status: Option<u16>,
+        content_type: Option<String>,
+        body: String,
+    },
     Proxy {
         upstream: String,
         #[serde(default)]

@@ -14,12 +14,23 @@ pub struct ConfigSnapshot {
     pub server: Server,
     pub default_vhost: VirtualHost,
     pub vhosts: Vec<VirtualHost>,
-    pub routes: Vec<Route>,
     pub upstreams: HashMap<String, Arc<Upstream>>,
+}
+
+impl ConfigSnapshot {
+    pub fn total_route_count(&self) -> usize {
+        self.default_vhost.routes.len()
+            + self.vhosts.iter().map(|vhost| vhost.routes.len()).sum::<usize>()
+    }
+
+    pub fn total_vhost_count(&self) -> usize {
+        1 + self.vhosts.len()
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct VirtualHost {
+    pub id: String,
     pub server_names: Vec<String>,
     pub routes: Vec<Route>,
     pub tls: Option<ServerTls>,
@@ -73,6 +84,7 @@ pub struct ServerTls {
 
 #[derive(Debug, Clone)]
 pub struct Route {
+    pub id: String,
     pub matcher: RouteMatcher,
     pub action: RouteAction,
     pub access_control: RouteAccessControl,
@@ -135,6 +147,13 @@ impl RouteMatcher {
             Self::Prefix(path) => (1, path.len()),
         }
     }
+
+    pub fn id_fragment(&self) -> String {
+        match self {
+            Self::Exact(path) => format!("exact:{path}"),
+            Self::Prefix(path) => format!("prefix:{path}"),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -185,11 +204,40 @@ pub struct ActiveHealthCheck {
     pub healthy_successes_required: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum UpstreamProtocol {
+    Auto,
+    Http1,
+    Http2,
+}
+
+impl UpstreamProtocol {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Http1 => "http1",
+            Self::Http2 => "http2",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct UpstreamSettings {
+    pub protocol: UpstreamProtocol,
+    pub server_name_override: Option<String>,
+    pub request_timeout: Duration,
+    pub max_replayable_request_body_bytes: usize,
+    pub unhealthy_after_failures: u32,
+    pub unhealthy_cooldown: Duration,
+    pub active_health_check: Option<ActiveHealthCheck>,
+}
+
 #[derive(Debug)]
 pub struct Upstream {
     pub name: String,
     pub peers: Vec<UpstreamPeer>,
     pub tls: UpstreamTls,
+    pub protocol: UpstreamProtocol,
     pub server_name_override: Option<String>,
     pub request_timeout: Duration,
     pub max_replayable_request_body_bytes: usize,
@@ -204,23 +252,19 @@ impl Upstream {
         name: String,
         peers: Vec<UpstreamPeer>,
         tls: UpstreamTls,
-        server_name_override: Option<String>,
-        request_timeout: Duration,
-        max_replayable_request_body_bytes: usize,
-        unhealthy_after_failures: u32,
-        unhealthy_cooldown: Duration,
-        active_health_check: Option<ActiveHealthCheck>,
+        settings: UpstreamSettings,
     ) -> Self {
         Self {
             name,
             peers,
             tls,
-            server_name_override,
-            request_timeout,
-            max_replayable_request_body_bytes,
-            unhealthy_after_failures,
-            unhealthy_cooldown,
-            active_health_check,
+            protocol: settings.protocol,
+            server_name_override: settings.server_name_override,
+            request_timeout: settings.request_timeout,
+            max_replayable_request_body_bytes: settings.max_replayable_request_body_bytes,
+            unhealthy_after_failures: settings.unhealthy_after_failures,
+            unhealthy_cooldown: settings.unhealthy_cooldown,
+            active_health_check: settings.active_health_check,
             cursor: AtomicUsize::new(0),
         }
     }
@@ -264,7 +308,13 @@ pub enum UpstreamTls {
 mod tests {
     use std::net::IpAddr;
 
-    use super::{RouteAccessControl, Server};
+    use super::{
+        ConfigSnapshot, Route, RouteAccessControl, RouteAction, RouteMatcher, RuntimeSettings,
+        Server, StaticResponse, VirtualHost,
+    };
+    use http::StatusCode;
+    use std::collections::HashMap;
+    use std::time::Duration;
 
     #[test]
     fn route_access_control_allows_when_lists_are_empty() {
@@ -311,5 +361,60 @@ mod tests {
         assert!(server.is_trusted_proxy("10.1.2.3".parse::<IpAddr>().unwrap()));
         assert!(server.is_trusted_proxy("::1".parse::<IpAddr>().unwrap()));
         assert!(!server.is_trusted_proxy("192.0.2.10".parse::<IpAddr>().unwrap()));
+    }
+
+    #[test]
+    fn config_snapshot_counts_routes_across_all_vhosts() {
+        let snapshot = ConfigSnapshot {
+            runtime: RuntimeSettings { shutdown_timeout: Duration::from_secs(1) },
+            server: Server {
+                listen_addr: "127.0.0.1:8080".parse().unwrap(),
+                trusted_proxies: Vec::new(),
+                keep_alive: true,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout: None,
+                tls: None,
+            },
+            default_vhost: VirtualHost {
+                id: "server".to_string(),
+                server_names: Vec::new(),
+                routes: vec![route("/")],
+                tls: None,
+            },
+            vhosts: vec![
+                VirtualHost {
+                    id: "servers[0]".to_string(),
+                    server_names: vec!["api.example.com".to_string()],
+                    routes: vec![route("/users"), route("/status")],
+                    tls: None,
+                },
+                VirtualHost {
+                    id: "servers[1]".to_string(),
+                    server_names: vec!["app.example.com".to_string()],
+                    routes: vec![route("/")],
+                    tls: None,
+                },
+            ],
+            upstreams: HashMap::new(),
+        };
+
+        assert_eq!(snapshot.total_vhost_count(), 3);
+        assert_eq!(snapshot.total_route_count(), 4);
+    }
+
+    fn route(path: &str) -> Route {
+        Route {
+            id: format!("test|exact:{path}"),
+            matcher: RouteMatcher::Exact(path.to_string()),
+            action: RouteAction::Static(StaticResponse {
+                status: StatusCode::OK,
+                content_type: "text/plain; charset=utf-8".to_string(),
+                body: "ok\n".to_string(),
+            }),
+            access_control: RouteAccessControl::default(),
+            rate_limit: None,
+        }
     }
 }

@@ -5,15 +5,17 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::model::{
+    Config, HandlerConfig, MatcherConfig, ServerTlsConfig, UpstreamProtocolConfig,
+    UpstreamTlsConfig, VirtualHostConfig,
+};
 use http::StatusCode;
 use ipnet::IpNet;
 use rginx_core::{
-    ActiveHealthCheck, ConfigSnapshot, Error, FileTarget, ProxyTarget, ReturnAction, Result, Route, RouteAccessControl,
-    RouteAction, RouteMatcher, RouteRateLimit, RuntimeSettings, Server, ServerTls, StaticResponse,
-    Upstream, UpstreamPeer, UpstreamTls, VirtualHost,
-};
-use crate::model::{
-    Config, HandlerConfig, MatcherConfig, ServerTlsConfig, UpstreamTlsConfig, VirtualHostConfig,
+    ActiveHealthCheck, ConfigSnapshot, Error, FileTarget, ProxyTarget, Result, ReturnAction, Route,
+    RouteAccessControl, RouteAction, RouteMatcher, RouteRateLimit, RuntimeSettings, Server,
+    ServerTls, StaticResponse, Upstream, UpstreamPeer, UpstreamProtocol, UpstreamSettings,
+    UpstreamTls, VirtualHost,
 };
 use rustls::pki_types::ServerName;
 
@@ -26,6 +28,7 @@ const DEFAULT_UNHEALTHY_COOLDOWN_SECS: u64 = 10;
 const DEFAULT_HEALTH_CHECK_INTERVAL_SECS: u64 = 5;
 const DEFAULT_HEALTH_CHECK_TIMEOUT_SECS: u64 = 2;
 const DEFAULT_HEALTHY_SUCCESSES_REQUIRED: u32 = 2;
+const DEFAULT_VHOST_ID: &str = "server";
 
 pub fn compile(raw: Config) -> Result<ConfigSnapshot> {
     compile_with_base(raw, Path::new("."))
@@ -63,6 +66,7 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
                 name,
                 peers,
                 tls,
+                protocol,
                 server_name_override,
                 request_timeout_secs,
                 max_replayable_request_body_bytes,
@@ -79,6 +83,7 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
                 .map(|peer| compile_peer(&name, peer.url))
                 .collect::<Result<Vec<_>>>()?;
             let tls = compile_tls(&name, tls, base_dir)?;
+            let protocol = compile_protocol(&name, protocol, &peers)?;
             let server_name_override = compile_server_name_override(&name, server_name_override)?;
             let request_timeout = Duration::from_secs(
                 request_timeout_secs.unwrap_or(DEFAULT_UPSTREAM_REQUEST_TIMEOUT_SECS),
@@ -104,104 +109,33 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
                 name.clone(),
                 peers,
                 tls,
-                server_name_override,
-                request_timeout,
-                max_replayable_request_body_bytes,
-                unhealthy_after_failures,
-                unhealthy_cooldown,
-                active_health_check,
+                UpstreamSettings {
+                    protocol,
+                    server_name_override,
+                    request_timeout,
+                    max_replayable_request_body_bytes,
+                    unhealthy_after_failures,
+                    unhealthy_cooldown,
+                    active_health_check,
+                },
             ));
             Ok((name, compiled))
         })
         .collect::<Result<HashMap<_, _>>>()?;
 
-    let mut routes = locations
-        .into_iter()
-        .map(|location| {
-            let crate::model::LocationConfig {
-                matcher,
-                handler,
-                allow_cidrs,
-                deny_cidrs,
-                requests_per_sec,
-                burst,
-            } = location;
-            let matcher = match matcher {
-                MatcherConfig::Exact(path) => RouteMatcher::Exact(path),
-                MatcherConfig::Prefix(path) => RouteMatcher::Prefix(path),
-            };
-            let access_control = compile_route_access_control(&matcher, allow_cidrs, deny_cidrs)?;
-            let rate_limit = compile_route_rate_limit(&matcher, requests_per_sec, burst)?;
-
-            let action = match handler {
-                HandlerConfig::Static { status, content_type, body } => {
-                    RouteAction::Static(StaticResponse {
-                        status: StatusCode::from_u16(status.unwrap_or(200))?,
-                        content_type: content_type
-                            .unwrap_or_else(|| "text/plain; charset=utf-8".to_string()),
-                        body,
-                    })
-                }
-                HandlerConfig::Proxy { upstream, preserve_host, strip_prefix, proxy_set_headers } => {
-                    let compiled = upstreams.get(&upstream).cloned().ok_or_else(|| {
-                        Error::Config(format!("proxy upstream `{upstream}` is not defined"))
-                    })?;
-
-                    let preserve_host = preserve_host.unwrap_or(false);
-
-                    let strip_prefix = strip_prefix.and_then(|s| if s.is_empty() { None } else { Some(s) });
-
-                    let proxy_set_headers = proxy_set_headers
-                        .into_iter()
-                        .map(|(name, value)| {
-                            let header_name = name.parse::<http::header::HeaderName>().map_err(|e| {
-                                Error::Config(format!("invalid header name `{name}`: {e}"))
-                            })?;
-                            let header_value = value.parse::<http::header::HeaderValue>().map_err(|e| {
-                                Error::Config(format!("invalid header value for `{name}`: {e}"))
-                            })?;
-                            Ok((header_name, header_value))
-                        })
-                        .collect::<Result<Vec<_>>>()?;
-
-                    RouteAction::Proxy(ProxyTarget {
-                        upstream_name: upstream,
-                        upstream: compiled,
-                        preserve_host,
-                        strip_prefix,
-                        proxy_set_headers,
-                    })
-                }
-                HandlerConfig::File { root, index, try_files } => {
-                    let root = resolve_path(base_dir, root);
-                    RouteAction::File(FileTarget {
-                        root,
-                        index: index.and_then(|s| if s.trim().is_empty() { None } else { Some(s) }),
-                        try_files: try_files.unwrap_or_default(),
-                    })
-                }
-                HandlerConfig::Return { status, location, body } => {
-                    RouteAction::Return(ReturnAction {
-                        status: StatusCode::from_u16(status)?,
-                        location,
-                        body,
-                    })
-                }
-                HandlerConfig::Status => RouteAction::Status,
-                HandlerConfig::Metrics => RouteAction::Metrics,
-            };
-
-            Ok(Route { matcher, action, access_control, rate_limit })
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    routes.sort_by(|left, right| right.matcher.priority().cmp(&left.matcher.priority()));
-
-    let default_vhost = VirtualHost { server_names, routes: routes.clone(), tls: server_tls.clone() };
+    let default_vhost = VirtualHost {
+        id: DEFAULT_VHOST_ID.to_string(),
+        server_names,
+        routes: compile_routes(locations, &upstreams, base_dir, DEFAULT_VHOST_ID)?,
+        tls: server_tls.clone(),
+    };
 
     let vhosts = raw_servers
         .into_iter()
-        .map(|vhost_config| compile_virtual_host(vhost_config, &upstreams, base_dir))
+        .enumerate()
+        .map(|(index, vhost_config)| {
+            compile_virtual_host(format!("servers[{index}]"), vhost_config, &upstreams, base_dir)
+        })
         .collect::<Result<Vec<_>>>()?;
 
     Ok(ConfigSnapshot {
@@ -220,7 +154,6 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
         },
         default_vhost,
         vhosts,
-        routes,
         upstreams,
     })
 }
@@ -309,6 +242,26 @@ fn compile_tls(
     }
 }
 
+fn compile_protocol(
+    upstream_name: &str,
+    protocol: UpstreamProtocolConfig,
+    peers: &[UpstreamPeer],
+) -> Result<UpstreamProtocol> {
+    match protocol {
+        UpstreamProtocolConfig::Auto => Ok(UpstreamProtocol::Auto),
+        UpstreamProtocolConfig::Http1 => Ok(UpstreamProtocol::Http1),
+        UpstreamProtocolConfig::Http2 => {
+            if peers.iter().any(|peer| peer.scheme != "https") {
+                return Err(Error::Config(format!(
+                    "upstream `{upstream_name}` protocol `Http2` currently requires all peers to use `https://`; cleartext h2c upstreams are not supported"
+                )));
+            }
+
+            Ok(UpstreamProtocol::Http2)
+        }
+    }
+}
+
 fn compile_server_tls(tls: Option<ServerTlsConfig>, base_dir: &Path) -> Result<Option<ServerTls>> {
     let Some(ServerTlsConfig { cert_path, key_path }) = tls else {
         return Ok(None);
@@ -333,16 +286,16 @@ fn compile_server_tls(tls: Option<ServerTlsConfig>, base_dir: &Path) -> Result<O
     Ok(Some(ServerTls { cert_path, key_path }))
 }
 
-fn compile_virtual_host(
-    config: VirtualHostConfig,
+fn compile_routes(
+    locations: Vec<crate::model::LocationConfig>,
     upstreams: &HashMap<String, Arc<Upstream>>,
     base_dir: &Path,
-) -> Result<VirtualHost> {
-    let VirtualHostConfig { server_names, locations, tls } = config;
-
+    vhost_id: &str,
+) -> Result<Vec<Route>> {
     let mut routes = locations
         .into_iter()
-        .map(|location| {
+        .enumerate()
+        .map(|(route_index, location)| {
             let crate::model::LocationConfig {
                 matcher,
                 handler,
@@ -355,6 +308,7 @@ fn compile_virtual_host(
                 MatcherConfig::Exact(path) => RouteMatcher::Exact(path),
                 MatcherConfig::Prefix(path) => RouteMatcher::Prefix(path),
             };
+            let route_id = format!("{vhost_id}/routes[{route_index}]|{}", matcher.id_fragment());
             let access_control = compile_route_access_control(&matcher, allow_cidrs, deny_cidrs)?;
             let rate_limit = compile_route_rate_limit(&matcher, requests_per_sec, burst)?;
 
@@ -367,24 +321,32 @@ fn compile_virtual_host(
                         body,
                     })
                 }
-                HandlerConfig::Proxy { upstream, preserve_host, strip_prefix, proxy_set_headers } => {
+                HandlerConfig::Proxy {
+                    upstream,
+                    preserve_host,
+                    strip_prefix,
+                    proxy_set_headers,
+                } => {
                     let compiled = upstreams.get(&upstream).cloned().ok_or_else(|| {
                         Error::Config(format!("proxy upstream `{upstream}` is not defined"))
                     })?;
 
                     let preserve_host = preserve_host.unwrap_or(false);
 
-                    let strip_prefix = strip_prefix.and_then(|s| if s.is_empty() { None } else { Some(s) });
+                    let strip_prefix =
+                        strip_prefix.and_then(|s| if s.is_empty() { None } else { Some(s) });
 
                     let proxy_set_headers = proxy_set_headers
                         .into_iter()
                         .map(|(name, value)| {
-                            let header_name = name.parse::<http::header::HeaderName>().map_err(|e| {
-                                Error::Config(format!("invalid header name `{name}`: {e}"))
-                            })?;
-                            let header_value = value.parse::<http::header::HeaderValue>().map_err(|e| {
-                                Error::Config(format!("invalid header value for `{name}`: {e}"))
-                            })?;
+                            let header_name =
+                                name.parse::<http::header::HeaderName>().map_err(|e| {
+                                    Error::Config(format!("invalid header name `{name}`: {e}"))
+                                })?;
+                            let header_value =
+                                value.parse::<http::header::HeaderValue>().map_err(|e| {
+                                    Error::Config(format!("invalid header value for `{name}`: {e}"))
+                                })?;
                             Ok((header_name, header_value))
                         })
                         .collect::<Result<Vec<_>>>()?;
@@ -416,15 +378,26 @@ fn compile_virtual_host(
                 HandlerConfig::Metrics => RouteAction::Metrics,
             };
 
-            Ok(Route { matcher, action, access_control, rate_limit })
+            Ok(Route { id: route_id, matcher, action, access_control, rate_limit })
         })
         .collect::<Result<Vec<_>>>()?;
 
     routes.sort_by(|left, right| right.matcher.priority().cmp(&left.matcher.priority()));
 
+    Ok(routes)
+}
+
+fn compile_virtual_host(
+    vhost_id: String,
+    config: VirtualHostConfig,
+    upstreams: &HashMap<String, Arc<Upstream>>,
+    base_dir: &Path,
+) -> Result<VirtualHost> {
+    let VirtualHostConfig { server_names, locations, tls } = config;
+    let routes = compile_routes(locations, upstreams, base_dir, &vhost_id)?;
     let tls = compile_server_tls(tls, base_dir)?;
 
-    Ok(VirtualHost { server_names, routes, tls })
+    Ok(VirtualHost { id: vhost_id, server_names, routes, tls })
 }
 
 fn compile_server_name_override(
@@ -603,7 +576,8 @@ mod tests {
 
     use crate::model::{
         Config, HandlerConfig, LocationConfig, MatcherConfig, RuntimeConfig, ServerConfig,
-        ServerTlsConfig, UpstreamConfig, UpstreamPeerConfig, UpstreamTlsConfig,
+        ServerTlsConfig, UpstreamConfig, UpstreamPeerConfig, UpstreamProtocolConfig,
+        UpstreamTlsConfig, VirtualHostConfig,
     };
 
     use super::{
@@ -632,6 +606,7 @@ mod tests {
                 name: "secure-backend".to_string(),
                 peers: vec![UpstreamPeerConfig { url: "https://example.com".to_string() }],
                 tls: None,
+                protocol: UpstreamProtocolConfig::Auto,
                 server_name_override: None,
                 request_timeout_secs: None,
                 max_replayable_request_body_bytes: None,
@@ -644,7 +619,12 @@ mod tests {
             }],
             locations: vec![LocationConfig {
                 matcher: MatcherConfig::Prefix("/api".to_string()),
-                handler: HandlerConfig::Proxy { upstream: "secure-backend".to_string(), preserve_host: None, strip_prefix: None, proxy_set_headers: std::collections::HashMap::new() },
+                handler: HandlerConfig::Proxy {
+                    upstream: "secure-backend".to_string(),
+                    preserve_host: None,
+                    strip_prefix: None,
+                    proxy_set_headers: std::collections::HashMap::new(),
+                },
                 allow_cidrs: Vec::new(),
                 deny_cidrs: Vec::new(),
                 requests_per_sec: None,
@@ -654,7 +634,7 @@ mod tests {
         };
 
         let snapshot = compile(config).expect("https upstream should compile");
-        let proxy = match &snapshot.routes[0].action {
+        let proxy = match &snapshot.default_vhost.routes[0].action {
             rginx_core::RouteAction::Proxy(proxy) => proxy,
             _ => panic!("expected proxy route"),
         };
@@ -663,6 +643,7 @@ mod tests {
         assert_eq!(proxy.upstream_name, "secure-backend");
         assert_eq!(peer.scheme, "https");
         assert_eq!(peer.authority, "example.com");
+        assert_eq!(proxy.upstream.protocol, rginx_core::UpstreamProtocol::Auto);
         assert_eq!(
             proxy.upstream.request_timeout,
             Duration::from_secs(DEFAULT_UPSTREAM_REQUEST_TIMEOUT_SECS)
@@ -715,6 +696,7 @@ mod tests {
                 name: "dev-backend".to_string(),
                 peers: vec![UpstreamPeerConfig { url: "https://localhost:9443".to_string() }],
                 tls: Some(UpstreamTlsConfig::CustomCa { ca_cert_path: "dev-ca.pem".to_string() }),
+                protocol: UpstreamProtocolConfig::Http2,
                 server_name_override: Some("dev.internal".to_string()),
                 request_timeout_secs: Some(5),
                 max_replayable_request_body_bytes: Some(1024),
@@ -727,7 +709,12 @@ mod tests {
             }],
             locations: vec![LocationConfig {
                 matcher: MatcherConfig::Prefix("/".to_string()),
-                handler: HandlerConfig::Proxy { upstream: "dev-backend".to_string(), preserve_host: None, strip_prefix: None, proxy_set_headers: std::collections::HashMap::new() },
+                handler: HandlerConfig::Proxy {
+                    upstream: "dev-backend".to_string(),
+                    preserve_host: None,
+                    strip_prefix: None,
+                    proxy_set_headers: std::collections::HashMap::new(),
+                },
                 allow_cidrs: Vec::new(),
                 deny_cidrs: Vec::new(),
                 requests_per_sec: None,
@@ -738,7 +725,7 @@ mod tests {
 
         let snapshot =
             compile_with_base(config, &base_dir).expect("custom CA config should compile");
-        let proxy = match &snapshot.routes[0].action {
+        let proxy = match &snapshot.default_vhost.routes[0].action {
             rginx_core::RouteAction::Proxy(proxy) => proxy,
             _ => panic!("expected proxy route"),
         };
@@ -747,6 +734,7 @@ mod tests {
             &proxy.upstream.tls,
             rginx_core::UpstreamTls::CustomCa { ca_cert_path } if ca_cert_path == &ca_path
         ));
+        assert_eq!(proxy.upstream.protocol, rginx_core::UpstreamProtocol::Http2);
         assert_eq!(proxy.upstream.server_name_override.as_deref(), Some("dev.internal"));
         assert_eq!(proxy.upstream.request_timeout, Duration::from_secs(5));
         assert_eq!(proxy.upstream.max_replayable_request_body_bytes, 1024);
@@ -785,6 +773,7 @@ mod tests {
                 name: "secure-backend".to_string(),
                 peers: vec![UpstreamPeerConfig { url: "https://[::1]:9443".to_string() }],
                 tls: None,
+                protocol: UpstreamProtocolConfig::Auto,
                 server_name_override: Some("[::1]".to_string()),
                 request_timeout_secs: None,
                 max_replayable_request_body_bytes: None,
@@ -797,7 +786,12 @@ mod tests {
             }],
             locations: vec![LocationConfig {
                 matcher: MatcherConfig::Prefix("/".to_string()),
-                handler: HandlerConfig::Proxy { upstream: "secure-backend".to_string(), preserve_host: None, strip_prefix: None, proxy_set_headers: std::collections::HashMap::new() },
+                handler: HandlerConfig::Proxy {
+                    upstream: "secure-backend".to_string(),
+                    preserve_host: None,
+                    strip_prefix: None,
+                    proxy_set_headers: std::collections::HashMap::new(),
+                },
                 allow_cidrs: Vec::new(),
                 deny_cidrs: Vec::new(),
                 requests_per_sec: None,
@@ -807,7 +801,7 @@ mod tests {
         };
 
         let snapshot = compile(config).expect("server name override should compile");
-        let proxy = match &snapshot.routes[0].action {
+        let proxy = match &snapshot.default_vhost.routes[0].action {
             rginx_core::RouteAction::Proxy(proxy) => proxy,
             _ => panic!("expected proxy route"),
         };
@@ -834,6 +828,7 @@ mod tests {
                 name: "secure-backend".to_string(),
                 peers: vec![UpstreamPeerConfig { url: "https://127.0.0.1:9443".to_string() }],
                 tls: None,
+                protocol: UpstreamProtocolConfig::Auto,
                 server_name_override: Some("bad name".to_string()),
                 request_timeout_secs: None,
                 max_replayable_request_body_bytes: None,
@@ -846,7 +841,12 @@ mod tests {
             }],
             locations: vec![LocationConfig {
                 matcher: MatcherConfig::Prefix("/".to_string()),
-                handler: HandlerConfig::Proxy { upstream: "secure-backend".to_string(), preserve_host: None, strip_prefix: None, proxy_set_headers: std::collections::HashMap::new() },
+                handler: HandlerConfig::Proxy {
+                    upstream: "secure-backend".to_string(),
+                    preserve_host: None,
+                    strip_prefix: None,
+                    proxy_set_headers: std::collections::HashMap::new(),
+                },
                 allow_cidrs: Vec::new(),
                 deny_cidrs: Vec::new(),
                 requests_per_sec: None,
@@ -887,7 +887,7 @@ mod tests {
         };
 
         let snapshot = compile(config).expect("status route should compile");
-        assert!(matches!(snapshot.routes[0].action, rginx_core::RouteAction::Status));
+        assert!(matches!(snapshot.default_vhost.routes[0].action, rginx_core::RouteAction::Status));
     }
 
     #[test]
@@ -918,7 +918,10 @@ mod tests {
         };
 
         let snapshot = compile(config).expect("metrics route should compile");
-        assert!(matches!(snapshot.routes[0].action, rginx_core::RouteAction::Metrics));
+        assert!(matches!(
+            snapshot.default_vhost.routes[0].action,
+            rginx_core::RouteAction::Metrics
+        ));
     }
 
     #[test]
@@ -949,8 +952,8 @@ mod tests {
         };
 
         let snapshot = compile(config).expect("access-controlled route should compile");
-        assert_eq!(snapshot.routes[0].access_control.allow_cidrs.len(), 2);
-        assert_eq!(snapshot.routes[0].access_control.deny_cidrs.len(), 1);
+        assert_eq!(snapshot.default_vhost.routes[0].access_control.allow_cidrs.len(), 2);
+        assert_eq!(snapshot.default_vhost.routes[0].access_control.deny_cidrs.len(), 1);
     }
 
     #[test]
@@ -985,9 +988,58 @@ mod tests {
         };
 
         let snapshot = compile(config).expect("rate-limited route should compile");
-        let rate_limit = snapshot.routes[0].rate_limit.expect("route rate limit should exist");
+        let rate_limit =
+            snapshot.default_vhost.routes[0].rate_limit.expect("route rate limit should exist");
         assert_eq!(rate_limit.requests_per_sec, 20);
         assert_eq!(rate_limit.burst, 5);
+    }
+
+    #[test]
+    fn compile_generates_distinct_route_and_vhost_ids() {
+        let config = Config {
+            runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
+            server: ServerConfig {
+                listen: "127.0.0.1:8080".to_string(),
+                server_names: vec!["default.example.com".to_string()],
+                trusted_proxies: Vec::new(),
+                keep_alive: None,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout_secs: None,
+                tls: None,
+            },
+            upstreams: Vec::new(),
+            locations: vec![LocationConfig {
+                matcher: MatcherConfig::Exact("/status".to_string()),
+                handler: HandlerConfig::Status,
+                allow_cidrs: Vec::new(),
+                deny_cidrs: Vec::new(),
+                requests_per_sec: None,
+                burst: None,
+            }],
+            servers: vec![VirtualHostConfig {
+                server_names: vec!["api.example.com".to_string()],
+                locations: vec![LocationConfig {
+                    matcher: MatcherConfig::Exact("/status".to_string()),
+                    handler: HandlerConfig::Status,
+                    allow_cidrs: Vec::new(),
+                    deny_cidrs: Vec::new(),
+                    requests_per_sec: None,
+                    burst: None,
+                }],
+                tls: None,
+            }],
+        };
+
+        let snapshot = compile(config).expect("vhost config should compile");
+
+        assert_eq!(snapshot.default_vhost.id, "server");
+        assert_eq!(snapshot.vhosts[0].id, "servers[0]");
+        assert_eq!(snapshot.default_vhost.routes[0].id, "server/routes[0]|exact:/status");
+        assert_eq!(snapshot.vhosts[0].routes[0].id, "servers[0]/routes[0]|exact:/status");
+        assert_eq!(snapshot.total_vhost_count(), 2);
+        assert_eq!(snapshot.total_route_count(), 2);
     }
 
     #[test]

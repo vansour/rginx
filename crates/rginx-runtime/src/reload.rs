@@ -46,12 +46,12 @@ mod tests {
                 tls: None,
             },
             default_vhost: VirtualHost {
+                id: "server".to_string(),
                 server_names: Vec::new(),
                 routes: Vec::new(),
                 tls: None,
             },
             vhosts: Vec::new(),
-            routes: Vec::new(),
             upstreams: HashMap::new(),
         }
     }

@@ -5,7 +5,10 @@ use http::uri::PathAndQuery;
 use ipnet::IpNet;
 use rginx_core::{Error, Result};
 
-use crate::model::{Config, HandlerConfig, MatcherConfig, ServerTlsConfig, UpstreamTlsConfig, VirtualHostConfig};
+use crate::model::{
+    Config, HandlerConfig, MatcherConfig, ServerTlsConfig, UpstreamProtocolConfig,
+    UpstreamTlsConfig, VirtualHostConfig,
+};
 
 pub fn validate(config: &Config) -> Result<()> {
     if config.runtime.shutdown_timeout_secs == 0 {
@@ -93,6 +96,21 @@ pub fn validate(config: &Config) -> Result<()> {
                     "upstream `{}` server_name_override must not be empty",
                     upstream.name
                 )));
+            }
+        }
+
+        if matches!(upstream.protocol, UpstreamProtocolConfig::Http2) {
+            for peer in &upstream.peers {
+                let Ok(uri) = peer.url.parse::<http::Uri>() else {
+                    continue;
+                };
+
+                if uri.scheme_str() != Some("https") {
+                    return Err(Error::Config(format!(
+                        "upstream `{}` protocol `Http2` currently requires all peers to use `https://`; cleartext h2c upstreams are not supported",
+                        upstream.name
+                    )));
+                }
             }
         }
 
@@ -204,7 +222,9 @@ pub fn validate(config: &Config) -> Result<()> {
         validate_route_cidrs(matcher_label, "deny_cidrs", &location.deny_cidrs)?;
         validate_route_rate_limit(matcher_label, location.requests_per_sec, location.burst)?;
 
-        if let HandlerConfig::Proxy { upstream, strip_prefix, proxy_set_headers, .. } = &location.handler {
+        if let HandlerConfig::Proxy { upstream, strip_prefix, proxy_set_headers, .. } =
+            &location.handler
+        {
             if upstream.trim().is_empty() {
                 return Err(Error::Config("proxy upstream name must not be empty".to_string()));
             }
@@ -282,7 +302,9 @@ pub fn validate(config: &Config) -> Result<()> {
         }
     }
 
-    validate_virtual_hosts(&config.servers, &upstream_names)?;
+    let mut all_server_names = HashSet::new();
+    validate_server_names("server", &config.server.server_names, &mut all_server_names)?;
+    validate_virtual_hosts(&config.servers, &upstream_names, &mut all_server_names)?;
 
     Ok(())
 }
@@ -357,37 +379,57 @@ fn normalize_trusted_proxy(value: &str) -> Option<String> {
     })
 }
 
-fn validate_virtual_hosts(vhosts: &[VirtualHostConfig], upstream_names: &HashSet<String>) -> Result<()> {
-    let mut all_server_names: HashSet<String> = HashSet::new();
+fn validate_server_names(
+    owner_label: &str,
+    server_names: &[String],
+    all_server_names: &mut HashSet<String>,
+) -> Result<()> {
+    for name in server_names {
+        let normalized = name.trim().to_lowercase();
+        if normalized.is_empty() {
+            return Err(Error::Config(format!("{owner_label} server_name must not be empty")));
+        }
 
+        if normalized.contains('/') {
+            return Err(Error::Config(format!(
+                "{owner_label} server_name `{name}` should not contain path separator"
+            )));
+        }
+
+        if !all_server_names.insert(normalized) {
+            return Err(Error::Config(format!(
+                "duplicate server_name `{name}` across server and servers"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_virtual_hosts(
+    vhosts: &[VirtualHostConfig],
+    upstream_names: &HashSet<String>,
+    all_server_names: &mut HashSet<String>,
+) -> Result<()> {
     for (idx, vhost) in vhosts.iter().enumerate() {
         let vhost_label = format!("servers[{idx}]");
 
-        for name in &vhost.server_names {
-            let normalized = name.trim().to_lowercase();
-            if normalized.is_empty() {
+        if vhost.server_names.is_empty() {
+            if vhost.tls.is_some() {
                 return Err(Error::Config(format!(
-                    "{vhost_label} server_name must not be empty"
+                    "{vhost_label} TLS requires at least one server_name"
                 )));
             }
 
-            if normalized.contains('/') {
-                return Err(Error::Config(format!(
-                    "{vhost_label} server_name `{name}` should not contain path separator"
-                )));
-            }
-
-            if !all_server_names.insert(normalized) {
-                return Err(Error::Config(format!(
-                    "duplicate server_name `{name}` across servers"
-                )));
-            }
+            return Err(Error::Config(format!(
+                "{vhost_label} must define at least one server_name"
+            )));
         }
 
+        validate_server_names(&vhost_label, &vhost.server_names, all_server_names)?;
+
         if vhost.locations.is_empty() {
-            return Err(Error::Config(format!(
-                "{vhost_label} must have at least one location"
-            )));
+            return Err(Error::Config(format!("{vhost_label} must have at least one location")));
         }
 
         if let Some(tls) = &vhost.tls {
@@ -429,11 +471,11 @@ fn validate_virtual_hosts(vhosts: &[VirtualHostConfig], upstream_names: &HashSet
             validate_route_cidrs(matcher_label, "deny_cidrs", &location.deny_cidrs)?;
             validate_route_rate_limit(matcher_label, location.requests_per_sec, location.burst)?;
 
-            if let HandlerConfig::Proxy { upstream, strip_prefix, proxy_set_headers, .. } = &location.handler {
+            if let HandlerConfig::Proxy { upstream, strip_prefix, proxy_set_headers, .. } =
+                &location.handler
+            {
                 if upstream.trim().is_empty() {
-                    return Err(Error::Config(
-                        "proxy upstream name must not be empty".to_string(),
-                    ));
+                    return Err(Error::Config("proxy upstream name must not be empty".to_string()));
                 }
 
                 if !upstream_names.contains(upstream) {
@@ -519,7 +561,8 @@ fn validate_virtual_hosts(vhosts: &[VirtualHostConfig], upstream_names: &HashSet
 mod tests {
     use crate::model::{
         Config, HandlerConfig, LocationConfig, MatcherConfig, RuntimeConfig, ServerConfig,
-        ServerTlsConfig, UpstreamConfig, UpstreamPeerConfig,
+        ServerTlsConfig, UpstreamConfig, UpstreamPeerConfig, UpstreamProtocolConfig,
+        VirtualHostConfig,
     };
 
     use super::validate;
@@ -639,6 +682,62 @@ mod tests {
         assert!(error.to_string().contains("server max_request_body_bytes must be greater than 0"));
     }
 
+    #[test]
+    fn validate_rejects_empty_default_server_name() {
+        let mut config = base_config();
+        config.server.server_names = vec![" ".to_string()];
+
+        let error = validate(&config).expect_err("empty default server_name should be rejected");
+        assert!(error.to_string().contains("server server_name must not be empty"));
+    }
+
+    #[test]
+    fn validate_rejects_default_server_name_with_path_separator() {
+        let mut config = base_config();
+        config.server.server_names = vec!["api/example.com".to_string()];
+
+        let error = validate(&config).expect_err("invalid default server_name should be rejected");
+        assert!(error
+            .to_string()
+            .contains("server server_name `api/example.com` should not contain path separator"));
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_server_name_between_default_server_and_vhost() {
+        let mut config = base_config();
+        config.server.server_names = vec!["api.example.com".to_string()];
+        config.servers = vec![sample_vhost(vec!["API.EXAMPLE.COM"])];
+
+        let error = validate(&config).expect_err("duplicate server_names should be rejected");
+        assert!(error
+            .to_string()
+            .contains("duplicate server_name `API.EXAMPLE.COM` across server and servers"));
+    }
+
+    #[test]
+    fn validate_rejects_vhost_without_server_name() {
+        let mut config = base_config();
+        config.servers = vec![sample_vhost(Vec::new())];
+
+        let error = validate(&config).expect_err("vhost without server_name should be rejected");
+        assert!(error.to_string().contains("servers[0] must define at least one server_name"));
+    }
+
+    #[test]
+    fn validate_rejects_tls_vhost_without_server_name() {
+        let mut config = base_config();
+        let mut vhost = sample_vhost(Vec::new());
+        vhost.tls = Some(ServerTlsConfig {
+            cert_path: "server.crt".to_string(),
+            key_path: "server.key".to_string(),
+        });
+        config.servers = vec![vhost];
+
+        let error =
+            validate(&config).expect_err("TLS vhost without server_name should be rejected");
+        assert!(error.to_string().contains("servers[0] TLS requires at least one server_name"));
+    }
+
     fn base_config() -> Config {
         Config {
             runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
@@ -657,6 +756,7 @@ mod tests {
                 name: "backend".to_string(),
                 peers: vec![UpstreamPeerConfig { url: "http://127.0.0.1:9000".to_string() }],
                 tls: None,
+                protocol: UpstreamProtocolConfig::Auto,
                 server_name_override: None,
                 request_timeout_secs: None,
                 max_replayable_request_body_bytes: None,
@@ -669,7 +769,12 @@ mod tests {
             }],
             locations: vec![LocationConfig {
                 matcher: MatcherConfig::Prefix("/".to_string()),
-                handler: HandlerConfig::Proxy { upstream: "backend".to_string(), preserve_host: None, strip_prefix: None, proxy_set_headers: std::collections::HashMap::new() },
+                handler: HandlerConfig::Proxy {
+                    upstream: "backend".to_string(),
+                    preserve_host: None,
+                    strip_prefix: None,
+                    proxy_set_headers: std::collections::HashMap::new(),
+                },
                 allow_cidrs: Vec::new(),
                 deny_cidrs: Vec::new(),
                 requests_per_sec: None,
@@ -727,5 +832,36 @@ mod tests {
 
         let error = validate(&config).expect_err("zero recovery threshold should be rejected");
         assert!(error.to_string().contains("healthy_successes_required must be greater than 0"));
+    }
+
+    #[test]
+    fn validate_rejects_http2_upstream_protocol_for_cleartext_peers() {
+        let mut config = base_config();
+        config.upstreams[0].protocol = UpstreamProtocolConfig::Http2;
+
+        let error =
+            validate(&config).expect_err("cleartext peers should be rejected for upstream http2");
+        assert!(error
+            .to_string()
+            .contains("protocol `Http2` currently requires all peers to use `https://`"));
+    }
+
+    fn sample_vhost(server_names: Vec<&str>) -> VirtualHostConfig {
+        VirtualHostConfig {
+            server_names: server_names.into_iter().map(str::to_string).collect(),
+            locations: vec![LocationConfig {
+                matcher: MatcherConfig::Exact("/".to_string()),
+                handler: HandlerConfig::Static {
+                    status: Some(200),
+                    content_type: Some("text/plain; charset=utf-8".to_string()),
+                    body: "vhost\n".to_string(),
+                },
+                allow_cidrs: Vec::new(),
+                deny_cidrs: Vec::new(),
+                requests_per_sec: None,
+                burst: None,
+            }],
+            tls: None,
+        }
     }
 }

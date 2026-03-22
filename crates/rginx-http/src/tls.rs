@@ -4,8 +4,8 @@ use std::io::BufReader;
 use std::sync::Arc;
 
 use rginx_core::{Error, Result, ServerTls, VirtualHost};
-use rustls::server::ResolvesServerCert;
 use rustls::server::ClientHello;
+use rustls::server::ResolvesServerCert;
 use rustls::ServerConfig;
 use tokio_rustls::TlsAcceptor;
 
@@ -82,9 +82,8 @@ pub fn build_tls_acceptor(
 
     let resolver = Arc::new(SniCertificateResolver::new(default_cert, all_certs));
 
-    let config = ServerConfig::builder()
-        .with_no_client_auth()
-        .with_cert_resolver(resolver);
+    let mut config = ServerConfig::builder().with_no_client_auth().with_cert_resolver(resolver);
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
     Ok(Some(TlsAcceptor::from(Arc::new(config))))
 }
@@ -149,6 +148,7 @@ mod tests {
     #[test]
     fn build_tls_acceptor_returns_none_for_plain_http() {
         let default_vhost = VirtualHost {
+            id: "server".to_string(),
             server_names: Vec::new(),
             routes: Vec::new(),
             tls: None,
@@ -172,6 +172,7 @@ mod tests {
         fs::write(&key_path, TEST_SERVER_KEY_PEM).expect("test key should be written");
 
         let default_vhost = VirtualHost {
+            id: "server".to_string(),
             server_names: vec!["localhost".to_string()],
             routes: Vec::new(),
             tls: Some(rginx_core::ServerTls {
@@ -181,8 +182,19 @@ mod tests {
         };
         let vhosts: Vec<VirtualHost> = Vec::new();
 
-        let acceptor = build_tls_acceptor(&default_vhost, &vhosts).expect("TLS acceptor should load");
+        let acceptor =
+            build_tls_acceptor(&default_vhost, &vhosts).expect("TLS acceptor should load");
         assert!(acceptor.is_some());
+        assert_eq!(
+            acceptor
+                .expect("TLS acceptor should exist")
+                .config()
+                .alpn_protocols
+                .iter()
+                .map(|protocol| protocol.as_slice())
+                .collect::<Vec<_>>(),
+            vec![b"h2".as_slice(), b"http/1.1".as_slice()]
+        );
 
         fs::remove_file(cert_path).expect("test cert should be removed");
         fs::remove_file(key_path).expect("test key should be removed");

@@ -16,21 +16,26 @@ use http::{Method, Request, Response, StatusCode, Uri, Version};
 use http_body_util::BodyExt;
 use hyper::body::Body as _;
 use hyper::body::Incoming;
+use hyper::upgrade::OnUpgrade;
 use hyper_rustls::{
     ConfigBuilderExt, FixedServerNameResolver, HttpsConnector, HttpsConnectorBuilder,
 };
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
-use hyper_util::rt::TokioExecutor;
-use rginx_core::{ConfigSnapshot, Error, ProxyTarget, Upstream, UpstreamPeer, UpstreamTls};
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use rginx_core::{
+    ConfigSnapshot, Error, ProxyTarget, Upstream, UpstreamPeer, UpstreamProtocol, UpstreamTls,
+};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
 use serde::Serialize;
+use tokio::io::copy_bidirectional;
 
 use crate::client_ip::ClientAddress;
 use crate::handler::{full_body, BoxError, HttpBody, HttpResponse};
 use crate::metrics::Metrics;
+use crate::state::SharedState;
 use crate::timeout::IdleTimeoutBody;
 
 const MAX_FAILOVER_ATTEMPTS: usize = 2;
@@ -39,7 +44,6 @@ pub type ProxyClient = Client<HttpsConnector<HttpConnector>, HttpBody>;
 
 struct PreparedProxyRequest {
     method: Method,
-    version: Version,
     uri: Uri,
     headers: HeaderMap,
     body: PreparedRequestBody,
@@ -157,15 +161,17 @@ pub(crate) struct PeerStatusSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct TlsClientProfile {
+struct UpstreamClientProfile {
     tls: UpstreamTls,
+    protocol: UpstreamProtocol,
     server_name_override: Option<String>,
 }
 
-impl TlsClientProfile {
+impl UpstreamClientProfile {
     fn from_upstream(upstream: &Upstream) -> Self {
         Self {
             tls: upstream.tls.clone(),
+            protocol: upstream.protocol,
             server_name_override: upstream.server_name_override.clone(),
         }
     }
@@ -182,7 +188,7 @@ impl PeerHealthPolicy {
 
 #[derive(Clone)]
 pub struct ProxyClients {
-    clients: Arc<HashMap<TlsClientProfile, ProxyClient>>,
+    clients: Arc<HashMap<UpstreamClientProfile, ProxyClient>>,
     health: PeerHealthRegistry,
 }
 
@@ -191,7 +197,7 @@ impl ProxyClients {
         let profiles = config
             .upstreams
             .values()
-            .map(|upstream| TlsClientProfile::from_upstream(upstream.as_ref()))
+            .map(|upstream| UpstreamClientProfile::from_upstream(upstream.as_ref()))
             .collect::<HashSet<_>>();
 
         let mut clients = HashMap::new();
@@ -204,7 +210,7 @@ impl ProxyClients {
     }
 
     pub fn for_upstream(&self, upstream: &Upstream) -> Result<ProxyClient, Error> {
-        let profile = TlsClientProfile::from_upstream(upstream);
+        let profile = UpstreamClientProfile::from_upstream(upstream);
         self.clients.get(&profile).cloned().ok_or_else(|| {
             Error::Server(format!(
                 "missing cached proxy client for upstream `{}` with TLS profile {:?}",
@@ -467,13 +473,7 @@ impl PreparedProxyRequest {
         )
         .await?;
 
-        Ok(Self {
-            method: parts.method,
-            version: parts.version,
-            uri: parts.uri,
-            headers: parts.headers,
-            body: replayable,
-        })
+        Ok(Self { method: parts.method, uri: parts.uri, headers: parts.headers, body: replayable })
     }
 
     fn can_failover(&self) -> bool {
@@ -484,7 +484,7 @@ impl PreparedProxyRequest {
     fn build_for_peer(
         &mut self,
         peer: &UpstreamPeer,
-        upstream_name: &str,
+        upstream: &Upstream,
         client_address: &ClientAddress,
         forwarded_proto: &str,
         preserve_host: bool,
@@ -505,7 +505,7 @@ impl PreparedProxyRequest {
         )?;
 
         tracing::debug!(
-            upstream = %upstream_name,
+            upstream = %upstream.name,
             peer = %peer.url,
             uri = %uri,
             "forwarding request to upstream"
@@ -523,7 +523,7 @@ impl PreparedProxyRequest {
             }
         });
         *request.method_mut() = self.method.clone();
-        *request.version_mut() = self.version;
+        *request.version_mut() = upstream_request_version(upstream.protocol);
         *request.uri_mut() = uri;
         *request.headers_mut() = headers;
         Ok(request)
@@ -557,7 +557,7 @@ pub async fn probe_upstream_peer(
         }
     };
 
-    let request = match build_active_health_request(&peer, &check.path) {
+    let request = match build_active_health_request(upstream.as_ref(), &peer, &check.path) {
         Ok(request) => request,
         Err(error) => {
             let transitioned = clients.record_active_peer_failure(&upstream.name, &peer.url);
@@ -633,9 +633,10 @@ pub async fn probe_upstream_peer(
 }
 
 pub async fn forward_request(
+    state: SharedState,
     clients: ProxyClients,
     metrics: Metrics,
-    request: Request<Incoming>,
+    mut request: Request<Incoming>,
     target: &ProxyTarget,
     client_address: ClientAddress,
     downstream_proto: &str,
@@ -654,6 +655,12 @@ pub async fn forward_request(
                 target.upstream_name
             ));
         }
+    };
+
+    let downstream_upgrade = if is_upgrade_request(request.version(), request.headers()) {
+        Some(hyper::upgrade::on(&mut request))
+    } else {
+        None
     };
 
     let mut prepared_request = match PreparedProxyRequest::from_request(
@@ -707,7 +714,7 @@ pub async fn forward_request(
     for (attempt_index, peer) in peers.iter().enumerate() {
         let upstream_request = match prepared_request.build_for_peer(
             peer,
-            &target.upstream_name,
+            target.upstream.as_ref(),
             &client_address,
             downstream_proto,
             target.preserve_host,
@@ -737,7 +744,7 @@ pub async fn forward_request(
         )
         .await
         {
-            Ok(Ok(response)) => {
+            Ok(Ok(mut response)) => {
                 clients.record_peer_success(&target.upstream_name, &peer.url);
                 metrics.record_upstream_request(&target.upstream_name, &peer.url, "success");
                 if attempt_index > 0 {
@@ -748,6 +755,28 @@ pub async fn forward_request(
                         "upstream failover request succeeded"
                     );
                 }
+
+                let upstream_upgrade = if downstream_upgrade.is_some()
+                    && is_upgrade_response(response.status(), response.headers())
+                {
+                    Some(hyper::upgrade::on(&mut response))
+                } else {
+                    None
+                };
+
+                if let (Some(downstream_upgrade), Some(upstream_upgrade)) =
+                    (downstream_upgrade.clone(), upstream_upgrade)
+                {
+                    metrics.increment_active_connections();
+                    state.spawn_background_task(proxy_upgraded_connection(
+                        metrics.clone(),
+                        downstream_upgrade,
+                        upstream_upgrade,
+                        target.upstream_name.clone(),
+                        peer.url.clone(),
+                    ));
+                }
+
                 return build_downstream_response(
                     response,
                     &target.upstream_name,
@@ -827,6 +856,7 @@ pub async fn forward_request(
 }
 
 fn build_active_health_request(
+    upstream: &Upstream,
     peer: &UpstreamPeer,
     path: &str,
 ) -> Result<Request<HttpBody>, Error> {
@@ -842,6 +872,7 @@ fn build_active_health_request(
 
     Request::builder()
         .method(Method::GET)
+        .version(upstream_request_version(upstream.protocol))
         .uri(uri)
         .header(HOST, peer.authority.as_str())
         .body(full_body(Bytes::new()))
@@ -956,29 +987,34 @@ fn can_retry_peer_request(
     prepared_request.can_failover() && attempt_index + 1 < peers.len()
 }
 
+fn upstream_request_version(protocol: UpstreamProtocol) -> Version {
+    match protocol {
+        UpstreamProtocol::Http2 => Version::HTTP_2,
+        UpstreamProtocol::Auto | UpstreamProtocol::Http1 => Version::HTTP_11,
+    }
+}
+
 fn build_downstream_response(
     response: Response<Incoming>,
     upstream_name: &str,
     peer_url: &str,
     request_timeout: Duration,
 ) -> HttpResponse {
-    let (parts, body) = response.into_parts();
-    let status = parts.status;
-    let version = parts.version;
-    let mut headers = parts.headers;
-    sanitize_response_headers(&mut headers);
+    let (mut parts, body) = response.into_parts();
+    let preserve_upgrade = is_upgrade_response(parts.status, &parts.headers);
+    sanitize_response_headers(&mut parts.headers, preserve_upgrade);
 
-    let label = format!("upstream `{upstream_name}` response body from `{peer_url}`");
-    let body = IdleTimeoutBody::new(body, request_timeout, label).boxed_unsync();
+    let body = if preserve_upgrade {
+        full_body(Bytes::new())
+    } else {
+        let label = format!("upstream `{upstream_name}` response body from `{peer_url}`");
+        IdleTimeoutBody::new(body, request_timeout, label).boxed_unsync()
+    };
 
-    let mut downstream = Response::new(body);
-    *downstream.status_mut() = status;
-    *downstream.version_mut() = version;
-    *downstream.headers_mut() = headers;
-    downstream
+    Response::from_parts(parts, body)
 }
 
-fn build_client_for_profile(profile: &TlsClientProfile) -> Result<ProxyClient, Error> {
+fn build_client_for_profile(profile: &UpstreamClientProfile) -> Result<ProxyClient, Error> {
     let mut connector = HttpConnector::new();
     connector.enforce_http(false);
 
@@ -994,9 +1030,18 @@ fn build_client_for_profile(profile: &TlsClientProfile) -> Result<ProxyClient, E
     } else {
         builder
     };
-    let connector = builder.enable_http1().wrap_connector(connector);
+    let connector = match profile.protocol {
+        UpstreamProtocol::Auto => builder.enable_all_versions().wrap_connector(connector),
+        UpstreamProtocol::Http1 => builder.enable_http1().wrap_connector(connector),
+        UpstreamProtocol::Http2 => builder.enable_http2().wrap_connector(connector),
+    };
 
-    Ok(Client::builder(TokioExecutor::new()).build(connector))
+    let mut client_builder = Client::builder(TokioExecutor::new());
+    if profile.protocol == UpstreamProtocol::Http2 {
+        client_builder.http2_only(true);
+    }
+
+    Ok(client_builder.build(connector))
 }
 
 fn build_tls_config(tls: &UpstreamTls) -> Result<ClientConfig, Error> {
@@ -1065,7 +1110,11 @@ fn build_proxy_uri(
     let path_and_query = if let Some(prefix) = strip_prefix {
         if let Some(stripped) = original_path.strip_prefix(prefix) {
             if stripped.is_empty() || stripped.starts_with('?') {
-                if stripped.is_empty() { "/" } else { stripped }
+                if stripped.is_empty() {
+                    "/"
+                } else {
+                    stripped
+                }
             } else if stripped.starts_with('/') {
                 stripped
             } else {
@@ -1094,7 +1143,8 @@ fn sanitize_request_headers(
     preserve_host: bool,
     proxy_set_headers: &[(HeaderName, HeaderValue)],
 ) -> Result<(), http::header::InvalidHeaderValue> {
-    remove_hop_by_hop_headers(headers);
+    let upgrade_protocol = extract_upgrade_protocol(headers);
+    remove_hop_by_hop_headers(headers, upgrade_protocol.is_some());
 
     if preserve_host {
         if let Some(ref host) = original_host {
@@ -1118,14 +1168,25 @@ fn sanitize_request_headers(
         headers.insert(name.clone(), value.clone());
     }
 
+    if let Some(upgrade_protocol) = upgrade_protocol {
+        headers.insert(CONNECTION, HeaderValue::from_static("upgrade"));
+        headers.insert(UPGRADE, upgrade_protocol);
+    }
+
     Ok(())
 }
 
-fn sanitize_response_headers(headers: &mut HeaderMap) {
-    remove_hop_by_hop_headers(headers);
+fn sanitize_response_headers(headers: &mut HeaderMap, preserve_upgrade: bool) {
+    let upgrade_protocol = if preserve_upgrade { headers.get(UPGRADE).cloned() } else { None };
+    remove_hop_by_hop_headers(headers, preserve_upgrade);
+
+    if let Some(upgrade_protocol) = upgrade_protocol {
+        headers.insert(CONNECTION, HeaderValue::from_static("upgrade"));
+        headers.insert(UPGRADE, upgrade_protocol);
+    }
 }
 
-fn remove_hop_by_hop_headers(headers: &mut HeaderMap) {
+fn remove_hop_by_hop_headers(headers: &mut HeaderMap, preserve_upgrade: bool) {
     let mut extra_headers = Vec::new();
 
     for value in headers.get_all(CONNECTION) {
@@ -1144,6 +1205,9 @@ fn remove_hop_by_hop_headers(headers: &mut HeaderMap) {
     }
 
     for name in extra_headers {
+        if preserve_upgrade && name == UPGRADE {
+            continue;
+        }
         headers.remove(name);
     }
 
@@ -1156,11 +1220,97 @@ fn remove_hop_by_hop_headers(headers: &mut HeaderMap) {
         TRANSFER_ENCODING,
         UPGRADE,
     ] {
+        if preserve_upgrade && (name == CONNECTION || name == UPGRADE) {
+            continue;
+        }
         headers.remove(name);
     }
 
     headers.remove("keep-alive");
     headers.remove("proxy-connection");
+}
+
+fn is_upgrade_request(version: Version, headers: &HeaderMap) -> bool {
+    version == Version::HTTP_11 && extract_upgrade_protocol(headers).is_some()
+}
+
+fn is_upgrade_response(status: StatusCode, headers: &HeaderMap) -> bool {
+    status == StatusCode::SWITCHING_PROTOCOLS && headers.contains_key(UPGRADE)
+}
+
+fn extract_upgrade_protocol(headers: &HeaderMap) -> Option<HeaderValue> {
+    connection_header_contains_token(headers, "upgrade").then(|| headers.get(UPGRADE).cloned())?
+}
+
+fn connection_header_contains_token(headers: &HeaderMap, token: &str) -> bool {
+    headers.get_all(CONNECTION).iter().any(|value| {
+        value.to_str().ok().is_some_and(|value| {
+            value.split(',').any(|item| item.trim().eq_ignore_ascii_case(token))
+        })
+    })
+}
+
+async fn proxy_upgraded_connection(
+    metrics: Metrics,
+    downstream_upgrade: OnUpgrade,
+    upstream_upgrade: OnUpgrade,
+    upstream_name: String,
+    peer_url: String,
+) {
+    let _guard = ActiveConnectionGuard::new(metrics);
+
+    let (downstream_upgraded, upstream_upgraded) =
+        match tokio::try_join!(downstream_upgrade, upstream_upgrade) {
+            Ok(upgraded) => upgraded,
+            Err(error) => {
+                tracing::warn!(
+                    upstream = %upstream_name,
+                    peer = %peer_url,
+                    %error,
+                    "failed to complete upgraded proxy handshake"
+                );
+                return;
+            }
+        };
+
+    let mut downstream_io = TokioIo::new(downstream_upgraded);
+    let mut upstream_io = TokioIo::new(upstream_upgraded);
+
+    match copy_bidirectional(&mut downstream_io, &mut upstream_io).await {
+        Ok((from_client_bytes, from_upstream_bytes)) => {
+            tracing::info!(
+                upstream = %upstream_name,
+                peer = %peer_url,
+                from_client_bytes,
+                from_upstream_bytes,
+                "upgraded proxy tunnel closed"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                upstream = %upstream_name,
+                peer = %peer_url,
+                %error,
+                "upgraded proxy tunnel failed"
+            );
+        }
+    }
+}
+
+struct ActiveConnectionGuard {
+    metrics: Metrics,
+}
+
+impl ActiveConnectionGuard {
+    fn new(metrics: Metrics) -> Self {
+        Self { metrics }
+    }
+}
+
+impl Drop for ActiveConnectionGuard {
+    fn drop(&mut self) {
+        self.metrics.decrement_active_connections();
+    }
 }
 
 #[derive(Debug)]
@@ -1227,12 +1377,15 @@ mod tests {
     use bytes::Bytes;
     use http::header::HOST;
     use http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, Version};
-    use rginx_core::{ActiveHealthCheck, Error, Upstream, UpstreamPeer, UpstreamTls};
+    use rginx_core::{
+        ActiveHealthCheck, Error, Upstream, UpstreamPeer, UpstreamProtocol, UpstreamSettings,
+        UpstreamTls,
+    };
 
     use super::{
         build_proxy_uri, can_retry_peer_request, is_idempotent_method, load_custom_ca_store,
-        probe_upstream_peer, sanitize_request_headers, wait_for_upstream_stage,
-        PreparedProxyRequest, PreparedRequestBody, ProxyClients,
+        probe_upstream_peer, sanitize_request_headers, upstream_request_version,
+        wait_for_upstream_stage, PreparedProxyRequest, PreparedRequestBody, ProxyClients,
     };
     use crate::client_ip::{ClientAddress, ClientIpSource};
     use crate::metrics::Metrics;
@@ -1292,6 +1445,43 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_request_headers_preserves_upgrade_handshake() {
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, HeaderValue::from_static("client.example"));
+        headers.insert(http::header::CONNECTION, HeaderValue::from_static("keep-alive, Upgrade"));
+        headers.insert(http::header::UPGRADE, HeaderValue::from_static("websocket"));
+
+        let client_address = ClientAddress {
+            peer_addr: "10.2.3.4:4000".parse().unwrap(),
+            client_ip: "198.51.100.9".parse().unwrap(),
+            forwarded_for: "198.51.100.9".to_string(),
+            source: ClientIpSource::SocketPeer,
+        };
+
+        sanitize_request_headers(
+            &mut headers,
+            "127.0.0.1:9000",
+            Some(HeaderValue::from_static("client.example")),
+            &client_address,
+            "http",
+            false,
+            &[],
+        )
+        .expect("header sanitization should succeed");
+
+        assert_eq!(headers.get(HOST).unwrap(), "127.0.0.1:9000");
+        assert_eq!(headers.get(http::header::CONNECTION).unwrap(), "upgrade");
+        assert_eq!(headers.get(http::header::UPGRADE).unwrap(), "websocket");
+    }
+
+    #[test]
+    fn upstream_request_version_follows_upstream_protocol() {
+        assert_eq!(upstream_request_version(UpstreamProtocol::Auto), Version::HTTP_11);
+        assert_eq!(upstream_request_version(UpstreamProtocol::Http1), Version::HTTP_11);
+        assert_eq!(upstream_request_version(UpstreamProtocol::Http2), Version::HTTP_2);
+    }
+
+    #[test]
     fn load_custom_ca_store_accepts_pem_files() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1316,12 +1506,7 @@ mod tests {
                 authority: "localhost:9443".to_string(),
             }],
             UpstreamTls::Insecure,
-            None,
-            Duration::from_secs(30),
-            64 * 1024,
-            2,
-            Duration::from_secs(10),
-            None,
+            upstream_settings(UpstreamProtocol::Auto),
         );
 
         let unique = SystemTime::now()
@@ -1339,12 +1524,7 @@ mod tests {
                 authority: "localhost:9443".to_string(),
             }],
             UpstreamTls::CustomCa { ca_cert_path: path.clone() },
-            None,
-            Duration::from_secs(30),
-            64 * 1024,
-            2,
-            Duration::from_secs(10),
-            None,
+            upstream_settings(UpstreamProtocol::Auto),
         );
 
         let snapshot = rginx_core::ConfigSnapshot {
@@ -1362,12 +1542,12 @@ mod tests {
                 tls: None,
             },
             default_vhost: rginx_core::VirtualHost {
+                id: "server".to_string(),
                 server_names: Vec::new(),
                 routes: Vec::new(),
                 tls: None,
             },
             vhosts: Vec::new(),
-            routes: Vec::new(),
             upstreams: HashMap::from([
                 ("insecure".to_string(), Arc::new(insecure)),
                 ("custom".to_string(), Arc::new(custom)),
@@ -1399,34 +1579,28 @@ mod tests {
             "first".to_string(),
             vec![peer.clone()],
             UpstreamTls::CustomCa { ca_cert_path: path.clone() },
-            Some("api-a.internal".to_string()),
-            Duration::from_secs(30),
-            64 * 1024,
-            2,
-            Duration::from_secs(10),
-            None,
+            UpstreamSettings {
+                server_name_override: Some("api-a.internal".to_string()),
+                ..upstream_settings(UpstreamProtocol::Auto)
+            },
         );
         let second = Upstream::new(
             "second".to_string(),
             vec![peer.clone()],
             UpstreamTls::CustomCa { ca_cert_path: path.clone() },
-            Some("api-b.internal".to_string()),
-            Duration::from_secs(30),
-            64 * 1024,
-            2,
-            Duration::from_secs(10),
-            None,
+            UpstreamSettings {
+                server_name_override: Some("api-b.internal".to_string()),
+                ..upstream_settings(UpstreamProtocol::Auto)
+            },
         );
         let duplicate = Upstream::new(
             "duplicate".to_string(),
             vec![peer],
             UpstreamTls::CustomCa { ca_cert_path: path.clone() },
-            Some("api-a.internal".to_string()),
-            Duration::from_secs(30),
-            64 * 1024,
-            2,
-            Duration::from_secs(10),
-            None,
+            UpstreamSettings {
+                server_name_override: Some("api-a.internal".to_string()),
+                ..upstream_settings(UpstreamProtocol::Auto)
+            },
         );
 
         let snapshot = rginx_core::ConfigSnapshot {
@@ -1444,12 +1618,12 @@ mod tests {
                 tls: None,
             },
             default_vhost: rginx_core::VirtualHost {
+                id: "server".to_string(),
                 server_names: Vec::new(),
                 routes: Vec::new(),
                 tls: None,
             },
             vhosts: Vec::new(),
-            routes: Vec::new(),
             upstreams: HashMap::from([
                 ("first".to_string(), Arc::new(first)),
                 ("second".to_string(), Arc::new(second)),
@@ -1464,6 +1638,62 @@ mod tests {
         assert!(clients.for_upstream(snapshot.upstreams["duplicate"].as_ref()).is_ok());
 
         std::fs::remove_file(path).expect("temp PEM file should be removed");
+    }
+
+    #[test]
+    fn proxy_clients_cache_distinguishes_upstream_protocol() {
+        let peer = UpstreamPeer {
+            url: "https://127.0.0.1:9443".to_string(),
+            scheme: "https".to_string(),
+            authority: "127.0.0.1:9443".to_string(),
+        };
+        let auto = Upstream::new(
+            "auto".to_string(),
+            vec![peer.clone()],
+            UpstreamTls::NativeRoots,
+            upstream_settings(UpstreamProtocol::Auto),
+        );
+        let http1 = Upstream::new(
+            "http1".to_string(),
+            vec![peer.clone()],
+            UpstreamTls::NativeRoots,
+            upstream_settings(UpstreamProtocol::Http1),
+        );
+        let http2 = Upstream::new(
+            "http2".to_string(),
+            vec![peer],
+            UpstreamTls::NativeRoots,
+            upstream_settings(UpstreamProtocol::Http2),
+        );
+
+        let snapshot = rginx_core::ConfigSnapshot {
+            runtime: rginx_core::RuntimeSettings { shutdown_timeout: Duration::from_secs(1) },
+            server: rginx_core::Server {
+                listen_addr: "127.0.0.1:8080".parse().unwrap(),
+                trusted_proxies: Vec::new(),
+                keep_alive: true,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout: None,
+                tls: None,
+            },
+            default_vhost: rginx_core::VirtualHost {
+                id: "server".to_string(),
+                server_names: Vec::new(),
+                routes: Vec::new(),
+                tls: None,
+            },
+            vhosts: Vec::new(),
+            upstreams: HashMap::from([
+                ("auto".to_string(), Arc::new(auto)),
+                ("http1".to_string(), Arc::new(http1)),
+                ("http2".to_string(), Arc::new(http2)),
+            ]),
+        };
+
+        let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+        assert_eq!(clients.clients.len(), 3);
     }
 
     #[tokio::test]
@@ -1489,12 +1719,7 @@ mod tests {
                 peer("http://127.0.0.1:9002"),
             ],
             UpstreamTls::NativeRoots,
-            None,
-            Duration::from_secs(30),
-            64 * 1024,
-            2,
-            Duration::from_secs(10),
-            None,
+            upstream_settings(UpstreamProtocol::Auto),
         );
 
         let first = upstream.next_peers(2);
@@ -1514,7 +1739,6 @@ mod tests {
     fn replayable_idempotent_requests_retry_once() {
         let prepared = PreparedProxyRequest {
             method: Method::GET,
-            version: Version::HTTP_11,
             uri: Uri::from_static("/"),
             headers: HeaderMap::new(),
             body: PreparedRequestBody::Replayable(Bytes::new()),
@@ -1529,7 +1753,6 @@ mod tests {
     fn streaming_requests_do_not_retry() {
         let prepared = PreparedProxyRequest {
             method: Method::GET,
-            version: Version::HTTP_11,
             uri: Uri::from_static("/"),
             headers: HeaderMap::new(),
             body: PreparedRequestBody::Streaming(None),
@@ -1634,23 +1857,21 @@ mod tests {
             "fast-fail".to_string(),
             vec![peer("http://127.0.0.1:9000")],
             UpstreamTls::NativeRoots,
-            None,
-            Duration::from_secs(30),
-            64 * 1024,
-            1,
-            Duration::from_secs(30),
-            None,
+            UpstreamSettings {
+                unhealthy_after_failures: 1,
+                unhealthy_cooldown: Duration::from_secs(30),
+                ..upstream_settings(UpstreamProtocol::Auto)
+            },
         ));
         let tolerant = Arc::new(Upstream::new(
             "tolerant".to_string(),
             vec![peer("http://127.0.0.1:9010")],
             UpstreamTls::NativeRoots,
-            None,
-            Duration::from_secs(30),
-            64 * 1024,
-            3,
-            Duration::from_secs(30),
-            None,
+            UpstreamSettings {
+                unhealthy_after_failures: 3,
+                unhealthy_cooldown: Duration::from_secs(30),
+                ..upstream_settings(UpstreamProtocol::Auto)
+            },
         ));
 
         let snapshot = rginx_core::ConfigSnapshot {
@@ -1666,12 +1887,12 @@ mod tests {
                 tls: None,
             },
             default_vhost: rginx_core::VirtualHost {
+                id: "server".to_string(),
                 server_names: Vec::new(),
                 routes: Vec::new(),
                 tls: None,
             },
             vhosts: Vec::new(),
-            routes: Vec::new(),
             upstreams: HashMap::from([
                 ("fast-fail".to_string(), fast_fail.clone()),
                 ("tolerant".to_string(), tolerant.clone()),
@@ -1749,6 +1970,18 @@ mod tests {
         assert!(rendered.contains("rginx_active_health_checks_total"));
     }
 
+    fn upstream_settings(protocol: UpstreamProtocol) -> UpstreamSettings {
+        UpstreamSettings {
+            protocol,
+            server_name_override: None,
+            request_timeout: Duration::from_secs(30),
+            max_replayable_request_body_bytes: 64 * 1024,
+            unhealthy_after_failures: 2,
+            unhealthy_cooldown: Duration::from_secs(10),
+            active_health_check: None,
+        }
+    }
+
     fn peer(url: &str) -> UpstreamPeer {
         let uri: http::Uri = url.parse().expect("peer URL should parse");
         UpstreamPeer {
@@ -1768,12 +2001,11 @@ mod tests {
             name.to_string(),
             peers,
             UpstreamTls::NativeRoots,
-            None,
-            Duration::from_secs(30),
-            64 * 1024,
-            unhealthy_after_failures,
-            unhealthy_cooldown,
-            None,
+            UpstreamSettings {
+                unhealthy_after_failures,
+                unhealthy_cooldown,
+                ..upstream_settings(UpstreamProtocol::Auto)
+            },
         );
 
         rginx_core::ConfigSnapshot {
@@ -1789,12 +2021,12 @@ mod tests {
                 tls: None,
             },
             default_vhost: rginx_core::VirtualHost {
+                id: "server".to_string(),
                 server_names: Vec::new(),
                 routes: Vec::new(),
                 tls: None,
             },
             vhosts: Vec::new(),
-            routes: Vec::new(),
             upstreams: HashMap::from([(name.to_string(), Arc::new(upstream))]),
         }
     }
@@ -1809,17 +2041,15 @@ mod tests {
             name.to_string(),
             peers,
             UpstreamTls::NativeRoots,
-            None,
-            Duration::from_secs(30),
-            64 * 1024,
-            2,
-            Duration::from_secs(10),
-            Some(ActiveHealthCheck {
-                path: path.to_string(),
-                interval: Duration::from_secs(5),
-                timeout: Duration::from_secs(1),
-                healthy_successes_required,
-            }),
+            UpstreamSettings {
+                active_health_check: Some(ActiveHealthCheck {
+                    path: path.to_string(),
+                    interval: Duration::from_secs(5),
+                    timeout: Duration::from_secs(1),
+                    healthy_successes_required,
+                }),
+                ..upstream_settings(UpstreamProtocol::Auto)
+            },
         );
 
         rginx_core::ConfigSnapshot {
@@ -1835,12 +2065,12 @@ mod tests {
                 tls: None,
             },
             default_vhost: rginx_core::VirtualHost {
+                id: "server".to_string(),
                 server_names: Vec::new(),
                 routes: Vec::new(),
                 tls: None,
             },
             vhosts: Vec::new(),
-            routes: Vec::new(),
             upstreams: HashMap::from([(name.to_string(), Arc::new(upstream))]),
         }
     }

@@ -83,6 +83,32 @@ fn check_returns_error_for_invalid_server_tls_material() {
     let _ = fs::remove_dir_all(temp_dir);
 }
 
+#[test]
+fn check_reports_total_routes_and_vhosts_for_vhost_config() {
+    let temp_dir = temp_dir("rginx-check-test");
+    fs::create_dir_all(&temp_dir).expect("temp test dir should be created");
+    let config_path = temp_dir.join("vhosts.ron");
+    let listen_addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+
+    fs::write(
+        &config_path,
+        format!(
+            "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n        server_names: [\"default.example.com\"],\n    ),\n    upstreams: [],\n    locations: [\n        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Static(\n                status: Some(200),\n                content_type: Some(\"text/plain; charset=utf-8\"),\n                body: \"default root\\n\",\n            ),\n        ),\n    ],\n    servers: [\n        VirtualHostConfig(\n            server_names: [\"api.example.com\"],\n            locations: [\n                LocationConfig(\n                    matcher: Exact(\"/users\"),\n                    handler: Static(\n                        status: Some(200),\n                        content_type: Some(\"text/plain; charset=utf-8\"),\n                        body: \"api users\\n\",\n                    ),\n                ),\n                LocationConfig(\n                    matcher: Exact(\"/status\"),\n                    handler: Status,\n                ),\n            ],\n        ),\n        VirtualHostConfig(\n            server_names: [\"*.internal.example.com\"],\n            locations: [\n                LocationConfig(\n                    matcher: Exact(\"/\"),\n                    handler: Static(\n                        status: Some(200),\n                        content_type: Some(\"text/plain; charset=utf-8\"),\n                        body: \"internal root\\n\",\n                    ),\n                ),\n            ],\n        ),\n    ],\n)\n",
+            listen_addr.to_string()
+        ),
+    )
+    .expect("vhost config should be written");
+
+    let output = run_rginx(["check", "--config", config_path.to_str().unwrap()]);
+
+    assert!(output.status.success(), "check should succeed: {}", render_output(&output));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("vhosts=3"), "stdout should report total vhost count: {stdout}");
+    assert!(stdout.contains("routes=4"), "stdout should report total route count: {stdout}");
+
+    let _ = fs::remove_dir_all(temp_dir);
+}
+
 fn run_rginx(args: impl IntoIterator<Item = impl AsRef<str>>) -> Output {
     let mut command = Command::new(binary_path());
     for arg in args {

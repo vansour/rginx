@@ -4,13 +4,13 @@ use std::net::SocketAddr;
 use std::time::Instant;
 
 use bytes::Bytes;
-use http::StatusCode;
+use http::{header::HOST, HeaderMap, StatusCode, Uri};
 use http_body_util::combinators::UnsyncBoxBody;
 use http_body_util::BodyExt;
 use http_body_util::Full;
 use hyper::body::Incoming;
 use hyper::{Request, Response};
-use rginx_core::{ActiveHealthCheck, Route, RouteAction, RouteMatcher};
+use rginx_core::{ActiveHealthCheck, ConfigSnapshot, Route, RouteAction};
 use serde::Serialize;
 
 use crate::client_ip::{resolve_client_address, ClientAddress};
@@ -39,20 +39,22 @@ pub async fn handle(
     let started = Instant::now();
     let client_address =
         resolve_client_address(request.headers(), &active.config.server, remote_addr);
-    let selected_route = router::select_route(&active.config.routes, request.uri().path());
-    let route_label =
-        selected_route.map(route_label).unwrap_or_else(|| "__unmatched__".to_string());
+    let selected_route =
+        select_route_for_request(active.config.as_ref(), request.headers(), request.uri());
+    let route_id =
+        selected_route.map(|route| route.id.clone()).unwrap_or_else(|| "__unmatched__".to_string());
     let response = match selected_route {
         Some(route) => {
             if let Some(response) = authorize_route(route, &client_address) {
                 response
             } else if let Some(response) =
-                enforce_rate_limit(&state, route, &route_label, &client_address, &metrics)
+                enforce_rate_limit(&state, route, &route_id, &client_address, &metrics)
             {
                 response
             } else {
                 build_route_response(
                     request,
+                    state.clone(),
                     route.action.clone(),
                     active,
                     metrics.clone(),
@@ -67,23 +69,34 @@ pub async fn handle(
     };
 
     let status = response.status();
-    metrics.observe_http_request(
-        &route_label,
-        status.as_u16(),
-        started.elapsed().as_millis() as u64,
-    );
+    metrics.observe_http_request(&route_id, status.as_u16(), started.elapsed().as_millis() as u64);
     tracing::info!(
         method = %method,
         path = %path,
         client_ip = %client_address.client_ip,
         client_ip_source = client_address.source.as_str(),
         peer_addr = %client_address.peer_addr,
+        route = %route_id,
         status = status.as_u16(),
         elapsed_ms = started.elapsed().as_millis() as u64,
         "request handled"
     );
 
     response
+}
+
+fn select_route_for_request<'a>(
+    config: &'a ConfigSnapshot,
+    headers: &HeaderMap,
+    uri: &Uri,
+) -> Option<&'a Route> {
+    let host = headers
+        .get(HOST)
+        .and_then(|value| value.to_str().ok())
+        .or_else(|| uri.authority().map(|authority| authority.as_str()))
+        .unwrap_or_default();
+    router::select_route_by_host(&config.default_vhost, &config.vhosts, host, uri.path())
+        .map(|(_, route)| route)
 }
 
 fn authorize_route(route: &Route, client_address: &ClientAddress) -> Option<HttpResponse> {
@@ -94,7 +107,7 @@ fn authorize_route(route: &Route, client_address: &ClientAddress) -> Option<Http
     tracing::warn!(
         client_ip = %client_address.client_ip,
         peer_addr = %client_address.peer_addr,
-        route = %route_label(route),
+        route = %route.id,
         "request denied by access control"
     );
     Some(forbidden_response())
@@ -119,7 +132,7 @@ fn enforce_rate_limit(
     tracing::warn!(
         client_ip = %client_address.client_ip,
         peer_addr = %client_address.peer_addr,
-        route = %route_label(route),
+        route = %route.id,
         "request rejected by route rate limit"
     );
     Some(too_many_requests_response())
@@ -127,6 +140,7 @@ fn enforce_rate_limit(
 
 async fn build_route_response(
     request: Request<Incoming>,
+    state: SharedState,
     action: RouteAction,
     active: ActiveState,
     metrics: Metrics,
@@ -140,6 +154,7 @@ async fn build_route_response(
             let downstream_proto =
                 if active.config.server.tls.is_some() { "https" } else { "http" };
             crate::proxy::forward_request(
+                state,
                 active.clients,
                 metrics,
                 request,
@@ -152,15 +167,10 @@ async fn build_route_response(
         }
         RouteAction::Status => status_response(&active),
         RouteAction::Metrics => metrics_response(&metrics),
-        RouteAction::File(ref target) => {
-            crate::file::serve_file(request, target).await
-        }
+        RouteAction::File(ref target) => crate::file::serve_file(request, target).await,
         RouteAction::Return(ref action) => {
             let body = action.body.clone().unwrap_or_else(|| {
-                format!(
-                    "{}\n",
-                    action.status.canonical_reason().unwrap_or("Redirect")
-                )
+                format!("{}\n", action.status.canonical_reason().unwrap_or("Redirect"))
             });
 
             let mut builder = Response::builder()
@@ -171,9 +181,7 @@ async fn build_route_response(
                 builder = builder.header("location", &action.location);
             }
 
-            builder
-                .body(full_body(body))
-                .expect("return response builder should not fail")
+            builder.body(full_body(body)).expect("return response builder should not fail")
         }
     }
 }
@@ -185,6 +193,7 @@ fn status_response(active: &ActiveState) -> HttpResponse {
         .values()
         .map(|upstream| UpstreamStatusPayload {
             name: upstream.name.clone(),
+            protocol: upstream.protocol.as_str(),
             request_timeout_ms: upstream.request_timeout.as_millis() as u64,
             active_health_check: upstream.active_health_check.as_ref().map(health_check_payload),
             peers: active.clients.peer_statuses(upstream.as_ref()),
@@ -195,7 +204,8 @@ fn status_response(active: &ActiveState) -> HttpResponse {
     let payload = StatusPayload {
         revision: active.revision,
         listen: active.config.server.listen_addr.to_string(),
-        route_count: active.config.routes.len(),
+        vhost_count: active.config.total_vhost_count(),
+        route_count: active.config.total_route_count(),
         upstream_count: active.config.upstreams.len(),
         upstreams,
     };
@@ -216,7 +226,11 @@ fn forbidden_response() -> HttpResponse {
 }
 
 fn too_many_requests_response() -> HttpResponse {
-    text_response(StatusCode::TOO_MANY_REQUESTS, "text/plain; charset=utf-8", "hold your horses! too many requests\n")
+    text_response(
+        StatusCode::TOO_MANY_REQUESTS,
+        "text/plain; charset=utf-8",
+        "hold your horses! too many requests\n",
+    )
 }
 
 pub(crate) fn text_response(
@@ -255,17 +269,11 @@ fn health_check_payload(health_check: &ActiveHealthCheck) -> ActiveHealthCheckPa
     }
 }
 
-fn route_label(route: &rginx_core::Route) -> String {
-    match &route.matcher {
-        RouteMatcher::Exact(path) => format!("exact:{path}"),
-        RouteMatcher::Prefix(path) => format!("prefix:{path}"),
-    }
-}
-
 #[derive(Debug, Serialize)]
 struct StatusPayload {
     revision: u64,
     listen: String,
+    vhost_count: usize,
     route_count: usize,
     upstream_count: usize,
     upstreams: Vec<UpstreamStatusPayload>,
@@ -274,6 +282,7 @@ struct StatusPayload {
 #[derive(Debug, Serialize)]
 struct UpstreamStatusPayload {
     name: String,
+    protocol: &'static str,
     request_timeout_ms: u64,
     active_health_check: Option<ActiveHealthCheckPayload>,
     peers: Vec<PeerStatusSnapshot>,
@@ -293,16 +302,19 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use http::StatusCode;
+    use http::{header::HOST, HeaderMap, HeaderValue, StatusCode};
     use http_body_util::BodyExt;
     use rginx_core::{
         ActiveHealthCheck, ConfigSnapshot, Route, RouteAccessControl, RouteAction, RouteMatcher,
         RouteRateLimit, RuntimeSettings, Server, StaticResponse, Upstream, UpstreamPeer,
-        UpstreamTls, VirtualHost,
+        UpstreamProtocol, UpstreamSettings, UpstreamTls, VirtualHost,
     };
     use serde_json::Value;
 
-    use super::{authorize_route, enforce_rate_limit, metrics_response, status_response};
+    use super::{
+        authorize_route, enforce_rate_limit, metrics_response, select_route_for_request,
+        status_response,
+    };
     use crate::client_ip::{ClientAddress, ClientIpSource};
     use crate::metrics::Metrics;
     use crate::proxy::ProxyClients;
@@ -314,17 +326,20 @@ mod tests {
             "backend".to_string(),
             vec![peer("http://127.0.0.1:9000")],
             UpstreamTls::NativeRoots,
-            None,
-            Duration::from_secs(30),
-            64 * 1024,
-            2,
-            Duration::from_secs(10),
-            Some(ActiveHealthCheck {
-                path: "/healthz".to_string(),
-                interval: Duration::from_secs(5),
-                timeout: Duration::from_secs(2),
-                healthy_successes_required: 2,
-            }),
+            UpstreamSettings {
+                protocol: UpstreamProtocol::Auto,
+                server_name_override: None,
+                request_timeout: Duration::from_secs(30),
+                max_replayable_request_body_bytes: 64 * 1024,
+                unhealthy_after_failures: 2,
+                unhealthy_cooldown: Duration::from_secs(10),
+                active_health_check: Some(ActiveHealthCheck {
+                    path: "/healthz".to_string(),
+                    interval: Duration::from_secs(5),
+                    timeout: Duration::from_secs(2),
+                    healthy_successes_required: 2,
+                }),
+            },
         ));
         let config = Arc::new(ConfigSnapshot {
             runtime: RuntimeSettings { shutdown_timeout: Duration::from_secs(1) },
@@ -339,12 +354,12 @@ mod tests {
                 tls: None,
             },
             default_vhost: VirtualHost {
+                id: "server".to_string(),
                 server_names: Vec::new(),
                 routes: Vec::new(),
                 tls: None,
             },
             vhosts: Vec::new(),
-            routes: Vec::new(),
             upstreams: HashMap::from([("backend".to_string(), upstream)]),
         });
         let clients = ProxyClients::from_config(config.as_ref()).expect("clients should build");
@@ -364,18 +379,58 @@ mod tests {
 
         assert_eq!(json["revision"], 3);
         assert_eq!(json["listen"], "127.0.0.1:8080");
+        assert_eq!(json["vhost_count"], 1);
+        assert_eq!(json["route_count"], 0);
         assert_eq!(json["upstream_count"], 1);
         assert_eq!(json["upstreams"][0]["name"], "backend");
+        assert_eq!(json["upstreams"][0]["protocol"], "auto");
         assert_eq!(json["upstreams"][0]["active_health_check"]["path"], "/healthz");
         assert_eq!(json["upstreams"][0]["peers"][0]["url"], "http://127.0.0.1:9000");
         assert_eq!(json["upstreams"][0]["peers"][0]["healthy"], false);
         assert_eq!(json["upstreams"][0]["peers"][0]["active_unhealthy"], true);
     }
 
+    #[tokio::test]
+    async fn status_response_counts_routes_across_all_vhosts() {
+        let config = Arc::new(test_config(
+            test_vhost(
+                "server",
+                vec!["default.example.com"],
+                vec![test_route("server/routes[0]|exact:/", RouteMatcher::Exact("/".to_string()))],
+            ),
+            vec![test_vhost(
+                "servers[0]",
+                vec!["api.example.com"],
+                vec![
+                    test_route(
+                        "servers[0]/routes[0]|exact:/users",
+                        RouteMatcher::Exact("/users".to_string()),
+                    ),
+                    test_route(
+                        "servers[0]/routes[1]|exact:/status",
+                        RouteMatcher::Exact("/status".to_string()),
+                    ),
+                ],
+            )],
+        ));
+        let clients = ProxyClients::from_config(config.as_ref()).expect("clients should build");
+
+        let response = status_response(&ActiveState { revision: 7, config, clients });
+        let body =
+            response.into_body().collect().await.expect("status body should collect").to_bytes();
+        let json: Value =
+            serde_json::from_slice(&body).expect("status payload should be valid JSON");
+
+        assert_eq!(json["revision"], 7);
+        assert_eq!(json["vhost_count"], 2);
+        assert_eq!(json["route_count"], 3);
+        assert_eq!(json["upstream_count"], 0);
+    }
+
     #[test]
     fn metrics_response_uses_prometheus_content_type() {
         let metrics = Metrics::default();
-        metrics.observe_http_request("exact:/metrics", 200, 1);
+        metrics.observe_http_request("server/routes[0]|exact:/metrics", 200, 1);
 
         let response = metrics_response(&metrics);
         assert_eq!(response.status(), StatusCode::OK);
@@ -388,6 +443,7 @@ mod tests {
     #[test]
     fn authorize_route_rejects_disallowed_remote_addr() {
         let route = Route {
+            id: "server/routes[0]|exact:/metrics".to_string(),
             matcher: RouteMatcher::Exact("/metrics".to_string()),
             action: RouteAction::Static(StaticResponse {
                 status: StatusCode::OK,
@@ -432,8 +488,10 @@ mod tests {
                 tls: None,
             },
             default_vhost: VirtualHost {
+                id: "server".to_string(),
                 server_names: Vec::new(),
                 routes: vec![Route {
+                    id: "server/routes[0]|exact:/api".to_string(),
                     matcher: RouteMatcher::Exact("/api".to_string()),
                     action: RouteAction::Static(StaticResponse {
                         status: StatusCode::OK,
@@ -446,21 +504,11 @@ mod tests {
                 tls: None,
             },
             vhosts: Vec::new(),
-            routes: vec![Route {
-                matcher: RouteMatcher::Exact("/api".to_string()),
-                action: RouteAction::Static(StaticResponse {
-                    status: StatusCode::OK,
-                    content_type: "text/plain; charset=utf-8".to_string(),
-                    body: "ok\n".to_string(),
-                }),
-                access_control: RouteAccessControl::default(),
-                rate_limit: Some(RouteRateLimit::new(1, 0)),
-            }],
             upstreams: HashMap::new(),
         };
         let state = SharedState::from_config(config).expect("shared state should build");
         let metrics = state.metrics();
-        let route = state.snapshot().await.config.routes[0].clone();
+        let route = state.snapshot().await.config.default_vhost.routes[0].clone();
         let client_address = ClientAddress {
             peer_addr: "192.0.2.10:4567".parse().unwrap(),
             client_ip: "192.0.2.10".parse().unwrap(),
@@ -468,16 +516,144 @@ mod tests {
             source: ClientIpSource::SocketPeer,
         };
 
-        assert!(
-            enforce_rate_limit(&state, &route, "exact:/api", &client_address, &metrics).is_none()
-        );
+        assert!(enforce_rate_limit(&state, &route, &route.id, &client_address, &metrics).is_none());
 
-        let response = enforce_rate_limit(&state, &route, "exact:/api", &client_address, &metrics)
+        let response = enforce_rate_limit(&state, &route, &route.id, &client_address, &metrics)
             .expect("second request should be rate limited");
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
 
         let rendered = metrics.render_prometheus();
-        assert!(rendered.contains("rginx_http_rate_limited_total{route=\"exact:/api\"} 1"));
+        assert!(rendered
+            .contains("rginx_http_rate_limited_total{route=\"server/routes[0]|exact:/api\"} 1"));
+    }
+
+    #[test]
+    fn select_route_for_request_uses_host_specific_vhost_routes() {
+        let config = test_config(
+            test_vhost(
+                "server",
+                Vec::new(),
+                vec![test_route("server/routes[0]|exact:/", RouteMatcher::Exact("/".to_string()))],
+            ),
+            vec![test_vhost(
+                "servers[0]",
+                vec!["api.example.com"],
+                vec![test_route(
+                    "servers[0]/routes[0]|exact:/users",
+                    RouteMatcher::Exact("/users".to_string()),
+                )],
+            )],
+        );
+
+        let route = select_route_for_request(
+            &config,
+            &host_headers("api.example.com"),
+            &request_uri("/users"),
+        )
+        .expect("api.example.com should match vhost route");
+        assert_eq!(route.id, "servers[0]/routes[0]|exact:/users");
+    }
+
+    #[test]
+    fn select_route_for_request_falls_back_to_default_vhost_for_unknown_host() {
+        let config = test_config(
+            test_vhost(
+                "server",
+                Vec::new(),
+                vec![test_route("server/routes[0]|exact:/", RouteMatcher::Exact("/".to_string()))],
+            ),
+            vec![test_vhost(
+                "servers[0]",
+                vec!["api.example.com"],
+                vec![test_route(
+                    "servers[0]/routes[0]|exact:/",
+                    RouteMatcher::Exact("/".to_string()),
+                )],
+            )],
+        );
+
+        let route = select_route_for_request(
+            &config,
+            &host_headers("unknown.example.com"),
+            &request_uri("/"),
+        )
+        .expect("unknown host should use default vhost");
+        assert_eq!(route.id, "server/routes[0]|exact:/");
+    }
+
+    #[test]
+    fn select_route_for_request_supports_wildcard_hosts() {
+        let config = test_config(
+            test_vhost("server", Vec::new(), Vec::new()),
+            vec![test_vhost(
+                "servers[0]",
+                vec!["*.internal.example.com"],
+                vec![test_route(
+                    "servers[0]/routes[0]|exact:/healthz",
+                    RouteMatcher::Exact("/healthz".to_string()),
+                )],
+            )],
+        );
+
+        let route = select_route_for_request(
+            &config,
+            &host_headers("app.internal.example.com:8443"),
+            &request_uri("/healthz"),
+        )
+        .expect("wildcard host should match vhost route");
+        assert_eq!(route.id, "servers[0]/routes[0]|exact:/healthz");
+    }
+
+    #[test]
+    fn select_route_for_request_uses_uri_authority_when_host_header_is_absent() {
+        let config = test_config(
+            test_vhost("server", Vec::new(), Vec::new()),
+            vec![test_vhost(
+                "servers[0]",
+                vec!["api.example.com"],
+                vec![test_route(
+                    "servers[0]/routes[0]|exact:/users",
+                    RouteMatcher::Exact("/users".to_string()),
+                )],
+            )],
+        );
+
+        let route = select_route_for_request(
+            &config,
+            &HeaderMap::new(),
+            &"https://api.example.com/users".parse().unwrap(),
+        )
+        .expect("request URI authority should be used when host header is absent");
+        assert_eq!(route.id, "servers[0]/routes[0]|exact:/users");
+    }
+
+    #[test]
+    fn select_route_for_request_does_not_fall_back_when_matched_vhost_has_no_route() {
+        let config = test_config(
+            test_vhost(
+                "server",
+                Vec::new(),
+                vec![test_route(
+                    "server/routes[0]|exact:/users",
+                    RouteMatcher::Exact("/users".to_string()),
+                )],
+            ),
+            vec![test_vhost(
+                "servers[0]",
+                vec!["api.example.com"],
+                vec![test_route(
+                    "servers[0]/routes[0]|exact:/status",
+                    RouteMatcher::Exact("/status".to_string()),
+                )],
+            )],
+        );
+
+        let route = select_route_for_request(
+            &config,
+            &host_headers("api.example.com"),
+            &request_uri("/users"),
+        );
+        assert!(route.is_none(), "matched vhost without matching path should return 404");
     }
 
     fn peer(url: &str) -> UpstreamPeer {
@@ -487,5 +663,57 @@ mod tests {
             scheme: uri.scheme_str().expect("peer should have scheme").to_string(),
             authority: uri.authority().expect("peer should have authority").to_string(),
         }
+    }
+
+    fn test_config(default_vhost: VirtualHost, vhosts: Vec<VirtualHost>) -> ConfigSnapshot {
+        ConfigSnapshot {
+            runtime: RuntimeSettings { shutdown_timeout: Duration::from_secs(1) },
+            server: Server {
+                listen_addr: "127.0.0.1:8080".parse().unwrap(),
+                trusted_proxies: Vec::new(),
+                keep_alive: true,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout: None,
+                tls: None,
+            },
+            default_vhost,
+            vhosts,
+            upstreams: HashMap::new(),
+        }
+    }
+
+    fn test_vhost(id: &str, server_names: Vec<&str>, routes: Vec<Route>) -> VirtualHost {
+        VirtualHost {
+            id: id.to_string(),
+            server_names: server_names.into_iter().map(str::to_string).collect(),
+            routes,
+            tls: None,
+        }
+    }
+
+    fn test_route(id: &str, matcher: RouteMatcher) -> Route {
+        Route {
+            id: id.to_string(),
+            matcher,
+            action: RouteAction::Static(StaticResponse {
+                status: StatusCode::OK,
+                content_type: "text/plain; charset=utf-8".to_string(),
+                body: "ok\n".to_string(),
+            }),
+            access_control: RouteAccessControl::default(),
+            rate_limit: None,
+        }
+    }
+
+    fn host_headers(host: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, HeaderValue::from_str(host).expect("host header should be valid"));
+        headers
+    }
+
+    fn request_uri(path: &str) -> http::Uri {
+        path.parse().expect("request URI should be valid")
     }
 }

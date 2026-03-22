@@ -297,8 +297,8 @@ mod tests {
     fn render_prometheus_includes_all_metric_families() {
         let metrics = Metrics::default();
         metrics.increment_active_connections();
-        metrics.observe_http_request("exact:/status", 200, 12);
-        metrics.record_rate_limited("prefix:/api");
+        metrics.observe_http_request("server/routes[0]|exact:/status", 200, 12);
+        metrics.record_rate_limited("server/routes[1]|prefix:/api");
         metrics.record_upstream_request("backend", "http://127.0.0.1:9000", "success");
         metrics.record_active_health_check("backend", "http://127.0.0.1:9000", "healthy");
         metrics.record_config_reload("success");
@@ -306,12 +306,14 @@ mod tests {
         let rendered = metrics.render_prometheus();
 
         assert!(rendered.contains("rginx_active_connections 1"));
+        assert!(rendered.contains(
+            "rginx_http_requests_total{route=\"server/routes[0]|exact:/status\",status=\"200\"} 1"
+        ));
         assert!(rendered
-            .contains("rginx_http_requests_total{route=\"exact:/status\",status=\"200\"} 1"));
-        assert!(rendered.contains("rginx_http_rate_limited_total{route=\"prefix:/api\"} 1"));
-        assert!(
-            rendered.contains("rginx_http_request_duration_ms_count{route=\"exact:/status\"} 1")
-        );
+            .contains("rginx_http_rate_limited_total{route=\"server/routes[1]|prefix:/api\"} 1"));
+        assert!(rendered.contains(
+            "rginx_http_request_duration_ms_count{route=\"server/routes[0]|exact:/status\"} 1"
+        ));
         assert!(rendered.contains(
             "rginx_upstream_requests_total{upstream=\"backend\",peer=\"http://127.0.0.1:9000\",result=\"success\"} 1"
         ));
@@ -324,23 +326,24 @@ mod tests {
     #[test]
     fn render_prometheus_uses_cumulative_histogram_buckets_once() {
         let metrics = Metrics::default();
-        metrics.observe_http_request("exact:/status", 200, 12);
+        metrics.observe_http_request("server/routes[0]|exact:/status", 200, 12);
 
         let rendered = metrics.render_prometheus();
 
-        assert!(rendered
-            .contains("rginx_http_request_duration_ms_bucket{route=\"exact:/status\",le=\"5\"} 0"));
         assert!(rendered.contains(
-            "rginx_http_request_duration_ms_bucket{route=\"exact:/status\",le=\"10\"} 0"
+            "rginx_http_request_duration_ms_bucket{route=\"server/routes[0]|exact:/status\",le=\"5\"} 0"
         ));
         assert!(rendered.contains(
-            "rginx_http_request_duration_ms_bucket{route=\"exact:/status\",le=\"25\"} 1"
+            "rginx_http_request_duration_ms_bucket{route=\"server/routes[0]|exact:/status\",le=\"10\"} 0"
         ));
         assert!(rendered.contains(
-            "rginx_http_request_duration_ms_bucket{route=\"exact:/status\",le=\"50\"} 1"
+            "rginx_http_request_duration_ms_bucket{route=\"server/routes[0]|exact:/status\",le=\"25\"} 1"
         ));
         assert!(rendered.contains(
-            "rginx_http_request_duration_ms_bucket{route=\"exact:/status\",le=\"+Inf\"} 1"
+            "rginx_http_request_duration_ms_bucket{route=\"server/routes[0]|exact:/status\",le=\"50\"} 1"
+        ));
+        assert!(rendered.contains(
+            "rginx_http_request_duration_ms_bucket{route=\"server/routes[0]|exact:/status\",le=\"+Inf\"} 1"
         ));
     }
 }

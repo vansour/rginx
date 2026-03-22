@@ -13,4 +13,12 @@ rginx-runtime = { path = "../rginx-runtime" }
 tokio.workspace = true
 
 [dev-dependencies]
+bytes.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-rustls.workspace = true
+hyper-util.workspace = true
 libc = "0.2"
+rustls.workspace = true
+rustls-pemfile.workspace = true
+tokio-rustls.workspace = true

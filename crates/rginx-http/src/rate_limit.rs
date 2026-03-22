@@ -104,10 +104,10 @@ mod tests {
         let first_ip: IpAddr = "192.0.2.10".parse().unwrap();
         let second_ip: IpAddr = "192.0.2.11".parse().unwrap();
 
-        assert!(limiters.check("prefix:/api", first_ip, Some(&policy)));
-        assert!(!limiters.check("prefix:/api", first_ip, Some(&policy)));
-        assert!(limiters.check("prefix:/api", second_ip, Some(&policy)));
-        assert!(limiters.check("exact:/status", first_ip, Some(&policy)));
+        assert!(limiters.check("server/routes[0]|prefix:/api", first_ip, Some(&policy)));
+        assert!(!limiters.check("server/routes[0]|prefix:/api", first_ip, Some(&policy)));
+        assert!(limiters.check("server/routes[0]|prefix:/api", second_ip, Some(&policy)));
+        assert!(limiters.check("servers[0]/routes[0]|exact:/status", first_ip, Some(&policy)));
     }
 
     #[test]

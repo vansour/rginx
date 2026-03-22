@@ -19,7 +19,8 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
 
     tracing::info!(
         listen = %current_config.server.listen_addr,
-        routes = current_config.routes.len(),
+        vhosts = current_config.total_vhost_count(),
+        routes = current_config.total_route_count(),
         "starting rginx runtime"
     );
 
@@ -27,27 +28,23 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
         tokio::spawn(rginx_http::serve(listener, state.http.clone(), shutdown_rx));
     let mut health_task = tokio::spawn(health::run(state.http.clone(), shutdown_tx.subscribe()));
 
-    loop {
-        match shutdown::wait_for_signal().await? {
-            RuntimeSignal::Reload => {
-                tracing::info!("reload signal received");
-                match reload::reload(&state).await {
-                    Ok(config) => {
-                        metrics.record_config_reload("success");
-                        tracing::info!(
-                            listen = %config.server.listen_addr,
-                            routes = config.routes.len(),
-                            upstreams = config.upstreams.len(),
-                            "configuration reloaded"
-                        );
-                    }
-                    Err(error) => {
-                        metrics.record_config_reload("failure");
-                        tracing::warn!(%error, "configuration reload failed");
-                    }
-                }
+    while let RuntimeSignal::Reload = shutdown::wait_for_signal().await? {
+        tracing::info!("reload signal received");
+        match reload::reload(&state).await {
+            Ok(config) => {
+                metrics.record_config_reload("success");
+                tracing::info!(
+                    listen = %config.server.listen_addr,
+                    vhosts = config.total_vhost_count(),
+                    routes = config.total_route_count(),
+                    upstreams = config.upstreams.len(),
+                    "configuration reloaded"
+                );
             }
-            RuntimeSignal::Shutdown => break,
+            Err(error) => {
+                metrics.record_config_reload("failure");
+                tracing::warn!(%error, "configuration reload failed");
+            }
         }
     }
 
@@ -66,6 +63,7 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
         (&mut health_task).await.map_err(|error| {
             Error::Server(format!("active health task failed to join: {error}"))
         })?;
+        state.http.drain_background_tasks().await;
         Ok::<(), Error>(())
     })
     .await
@@ -91,6 +89,8 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
                     tracing::warn!(%error, "active health task failed after abort");
                 }
             }
+
+            state.http.abort_background_tasks().await;
         }
     }
 

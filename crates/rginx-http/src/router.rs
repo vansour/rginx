@@ -10,10 +10,7 @@ pub fn select_vhost<'a>(
     default: &'a VirtualHost,
     host: &str,
 ) -> &'a VirtualHost {
-    vhosts
-        .iter()
-        .find(|vhost| vhost.matches_host(host))
-        .unwrap_or(default)
+    vhosts.iter().find(|vhost| vhost.matches_host(host)).unwrap_or(default)
 }
 
 /// 在指定虚拟主机内选择路由
@@ -35,12 +32,15 @@ pub fn select_route_by_host<'a>(
 #[cfg(test)]
 mod tests {
     use http::StatusCode;
-    use rginx_core::{Route, RouteAccessControl, RouteAction, RouteMatcher, StaticResponse, VirtualHost};
+    use rginx_core::{
+        Route, RouteAccessControl, RouteAction, RouteMatcher, StaticResponse, VirtualHost,
+    };
 
-    use super::{select_route, select_vhost, select_route_by_host};
+    use super::{select_route, select_route_by_host, select_vhost};
 
     fn make_route(path: &str, body: &str) -> Route {
         Route {
+            id: format!("test|prefix:{path}"),
             matcher: RouteMatcher::Prefix(path.to_string()),
             action: RouteAction::Static(StaticResponse {
                 status: StatusCode::OK,
@@ -54,6 +54,11 @@ mod tests {
 
     fn make_vhost(server_names: Vec<&str>, routes: Vec<Route>) -> VirtualHost {
         VirtualHost {
+            id: if server_names.is_empty() {
+                "server".to_string()
+            } else {
+                format!("servers[{}]", server_names.join(","))
+            },
             server_names: server_names.into_iter().map(String::from).collect(),
             routes,
             tls: None,
@@ -64,6 +69,7 @@ mod tests {
     fn exact_routes_beat_prefix_routes() {
         let routes = vec![
             Route {
+                id: "test|exact:/api".to_string(),
                 matcher: RouteMatcher::Exact("/api".to_string()),
                 action: RouteAction::Static(StaticResponse {
                     status: StatusCode::OK,
@@ -74,6 +80,7 @@ mod tests {
                 rate_limit: None,
             },
             Route {
+                id: "test|prefix:/".to_string(),
                 matcher: RouteMatcher::Prefix("/".to_string()),
                 action: RouteAction::Static(StaticResponse {
                     status: StatusCode::OK,
@@ -92,6 +99,7 @@ mod tests {
     #[test]
     fn prefix_routes_respect_segment_boundaries() {
         let routes = vec![Route {
+            id: "test|prefix:/api".to_string(),
             matcher: RouteMatcher::Prefix("/api".to_string()),
             action: RouteAction::Static(StaticResponse {
                 status: StatusCode::OK,
@@ -123,7 +131,8 @@ mod tests {
     #[test]
     fn select_vhost_matches_wildcard_domains() {
         let default = make_vhost(vec![], vec![make_route("/", "default")]);
-        let wildcard_vhost = make_vhost(vec!["*.internal.example.com"], vec![make_route("/", "internal")]);
+        let wildcard_vhost =
+            make_vhost(vec!["*.internal.example.com"], vec![make_route("/", "internal")]);
         let vhosts = vec![wildcard_vhost];
 
         let selected = select_vhost(&vhosts, &default, "app.internal.example.com");
@@ -141,10 +150,7 @@ mod tests {
         let default = make_vhost(vec![], vec![make_route("/", "default")]);
         let api_vhost = make_vhost(
             vec!["api.example.com"],
-            vec![
-                make_route("/users", "users"),
-                make_route("/", "api-root"),
-            ],
+            vec![make_route("/users", "users"), make_route("/", "api-root")],
         );
         let vhosts = vec![api_vhost];
 
