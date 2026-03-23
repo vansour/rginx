@@ -111,6 +111,7 @@ tag push 后，GitHub Actions 的 `Release` workflow 会自动创建或更新同
   - `scripts/install.sh`
   - `scripts/uninstall.sh`
   - `scripts/prepare-release.sh`
+  - `scripts/sync-wiki.sh`
   - `README.md`
   - `CHANGELOG.md`
   - `LICENSE*`

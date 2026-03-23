@@ -153,6 +153,12 @@ cargo build -p rginx
 
 - [wiki/Home.md](wiki/Home.md)
 
+如果要把仓库内 `wiki/` 同步到 GitHub Wiki 仓库，可直接运行：
+
+```bash
+./scripts/sync-wiki.sh
+```
+
 推荐阅读顺序：
 
 - [wiki/Quick-Start.md](wiki/Quick-Start.md)
@@ -739,6 +745,7 @@ tag 被 push 之后，GitHub Actions 会自动：
 - `scripts/install.sh`
 - `scripts/uninstall.sh`
 - `scripts/prepare-release.sh`
+- `scripts/sync-wiki.sh`
 - `README.md`
 - `CHANGELOG.md`
 - `LICENSE*`
