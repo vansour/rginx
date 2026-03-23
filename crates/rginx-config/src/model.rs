@@ -53,9 +53,33 @@ pub struct UpstreamConfig {
     #[serde(default)]
     pub protocol: UpstreamProtocolConfig,
     #[serde(default)]
+    pub load_balance: UpstreamLoadBalanceConfig,
+    #[serde(default)]
     pub server_name_override: Option<String>,
     #[serde(default)]
     pub request_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub connect_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub read_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub write_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub idle_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub pool_idle_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub pool_max_idle_per_host: Option<u64>,
+    #[serde(default)]
+    pub tcp_keepalive_secs: Option<u64>,
+    #[serde(default)]
+    pub tcp_nodelay: Option<bool>,
+    #[serde(default)]
+    pub http2_keep_alive_interval_secs: Option<u64>,
+    #[serde(default)]
+    pub http2_keep_alive_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub http2_keep_alive_while_idle: Option<bool>,
     #[serde(default)]
     pub max_replayable_request_body_bytes: Option<u64>,
     #[serde(default)]
@@ -75,6 +99,14 @@ pub struct UpstreamConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct UpstreamPeerConfig {
     pub url: String,
+    #[serde(default = "default_upstream_peer_weight")]
+    pub weight: u32,
+    #[serde(default)]
+    pub backup: bool,
+}
+
+const fn default_upstream_peer_weight() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -90,6 +122,14 @@ pub enum UpstreamProtocolConfig {
     Auto,
     Http1,
     Http2,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub enum UpstreamLoadBalanceConfig {
+    #[default]
+    RoundRobin,
+    IpHash,
+    LeastConn,
 }
 
 #[derive(Debug, Clone, Deserialize)]

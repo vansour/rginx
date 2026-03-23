@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
@@ -9,13 +10,39 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[test]
-fn idempotent_requests_fail_over_after_upstream_timeout() {
-    let slow_peer = spawn_response_server(Duration::from_millis(1_500), "slow peer\n");
-    let fast_peer = spawn_response_server(Duration::from_millis(0), "fast peer\n");
+fn ip_hash_keeps_clients_sticky_and_spreads_across_peers() {
+    let peer_a = spawn_response_server("peer-a\n");
+    let peer_b = spawn_response_server("peer-b\n");
     let listen_addr = reserve_loopback_addr();
-    let mut server = TestServer::spawn(listen_addr, &[slow_peer, fast_peer]);
+    let mut server = TestServer::spawn(listen_addr, &[peer_a, peer_b]);
 
-    server.wait_for_body(listen_addr, "/api/demo", "fast peer\n", Duration::from_secs(5));
+    let sticky_ip = "198.51.100.10";
+    let first =
+        server.wait_for_success(listen_addr, "/api/demo", sticky_ip, Duration::from_secs(5));
+    let second = fetch_text_response(listen_addr, "/api/demo", sticky_ip)
+        .expect("second sticky request should succeed");
+    let third = fetch_text_response(listen_addr, "/api/demo", sticky_ip)
+        .expect("third sticky request should succeed");
+
+    assert_eq!(first.0, 200);
+    assert_eq!(second.0, 200);
+    assert_eq!(third.0, 200);
+    assert_eq!(first.1, second.1);
+    assert_eq!(second.1, third.1);
+
+    let unique_bodies = (1..=16)
+        .map(|suffix| {
+            fetch_text_response(listen_addr, "/api/demo", &format!("198.51.100.{suffix}"))
+                .expect("hashed request should succeed")
+                .1
+        })
+        .collect::<HashSet<_>>();
+
+    assert!(
+        unique_bodies.contains("peer-a\n") && unique_bodies.contains("peer-b\n"),
+        "expected ip_hash to distribute requests across both peers, got {unique_bodies:?}"
+    );
+
     server.shutdown_and_wait(Duration::from_secs(5));
 }
 
@@ -26,11 +53,11 @@ struct TestServer {
 
 impl TestServer {
     fn spawn(listen_addr: SocketAddr, upstreams: &[SocketAddr]) -> Self {
-        let temp_dir = temp_dir("rginx-failover-test");
+        let temp_dir = temp_dir("rginx-ip-hash-test");
         fs::create_dir_all(&temp_dir).expect("temp test dir should be created");
         let config_path = temp_dir.join("rginx.ron");
         fs::write(&config_path, proxy_config(listen_addr, upstreams))
-            .expect("proxy config should be written");
+            .expect("ip_hash config should be written");
 
         let child = Command::new(binary_path())
             .arg("--config")
@@ -43,21 +70,21 @@ impl TestServer {
         Self { child, temp_dir }
     }
 
-    fn wait_for_body(
+    fn wait_for_success(
         &mut self,
         listen_addr: SocketAddr,
         path: &str,
-        expected: &str,
+        forwarded_for: &str,
         timeout: Duration,
-    ) {
+    ) -> (u16, String) {
         let deadline = Instant::now() + timeout;
         let mut last_error = String::new();
 
         while Instant::now() < deadline {
             self.assert_running();
 
-            match fetch_text_response(listen_addr, path) {
-                Ok((status, body)) if status == 200 && body == expected => return,
+            match fetch_text_response(listen_addr, path, forwarded_for) {
+                Ok((200, body)) => return (200, body),
                 Ok((status, body)) => {
                     last_error = format!(
                         "unexpected response from {listen_addr}: status={status} body={body:?}"
@@ -70,8 +97,7 @@ impl TestServer {
         }
 
         panic!(
-            "timed out waiting for response body {:?} on {}; last error: {}",
-            expected, listen_addr, last_error
+            "timed out waiting for successful response on {listen_addr}; last error: {last_error}"
         );
     }
 
@@ -120,7 +146,7 @@ impl Drop for TestServer {
     }
 }
 
-fn spawn_response_server(delay: Duration, body: &'static str) -> SocketAddr {
+fn spawn_response_server(body: &'static str) -> SocketAddr {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("test upstream listener should bind");
     let listen_addr = listener.local_addr().expect("listener addr should be available");
 
@@ -133,7 +159,6 @@ fn spawn_response_server(delay: Duration, body: &'static str) -> SocketAddr {
             thread::spawn(move || {
                 let mut buffer = [0u8; 1024];
                 let _ = stream.read(&mut buffer);
-                thread::sleep(delay);
 
                 let response = format!(
                     "HTTP/1.1 200 OK\r\ncontent-type: text/plain; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
@@ -149,18 +174,25 @@ fn spawn_response_server(delay: Duration, body: &'static str) -> SocketAddr {
     listen_addr
 }
 
-fn fetch_text_response(listen_addr: SocketAddr, path: &str) -> Result<(u16, String), String> {
+fn fetch_text_response(
+    listen_addr: SocketAddr,
+    path: &str,
+    forwarded_for: &str,
+) -> Result<(u16, String), String> {
     let mut stream = TcpStream::connect_timeout(&listen_addr, Duration::from_millis(200))
         .map_err(|error| format!("failed to connect to {listen_addr}: {error}"))?;
     stream
-        .set_read_timeout(Some(Duration::from_millis(2_500)))
+        .set_read_timeout(Some(Duration::from_secs(2)))
         .map_err(|error| format!("failed to set read timeout: {error}"))?;
     stream
         .set_write_timeout(Some(Duration::from_millis(500)))
         .map_err(|error| format!("failed to set write timeout: {error}"))?;
 
-    write!(stream, "GET {path} HTTP/1.1\r\nHost: {listen_addr}\r\nConnection: close\r\n\r\n")
-        .map_err(|error| format!("failed to write request: {error}"))?;
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: {listen_addr}\r\nX-Forwarded-For: {forwarded_for}\r\nConnection: close\r\n\r\n"
+    )
+    .map_err(|error| format!("failed to write request: {error}"))?;
     stream.flush().map_err(|error| format!("failed to flush request: {error}"))?;
 
     let mut response = String::new();
@@ -195,7 +227,7 @@ fn proxy_config(listen_addr: SocketAddr, upstreams: &[SocketAddr]) -> String {
         .join(",\n");
 
     format!(
-        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [\n{}\n            ],\n            request_timeout_secs: Some(1),\n            unhealthy_after_failures: Some(2),\n            unhealthy_cooldown_secs: Some(1),\n        ),\n    ],\n    locations: [\n        LocationConfig(\n            matcher: Prefix(\"/api\"),\n            handler: Proxy(\n                upstream: \"backend\",\n            ),\n        ),\n    ],\n)\n",
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n        trusted_proxies: [\"127.0.0.1/32\"],\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [\n{}\n            ],\n            load_balance: IpHash,\n        ),\n    ],\n    locations: [\n        LocationConfig(\n            matcher: Prefix(\"/api\"),\n            handler: Proxy(\n                upstream: \"backend\",\n            ),\n        ),\n    ],\n)\n",
         listen_addr.to_string(),
         peers
     )

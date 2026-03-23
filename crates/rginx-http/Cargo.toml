@@ -1,10 +1,11 @@
 [package]
 name = "rginx-http"
-version = "0.1.1-rc.1"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
 bytes.workspace = true
+futures-util.workspace = true
 http.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
@@ -19,4 +20,5 @@ serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util"] }
 tokio-rustls.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true

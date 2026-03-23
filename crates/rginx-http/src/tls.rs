@@ -4,9 +4,9 @@ use std::io::BufReader;
 use std::sync::Arc;
 
 use rginx_core::{Error, Result, ServerTls, VirtualHost};
+use rustls::ServerConfig;
 use rustls::server::ClientHello;
 use rustls::server::ResolvesServerCert;
-use rustls::ServerConfig;
 use tokio_rustls::TlsAcceptor;
 
 /// SNI 证书解析器，支持基于域名选择证书
@@ -35,10 +35,10 @@ impl ResolvesServerCert for SniCertificateResolver {
             }
             // 尝试通配符匹配
             for (pattern, cert) in &self.by_name {
-                if let Some(suffix) = pattern.strip_prefix("*.") {
-                    if name_lower.ends_with(&format!(".{suffix}")) || name_lower == suffix {
-                        return Some(cert.clone());
-                    }
+                if let Some(suffix) = pattern.strip_prefix("*.")
+                    && (name_lower.ends_with(&format!(".{suffix}")) || name_lower == suffix)
+                {
+                    return Some(cert.clone());
                 }
             }
         }

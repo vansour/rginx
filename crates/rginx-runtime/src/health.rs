@@ -2,9 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use rginx_core::{ActiveHealthCheck, Upstream, UpstreamPeer};
-use rginx_http::proxy::{probe_upstream_peer, ProxyClients};
-use rginx_http::state::ActiveState;
 use rginx_http::SharedState;
+use rginx_http::proxy::{ProxyClients, probe_upstream_peer};
+use rginx_http::state::ActiveState;
 use tokio::sync::watch;
 use tokio::task::{JoinError, JoinSet};
 use tokio::time::Instant;
@@ -143,8 +143,8 @@ mod tests {
     use std::time::Duration;
 
     use rginx_core::{
-        ActiveHealthCheck, ConfigSnapshot, RuntimeSettings, Server, Upstream, UpstreamPeer,
-        UpstreamProtocol, UpstreamSettings, UpstreamTls, VirtualHost,
+        ActiveHealthCheck, ConfigSnapshot, RuntimeSettings, Server, Upstream, UpstreamLoadBalance,
+        UpstreamPeer, UpstreamProtocol, UpstreamSettings, UpstreamTls, VirtualHost,
     };
     use rginx_http::SharedState;
 
@@ -157,33 +157,20 @@ mod tests {
             vec![peer("http://127.0.0.1:9000")],
             UpstreamTls::NativeRoots,
             UpstreamSettings {
-                protocol: UpstreamProtocol::Auto,
-                server_name_override: None,
-                request_timeout: Duration::from_secs(30),
-                max_replayable_request_body_bytes: 64 * 1024,
-                unhealthy_after_failures: 2,
-                unhealthy_cooldown: Duration::from_secs(10),
                 active_health_check: Some(ActiveHealthCheck {
                     path: "/healthz".to_string(),
                     interval: Duration::from_secs(5),
                     timeout: Duration::from_secs(2),
                     healthy_successes_required: 2,
                 }),
+                ..upstream_settings()
             },
         ));
         let passive_only = Arc::new(Upstream::new(
             "passive-only".to_string(),
             vec![peer("http://127.0.0.1:9010")],
             UpstreamTls::NativeRoots,
-            UpstreamSettings {
-                protocol: UpstreamProtocol::Auto,
-                server_name_override: None,
-                request_timeout: Duration::from_secs(30),
-                max_replayable_request_body_bytes: 64 * 1024,
-                unhealthy_after_failures: 2,
-                unhealthy_cooldown: Duration::from_secs(10),
-                active_health_check: None,
-            },
+            UpstreamSettings { ..upstream_settings() },
         ));
 
         let snapshot = ConfigSnapshot {
@@ -226,6 +213,31 @@ mod tests {
             url: url.to_string(),
             scheme: scheme.to_string(),
             authority: authority.to_string(),
+            weight: 1,
+            backup: false,
+        }
+    }
+
+    fn upstream_settings() -> UpstreamSettings {
+        UpstreamSettings {
+            protocol: UpstreamProtocol::Auto,
+            load_balance: UpstreamLoadBalance::RoundRobin,
+            server_name_override: None,
+            request_timeout: Duration::from_secs(30),
+            connect_timeout: Duration::from_secs(30),
+            write_timeout: Duration::from_secs(30),
+            idle_timeout: Duration::from_secs(30),
+            pool_idle_timeout: Some(Duration::from_secs(90)),
+            pool_max_idle_per_host: usize::MAX,
+            tcp_keepalive: None,
+            tcp_nodelay: false,
+            http2_keep_alive_interval: None,
+            http2_keep_alive_timeout: Duration::from_secs(20),
+            http2_keep_alive_while_idle: false,
+            max_replayable_request_body_bytes: 64 * 1024,
+            unhealthy_after_failures: 2,
+            unhealthy_cooldown: Duration::from_secs(10),
+            active_health_check: None,
         }
     }
 }

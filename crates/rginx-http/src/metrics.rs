@@ -309,8 +309,11 @@ mod tests {
         assert!(rendered.contains(
             "rginx_http_requests_total{route=\"server/routes[0]|exact:/status\",status=\"200\"} 1"
         ));
-        assert!(rendered
-            .contains("rginx_http_rate_limited_total{route=\"server/routes[1]|prefix:/api\"} 1"));
+        assert!(
+            rendered.contains(
+                "rginx_http_rate_limited_total{route=\"server/routes[1]|prefix:/api\"} 1"
+            )
+        );
         assert!(rendered.contains(
             "rginx_http_request_duration_ms_count{route=\"server/routes[0]|exact:/status\"} 1"
         ));

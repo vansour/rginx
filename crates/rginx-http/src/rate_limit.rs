@@ -73,7 +73,7 @@ mod tests {
 
     use rginx_core::RouteRateLimit;
 
-    use super::{bucket_capacity, RateLimiters, TokenBucket};
+    use super::{RateLimiters, TokenBucket, bucket_capacity};
 
     #[test]
     fn token_bucket_blocks_after_burst_is_exhausted() {

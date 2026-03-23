@@ -9,13 +9,36 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[test]
-fn idempotent_requests_fail_over_after_upstream_timeout() {
-    let slow_peer = spawn_response_server(Duration::from_millis(1_500), "slow peer\n");
-    let fast_peer = spawn_response_server(Duration::from_millis(0), "fast peer\n");
+fn round_robin_honors_peer_weights() {
+    let heavy_peer = spawn_response_server("heavy-peer\n");
+    let light_peer = spawn_response_server("light-peer\n");
     let listen_addr = reserve_loopback_addr();
-    let mut server = TestServer::spawn(listen_addr, &[slow_peer, fast_peer]);
+    let mut server = TestServer::spawn(listen_addr, heavy_peer, light_peer);
+    wait_for_listener(listen_addr, Duration::from_secs(5));
 
-    server.wait_for_body(listen_addr, "/api/demo", "fast peer\n", Duration::from_secs(5));
+    let observed = (0..8)
+        .map(|_| {
+            let (status, body) = fetch_text_response(listen_addr, "/api/demo")
+                .expect("weighted request should work");
+            assert_eq!(status, 200);
+            body
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        observed,
+        vec![
+            "heavy-peer\n".to_string(),
+            "heavy-peer\n".to_string(),
+            "heavy-peer\n".to_string(),
+            "light-peer\n".to_string(),
+            "heavy-peer\n".to_string(),
+            "heavy-peer\n".to_string(),
+            "heavy-peer\n".to_string(),
+            "light-peer\n".to_string(),
+        ]
+    );
+
     server.shutdown_and_wait(Duration::from_secs(5));
 }
 
@@ -25,12 +48,12 @@ struct TestServer {
 }
 
 impl TestServer {
-    fn spawn(listen_addr: SocketAddr, upstreams: &[SocketAddr]) -> Self {
-        let temp_dir = temp_dir("rginx-failover-test");
+    fn spawn(listen_addr: SocketAddr, heavy_peer: SocketAddr, light_peer: SocketAddr) -> Self {
+        let temp_dir = temp_dir("rginx-weighted-round-robin-test");
         fs::create_dir_all(&temp_dir).expect("temp test dir should be created");
         let config_path = temp_dir.join("rginx.ron");
-        fs::write(&config_path, proxy_config(listen_addr, upstreams))
-            .expect("proxy config should be written");
+        fs::write(&config_path, proxy_config(listen_addr, heavy_peer, light_peer))
+            .expect("weighted config should be written");
 
         let child = Command::new(binary_path())
             .arg("--config")
@@ -41,38 +64,6 @@ impl TestServer {
             .expect("rginx should start");
 
         Self { child, temp_dir }
-    }
-
-    fn wait_for_body(
-        &mut self,
-        listen_addr: SocketAddr,
-        path: &str,
-        expected: &str,
-        timeout: Duration,
-    ) {
-        let deadline = Instant::now() + timeout;
-        let mut last_error = String::new();
-
-        while Instant::now() < deadline {
-            self.assert_running();
-
-            match fetch_text_response(listen_addr, path) {
-                Ok((status, body)) if status == 200 && body == expected => return,
-                Ok((status, body)) => {
-                    last_error = format!(
-                        "unexpected response from {listen_addr}: status={status} body={body:?}"
-                    );
-                }
-                Err(error) => last_error = error,
-            }
-
-            thread::sleep(Duration::from_millis(50));
-        }
-
-        panic!(
-            "timed out waiting for response body {:?} on {}; last error: {}",
-            expected, listen_addr, last_error
-        );
     }
 
     fn shutdown_and_wait(&mut self, timeout: Duration) {
@@ -101,12 +92,6 @@ impl TestServer {
             thread::sleep(Duration::from_millis(50));
         }
     }
-
-    fn assert_running(&mut self) {
-        if let Some(status) = self.child.try_wait().expect("child status should be readable") {
-            panic!("rginx exited unexpectedly with status {status}");
-        }
-    }
 }
 
 impl Drop for TestServer {
@@ -120,7 +105,7 @@ impl Drop for TestServer {
     }
 }
 
-fn spawn_response_server(delay: Duration, body: &'static str) -> SocketAddr {
+fn spawn_response_server(body: &'static str) -> SocketAddr {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("test upstream listener should bind");
     let listen_addr = listener.local_addr().expect("listener addr should be available");
 
@@ -133,7 +118,6 @@ fn spawn_response_server(delay: Duration, body: &'static str) -> SocketAddr {
             thread::spawn(move || {
                 let mut buffer = [0u8; 1024];
                 let _ = stream.read(&mut buffer);
-                thread::sleep(delay);
 
                 let response = format!(
                     "HTTP/1.1 200 OK\r\ncontent-type: text/plain; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
@@ -153,7 +137,7 @@ fn fetch_text_response(listen_addr: SocketAddr, path: &str) -> Result<(u16, Stri
     let mut stream = TcpStream::connect_timeout(&listen_addr, Duration::from_millis(200))
         .map_err(|error| format!("failed to connect to {listen_addr}: {error}"))?;
     stream
-        .set_read_timeout(Some(Duration::from_millis(2_500)))
+        .set_read_timeout(Some(Duration::from_secs(2)))
         .map_err(|error| format!("failed to set read timeout: {error}"))?;
     stream
         .set_write_timeout(Some(Duration::from_millis(500)))
@@ -182,22 +166,28 @@ fn fetch_text_response(listen_addr: SocketAddr, path: &str) -> Result<(u16, Stri
     Ok((status, body.to_string()))
 }
 
-fn proxy_config(listen_addr: SocketAddr, upstreams: &[SocketAddr]) -> String {
-    let peers = upstreams
-        .iter()
-        .map(|addr| {
-            format!(
-                "                UpstreamPeerConfig(\n                    url: {:?},\n                )",
-                format!("http://{addr}")
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",\n");
+fn wait_for_listener(listen_addr: SocketAddr, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    let mut last_error = String::new();
 
+    while Instant::now() < deadline {
+        match TcpStream::connect_timeout(&listen_addr, Duration::from_millis(200)) {
+            Ok(_) => return,
+            Err(error) => last_error = error.to_string(),
+        }
+
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    panic!("timed out waiting for {listen_addr} to accept connections: {last_error}");
+}
+
+fn proxy_config(listen_addr: SocketAddr, heavy_peer: SocketAddr, light_peer: SocketAddr) -> String {
     format!(
-        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [\n{}\n            ],\n            request_timeout_secs: Some(1),\n            unhealthy_after_failures: Some(2),\n            unhealthy_cooldown_secs: Some(1),\n        ),\n    ],\n    locations: [\n        LocationConfig(\n            matcher: Prefix(\"/api\"),\n            handler: Proxy(\n                upstream: \"backend\",\n            ),\n        ),\n    ],\n)\n",
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [\n                UpstreamPeerConfig(\n                    url: {:?},\n                    weight: 3,\n                ),\n                UpstreamPeerConfig(\n                    url: {:?},\n                    weight: 1,\n                ),\n            ],\n        ),\n    ],\n    locations: [\n        LocationConfig(\n            matcher: Prefix(\"/api\"),\n            handler: Proxy(\n                upstream: \"backend\",\n            ),\n        ),\n    ],\n)\n",
         listen_addr.to_string(),
-        peers
+        format!("http://{heavy_peer}"),
+        format!("http://{light_peer}")
     )
 }
 

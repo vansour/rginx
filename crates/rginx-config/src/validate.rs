@@ -79,24 +79,31 @@ pub fn validate(config: &Config) -> Result<()> {
                     upstream.name
                 )));
             }
-        }
 
-        if let Some(UpstreamTlsConfig::CustomCa { ca_cert_path }) = &upstream.tls {
-            if ca_cert_path.trim().is_empty() {
+            if peer.weight == 0 {
                 return Err(Error::Config(format!(
-                    "upstream `{}` custom CA path must not be empty",
-                    upstream.name
+                    "upstream `{}` peer `{}` weight must be greater than 0",
+                    upstream.name, peer.url
                 )));
             }
         }
 
-        if let Some(server_name_override) = &upstream.server_name_override {
-            if server_name_override.trim().is_empty() {
-                return Err(Error::Config(format!(
-                    "upstream `{}` server_name_override must not be empty",
-                    upstream.name
-                )));
-            }
+        if let Some(UpstreamTlsConfig::CustomCa { ca_cert_path }) = &upstream.tls
+            && ca_cert_path.trim().is_empty()
+        {
+            return Err(Error::Config(format!(
+                "upstream `{}` custom CA path must not be empty",
+                upstream.name
+            )));
+        }
+
+        if let Some(server_name_override) = &upstream.server_name_override
+            && server_name_override.trim().is_empty()
+        {
+            return Err(Error::Config(format!(
+                "upstream `{}` server_name_override must not be empty",
+                upstream.name
+            )));
         }
 
         if matches!(upstream.protocol, UpstreamProtocolConfig::Http2) {
@@ -117,6 +124,64 @@ pub fn validate(config: &Config) -> Result<()> {
         if upstream.request_timeout_secs.is_some_and(|timeout| timeout == 0) {
             return Err(Error::Config(format!(
                 "upstream `{}` request_timeout_secs must be greater than 0",
+                upstream.name
+            )));
+        }
+
+        if upstream.connect_timeout_secs.is_some_and(|timeout| timeout == 0) {
+            return Err(Error::Config(format!(
+                "upstream `{}` connect_timeout_secs must be greater than 0",
+                upstream.name
+            )));
+        }
+
+        if upstream.read_timeout_secs.is_some_and(|timeout| timeout == 0) {
+            return Err(Error::Config(format!(
+                "upstream `{}` read_timeout_secs must be greater than 0",
+                upstream.name
+            )));
+        }
+
+        if upstream.write_timeout_secs.is_some_and(|timeout| timeout == 0) {
+            return Err(Error::Config(format!(
+                "upstream `{}` write_timeout_secs must be greater than 0",
+                upstream.name
+            )));
+        }
+
+        if upstream.idle_timeout_secs.is_some_and(|timeout| timeout == 0) {
+            return Err(Error::Config(format!(
+                "upstream `{}` idle_timeout_secs must be greater than 0",
+                upstream.name
+            )));
+        }
+
+        if upstream.tcp_keepalive_secs.is_some_and(|timeout| timeout == 0) {
+            return Err(Error::Config(format!(
+                "upstream `{}` tcp_keepalive_secs must be greater than 0",
+                upstream.name
+            )));
+        }
+
+        if upstream.http2_keep_alive_interval_secs.is_some_and(|timeout| timeout == 0) {
+            return Err(Error::Config(format!(
+                "upstream `{}` http2_keep_alive_interval_secs must be greater than 0",
+                upstream.name
+            )));
+        }
+
+        if upstream.http2_keep_alive_timeout_secs.is_some_and(|timeout| timeout == 0) {
+            return Err(Error::Config(format!(
+                "upstream `{}` http2_keep_alive_timeout_secs must be greater than 0",
+                upstream.name
+            )));
+        }
+
+        let has_http2_keep_alive_tuning = upstream.http2_keep_alive_timeout_secs.is_some()
+            || upstream.http2_keep_alive_while_idle.is_some();
+        if upstream.http2_keep_alive_interval_secs.is_none() && has_http2_keep_alive_tuning {
+            return Err(Error::Config(format!(
+                "upstream `{}` http2_keep_alive_timeout_secs and http2_keep_alive_while_idle require http2_keep_alive_interval_secs to be set",
                 upstream.name
             )));
         }
@@ -212,10 +277,10 @@ pub fn validate(config: &Config) -> Result<()> {
             }
         };
 
-        if let MatcherConfig::Exact(path) = &location.matcher {
-            if !exact_routes.insert(path.clone()) {
-                return Err(Error::Config(format!("duplicate exact route `{path}`")));
-            }
+        if let MatcherConfig::Exact(path) = &location.matcher
+            && !exact_routes.insert(path.clone())
+        {
+            return Err(Error::Config(format!("duplicate exact route `{path}`")));
         }
 
         validate_route_cidrs(matcher_label, "allow_cidrs", &location.allow_cidrs)?;
@@ -233,12 +298,12 @@ pub fn validate(config: &Config) -> Result<()> {
                 return Err(Error::Config(format!("proxy upstream `{upstream}` is not defined")));
             }
 
-            if let Some(prefix) = strip_prefix {
-                if !prefix.starts_with('/') {
-                    return Err(Error::Config(format!(
-                        "route matcher `{matcher_label}` strip_prefix must start with `/`"
-                    )));
-                }
+            if let Some(prefix) = strip_prefix
+                && !prefix.starts_with('/')
+            {
+                return Err(Error::Config(format!(
+                    "route matcher `{matcher_label}` strip_prefix must start with `/`"
+                )));
             }
 
             for name in proxy_set_headers.keys() {
@@ -262,12 +327,12 @@ pub fn validate(config: &Config) -> Result<()> {
                 )));
             }
 
-            if let Some(index) = index {
-                if index.trim().is_empty() {
-                    return Err(Error::Config(format!(
-                        "route matcher `{matcher_label}` file index must not be empty"
-                    )));
-                }
+            if let Some(index) = index
+                && index.trim().is_empty()
+            {
+                return Err(Error::Config(format!(
+                    "route matcher `{matcher_label}` file index must not be empty"
+                )));
             }
 
             if let Some(try_files) = try_files {
@@ -459,12 +524,10 @@ fn validate_virtual_hosts(
                 }
             };
 
-            if let MatcherConfig::Exact(path) = &location.matcher {
-                if !vhost_exact_routes.insert(path.clone()) {
-                    return Err(Error::Config(format!(
-                        "{vhost_label} duplicate exact route `{path}`"
-                    )));
-                }
+            if let MatcherConfig::Exact(path) = &location.matcher
+                && !vhost_exact_routes.insert(path.clone())
+            {
+                return Err(Error::Config(format!("{vhost_label} duplicate exact route `{path}`")));
             }
 
             validate_route_cidrs(matcher_label, "allow_cidrs", &location.allow_cidrs)?;
@@ -484,12 +547,12 @@ fn validate_virtual_hosts(
                     )));
                 }
 
-                if let Some(prefix) = strip_prefix {
-                    if !prefix.starts_with('/') {
-                        return Err(Error::Config(format!(
-                            "{vhost_label} route matcher `{matcher_label}` strip_prefix must start with `/`"
-                        )));
-                    }
+                if let Some(prefix) = strip_prefix
+                    && !prefix.starts_with('/')
+                {
+                    return Err(Error::Config(format!(
+                        "{vhost_label} route matcher `{matcher_label}` strip_prefix must start with `/`"
+                    )));
                 }
 
                 for name in proxy_set_headers.keys() {
@@ -513,12 +576,12 @@ fn validate_virtual_hosts(
                     )));
                 }
 
-                if let Some(index) = index {
-                    if index.trim().is_empty() {
-                        return Err(Error::Config(format!(
-                            "{vhost_label} route matcher `{matcher_label}` file index must not be empty"
-                        )));
-                    }
+                if let Some(index) = index
+                    && index.trim().is_empty()
+                {
+                    return Err(Error::Config(format!(
+                        "{vhost_label} route matcher `{matcher_label}` file index must not be empty"
+                    )));
                 }
 
                 if let Some(try_files) = try_files {
@@ -561,8 +624,8 @@ fn validate_virtual_hosts(
 mod tests {
     use crate::model::{
         Config, HandlerConfig, LocationConfig, MatcherConfig, RuntimeConfig, ServerConfig,
-        ServerTlsConfig, UpstreamConfig, UpstreamPeerConfig, UpstreamProtocolConfig,
-        VirtualHostConfig,
+        ServerTlsConfig, UpstreamConfig, UpstreamLoadBalanceConfig, UpstreamPeerConfig,
+        UpstreamProtocolConfig, VirtualHostConfig,
     };
 
     use super::validate;
@@ -573,9 +636,9 @@ mod tests {
         config.upstreams[0].max_replayable_request_body_bytes = Some(0);
 
         let error = validate(&config).expect_err("zero body size should be rejected");
-        assert!(error
-            .to_string()
-            .contains("max_replayable_request_body_bytes must be greater than 0"));
+        assert!(
+            error.to_string().contains("max_replayable_request_body_bytes must be greater than 0")
+        );
     }
 
     #[test]
@@ -594,6 +657,74 @@ mod tests {
 
         let error = validate(&config).expect_err("zero cooldown should be rejected");
         assert!(error.to_string().contains("unhealthy_cooldown_secs must be greater than 0"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_connect_timeout() {
+        let mut config = base_config();
+        config.upstreams[0].connect_timeout_secs = Some(0);
+
+        let error = validate(&config).expect_err("zero connect timeout should be rejected");
+        assert!(error.to_string().contains("connect_timeout_secs must be greater than 0"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_write_timeout() {
+        let mut config = base_config();
+        config.upstreams[0].write_timeout_secs = Some(0);
+
+        let error = validate(&config).expect_err("zero write timeout should be rejected");
+        assert!(error.to_string().contains("write_timeout_secs must be greater than 0"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_idle_timeout() {
+        let mut config = base_config();
+        config.upstreams[0].idle_timeout_secs = Some(0);
+
+        let error = validate(&config).expect_err("zero idle timeout should be rejected");
+        assert!(error.to_string().contains("idle_timeout_secs must be greater than 0"));
+    }
+
+    #[test]
+    fn validate_allows_disabling_pool_idle_timeout() {
+        let mut config = base_config();
+        config.upstreams[0].pool_idle_timeout_secs = Some(0);
+
+        validate(&config).expect("pool_idle_timeout_secs: Some(0) should be accepted");
+    }
+
+    #[test]
+    fn validate_rejects_zero_tcp_keepalive_timeout() {
+        let mut config = base_config();
+        config.upstreams[0].tcp_keepalive_secs = Some(0);
+
+        let error = validate(&config).expect_err("zero tcp keepalive should be rejected");
+        assert!(error.to_string().contains("tcp_keepalive_secs must be greater than 0"));
+    }
+
+    #[test]
+    fn validate_rejects_http2_keepalive_tuning_without_interval() {
+        let mut config = base_config();
+        config.upstreams[0].http2_keep_alive_timeout_secs = Some(5);
+
+        let error =
+            validate(&config).expect_err("http2 keepalive tuning should require an interval");
+        assert!(error.to_string().contains(
+            "http2_keep_alive_timeout_secs and http2_keep_alive_while_idle require http2_keep_alive_interval_secs to be set"
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_zero_http2_keepalive_interval() {
+        let mut config = base_config();
+        config.upstreams[0].http2_keep_alive_interval_secs = Some(0);
+
+        let error =
+            validate(&config).expect_err("zero http2 keepalive interval should be rejected");
+        assert!(
+            error.to_string().contains("http2_keep_alive_interval_secs must be greater than 0")
+        );
     }
 
     #[test]
@@ -659,9 +790,9 @@ mod tests {
         config.server.header_read_timeout_secs = Some(0);
 
         let error = validate(&config).expect_err("zero header timeout should be rejected");
-        assert!(error
-            .to_string()
-            .contains("server header_read_timeout_secs must be greater than 0"));
+        assert!(
+            error.to_string().contains("server header_read_timeout_secs must be greater than 0")
+        );
     }
 
     #[test]
@@ -697,9 +828,11 @@ mod tests {
         config.server.server_names = vec!["api/example.com".to_string()];
 
         let error = validate(&config).expect_err("invalid default server_name should be rejected");
-        assert!(error
-            .to_string()
-            .contains("server server_name `api/example.com` should not contain path separator"));
+        assert!(
+            error
+                .to_string()
+                .contains("server server_name `api/example.com` should not contain path separator")
+        );
     }
 
     #[test]
@@ -709,9 +842,11 @@ mod tests {
         config.servers = vec![sample_vhost(vec!["API.EXAMPLE.COM"])];
 
         let error = validate(&config).expect_err("duplicate server_names should be rejected");
-        assert!(error
-            .to_string()
-            .contains("duplicate server_name `API.EXAMPLE.COM` across server and servers"));
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate server_name `API.EXAMPLE.COM` across server and servers")
+        );
     }
 
     #[test]
@@ -754,11 +889,27 @@ mod tests {
             },
             upstreams: vec![UpstreamConfig {
                 name: "backend".to_string(),
-                peers: vec![UpstreamPeerConfig { url: "http://127.0.0.1:9000".to_string() }],
+                peers: vec![UpstreamPeerConfig {
+                    url: "http://127.0.0.1:9000".to_string(),
+                    weight: 1,
+                    backup: false,
+                }],
                 tls: None,
                 protocol: UpstreamProtocolConfig::Auto,
+                load_balance: UpstreamLoadBalanceConfig::RoundRobin,
                 server_name_override: None,
                 request_timeout_secs: None,
+                connect_timeout_secs: None,
+                read_timeout_secs: None,
+                write_timeout_secs: None,
+                idle_timeout_secs: None,
+                pool_idle_timeout_secs: None,
+                pool_max_idle_per_host: None,
+                tcp_keepalive_secs: None,
+                tcp_nodelay: None,
+                http2_keep_alive_interval_secs: None,
+                http2_keep_alive_timeout_secs: None,
+                http2_keep_alive_while_idle: None,
                 max_replayable_request_body_bytes: None,
                 unhealthy_after_failures: None,
                 unhealthy_cooldown_secs: None,
@@ -790,9 +941,9 @@ mod tests {
         config.upstreams[0].health_check_timeout_secs = Some(1);
 
         let error = validate(&config).expect_err("active health tuning should require a path");
-        assert!(error
-            .to_string()
-            .contains("active health-check tuning requires health_check_path"));
+        assert!(
+            error.to_string().contains("active health-check tuning requires health_check_path")
+        );
     }
 
     #[test]
@@ -825,6 +976,15 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_zero_peer_weight() {
+        let mut config = base_config();
+        config.upstreams[0].peers[0].weight = 0;
+
+        let error = validate(&config).expect_err("zero peer weight should be rejected");
+        assert!(error.to_string().contains("weight must be greater than 0"));
+    }
+
+    #[test]
     fn validate_rejects_zero_healthy_successes_required() {
         let mut config = base_config();
         config.upstreams[0].health_check_path = Some("/healthz".to_string());
@@ -841,9 +1001,11 @@ mod tests {
 
         let error =
             validate(&config).expect_err("cleartext peers should be rejected for upstream http2");
-        assert!(error
-            .to_string()
-            .contains("protocol `Http2` currently requires all peers to use `https://`"));
+        assert!(
+            error
+                .to_string()
+                .contains("protocol `Http2` currently requires all peers to use `https://`")
+        );
     }
 
     fn sample_vhost(server_names: Vec<&str>) -> VirtualHostConfig {

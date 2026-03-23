@@ -8,7 +8,7 @@ pub enum RuntimeSignal {
 
 #[cfg(unix)]
 pub async fn wait_for_signal() -> Result<RuntimeSignal> {
-    use tokio::signal::unix::{signal, SignalKind};
+    use tokio::signal::unix::{SignalKind, signal};
 
     let mut terminate = signal(SignalKind::terminate())?;
     let mut hangup = signal(SignalKind::hangup())?;

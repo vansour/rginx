@@ -255,6 +255,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7e3450815272ef58cec6d564423f6e755e25379b217b0bc688e295ba24df6b1d"
 
 [[package]]
+name = "futures-macro"
+version = "0.3.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e835b70203e41293343137df5c0664546da5745f82ec9b84d40be8336958447b"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "futures-sink"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -273,8 +284,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "389ca41296e6190b48053de0321d02a77f32f8a5d2461dd38762c0593805c6d6"
 dependencies = [
  "futures-core",
+ "futures-macro",
  "futures-task",
  "pin-project-lite",
+ "slab",
 ]
 
 [[package]]
@@ -606,7 +619,7 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "rginx"
-version = "0.1.1-rc.1"
+version = "0.1.1-rc.2"
 dependencies = [
  "anyhow",
  "bytes",
@@ -628,7 +641,7 @@ dependencies = [
 
 [[package]]
 name = "rginx-config"
-version = "0.1.1-rc.1"
+version = "0.1.1-rc.2"
 dependencies = [
  "http",
  "ipnet",
@@ -640,7 +653,7 @@ dependencies = [
 
 [[package]]
 name = "rginx-core"
-version = "0.1.1-rc.1"
+version = "0.1.1-rc.2"
 dependencies = [
  "http",
  "ipnet",
@@ -649,9 +662,10 @@ dependencies = [
 
 [[package]]
 name = "rginx-http"
-version = "0.1.1-rc.1"
+version = "0.1.1-rc.2"
 dependencies = [
  "bytes",
+ "futures-util",
  "http",
  "http-body-util",
  "hyper",
@@ -666,19 +680,20 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "tracing",
 ]
 
 [[package]]
 name = "rginx-observability"
-version = "0.1.1-rc.1"
+version = "0.1.1-rc.2"
 dependencies = [
  "tracing-subscriber",
 ]
 
 [[package]]
 name = "rginx-runtime"
-version = "0.1.1-rc.1"
+version = "0.1.1-rc.2"
 dependencies = [
  "rginx-config",
  "rginx-core",

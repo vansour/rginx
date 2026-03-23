@@ -119,7 +119,7 @@ fn poll_idle_timer(
 
 #[cfg(test)]
 mod tests {
-    use std::future::{poll_fn, Future};
+    use std::future::{Future, poll_fn};
     use std::io;
     use std::pin::Pin;
     use std::task::{Context, Poll};

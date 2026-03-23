@@ -6,22 +6,28 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::model::{
-    Config, HandlerConfig, MatcherConfig, ServerTlsConfig, UpstreamProtocolConfig,
-    UpstreamTlsConfig, VirtualHostConfig,
+    Config, HandlerConfig, MatcherConfig, ServerTlsConfig, UpstreamLoadBalanceConfig,
+    UpstreamProtocolConfig, UpstreamTlsConfig, VirtualHostConfig,
 };
 use http::StatusCode;
 use ipnet::IpNet;
 use rginx_core::{
     ActiveHealthCheck, ConfigSnapshot, Error, FileTarget, ProxyTarget, Result, ReturnAction, Route,
     RouteAccessControl, RouteAction, RouteMatcher, RouteRateLimit, RuntimeSettings, Server,
-    ServerTls, StaticResponse, Upstream, UpstreamPeer, UpstreamProtocol, UpstreamSettings,
-    UpstreamTls, VirtualHost,
+    ServerTls, StaticResponse, Upstream, UpstreamLoadBalance, UpstreamPeer, UpstreamProtocol,
+    UpstreamSettings, UpstreamTls, VirtualHost,
 };
 use rustls::pki_types::ServerName;
 
 use crate::validate::validate;
 
 const DEFAULT_UPSTREAM_REQUEST_TIMEOUT_SECS: u64 = 30;
+const DEFAULT_UPSTREAM_CONNECT_TIMEOUT_SECS: u64 = DEFAULT_UPSTREAM_REQUEST_TIMEOUT_SECS;
+const DEFAULT_UPSTREAM_WRITE_TIMEOUT_SECS: u64 = DEFAULT_UPSTREAM_REQUEST_TIMEOUT_SECS;
+const DEFAULT_UPSTREAM_IDLE_TIMEOUT_SECS: u64 = DEFAULT_UPSTREAM_REQUEST_TIMEOUT_SECS;
+const DEFAULT_UPSTREAM_POOL_IDLE_TIMEOUT_SECS: u64 = 90;
+const DEFAULT_UPSTREAM_POOL_MAX_IDLE_PER_HOST: usize = usize::MAX;
+const DEFAULT_UPSTREAM_HTTP2_KEEP_ALIVE_TIMEOUT_SECS: u64 = 20;
 const DEFAULT_MAX_REPLAYABLE_REQUEST_BODY_BYTES: u64 = 64 * 1024;
 const DEFAULT_UNHEALTHY_AFTER_FAILURES: u32 = 2;
 const DEFAULT_UNHEALTHY_COOLDOWN_SECS: u64 = 10;
@@ -67,8 +73,20 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
                 peers,
                 tls,
                 protocol,
+                load_balance,
                 server_name_override,
                 request_timeout_secs,
+                connect_timeout_secs,
+                read_timeout_secs,
+                write_timeout_secs,
+                idle_timeout_secs,
+                pool_idle_timeout_secs,
+                pool_max_idle_per_host,
+                tcp_keepalive_secs,
+                tcp_nodelay,
+                http2_keep_alive_interval_secs,
+                http2_keep_alive_timeout_secs,
+                http2_keep_alive_while_idle,
                 max_replayable_request_body_bytes,
                 unhealthy_after_failures,
                 unhealthy_cooldown_secs,
@@ -80,14 +98,67 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
 
             let peers = peers
                 .into_iter()
-                .map(|peer| compile_peer(&name, peer.url))
+                .map(|peer| compile_peer(&name, peer.url, peer.weight, peer.backup))
                 .collect::<Result<Vec<_>>>()?;
             let tls = compile_tls(&name, tls, base_dir)?;
             let protocol = compile_protocol(&name, protocol, &peers)?;
+            let load_balance = compile_load_balance(load_balance);
             let server_name_override = compile_server_name_override(&name, server_name_override)?;
-            let request_timeout = Duration::from_secs(
-                request_timeout_secs.unwrap_or(DEFAULT_UPSTREAM_REQUEST_TIMEOUT_SECS),
-            );
+            let request_timeout = compile_timeout_secs(
+                read_timeout_secs
+                    .or(request_timeout_secs)
+                    .unwrap_or(DEFAULT_UPSTREAM_REQUEST_TIMEOUT_SECS),
+                &name,
+                "read_timeout_secs",
+            )?;
+            let connect_timeout = compile_timeout_secs(
+                connect_timeout_secs
+                    .or(request_timeout_secs)
+                    .unwrap_or(DEFAULT_UPSTREAM_CONNECT_TIMEOUT_SECS),
+                &name,
+                "connect_timeout_secs",
+            )?;
+            let write_timeout = compile_timeout_secs(
+                write_timeout_secs
+                    .or(request_timeout_secs)
+                    .unwrap_or(DEFAULT_UPSTREAM_WRITE_TIMEOUT_SECS),
+                &name,
+                "write_timeout_secs",
+            )?;
+            let idle_timeout = compile_timeout_secs(
+                idle_timeout_secs
+                    .or(request_timeout_secs)
+                    .unwrap_or(DEFAULT_UPSTREAM_IDLE_TIMEOUT_SECS),
+                &name,
+                "idle_timeout_secs",
+            )?;
+            let pool_idle_timeout = match pool_idle_timeout_secs {
+                Some(0) => None,
+                Some(timeout) => {
+                    Some(compile_timeout_secs(timeout, &name, "pool_idle_timeout_secs")?)
+                }
+                None => Some(Duration::from_secs(DEFAULT_UPSTREAM_POOL_IDLE_TIMEOUT_SECS)),
+            };
+            let pool_max_idle_per_host = compile_pool_max_idle_per_host(
+                &name,
+                pool_max_idle_per_host.unwrap_or(DEFAULT_UPSTREAM_POOL_MAX_IDLE_PER_HOST as u64),
+            )?;
+            let tcp_keepalive = tcp_keepalive_secs
+                .map(|timeout| compile_timeout_secs(timeout, &name, "tcp_keepalive_secs"))
+                .transpose()?;
+            let tcp_nodelay = tcp_nodelay.unwrap_or(false);
+            let http2_keep_alive_interval = http2_keep_alive_interval_secs
+                .map(|timeout| {
+                    compile_timeout_secs(timeout, &name, "http2_keep_alive_interval_secs")
+                })
+                .transpose()?;
+            let http2_keep_alive_timeout = compile_timeout_secs(
+                http2_keep_alive_timeout_secs
+                    .unwrap_or(DEFAULT_UPSTREAM_HTTP2_KEEP_ALIVE_TIMEOUT_SECS),
+                &name,
+                "http2_keep_alive_timeout_secs",
+            )?;
+            let http2_keep_alive_while_idle = http2_keep_alive_while_idle.unwrap_or(false);
             let max_replayable_request_body_bytes = compile_max_replayable_request_body_bytes(
                 &name,
                 max_replayable_request_body_bytes,
@@ -111,8 +182,19 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
                 tls,
                 UpstreamSettings {
                     protocol,
+                    load_balance,
                     server_name_override,
                     request_timeout,
+                    connect_timeout,
+                    write_timeout,
+                    idle_timeout,
+                    pool_idle_timeout,
+                    pool_max_idle_per_host,
+                    tcp_keepalive,
+                    tcp_nodelay,
+                    http2_keep_alive_interval,
+                    http2_keep_alive_timeout,
+                    http2_keep_alive_while_idle,
                     max_replayable_request_body_bytes,
                     unhealthy_after_failures,
                     unhealthy_cooldown,
@@ -190,7 +272,30 @@ fn compile_max_connections(max_connections: Option<u64>) -> Result<Option<usize>
         .transpose()
 }
 
-fn compile_peer(upstream_name: &str, url: String) -> Result<UpstreamPeer> {
+fn compile_timeout_secs(raw: u64, upstream_name: &str, field: &str) -> Result<Duration> {
+    if raw == 0 {
+        return Err(Error::Config(format!(
+            "upstream `{upstream_name}` {field} must be greater than 0"
+        )));
+    }
+
+    Ok(Duration::from_secs(raw))
+}
+
+fn compile_pool_max_idle_per_host(upstream_name: &str, raw: u64) -> Result<usize> {
+    usize::try_from(raw).map_err(|_| {
+        Error::Config(format!(
+            "upstream `{upstream_name}` pool_max_idle_per_host `{raw}` exceeds platform limits"
+        ))
+    })
+}
+
+fn compile_peer(
+    upstream_name: &str,
+    url: String,
+    weight: u32,
+    backup: bool,
+) -> Result<UpstreamPeer> {
     let uri: http::Uri = url.parse()?;
     let scheme = uri.scheme_str().ok_or_else(|| {
         Error::Config(format!("upstream `{upstream_name}` peer `{url}` must include a scheme"))
@@ -217,7 +322,13 @@ fn compile_peer(upstream_name: &str, url: String) -> Result<UpstreamPeer> {
         )));
     }
 
-    Ok(UpstreamPeer { url, scheme: scheme.to_string(), authority: authority.to_string() })
+    Ok(UpstreamPeer {
+        url,
+        scheme: scheme.to_string(),
+        authority: authority.to_string(),
+        weight,
+        backup,
+    })
 }
 
 fn compile_tls(
@@ -259,6 +370,14 @@ fn compile_protocol(
 
             Ok(UpstreamProtocol::Http2)
         }
+    }
+}
+
+fn compile_load_balance(load_balance: UpstreamLoadBalanceConfig) -> UpstreamLoadBalance {
+    match load_balance {
+        UpstreamLoadBalanceConfig::RoundRobin => UpstreamLoadBalance::RoundRobin,
+        UpstreamLoadBalanceConfig::IpHash => UpstreamLoadBalance::IpHash,
+        UpstreamLoadBalanceConfig::LeastConn => UpstreamLoadBalance::LeastConn,
     }
 }
 
@@ -561,11 +680,7 @@ fn normalize_server_name_override(value: &str) -> String {
 
 fn resolve_path(base_dir: &Path, path: String) -> PathBuf {
     let path = PathBuf::from(path);
-    if path.is_absolute() {
-        path
-    } else {
-        base_dir.join(path)
-    }
+    if path.is_absolute() { path } else { base_dir.join(path) }
 }
 
 #[cfg(test)]
@@ -576,15 +691,16 @@ mod tests {
 
     use crate::model::{
         Config, HandlerConfig, LocationConfig, MatcherConfig, RuntimeConfig, ServerConfig,
-        ServerTlsConfig, UpstreamConfig, UpstreamPeerConfig, UpstreamProtocolConfig,
-        UpstreamTlsConfig, VirtualHostConfig,
+        ServerTlsConfig, UpstreamConfig, UpstreamLoadBalanceConfig, UpstreamPeerConfig,
+        UpstreamProtocolConfig, UpstreamTlsConfig, VirtualHostConfig,
     };
 
     use super::{
-        compile, compile_with_base, DEFAULT_HEALTHY_SUCCESSES_REQUIRED,
         DEFAULT_HEALTH_CHECK_INTERVAL_SECS, DEFAULT_HEALTH_CHECK_TIMEOUT_SECS,
-        DEFAULT_MAX_REPLAYABLE_REQUEST_BODY_BYTES, DEFAULT_UNHEALTHY_AFTER_FAILURES,
-        DEFAULT_UNHEALTHY_COOLDOWN_SECS, DEFAULT_UPSTREAM_REQUEST_TIMEOUT_SECS,
+        DEFAULT_HEALTHY_SUCCESSES_REQUIRED, DEFAULT_MAX_REPLAYABLE_REQUEST_BODY_BYTES,
+        DEFAULT_UNHEALTHY_AFTER_FAILURES, DEFAULT_UNHEALTHY_COOLDOWN_SECS,
+        DEFAULT_UPSTREAM_HTTP2_KEEP_ALIVE_TIMEOUT_SECS, DEFAULT_UPSTREAM_POOL_IDLE_TIMEOUT_SECS,
+        DEFAULT_UPSTREAM_REQUEST_TIMEOUT_SECS, compile, compile_with_base,
     };
 
     #[test]
@@ -604,11 +720,27 @@ mod tests {
             },
             upstreams: vec![UpstreamConfig {
                 name: "secure-backend".to_string(),
-                peers: vec![UpstreamPeerConfig { url: "https://example.com".to_string() }],
+                peers: vec![UpstreamPeerConfig {
+                    url: "https://example.com".to_string(),
+                    weight: 1,
+                    backup: false,
+                }],
                 tls: None,
                 protocol: UpstreamProtocolConfig::Auto,
+                load_balance: UpstreamLoadBalanceConfig::IpHash,
                 server_name_override: None,
                 request_timeout_secs: None,
+                connect_timeout_secs: None,
+                read_timeout_secs: None,
+                write_timeout_secs: None,
+                idle_timeout_secs: None,
+                pool_idle_timeout_secs: None,
+                pool_max_idle_per_host: None,
+                tcp_keepalive_secs: None,
+                tcp_nodelay: None,
+                http2_keep_alive_interval_secs: None,
+                http2_keep_alive_timeout_secs: None,
+                http2_keep_alive_while_idle: None,
                 max_replayable_request_body_bytes: None,
                 unhealthy_after_failures: None,
                 unhealthy_cooldown_secs: None,
@@ -644,6 +776,7 @@ mod tests {
         assert_eq!(peer.scheme, "https");
         assert_eq!(peer.authority, "example.com");
         assert_eq!(proxy.upstream.protocol, rginx_core::UpstreamProtocol::Auto);
+        assert_eq!(proxy.upstream.load_balance, rginx_core::UpstreamLoadBalance::IpHash);
         assert_eq!(
             proxy.upstream.request_timeout,
             Duration::from_secs(DEFAULT_UPSTREAM_REQUEST_TIMEOUT_SECS)
@@ -666,6 +799,506 @@ mod tests {
         assert_eq!(active_health.interval, Duration::from_secs(DEFAULT_HEALTH_CHECK_INTERVAL_SECS));
         assert_eq!(active_health.timeout, Duration::from_secs(DEFAULT_HEALTH_CHECK_TIMEOUT_SECS));
         assert_eq!(active_health.healthy_successes_required, DEFAULT_HEALTHY_SUCCESSES_REQUIRED);
+    }
+
+    #[test]
+    fn compile_applies_granular_upstream_transport_settings() {
+        let config = Config {
+            runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
+            server: ServerConfig {
+                listen: "127.0.0.1:8080".to_string(),
+                server_names: Vec::new(),
+                trusted_proxies: Vec::new(),
+                keep_alive: None,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout_secs: None,
+                tls: None,
+            },
+            upstreams: vec![UpstreamConfig {
+                name: "backend".to_string(),
+                peers: vec![UpstreamPeerConfig {
+                    url: "https://example.com".to_string(),
+                    weight: 1,
+                    backup: false,
+                }],
+                tls: None,
+                protocol: UpstreamProtocolConfig::Auto,
+                load_balance: UpstreamLoadBalanceConfig::IpHash,
+                server_name_override: None,
+                request_timeout_secs: None,
+                connect_timeout_secs: Some(3),
+                read_timeout_secs: Some(4),
+                write_timeout_secs: Some(5),
+                idle_timeout_secs: Some(6),
+                pool_idle_timeout_secs: Some(7),
+                pool_max_idle_per_host: Some(8),
+                tcp_keepalive_secs: Some(9),
+                tcp_nodelay: Some(true),
+                http2_keep_alive_interval_secs: Some(10),
+                http2_keep_alive_timeout_secs: Some(11),
+                http2_keep_alive_while_idle: Some(true),
+                max_replayable_request_body_bytes: None,
+                unhealthy_after_failures: None,
+                unhealthy_cooldown_secs: None,
+                health_check_path: None,
+                health_check_interval_secs: None,
+                health_check_timeout_secs: None,
+                healthy_successes_required: None,
+            }],
+            locations: vec![LocationConfig {
+                matcher: MatcherConfig::Prefix("/".to_string()),
+                handler: HandlerConfig::Proxy {
+                    upstream: "backend".to_string(),
+                    preserve_host: None,
+                    strip_prefix: None,
+                    proxy_set_headers: std::collections::HashMap::new(),
+                },
+                allow_cidrs: Vec::new(),
+                deny_cidrs: Vec::new(),
+                requests_per_sec: None,
+                burst: None,
+            }],
+            servers: Vec::new(),
+        };
+
+        let snapshot = compile(config).expect("granular upstream settings should compile");
+        let proxy = match &snapshot.default_vhost.routes[0].action {
+            rginx_core::RouteAction::Proxy(proxy) => proxy,
+            _ => panic!("expected proxy route"),
+        };
+
+        assert_eq!(proxy.upstream.load_balance, rginx_core::UpstreamLoadBalance::IpHash);
+        assert_eq!(proxy.upstream.connect_timeout, Duration::from_secs(3));
+        assert_eq!(proxy.upstream.request_timeout, Duration::from_secs(4));
+        assert_eq!(proxy.upstream.write_timeout, Duration::from_secs(5));
+        assert_eq!(proxy.upstream.idle_timeout, Duration::from_secs(6));
+        assert_eq!(proxy.upstream.pool_idle_timeout, Some(Duration::from_secs(7)));
+        assert_eq!(proxy.upstream.pool_max_idle_per_host, 8);
+        assert_eq!(proxy.upstream.tcp_keepalive, Some(Duration::from_secs(9)));
+        assert!(proxy.upstream.tcp_nodelay);
+        assert_eq!(proxy.upstream.http2_keep_alive_interval, Some(Duration::from_secs(10)));
+        assert_eq!(proxy.upstream.http2_keep_alive_timeout, Duration::from_secs(11));
+        assert!(proxy.upstream.http2_keep_alive_while_idle);
+    }
+
+    #[test]
+    fn compile_accepts_least_conn_load_balance() {
+        let config = Config {
+            runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
+            server: ServerConfig {
+                listen: "127.0.0.1:8080".to_string(),
+                server_names: Vec::new(),
+                trusted_proxies: Vec::new(),
+                keep_alive: None,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout_secs: None,
+                tls: None,
+            },
+            upstreams: vec![UpstreamConfig {
+                name: "backend".to_string(),
+                peers: vec![
+                    UpstreamPeerConfig {
+                        url: "http://127.0.0.1:9000".to_string(),
+                        weight: 1,
+                        backup: false,
+                    },
+                    UpstreamPeerConfig {
+                        url: "http://127.0.0.1:9001".to_string(),
+                        weight: 1,
+                        backup: false,
+                    },
+                ],
+                tls: None,
+                protocol: UpstreamProtocolConfig::Auto,
+                load_balance: UpstreamLoadBalanceConfig::LeastConn,
+                server_name_override: None,
+                request_timeout_secs: None,
+                connect_timeout_secs: None,
+                read_timeout_secs: None,
+                write_timeout_secs: None,
+                idle_timeout_secs: None,
+                pool_idle_timeout_secs: None,
+                pool_max_idle_per_host: None,
+                tcp_keepalive_secs: None,
+                tcp_nodelay: None,
+                http2_keep_alive_interval_secs: None,
+                http2_keep_alive_timeout_secs: None,
+                http2_keep_alive_while_idle: None,
+                max_replayable_request_body_bytes: None,
+                unhealthy_after_failures: None,
+                unhealthy_cooldown_secs: None,
+                health_check_path: None,
+                health_check_interval_secs: None,
+                health_check_timeout_secs: None,
+                healthy_successes_required: None,
+            }],
+            locations: vec![LocationConfig {
+                matcher: MatcherConfig::Prefix("/".to_string()),
+                handler: HandlerConfig::Proxy {
+                    upstream: "backend".to_string(),
+                    preserve_host: None,
+                    strip_prefix: None,
+                    proxy_set_headers: std::collections::HashMap::new(),
+                },
+                allow_cidrs: Vec::new(),
+                deny_cidrs: Vec::new(),
+                requests_per_sec: None,
+                burst: None,
+            }],
+            servers: Vec::new(),
+        };
+
+        let snapshot = compile(config).expect("least_conn config should compile");
+        let proxy = match &snapshot.default_vhost.routes[0].action {
+            rginx_core::RouteAction::Proxy(proxy) => proxy,
+            _ => panic!("expected proxy route"),
+        };
+
+        assert_eq!(proxy.upstream.load_balance, rginx_core::UpstreamLoadBalance::LeastConn);
+    }
+
+    #[test]
+    fn compile_applies_peer_weights() {
+        let config = Config {
+            runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
+            server: ServerConfig {
+                listen: "127.0.0.1:8080".to_string(),
+                server_names: Vec::new(),
+                trusted_proxies: Vec::new(),
+                keep_alive: None,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout_secs: None,
+                tls: None,
+            },
+            upstreams: vec![UpstreamConfig {
+                name: "backend".to_string(),
+                peers: vec![
+                    UpstreamPeerConfig {
+                        url: "http://127.0.0.1:9000".to_string(),
+                        weight: 3,
+                        backup: false,
+                    },
+                    UpstreamPeerConfig {
+                        url: "http://127.0.0.1:9001".to_string(),
+                        weight: 1,
+                        backup: false,
+                    },
+                ],
+                tls: None,
+                protocol: UpstreamProtocolConfig::Auto,
+                load_balance: UpstreamLoadBalanceConfig::RoundRobin,
+                server_name_override: None,
+                request_timeout_secs: None,
+                connect_timeout_secs: None,
+                read_timeout_secs: None,
+                write_timeout_secs: None,
+                idle_timeout_secs: None,
+                pool_idle_timeout_secs: None,
+                pool_max_idle_per_host: None,
+                tcp_keepalive_secs: None,
+                tcp_nodelay: None,
+                http2_keep_alive_interval_secs: None,
+                http2_keep_alive_timeout_secs: None,
+                http2_keep_alive_while_idle: None,
+                max_replayable_request_body_bytes: None,
+                unhealthy_after_failures: None,
+                unhealthy_cooldown_secs: None,
+                health_check_path: None,
+                health_check_interval_secs: None,
+                health_check_timeout_secs: None,
+                healthy_successes_required: None,
+            }],
+            locations: vec![LocationConfig {
+                matcher: MatcherConfig::Prefix("/".to_string()),
+                handler: HandlerConfig::Proxy {
+                    upstream: "backend".to_string(),
+                    preserve_host: None,
+                    strip_prefix: None,
+                    proxy_set_headers: std::collections::HashMap::new(),
+                },
+                allow_cidrs: Vec::new(),
+                deny_cidrs: Vec::new(),
+                requests_per_sec: None,
+                burst: None,
+            }],
+            servers: Vec::new(),
+        };
+
+        let snapshot = compile(config).expect("weighted peer config should compile");
+        let proxy = match &snapshot.default_vhost.routes[0].action {
+            rginx_core::RouteAction::Proxy(proxy) => proxy,
+            _ => panic!("expected proxy route"),
+        };
+
+        assert_eq!(proxy.upstream.peers[0].weight, 3);
+        assert_eq!(proxy.upstream.peers[1].weight, 1);
+
+        let observed = (0..4)
+            .map(|_| proxy.upstream.next_peer().expect("expected weighted peer").url.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            observed,
+            vec![
+                "http://127.0.0.1:9000".to_string(),
+                "http://127.0.0.1:9000".to_string(),
+                "http://127.0.0.1:9000".to_string(),
+                "http://127.0.0.1:9001".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn compile_accepts_backup_peers() {
+        let config = Config {
+            runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
+            server: ServerConfig {
+                listen: "127.0.0.1:8080".to_string(),
+                server_names: Vec::new(),
+                trusted_proxies: Vec::new(),
+                keep_alive: None,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout_secs: None,
+                tls: None,
+            },
+            upstreams: vec![UpstreamConfig {
+                name: "backend".to_string(),
+                peers: vec![
+                    UpstreamPeerConfig {
+                        url: "http://127.0.0.1:9000".to_string(),
+                        weight: 1,
+                        backup: false,
+                    },
+                    UpstreamPeerConfig {
+                        url: "http://127.0.0.1:9001".to_string(),
+                        weight: 1,
+                        backup: true,
+                    },
+                ],
+                tls: None,
+                protocol: UpstreamProtocolConfig::Auto,
+                load_balance: UpstreamLoadBalanceConfig::RoundRobin,
+                server_name_override: None,
+                request_timeout_secs: None,
+                connect_timeout_secs: None,
+                read_timeout_secs: None,
+                write_timeout_secs: None,
+                idle_timeout_secs: None,
+                pool_idle_timeout_secs: None,
+                pool_max_idle_per_host: None,
+                tcp_keepalive_secs: None,
+                tcp_nodelay: None,
+                http2_keep_alive_interval_secs: None,
+                http2_keep_alive_timeout_secs: None,
+                http2_keep_alive_while_idle: None,
+                max_replayable_request_body_bytes: None,
+                unhealthy_after_failures: None,
+                unhealthy_cooldown_secs: None,
+                health_check_path: None,
+                health_check_interval_secs: None,
+                health_check_timeout_secs: None,
+                healthy_successes_required: None,
+            }],
+            locations: vec![LocationConfig {
+                matcher: MatcherConfig::Prefix("/".to_string()),
+                handler: HandlerConfig::Proxy {
+                    upstream: "backend".to_string(),
+                    preserve_host: None,
+                    strip_prefix: None,
+                    proxy_set_headers: std::collections::HashMap::new(),
+                },
+                allow_cidrs: Vec::new(),
+                deny_cidrs: Vec::new(),
+                requests_per_sec: None,
+                burst: None,
+            }],
+            servers: Vec::new(),
+        };
+
+        let snapshot = compile(config).expect("backup peer config should compile");
+        let proxy = match &snapshot.default_vhost.routes[0].action {
+            rginx_core::RouteAction::Proxy(proxy) => proxy,
+            _ => panic!("expected proxy route"),
+        };
+
+        assert!(!proxy.upstream.peers[0].backup);
+        assert!(proxy.upstream.peers[1].backup);
+        assert_eq!(
+            proxy.upstream.next_peer().expect("primary peer should be selected").url,
+            "http://127.0.0.1:9000"
+        );
+        assert_eq!(
+            proxy
+                .upstream
+                .backup_next_peers(1)
+                .into_iter()
+                .next()
+                .expect("backup peer should be available")
+                .url,
+            "http://127.0.0.1:9001"
+        );
+    }
+
+    #[test]
+    fn compile_uses_legacy_request_timeout_fallbacks_and_disables_pool_idle_timeout() {
+        let config = Config {
+            runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
+            server: ServerConfig {
+                listen: "127.0.0.1:8080".to_string(),
+                server_names: Vec::new(),
+                trusted_proxies: Vec::new(),
+                keep_alive: None,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout_secs: None,
+                tls: None,
+            },
+            upstreams: vec![UpstreamConfig {
+                name: "backend".to_string(),
+                peers: vec![UpstreamPeerConfig {
+                    url: "https://example.com".to_string(),
+                    weight: 1,
+                    backup: false,
+                }],
+                tls: None,
+                protocol: UpstreamProtocolConfig::Auto,
+                load_balance: UpstreamLoadBalanceConfig::RoundRobin,
+                server_name_override: None,
+                request_timeout_secs: Some(12),
+                connect_timeout_secs: None,
+                read_timeout_secs: None,
+                write_timeout_secs: None,
+                idle_timeout_secs: None,
+                pool_idle_timeout_secs: Some(0),
+                pool_max_idle_per_host: None,
+                tcp_keepalive_secs: None,
+                tcp_nodelay: None,
+                http2_keep_alive_interval_secs: None,
+                http2_keep_alive_timeout_secs: None,
+                http2_keep_alive_while_idle: None,
+                max_replayable_request_body_bytes: None,
+                unhealthy_after_failures: None,
+                unhealthy_cooldown_secs: None,
+                health_check_path: None,
+                health_check_interval_secs: None,
+                health_check_timeout_secs: None,
+                healthy_successes_required: None,
+            }],
+            locations: vec![LocationConfig {
+                matcher: MatcherConfig::Prefix("/".to_string()),
+                handler: HandlerConfig::Proxy {
+                    upstream: "backend".to_string(),
+                    preserve_host: None,
+                    strip_prefix: None,
+                    proxy_set_headers: std::collections::HashMap::new(),
+                },
+                allow_cidrs: Vec::new(),
+                deny_cidrs: Vec::new(),
+                requests_per_sec: None,
+                burst: None,
+            }],
+            servers: Vec::new(),
+        };
+
+        let snapshot = compile(config).expect("legacy request_timeout_secs should still compile");
+        let proxy = match &snapshot.default_vhost.routes[0].action {
+            rginx_core::RouteAction::Proxy(proxy) => proxy,
+            _ => panic!("expected proxy route"),
+        };
+
+        assert_eq!(proxy.upstream.request_timeout, Duration::from_secs(12));
+        assert_eq!(proxy.upstream.connect_timeout, Duration::from_secs(12));
+        assert_eq!(proxy.upstream.write_timeout, Duration::from_secs(12));
+        assert_eq!(proxy.upstream.idle_timeout, Duration::from_secs(12));
+        assert_eq!(proxy.upstream.pool_idle_timeout, None);
+        assert_eq!(proxy.upstream.pool_max_idle_per_host, usize::MAX);
+        assert_eq!(
+            proxy.upstream.http2_keep_alive_timeout,
+            Duration::from_secs(DEFAULT_UPSTREAM_HTTP2_KEEP_ALIVE_TIMEOUT_SECS)
+        );
+    }
+
+    #[test]
+    fn compile_uses_default_pool_idle_timeout() {
+        let config = Config {
+            runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
+            server: ServerConfig {
+                listen: "127.0.0.1:8080".to_string(),
+                server_names: Vec::new(),
+                trusted_proxies: Vec::new(),
+                keep_alive: None,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout_secs: None,
+                tls: None,
+            },
+            upstreams: vec![UpstreamConfig {
+                name: "backend".to_string(),
+                peers: vec![UpstreamPeerConfig {
+                    url: "https://example.com".to_string(),
+                    weight: 1,
+                    backup: false,
+                }],
+                tls: None,
+                protocol: UpstreamProtocolConfig::Auto,
+                load_balance: UpstreamLoadBalanceConfig::RoundRobin,
+                server_name_override: None,
+                request_timeout_secs: None,
+                connect_timeout_secs: None,
+                read_timeout_secs: None,
+                write_timeout_secs: None,
+                idle_timeout_secs: None,
+                pool_idle_timeout_secs: None,
+                pool_max_idle_per_host: None,
+                tcp_keepalive_secs: None,
+                tcp_nodelay: None,
+                http2_keep_alive_interval_secs: None,
+                http2_keep_alive_timeout_secs: None,
+                http2_keep_alive_while_idle: None,
+                max_replayable_request_body_bytes: None,
+                unhealthy_after_failures: None,
+                unhealthy_cooldown_secs: None,
+                health_check_path: None,
+                health_check_interval_secs: None,
+                health_check_timeout_secs: None,
+                healthy_successes_required: None,
+            }],
+            locations: vec![LocationConfig {
+                matcher: MatcherConfig::Prefix("/".to_string()),
+                handler: HandlerConfig::Proxy {
+                    upstream: "backend".to_string(),
+                    preserve_host: None,
+                    strip_prefix: None,
+                    proxy_set_headers: std::collections::HashMap::new(),
+                },
+                allow_cidrs: Vec::new(),
+                deny_cidrs: Vec::new(),
+                requests_per_sec: None,
+                burst: None,
+            }],
+            servers: Vec::new(),
+        };
+
+        let snapshot = compile(config).expect("defaults should compile");
+        let proxy = match &snapshot.default_vhost.routes[0].action {
+            rginx_core::RouteAction::Proxy(proxy) => proxy,
+            _ => panic!("expected proxy route"),
+        };
+
+        assert_eq!(
+            proxy.upstream.pool_idle_timeout,
+            Some(Duration::from_secs(DEFAULT_UPSTREAM_POOL_IDLE_TIMEOUT_SECS))
+        );
     }
 
     #[test]
@@ -694,11 +1327,27 @@ mod tests {
             },
             upstreams: vec![UpstreamConfig {
                 name: "dev-backend".to_string(),
-                peers: vec![UpstreamPeerConfig { url: "https://localhost:9443".to_string() }],
+                peers: vec![UpstreamPeerConfig {
+                    url: "https://localhost:9443".to_string(),
+                    weight: 1,
+                    backup: false,
+                }],
                 tls: Some(UpstreamTlsConfig::CustomCa { ca_cert_path: "dev-ca.pem".to_string() }),
                 protocol: UpstreamProtocolConfig::Http2,
+                load_balance: UpstreamLoadBalanceConfig::RoundRobin,
                 server_name_override: Some("dev.internal".to_string()),
                 request_timeout_secs: Some(5),
+                connect_timeout_secs: None,
+                read_timeout_secs: None,
+                write_timeout_secs: None,
+                idle_timeout_secs: None,
+                pool_idle_timeout_secs: None,
+                pool_max_idle_per_host: None,
+                tcp_keepalive_secs: None,
+                tcp_nodelay: None,
+                http2_keep_alive_interval_secs: None,
+                http2_keep_alive_timeout_secs: None,
+                http2_keep_alive_while_idle: None,
                 max_replayable_request_body_bytes: Some(1024),
                 unhealthy_after_failures: Some(3),
                 unhealthy_cooldown_secs: Some(15),
@@ -771,11 +1420,27 @@ mod tests {
             },
             upstreams: vec![UpstreamConfig {
                 name: "secure-backend".to_string(),
-                peers: vec![UpstreamPeerConfig { url: "https://[::1]:9443".to_string() }],
+                peers: vec![UpstreamPeerConfig {
+                    url: "https://[::1]:9443".to_string(),
+                    weight: 1,
+                    backup: false,
+                }],
                 tls: None,
                 protocol: UpstreamProtocolConfig::Auto,
+                load_balance: UpstreamLoadBalanceConfig::RoundRobin,
                 server_name_override: Some("[::1]".to_string()),
                 request_timeout_secs: None,
+                connect_timeout_secs: None,
+                read_timeout_secs: None,
+                write_timeout_secs: None,
+                idle_timeout_secs: None,
+                pool_idle_timeout_secs: None,
+                pool_max_idle_per_host: None,
+                tcp_keepalive_secs: None,
+                tcp_nodelay: None,
+                http2_keep_alive_interval_secs: None,
+                http2_keep_alive_timeout_secs: None,
+                http2_keep_alive_while_idle: None,
                 max_replayable_request_body_bytes: None,
                 unhealthy_after_failures: None,
                 unhealthy_cooldown_secs: None,
@@ -826,11 +1491,27 @@ mod tests {
             },
             upstreams: vec![UpstreamConfig {
                 name: "secure-backend".to_string(),
-                peers: vec![UpstreamPeerConfig { url: "https://127.0.0.1:9443".to_string() }],
+                peers: vec![UpstreamPeerConfig {
+                    url: "https://127.0.0.1:9443".to_string(),
+                    weight: 1,
+                    backup: false,
+                }],
                 tls: None,
                 protocol: UpstreamProtocolConfig::Auto,
+                load_balance: UpstreamLoadBalanceConfig::RoundRobin,
                 server_name_override: Some("bad name".to_string()),
                 request_timeout_secs: None,
+                connect_timeout_secs: None,
+                read_timeout_secs: None,
+                write_timeout_secs: None,
+                idle_timeout_secs: None,
+                pool_idle_timeout_secs: None,
+                pool_max_idle_per_host: None,
+                tcp_keepalive_secs: None,
+                tcp_nodelay: None,
+                http2_keep_alive_interval_secs: None,
+                http2_keep_alive_timeout_secs: None,
+                http2_keep_alive_while_idle: None,
                 max_replayable_request_body_bytes: None,
                 unhealthy_after_failures: None,
                 unhealthy_cooldown_secs: None,

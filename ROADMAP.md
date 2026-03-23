@@ -53,7 +53,7 @@
 | **gRPC 代理** | ❌ | 上游 h2 基础层已具备，但 trailer / streaming 等 gRPC 语义尚未补齐。 |
 | **Proxy Protocol** | ❌ | 暂不支持。 |
 | **上游 TLS** | ✅ | 支持系统根证书、自定义 CA、Insecure。 |
-| **上游连接池** | 🚧 | Hyper 自动管理，但缺乏精细控制（如 idle 数量）。 |
+| **上游连接池** | ✅ | 支持 idle timeout 和每 host idle 连接数上限。 |
 
 ### 4.1 请求/响应处理
 
@@ -72,12 +72,12 @@
 | Nginx 能力 | Rginx 状态 | 说明 / 差异 |
 | :--- | :--- | :--- |
 | **Round Robin** | ✅ | 默认策略。 |
-| **Weight** | ❌ | Peer 元数据缺失。 |
-| **Ip Hash** | ❌ | **P1 优先**。 |
-| **Least Conn** | ❌ | 计划中。 |
+| **Weight** | ✅ | 支持 `peer.weight`，适用于 `round_robin`、`ip_hash`、`least_conn`。 |
+| **Ip Hash** | ✅ | 支持基于解析后客户端 IP 的稳定 peer 选择，并在 peer 不健康时顺序回退。 |
+| **Least Conn** | ✅ | 支持按 peer 当前活跃请求数选择最空闲节点；活跃数相同时按配置顺序选择。 |
 | **被动健康检查** | ✅ | 支持失败计数与冷却。 |
 | **主动健康检查** | ✅ | 支持定期 HTTP 探测。 |
-| **Backup Peer** | ❌ | Peer 元数据缺失。 |
+| **Backup Peer** | ✅ | 支持 `peer.backup`，仅在主 peer 不可用时接管流量。 |
 
 ## 6. 流量治理
 
@@ -87,13 +87,13 @@
 | **IP 黑白名单** | ✅ | 支持 CIDR allow/deny。 |
 | **最大连接数** | ✅ | Server 级别限制。 |
 | **请求体大小限制** | ✅ | `max_request_body_bytes`。 |
-| **超时控制** | 🚧 | 部分支持（Header read, Upstream timeout）。缺乏精细化配置。 |
+| **超时控制** | 🚧 | 已支持 `header_read_timeout` 和 upstream `connect/read/write/idle` 精细化配置；客户端侧超时仍待补齐。 |
 
 ## 7. 内容服务
 
 | Nginx 能力 | Rginx 状态 | 说明 / 差异 |
 | :--- | :--- | :--- |
-| **静态文件** | ✅ | 支持 `root` 指令，`try_files` 回退，MIME 类型检测。 |
+| **静态文件** | ✅ | 支持 `root`、`try_files`、MIME 类型、`HEAD`、单段 `Range`。 |
 | **Index** | ✅ | 支持 `index` 指令指定默认索引文件。 |
 | **Autoindex** | ❌ | 暂不支持目录列表。 |
 | **Gzip/Brotli** | ❌ | 计划中。 |
@@ -102,11 +102,11 @@
 
 | Nginx 能力 | Rginx 状态 | 说明 / 差异 |
 | :--- | :--- | :--- |
-| **Access Log** | 🚧 | 仅通过 Tracing 输出，缺乏结构化/自定义格式日志。 |
+| **Access Log** | 🚧 | 通过 Tracing 输出结构化字段，已包含 `request_id` / `host` / `vhost` / `route`，但仍缺自定义格式。 |
 | **Error Log** | ✅ | Tracing 实现。 |
 | **Prometheus Metrics** | ✅ | 基础指标齐全。 |
 | **Status Page** | ✅ | 提供 JSON 状态接口。 |
-| **请求 ID** | ❌ | 缺乏 `X-Request-ID` 贯通。 |
+| **请求 ID** | ✅ | 支持复用或自动生成 `X-Request-ID`，并贯通下游响应、upstream 转发和 access log。 |
 
 ---
 

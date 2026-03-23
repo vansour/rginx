@@ -78,16 +78,16 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
             server_task.abort();
             health_task.abort();
 
-            if let Err(error) = server_task.await {
-                if !error.is_cancelled() {
-                    tracing::warn!(%error, "http task failed after abort");
-                }
+            if let Err(error) = server_task.await
+                && !error.is_cancelled()
+            {
+                tracing::warn!(%error, "http task failed after abort");
             }
 
-            if let Err(error) = health_task.await {
-                if !error.is_cancelled() {
-                    tracing::warn!(%error, "active health task failed after abort");
-                }
+            if let Err(error) = health_task.await
+                && !error.is_cancelled()
+            {
+                tracing::warn!(%error, "active health task failed after abort");
             }
 
             state.http.abort_background_tasks().await;

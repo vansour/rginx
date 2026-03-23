@@ -16,16 +16,20 @@
 
 - 基于 RON 配置文件启动反向代理
 - `Exact("/foo")` / `Prefix("/api")` 两种路由匹配
-- `Static` / `Proxy` / `Status` / `Metrics` 四种处理器
-- 多上游节点轮询转发
+- `Static` / `Proxy` / `File` / `Return` / `Status` / `Metrics` 六种处理器
+- 多上游节点轮询、加权与主备转发
+- 支持 `round_robin`、`ip_hash`、`least_conn` 三种 upstream 选择策略，以及 peer `weight` / `backup`
 - 幂等或可重放请求的上游重试
 - 入站 HTTP/2（TLS/ALPN）
 - 上游 HTTP/2（HTTPS/TLS + ALPN）
 - 支持 HTTP/1.1 `Upgrade` / WebSocket 透传
+- 上游细粒度超时、连接池和 TCP/HTTP2 keepalive 调优
 - 被动健康检查与主动健康检查
 - 按路由做 CIDR 访问控制
 - 按路由做请求速率限制
 - 支持 `trusted_proxies`，可从 `X-Forwarded-For` 解析真实客户端 IP
+- 自动透传或生成 `X-Request-ID`
+- 静态文件支持 `HEAD`、单段 `Range` 和 `206 Partial Content`
 - 入站 TLS 终止：`server.tls`
 - 出站 TLS 模式：
   - `NativeRoots`
@@ -62,10 +66,28 @@ cargo build -p rginx
 仓库已自带几个示例配置：
 
 - `configs/rginx.ron`
+- `configs/rginx-ip-hash-example.ron`
+- `configs/rginx-least-conn-example.ron`
+- `configs/rginx-weighted-example.ron`
+- `configs/rginx-backup-example.ron`
 - `configs/rginx-https-example.ron`
 - `configs/rginx-https-custom-ca-example.ron`
 - `configs/rginx-https-insecure-example.ron`
 - `configs/rginx-vhosts-example.ron`
+
+## Wiki
+
+仓库内已经补了一套本地 wiki，入口见：
+
+- [wiki/Home.md](wiki/Home.md)
+
+推荐阅读顺序：
+
+- [wiki/Quick-Start.md](wiki/Quick-Start.md)
+- [wiki/Configuration.md](wiki/Configuration.md)
+- [wiki/Routing-and-Handlers.md](wiki/Routing-and-Handlers.md)
+- [wiki/Upstreams.md](wiki/Upstreams.md)
+- [wiki/Operations.md](wiki/Operations.md)
 
 ## 配置结构
 
@@ -129,10 +151,24 @@ Config(
 
 - `name`
 - `peers`
+- `peers[].weight`
+- `peers[].backup`
 - `tls`
 - `protocol`
+- `load_balance`
 - `server_name_override`
 - `request_timeout_secs`
+- `connect_timeout_secs`
+- `read_timeout_secs`
+- `write_timeout_secs`
+- `idle_timeout_secs`
+- `pool_idle_timeout_secs`
+- `pool_max_idle_per_host`
+- `tcp_keepalive_secs`
+- `tcp_nodelay`
+- `http2_keep_alive_interval_secs`
+- `http2_keep_alive_timeout_secs`
+- `http2_keep_alive_while_idle`
 - `max_replayable_request_body_bytes`
 - `unhealthy_after_failures`
 - `unhealthy_cooldown_secs`
@@ -144,10 +180,20 @@ Config(
 说明：
 
 - `peers[].url` 目前只支持 `http://` 和 `https://`
+- `peers[].weight` 默认为 `1`，越大表示该 peer 希望承担更多流量
+- `peers[].backup` 默认为 `false`；设为 `true` 后，该 peer 只会在主 peer 不可用时接管流量
 - `protocol` 默认为 `Auto`
+- `load_balance` 默认为 `RoundRobin`
 - `protocol: Auto` 时，`https://` peer 会通过 ALPN 自动协商 HTTP/2；未协商到 `h2` 时回落到 HTTP/1.1
 - `protocol: Http1` 会固定使用 HTTP/1.1
 - `protocol: Http2` 会要求 upstream 使用 HTTP/2；当前只支持 `https://` peer，经 TLS/ALPN 建链，明文 `h2c` upstream 仍未支持
+- `load_balance: RoundRobin` 会按 peer `weight` 做加权轮询
+- `load_balance: IpHash` 会基于解析后的客户端 IP 固定主 peer，不同 peer 的命中比例会按 `weight` 倾斜；当主 peer 不健康时会按加权顺序回退
+- `load_balance: LeastConn` 会结合当前活跃请求数和 peer `weight` 选择更空闲的 peer
+- `backup: true` 的 peer 不参与正常主流量分配；只有主 peer 不可用时才会启用，并可作为可重试请求的后备候选
+- `request_timeout_secs` 仍可用，作为兼容字段；未单独设置 `connect/read/write/idle` 时会回退到它
+- `read_timeout_secs` 是推荐的新写法，对应上游响应读取超时
+- `pool_idle_timeout_secs: Some(0)` 表示禁用 idle 连接过期
 - `health_check_path` 启用主动健康检查
 - 证书、私钥、自定义 CA 等相对路径，都是相对配置文件所在目录解析
 
@@ -156,7 +202,7 @@ Config(
 每个路由可配置：
 
 - `matcher`: `Exact("/foo")` 或 `Prefix("/api")`
-- `handler`: `Static` / `Proxy` / `Status` / `Metrics`
+- `handler`: `Static` / `Proxy` / `File` / `Return` / `Status` / `Metrics`
 - `allow_cidrs`
 - `deny_cidrs`
 - `requests_per_sec`
@@ -186,7 +232,7 @@ Config(
                     url: "http://127.0.0.1:9000",
                 ),
             ],
-            request_timeout_secs: Some(30),
+            read_timeout_secs: Some(30),
         ),
     ],
     locations: [
@@ -232,7 +278,7 @@ locations: [
 - 虚拟主机数 `vhost_count`
 - 路由总数 `route_count`
 - 上游数 `upstream_count`
-- 每个上游的请求超时、主动健康检查参数、每个 peer 的健康状态
+- 每个上游的负载均衡策略、连接/读写/空闲超时、连接池参数、TCP/HTTP2 keepalive 参数、主动健康检查参数、每个 peer 的 `weight` / `backup`、健康状态与当前活跃请求数
 
 其中 `route_count` 是默认虚拟主机和所有额外虚拟主机路由数的总和。
 
@@ -413,6 +459,158 @@ UpstreamConfig(
 )
 ```
 
+### 8. 上游超时与连接池
+
+```ron
+UpstreamConfig(
+    name: "backend",
+    peers: [
+        UpstreamPeerConfig(
+            url: "https://api.internal.example",
+        ),
+    ],
+    protocol: Auto,
+    connect_timeout_secs: Some(3),
+    read_timeout_secs: Some(30),
+    write_timeout_secs: Some(30),
+    idle_timeout_secs: Some(60),
+    pool_idle_timeout_secs: Some(90),
+    pool_max_idle_per_host: Some(64),
+    tcp_keepalive_secs: Some(30),
+    tcp_nodelay: Some(true),
+    http2_keep_alive_interval_secs: Some(15),
+    http2_keep_alive_timeout_secs: Some(20),
+    http2_keep_alive_while_idle: Some(true),
+)
+```
+
+常见建议：
+
+- `connect_timeout_secs` 用较小值，尽快切换到其他 peer
+- `read_timeout_secs` / `write_timeout_secs` 用于限制慢 upstream
+- `idle_timeout_secs` 用于限制长时间无进展的响应流
+- `pool_idle_timeout_secs` 控制连接池内空闲连接保留时长
+- `pool_max_idle_per_host` 控制每个 upstream host 的最大空闲连接数
+
+### 9. 基于客户端 IP 的粘性转发
+
+```ron
+server: ServerConfig(
+    listen: "0.0.0.0:8080",
+    trusted_proxies: ["127.0.0.1/32"],
+),
+
+upstreams: [
+    UpstreamConfig(
+        name: "backend",
+        peers: [
+            UpstreamPeerConfig(
+                url: "http://127.0.0.1:9000",
+            ),
+            UpstreamPeerConfig(
+                url: "http://127.0.0.1:9001",
+            ),
+        ],
+        load_balance: IpHash,
+    ),
+],
+```
+
+适用场景：
+
+- 需要把同一客户端尽量打到同一台应用节点
+- 上游本身没有共享 session，或者共享成本较高
+- `Rginx` 前面还有 LB / CDN 时，要正确配置 `trusted_proxies`，否则 hash 的会是前置代理 IP
+
+### 10. 最少连接数转发
+
+```ron
+upstreams: [
+    UpstreamConfig(
+        name: "backend",
+        peers: [
+            UpstreamPeerConfig(
+                url: "http://127.0.0.1:9000",
+            ),
+            UpstreamPeerConfig(
+                url: "http://127.0.0.1:9001",
+            ),
+        ],
+        load_balance: LeastConn,
+    ),
+],
+```
+
+适用场景：
+
+- 上游请求耗时差异较大，希望把新请求优先打到当前更空闲的 peer
+- 有长轮询、流式响应或升级连接，不适合简单轮询
+- 需要比 `RoundRobin` 更贴近真实负载的分配方式
+
+### 11. 加权 upstream
+
+```ron
+upstreams: [
+    UpstreamConfig(
+        name: "backend",
+        peers: [
+            UpstreamPeerConfig(
+                url: "http://127.0.0.1:9000",
+                weight: 3,
+            ),
+            UpstreamPeerConfig(
+                url: "http://127.0.0.1:9001",
+                weight: 1,
+            ),
+        ],
+    ),
+],
+```
+
+适用场景：
+
+- 新老节点并存时，希望大部分流量先打到容量更高的新节点
+- 需要按机器规格差异分流，例如 8C 机器比 2C 机器承担更多请求
+- 希望在不改业务服务发现的情况下，直接在入口层做简单容量倾斜
+
+### 12. Backup upstream
+
+```ron
+upstreams: [
+    UpstreamConfig(
+        name: "backend",
+        peers: [
+            UpstreamPeerConfig(
+                url: "http://127.0.0.1:9000",
+            ),
+            UpstreamPeerConfig(
+                url: "http://127.0.0.1:9001",
+                backup: true,
+            ),
+        ],
+        request_timeout_secs: Some(1),
+        unhealthy_after_failures: Some(1),
+        unhealthy_cooldown_secs: Some(30),
+    ),
+],
+```
+
+适用场景：
+
+- 主节点集群正常时不希望流量打到备用节点
+- 主节点超时或进入冷却后，希望自动切到灾备节点
+- 需要在入口层做简单主备切换，而不是把备机长期纳入常规负载均衡
+
+### 13. 请求 ID
+
+`Rginx` 会优先复用入站请求自带的 `X-Request-ID`；如果客户端没有带，它会自动生成类似 `rginx-0000000000000001` 的 ID，并同时：
+
+- 透传给 upstream
+- 回写到下游响应头
+- 记录到 access log
+
+这样可以把边缘日志、应用日志和调用链串起来。
+
 ## 维护与发版
 
 ### 日常 CI
@@ -452,7 +650,7 @@ tag 被 push 之后，GitHub Actions 会自动：
 - 重新执行格式检查和全量测试
 - 构建多架构发布产物
 - 自动创建或更新同名 GitHub Release
-- 在 Release 页面写入当前 tag 对应的 commit、上一个 tag、compare 链接和本次包含的 commit 列表
+- 在 Release 页面写入当前 tag 对应的 commit、上一个 tag、compare 链接和本次发布的具体 changelog
 - 上传二进制压缩包和 `SHA256SUMS.txt`
 
 当前发布矩阵：
@@ -480,7 +678,12 @@ cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 2. 确认工作区没有误提交的临时改动。
 3. 创建语义化版本 tag，例如 `v1.2.3` 或 `v1.2.3-rc.1`。
 4. push tag，等待 `release.yml` 完成。
-5. 到 GitHub Release 页面检查生成的 notes、commit 链接和各平台产物是否齐全。
+5. 到 GitHub Release 页面检查生成的 changelog、commit 链接和各平台产物是否齐全。
+
+说明：
+
+- 即使这是仓库的第一个 tag，没有“上一个版本”可比较，release workflow 也会基于当前 tag 所包含的提交历史自动写出 `## Changelog`
+- 如果存在上一个 tag，`## Changelog` 会列出从上一个 tag 到当前 tag 的具体提交
 
 产物命名规则示例：
 

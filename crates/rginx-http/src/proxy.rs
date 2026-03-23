@@ -9,22 +9,23 @@ use std::time::Instant;
 
 use bytes::{Bytes, BytesMut};
 use http::header::{
-    HeaderMap, HeaderName, HeaderValue, CONNECTION, HOST, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION,
+    CONNECTION, HOST, HeaderMap, HeaderName, HeaderValue, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION,
     TE, TRAILER, TRANSFER_ENCODING, UPGRADE,
 };
 use http::{Method, Request, Response, StatusCode, Uri, Version};
 use http_body_util::BodyExt;
-use hyper::body::Body as _;
-use hyper::body::Incoming;
+use hyper::body::{Body as _, Frame, Incoming, SizeHint};
 use hyper::upgrade::OnUpgrade;
 use hyper_rustls::{
     ConfigBuilderExt, FixedServerNameResolver, HttpsConnector, HttpsConnectorBuilder,
 };
-use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
-use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use pin_project_lite::pin_project;
 use rginx_core::{
-    ConfigSnapshot, Error, ProxyTarget, Upstream, UpstreamPeer, UpstreamProtocol, UpstreamTls,
+    ConfigSnapshot, Error, ProxyTarget, Upstream, UpstreamLoadBalance, UpstreamPeer,
+    UpstreamProtocol, UpstreamTls,
 };
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -33,7 +34,7 @@ use serde::Serialize;
 use tokio::io::copy_bidirectional;
 
 use crate::client_ip::ClientAddress;
-use crate::handler::{full_body, BoxError, HttpBody, HttpResponse};
+use crate::handler::{BoxError, HttpBody, HttpResponse, full_body};
 use crate::metrics::Metrics;
 use crate::state::SharedState;
 use crate::timeout::IdleTimeoutBody;
@@ -65,8 +66,8 @@ impl PrepareRequestError {
         Self::PayloadTooLarge { max_request_body_bytes }
     }
 
-    fn other(error: impl std::error::Error + Send + Sync + 'static) -> Self {
-        Self::Other(Box::new(error))
+    fn boxed(error: BoxError) -> Self {
+        Self::Other(error)
     }
 }
 
@@ -125,6 +126,7 @@ struct ActiveHealthState {
 struct PeerHealthState {
     passive: PassiveHealthState,
     active: ActiveHealthState,
+    active_requests: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,7 +155,10 @@ struct SelectedPeers {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct PeerStatusSnapshot {
     pub url: String,
+    pub weight: u32,
+    pub backup: bool,
     pub healthy: bool,
+    pub active_requests: u64,
     pub passive_consecutive_failures: u32,
     pub passive_cooldown_remaining_ms: Option<u64>,
     pub active_unhealthy: bool,
@@ -165,6 +170,14 @@ struct UpstreamClientProfile {
     tls: UpstreamTls,
     protocol: UpstreamProtocol,
     server_name_override: Option<String>,
+    connect_timeout: Duration,
+    pool_idle_timeout: Option<Duration>,
+    pool_max_idle_per_host: usize,
+    tcp_keepalive: Option<Duration>,
+    tcp_nodelay: bool,
+    http2_keep_alive_interval: Option<Duration>,
+    http2_keep_alive_timeout: Duration,
+    http2_keep_alive_while_idle: bool,
 }
 
 impl UpstreamClientProfile {
@@ -173,6 +186,14 @@ impl UpstreamClientProfile {
             tls: upstream.tls.clone(),
             protocol: upstream.protocol,
             server_name_override: upstream.server_name_override.clone(),
+            connect_timeout: upstream.connect_timeout,
+            pool_idle_timeout: upstream.pool_idle_timeout,
+            pool_max_idle_per_host: upstream.pool_max_idle_per_host,
+            tcp_keepalive: upstream.tcp_keepalive,
+            tcp_nodelay: upstream.tcp_nodelay,
+            http2_keep_alive_interval: upstream.http2_keep_alive_interval,
+            http2_keep_alive_timeout: upstream.http2_keep_alive_timeout,
+            http2_keep_alive_while_idle: upstream.http2_keep_alive_while_idle,
         }
     }
 }
@@ -219,8 +240,13 @@ impl ProxyClients {
         })
     }
 
-    fn select_peers(&self, upstream: &Upstream, limit: usize) -> SelectedPeers {
-        self.health.select_peers(upstream, limit)
+    fn select_peers(
+        &self,
+        upstream: &Upstream,
+        client_ip: std::net::IpAddr,
+        limit: usize,
+    ) -> SelectedPeers {
+        self.health.select_peers(upstream, client_ip, limit)
     }
 
     fn record_peer_success(&self, upstream_name: &str, peer_url: &str) {
@@ -244,11 +270,17 @@ impl ProxyClients {
         self.health.record_active_failure(upstream_name, peer_url)
     }
 
+    fn track_active_request(&self, upstream_name: &str, peer_url: &str) -> ActivePeerGuard {
+        self.health.track_active_request(upstream_name, peer_url)
+    }
+
     pub(crate) fn peer_statuses(&self, upstream: &Upstream) -> Vec<PeerStatusSnapshot> {
         upstream
             .peers
             .iter()
-            .map(|peer| self.health.snapshot(&upstream.name, &peer.url, &peer.url))
+            .map(|peer| {
+                self.health.snapshot(&upstream.name, &peer.url, &peer.url, peer.weight, peer.backup)
+            })
             .collect()
     }
 }
@@ -281,7 +313,126 @@ impl PeerHealthRegistry {
         Self { policies: Arc::new(policies), peers: Arc::new(peers) }
     }
 
-    fn select_peers(&self, upstream: &Upstream, limit: usize) -> SelectedPeers {
+    fn select_peers(
+        &self,
+        upstream: &Upstream,
+        client_ip: std::net::IpAddr,
+        limit: usize,
+    ) -> SelectedPeers {
+        if upstream.load_balance == UpstreamLoadBalance::LeastConn {
+            return self.select_peers_by_least_conn(upstream, limit);
+        }
+
+        if !upstream.has_primary_peers() {
+            return self.select_peers_in_pool(upstream, client_ip, limit, true);
+        }
+
+        let primary = self.select_peers_in_pool(upstream, client_ip, limit, false);
+        if limit == 0 {
+            return SelectedPeers { peers: Vec::new(), skipped_unhealthy: 0 };
+        }
+
+        if primary.peers.is_empty() {
+            return merge_selected_peers(
+                primary,
+                self.select_peers_in_pool(upstream, client_ip, limit, true),
+            );
+        }
+
+        if primary.peers.len() == limit {
+            return primary;
+        }
+
+        let remaining = limit - primary.peers.len();
+        merge_selected_peers(
+            primary,
+            self.select_peers_in_pool(upstream, client_ip, remaining, true),
+        )
+    }
+
+    fn select_peers_by_least_conn(&self, upstream: &Upstream, limit: usize) -> SelectedPeers {
+        if limit == 0 {
+            return SelectedPeers { peers: Vec::new(), skipped_unhealthy: 0 };
+        }
+
+        if !upstream.has_primary_peers() {
+            return self.select_peers_by_least_conn_in_pool(upstream, limit, true);
+        }
+
+        let primary = self.select_peers_by_least_conn_in_pool(upstream, limit, false);
+        if primary.peers.is_empty() {
+            return merge_selected_peers(
+                primary,
+                self.select_peers_by_least_conn_in_pool(upstream, limit, true),
+            );
+        }
+
+        if primary.peers.len() == limit {
+            return primary;
+        }
+
+        let remaining = limit - primary.peers.len();
+        merge_selected_peers(
+            primary,
+            self.select_peers_by_least_conn_in_pool(upstream, remaining, true),
+        )
+    }
+
+    fn select_peers_in_pool(
+        &self,
+        upstream: &Upstream,
+        client_ip: std::net::IpAddr,
+        limit: usize,
+        backup: bool,
+    ) -> SelectedPeers {
+        let ordered = if backup {
+            upstream.backup_peers_for_client_ip(client_ip, upstream.peers.len())
+        } else {
+            upstream.primary_peers_for_client_ip(client_ip, upstream.peers.len())
+        };
+
+        self.select_available_peers(upstream, ordered, limit)
+    }
+
+    fn select_peers_by_least_conn_in_pool(
+        &self,
+        upstream: &Upstream,
+        limit: usize,
+        backup: bool,
+    ) -> SelectedPeers {
+        let mut available = Vec::new();
+        let mut skipped_unhealthy = 0;
+
+        for (order, peer) in upstream.peers.iter().cloned().enumerate() {
+            if peer.backup != backup {
+                continue;
+            }
+
+            if self.is_available(&upstream.name, &peer.url) {
+                available.push((self.active_requests(&upstream.name, &peer.url), order, peer));
+            } else {
+                skipped_unhealthy += 1;
+            }
+        }
+
+        available.sort_by(|left, right| {
+            projected_least_conn_load(left.0, left.2.weight, right.0, right.2.weight)
+                .then(right.2.weight.cmp(&left.2.weight))
+                .then(left.1.cmp(&right.1))
+        });
+
+        SelectedPeers {
+            peers: available.into_iter().take(limit).map(|(_, _, peer)| peer).collect(),
+            skipped_unhealthy,
+        }
+    }
+
+    fn select_available_peers(
+        &self,
+        upstream: &Upstream,
+        ordered: Vec<UpstreamPeer>,
+        limit: usize,
+    ) -> SelectedPeers {
         if limit == 0 {
             return SelectedPeers { peers: Vec::new(), skipped_unhealthy: 0 };
         }
@@ -289,7 +440,7 @@ impl PeerHealthRegistry {
         let mut selected = Vec::new();
         let mut skipped_unhealthy = 0;
 
-        for peer in upstream.next_peers(upstream.peers.len()) {
+        for peer in ordered {
             if self.is_available(&upstream.name, &peer.url) {
                 selected.push(peer);
                 if selected.len() == limit {
@@ -342,6 +493,19 @@ impl PeerHealthRegistry {
         self.get(upstream_name, peer_url).is_some_and(|health| health.record_active_failure())
     }
 
+    fn track_active_request(&self, upstream_name: &str, peer_url: &str) -> ActivePeerGuard {
+        let peer = self.get(upstream_name, peer_url).cloned();
+        if let Some(ref peer) = peer {
+            peer.increment_active_requests();
+        }
+
+        ActivePeerGuard { peer }
+    }
+
+    fn active_requests(&self, upstream_name: &str, peer_url: &str) -> u64 {
+        self.get(upstream_name, peer_url).map(|health| health.active_requests()).unwrap_or(0)
+    }
+
     fn get(&self, upstream_name: &str, peer_url: &str) -> Option<&Arc<PeerHealth>> {
         self.peers.get(&PeerHealthKey {
             upstream_name: upstream_name.to_string(),
@@ -354,12 +518,17 @@ impl PeerHealthRegistry {
         upstream_name: &str,
         peer_url: &str,
         peer_display_url: &str,
+        peer_weight: u32,
+        peer_backup: bool,
     ) -> PeerStatusSnapshot {
         self.get(upstream_name, peer_url)
-            .map(|health| health.snapshot(peer_display_url))
+            .map(|health| health.snapshot(peer_display_url, peer_weight, peer_backup))
             .unwrap_or_else(|| PeerStatusSnapshot {
                 url: peer_display_url.to_string(),
+                weight: peer_weight,
+                backup: peer_backup,
                 healthy: true,
+                active_requests: 0,
                 passive_consecutive_failures: 0,
                 passive_cooldown_remaining_ms: None,
                 active_unhealthy: false,
@@ -428,7 +597,20 @@ impl PeerHealth {
         was_healthy
     }
 
-    fn snapshot(&self, url: &str) -> PeerStatusSnapshot {
+    fn increment_active_requests(&self) {
+        lock_peer_health(&self.state).active_requests += 1;
+    }
+
+    fn decrement_active_requests(&self) {
+        let mut state = lock_peer_health(&self.state);
+        state.active_requests = state.active_requests.saturating_sub(1);
+    }
+
+    fn active_requests(&self) -> u64 {
+        lock_peer_health(&self.state).active_requests
+    }
+
+    fn snapshot(&self, url: &str, weight: u32, backup: bool) -> PeerStatusSnapshot {
         let mut state = lock_peer_health(&self.state);
         let now = Instant::now();
 
@@ -445,7 +627,10 @@ impl PeerHealth {
 
         PeerStatusSnapshot {
             url: url.to_string(),
+            weight,
+            backup,
             healthy,
+            active_requests: state.active_requests,
             passive_consecutive_failures: state.passive.consecutive_failures,
             passive_cooldown_remaining_ms,
             active_unhealthy: state.active.unhealthy,
@@ -454,20 +639,104 @@ impl PeerHealth {
     }
 }
 
+struct ActivePeerGuard {
+    peer: Option<Arc<PeerHealth>>,
+}
+
+impl Drop for ActivePeerGuard {
+    fn drop(&mut self) {
+        if let Some(peer) = self.peer.take() {
+            peer.decrement_active_requests();
+        }
+    }
+}
+
+pin_project! {
+    struct ActivePeerBody<B> {
+        #[pin]
+        inner: B,
+        guard: Option<ActivePeerGuard>,
+    }
+}
+
+impl<B> ActivePeerBody<B> {
+    fn new(inner: B, guard: ActivePeerGuard) -> Self {
+        Self { inner, guard: Some(guard) }
+    }
+}
+
+impl<B> hyper::body::Body for ActivePeerBody<B>
+where
+    B: hyper::body::Body<Data = Bytes>,
+    B::Error: Into<BoxError>,
+{
+    type Data = Bytes;
+    type Error = BoxError;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        let mut this = self.project();
+        match this.inner.as_mut().poll_frame(cx) {
+            std::task::Poll::Ready(Some(Ok(frame))) => std::task::Poll::Ready(Some(Ok(frame))),
+            std::task::Poll::Ready(Some(Err(error))) => {
+                this.guard.take();
+                std::task::Poll::Ready(Some(Err(error.into())))
+            }
+            std::task::Poll::Ready(None) => {
+                this.guard.take();
+                std::task::Poll::Ready(None)
+            }
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.inner.size_hint()
+    }
+}
+
 fn lock_peer_health(state: &Mutex<PeerHealthState>) -> std::sync::MutexGuard<'_, PeerHealthState> {
     state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn merge_selected_peers(mut primary: SelectedPeers, secondary: SelectedPeers) -> SelectedPeers {
+    primary.skipped_unhealthy += secondary.skipped_unhealthy;
+    primary.peers.extend(secondary.peers);
+    primary
+}
+
+fn projected_least_conn_load(
+    left_active_requests: u64,
+    left_weight: u32,
+    right_active_requests: u64,
+    right_weight: u32,
+) -> std::cmp::Ordering {
+    let left = u128::from(left_active_requests.saturating_add(1)) * u128::from(right_weight.max(1));
+    let right =
+        u128::from(right_active_requests.saturating_add(1)) * u128::from(left_weight.max(1));
+    left.cmp(&right)
 }
 
 impl PreparedProxyRequest {
     async fn from_request(
         request: Request<Incoming>,
+        upstream_name: &str,
+        write_timeout: Duration,
         max_replayable_request_body_bytes: usize,
         max_request_body_bytes: Option<usize>,
     ) -> Result<Self, PrepareRequestError> {
         let (parts, body) = request.into_parts();
         let replayable = prepare_request_body(
+            upstream_name,
             &parts.method,
             body,
+            write_timeout,
             max_replayable_request_body_bytes,
             max_request_body_bytes,
         )
@@ -484,28 +753,25 @@ impl PreparedProxyRequest {
     fn build_for_peer(
         &mut self,
         peer: &UpstreamPeer,
-        upstream: &Upstream,
+        target: &ProxyTarget,
         client_address: &ClientAddress,
         forwarded_proto: &str,
-        preserve_host: bool,
-        strip_prefix: Option<&str>,
-        proxy_set_headers: &[(HeaderName, HeaderValue)],
     ) -> Result<Request<HttpBody>, Box<dyn std::error::Error + Send + Sync>> {
         let original_host = self.headers.get(HOST).cloned();
         let mut headers = self.headers.clone();
-        let uri = build_proxy_uri(peer, &self.uri, strip_prefix)?;
+        let uri = build_proxy_uri(peer, &self.uri, target.strip_prefix.as_deref())?;
         sanitize_request_headers(
             &mut headers,
             &peer.authority,
             original_host,
             client_address,
             forwarded_proto,
-            preserve_host,
-            proxy_set_headers,
+            target.preserve_host,
+            &target.proxy_set_headers,
         )?;
 
         tracing::debug!(
-            upstream = %upstream.name,
+            upstream = %target.upstream.name,
             peer = %peer.url,
             uri = %uri,
             "forwarding request to upstream"
@@ -513,17 +779,19 @@ impl PreparedProxyRequest {
 
         let mut request = Request::new(match &mut self.body {
             PreparedRequestBody::Replayable(body) => full_body(body.clone()),
-            PreparedRequestBody::Streaming(body) => {
-                streaming_request_body(body.take().ok_or_else(|| {
+            PreparedRequestBody::Streaming(body) => streaming_request_body(
+                body.take().ok_or_else(|| {
                     std::io::Error::new(
                         std::io::ErrorKind::BrokenPipe,
                         "streaming request body is no longer available for replay",
                     )
-                })?)
-            }
+                })?,
+                target.upstream.write_timeout,
+                format!("upstream `{}` request body to `{}`", target.upstream.name, peer.url),
+            ),
         });
         *request.method_mut() = self.method.clone();
-        *request.version_mut() = upstream_request_version(upstream.protocol);
+        *request.version_mut() = upstream_request_version(target.upstream.protocol);
         *request.uri_mut() = uri;
         *request.headers_mut() = headers;
         Ok(request)
@@ -635,17 +903,19 @@ pub async fn probe_upstream_peer(
 pub async fn forward_request(
     state: SharedState,
     clients: ProxyClients,
-    metrics: Metrics,
     mut request: Request<Incoming>,
     target: &ProxyTarget,
     client_address: ClientAddress,
     downstream_proto: &str,
     max_request_body_bytes: Option<usize>,
+    request_id: &str,
 ) -> HttpResponse {
+    let metrics = state.metrics();
     let client = match clients.for_upstream(target.upstream.as_ref()) {
         Ok(client) => client,
         Err(error) => {
             tracing::warn!(
+                request_id = %request_id,
                 upstream = %target.upstream_name,
                 %error,
                 "failed to select proxy client"
@@ -665,6 +935,8 @@ pub async fn forward_request(
 
     let mut prepared_request = match PreparedProxyRequest::from_request(
         request,
+        &target.upstream_name,
+        target.upstream.write_timeout,
         target.upstream.max_replayable_request_body_bytes,
         max_request_body_bytes,
     )
@@ -673,6 +945,7 @@ pub async fn forward_request(
         Ok(request) => request,
         Err(PrepareRequestError::PayloadTooLarge { max_request_body_bytes }) => {
             tracing::info!(
+                request_id = %request_id,
                 upstream = %target.upstream_name,
                 max_request_body_bytes,
                 "rejecting request body that exceeds configured server limit"
@@ -683,6 +956,7 @@ pub async fn forward_request(
         }
         Err(error) => {
             tracing::warn!(
+                request_id = %request_id,
                 upstream = %target.upstream_name,
                 %error,
                 "failed to prepare upstream request"
@@ -696,11 +970,13 @@ pub async fn forward_request(
     let can_failover = prepared_request.can_failover();
     let selected = clients.select_peers(
         target.upstream.as_ref(),
+        client_address.client_ip,
         if can_failover { MAX_FAILOVER_ATTEMPTS } else { 1 },
     );
     let peers = selected.peers;
     if peers.is_empty() {
         tracing::warn!(
+            request_id = %request_id,
             upstream = %target.upstream_name,
             skipped_unhealthy = selected.skipped_unhealthy,
             "proxy route has no healthy peers available"
@@ -714,16 +990,14 @@ pub async fn forward_request(
     for (attempt_index, peer) in peers.iter().enumerate() {
         let upstream_request = match prepared_request.build_for_peer(
             peer,
-            target.upstream.as_ref(),
+            target,
             &client_address,
             downstream_proto,
-            target.preserve_host,
-            target.strip_prefix.as_deref(),
-            &target.proxy_set_headers,
         ) {
             Ok(request) => request,
             Err(error) => {
                 tracing::warn!(
+                    request_id = %request_id,
                     upstream = %target.upstream_name,
                     peer = %peer.url,
                     %error,
@@ -735,6 +1009,7 @@ pub async fn forward_request(
                 ));
             }
         };
+        let active_peer = clients.track_active_request(&target.upstream_name, &peer.url);
 
         match wait_for_upstream_stage(
             target.upstream.request_timeout,
@@ -749,6 +1024,7 @@ pub async fn forward_request(
                 metrics.record_upstream_request(&target.upstream_name, &peer.url, "success");
                 if attempt_index > 0 {
                     tracing::info!(
+                        request_id = %request_id,
                         upstream = %target.upstream_name,
                         peer = %peer.url,
                         attempt = attempt_index + 1,
@@ -774,14 +1050,23 @@ pub async fn forward_request(
                         upstream_upgrade,
                         target.upstream_name.clone(),
                         peer.url.clone(),
+                        active_peer,
                     ));
+                    return build_downstream_response(
+                        response,
+                        &target.upstream_name,
+                        &peer.url,
+                        target.upstream.idle_timeout,
+                        None,
+                    );
                 }
 
                 return build_downstream_response(
                     response,
                     &target.upstream_name,
                     &peer.url,
-                    target.upstream.request_timeout,
+                    target.upstream.idle_timeout,
+                    Some(active_peer),
                 );
             }
             Ok(Err(error)) if can_retry_peer_request(&prepared_request, &peers, attempt_index) => {
@@ -789,6 +1074,7 @@ pub async fn forward_request(
                 metrics.record_upstream_request(&target.upstream_name, &peer.url, "error");
                 let next_peer = &peers[attempt_index + 1];
                 tracing::warn!(
+                    request_id = %request_id,
                     upstream = %target.upstream_name,
                     failed_peer = %peer.url,
                     next_peer = %next_peer.url,
@@ -803,6 +1089,7 @@ pub async fn forward_request(
                 let failure = clients.record_peer_failure(&target.upstream_name, &peer.url);
                 metrics.record_upstream_request(&target.upstream_name, &peer.url, "error");
                 tracing::warn!(
+                    request_id = %request_id,
                     upstream = %target.upstream_name,
                     peer = %peer.url,
                     consecutive_failures = failure.consecutive_failures,
@@ -820,6 +1107,7 @@ pub async fn forward_request(
                 metrics.record_upstream_request(&target.upstream_name, &peer.url, "timeout");
                 let next_peer = &peers[attempt_index + 1];
                 tracing::warn!(
+                    request_id = %request_id,
                     upstream = %target.upstream_name,
                     failed_peer = %peer.url,
                     next_peer = %next_peer.url,
@@ -835,6 +1123,7 @@ pub async fn forward_request(
                 let failure = clients.record_peer_failure(&target.upstream_name, &peer.url);
                 metrics.record_upstream_request(&target.upstream_name, &peer.url, "timeout");
                 tracing::warn!(
+                    request_id = %request_id,
                     upstream = %target.upstream_name,
                     peer = %peer.url,
                     timeout_ms = target.upstream.request_timeout.as_millis() as u64,
@@ -912,11 +1201,15 @@ fn payload_too_large(message: String) -> HttpResponse {
 }
 
 async fn prepare_request_body(
+    upstream_name: &str,
     method: &Method,
     body: Incoming,
+    write_timeout: Duration,
     max_replayable_request_body_bytes: usize,
     max_request_body_bytes: Option<usize>,
 ) -> Result<PreparedRequestBody, PrepareRequestError> {
+    let body_timeout_label = format!("upstream `{upstream_name}` request body");
+
     if let Some(max_request_body_bytes) = max_request_body_bytes {
         if body.is_end_stream() {
             return Ok(PreparedRequestBody::Replayable(Bytes::new()));
@@ -926,7 +1219,11 @@ async fn prepare_request_body(
             return Err(PrepareRequestError::payload_too_large(max_request_body_bytes));
         }
 
-        let body = collect_request_body_with_limit(body, max_request_body_bytes).await?;
+        let body = collect_request_body_with_limit(
+            IdleTimeoutBody::new(body, write_timeout, body_timeout_label.clone()),
+            max_request_body_bytes,
+        )
+        .await?;
         return Ok(PreparedRequestBody::Replayable(body));
     }
 
@@ -940,21 +1237,30 @@ async fn prepare_request_body(
 
     match body.size_hint().upper() {
         Some(upper) if upper <= max_replayable_request_body_bytes as u64 => {
-            let body = body.collect().await.map_err(PrepareRequestError::other)?.to_bytes();
+            let body = IdleTimeoutBody::new(body, write_timeout, body_timeout_label)
+                .collect()
+                .await
+                .map_err(PrepareRequestError::boxed)?
+                .to_bytes();
             Ok(PreparedRequestBody::Replayable(body))
         }
         _ => Ok(PreparedRequestBody::Streaming(Some(body))),
     }
 }
 
-async fn collect_request_body_with_limit(
-    mut body: Incoming,
+async fn collect_request_body_with_limit<B>(
+    mut body: B,
     max_request_body_bytes: usize,
-) -> Result<Bytes, PrepareRequestError> {
+) -> Result<Bytes, PrepareRequestError>
+where
+    B: hyper::body::Body<Data = Bytes> + Unpin,
+    B::Error: Into<BoxError>,
+{
     let mut collected = BytesMut::new();
 
     while let Some(frame) = body.frame().await {
-        let frame = frame.map_err(PrepareRequestError::other)?;
+        let frame =
+            frame.map_err(|error| PrepareRequestError::boxed(Into::<BoxError>::into(error)))?;
         let Ok(data) = frame.into_data() else {
             continue;
         };
@@ -968,8 +1274,8 @@ async fn collect_request_body_with_limit(
     Ok(collected.freeze())
 }
 
-fn streaming_request_body(body: Incoming) -> HttpBody {
-    body.map_err(|error| -> BoxError { Box::new(error) }).boxed_unsync()
+fn streaming_request_body(body: Incoming, write_timeout: Duration, label: String) -> HttpBody {
+    IdleTimeoutBody::new(body, write_timeout, label).boxed_unsync()
 }
 
 fn is_idempotent_method(method: &Method) -> bool {
@@ -998,7 +1304,8 @@ fn build_downstream_response(
     response: Response<Incoming>,
     upstream_name: &str,
     peer_url: &str,
-    request_timeout: Duration,
+    idle_timeout: Duration,
+    active_peer: Option<ActivePeerGuard>,
 ) -> HttpResponse {
     let (mut parts, body) = response.into_parts();
     let preserve_upgrade = is_upgrade_response(parts.status, &parts.headers);
@@ -1008,7 +1315,11 @@ fn build_downstream_response(
         full_body(Bytes::new())
     } else {
         let label = format!("upstream `{upstream_name}` response body from `{peer_url}`");
-        IdleTimeoutBody::new(body, request_timeout, label).boxed_unsync()
+        ActivePeerBody::new(
+            IdleTimeoutBody::new(body, idle_timeout, label),
+            active_peer.expect("non-upgrade responses should track peer activity"),
+        )
+        .boxed_unsync()
     };
 
     Response::from_parts(parts, body)
@@ -1017,6 +1328,9 @@ fn build_downstream_response(
 fn build_client_for_profile(profile: &UpstreamClientProfile) -> Result<ProxyClient, Error> {
     let mut connector = HttpConnector::new();
     connector.enforce_http(false);
+    connector.set_connect_timeout(Some(profile.connect_timeout));
+    connector.set_keepalive(profile.tcp_keepalive);
+    connector.set_nodelay(profile.tcp_nodelay);
 
     let tls_config = build_tls_config(&profile.tls)?;
     let builder = HttpsConnectorBuilder::new().with_tls_config(tls_config).https_or_http();
@@ -1037,6 +1351,16 @@ fn build_client_for_profile(profile: &UpstreamClientProfile) -> Result<ProxyClie
     };
 
     let mut client_builder = Client::builder(TokioExecutor::new());
+    client_builder.timer(TokioTimer::new());
+    client_builder.pool_timer(TokioTimer::new());
+    client_builder.set_host(false);
+    client_builder.pool_idle_timeout(profile.pool_idle_timeout);
+    client_builder.pool_max_idle_per_host(profile.pool_max_idle_per_host);
+    if let Some(interval) = profile.http2_keep_alive_interval {
+        client_builder.http2_keep_alive_interval(interval);
+        client_builder.http2_keep_alive_timeout(profile.http2_keep_alive_timeout);
+        client_builder.http2_keep_alive_while_idle(profile.http2_keep_alive_while_idle);
+    }
     if profile.protocol == UpstreamProtocol::Http2 {
         client_builder.http2_only(true);
     }
@@ -1110,11 +1434,7 @@ fn build_proxy_uri(
     let path_and_query = if let Some(prefix) = strip_prefix {
         if let Some(stripped) = original_path.strip_prefix(prefix) {
             if stripped.is_empty() || stripped.starts_with('?') {
-                if stripped.is_empty() {
-                    "/"
-                } else {
-                    stripped
-                }
+                if stripped.is_empty() { "/" } else { stripped }
             } else if stripped.starts_with('/') {
                 stripped
             } else {
@@ -1256,6 +1576,7 @@ async fn proxy_upgraded_connection(
     upstream_upgrade: OnUpgrade,
     upstream_name: String,
     peer_url: String,
+    _active_peer: ActivePeerGuard,
 ) {
     let _guard = ActiveConnectionGuard::new(metrics);
 
@@ -1366,6 +1687,7 @@ impl ServerCertVerifier for InsecureServerCertVerifier {
 mod tests {
     use std::collections::{HashMap, VecDeque};
     use std::io::{Read, Write};
+    use std::net::IpAddr;
     use std::net::SocketAddr;
     use std::net::TcpListener;
     use std::sync::Arc;
@@ -1378,14 +1700,14 @@ mod tests {
     use http::header::HOST;
     use http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, Version};
     use rginx_core::{
-        ActiveHealthCheck, Error, Upstream, UpstreamPeer, UpstreamProtocol, UpstreamSettings,
-        UpstreamTls,
+        ActiveHealthCheck, Error, Upstream, UpstreamLoadBalance, UpstreamPeer, UpstreamProtocol,
+        UpstreamSettings, UpstreamTls,
     };
 
     use super::{
-        build_proxy_uri, can_retry_peer_request, is_idempotent_method, load_custom_ca_store,
-        probe_upstream_peer, sanitize_request_headers, upstream_request_version,
-        wait_for_upstream_stage, PreparedProxyRequest, PreparedRequestBody, ProxyClients,
+        PreparedProxyRequest, PreparedRequestBody, ProxyClients, build_proxy_uri,
+        can_retry_peer_request, is_idempotent_method, load_custom_ca_store, probe_upstream_peer,
+        sanitize_request_headers, upstream_request_version, wait_for_upstream_stage,
     };
     use crate::client_ip::{ClientAddress, ClientIpSource};
     use crate::metrics::Metrics;
@@ -1396,6 +1718,8 @@ mod tests {
             url: "http://127.0.0.1:9000".to_string(),
             scheme: "http".to_string(),
             authority: "127.0.0.1:9000".to_string(),
+            weight: 1,
+            backup: false,
         };
 
         let uri = build_proxy_uri(&peer, &"/api/demo?x=1".parse().unwrap(), None).unwrap();
@@ -1408,6 +1732,8 @@ mod tests {
             url: "https://example.com".to_string(),
             scheme: "https".to_string(),
             authority: "example.com".to_string(),
+            weight: 1,
+            backup: false,
         };
 
         let uri = build_proxy_uri(&peer, &"/healthz".parse().unwrap(), None).unwrap();
@@ -1504,6 +1830,8 @@ mod tests {
                 url: "https://localhost:9443".to_string(),
                 scheme: "https".to_string(),
                 authority: "localhost:9443".to_string(),
+                weight: 1,
+                backup: false,
             }],
             UpstreamTls::Insecure,
             upstream_settings(UpstreamProtocol::Auto),
@@ -1522,6 +1850,8 @@ mod tests {
                 url: "https://localhost:9443".to_string(),
                 scheme: "https".to_string(),
                 authority: "localhost:9443".to_string(),
+                weight: 1,
+                backup: false,
             }],
             UpstreamTls::CustomCa { ca_cert_path: path.clone() },
             upstream_settings(UpstreamProtocol::Auto),
@@ -1574,6 +1904,8 @@ mod tests {
             url: "https://127.0.0.1:9443".to_string(),
             scheme: "https".to_string(),
             authority: "127.0.0.1:9443".to_string(),
+            weight: 1,
+            backup: false,
         };
         let first = Upstream::new(
             "first".to_string(),
@@ -1646,6 +1978,8 @@ mod tests {
             url: "https://127.0.0.1:9443".to_string(),
             scheme: "https".to_string(),
             authority: "127.0.0.1:9443".to_string(),
+            weight: 1,
+            backup: false,
         };
         let auto = Upstream::new(
             "auto".to_string(),
@@ -1772,6 +2106,330 @@ mod tests {
     }
 
     #[test]
+    fn ip_hash_keeps_the_same_primary_peer_for_the_same_client_ip() {
+        let upstream = Upstream::new(
+            "backend".to_string(),
+            vec![
+                peer("http://127.0.0.1:9000"),
+                peer("http://127.0.0.1:9001"),
+                peer("http://127.0.0.1:9002"),
+            ],
+            UpstreamTls::NativeRoots,
+            UpstreamSettings {
+                load_balance: UpstreamLoadBalance::IpHash,
+                ..upstream_settings(UpstreamProtocol::Auto)
+            },
+        );
+        let snapshot = snapshot_with_upstream("backend", Arc::new(upstream));
+        let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+
+        let first = clients.select_peers(
+            snapshot.upstreams["backend"].as_ref(),
+            client_ip("198.51.100.10"),
+            2,
+        );
+        let second = clients.select_peers(
+            snapshot.upstreams["backend"].as_ref(),
+            client_ip("198.51.100.10"),
+            2,
+        );
+
+        assert_eq!(
+            first.peers.iter().map(|peer| peer.url.as_str()).collect::<Vec<_>>(),
+            second.peers.iter().map(|peer| peer.url.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn ip_hash_skips_unhealthy_primary_and_uses_the_next_peer() {
+        let upstream = Upstream::new(
+            "backend".to_string(),
+            vec![
+                peer("http://127.0.0.1:9000"),
+                peer("http://127.0.0.1:9001"),
+                peer("http://127.0.0.1:9002"),
+            ],
+            UpstreamTls::NativeRoots,
+            UpstreamSettings {
+                load_balance: UpstreamLoadBalance::IpHash,
+                unhealthy_after_failures: 1,
+                unhealthy_cooldown: Duration::from_secs(30),
+                ..upstream_settings(UpstreamProtocol::Auto)
+            },
+        );
+        let snapshot = snapshot_with_upstream("backend", Arc::new(upstream));
+        let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+
+        let initial = clients.select_peers(
+            snapshot.upstreams["backend"].as_ref(),
+            client_ip("198.51.100.10"),
+            2,
+        );
+        let primary = initial.peers[0].url.clone();
+        let fallback = initial.peers[1].url.clone();
+
+        let failure = clients.record_peer_failure("backend", &primary);
+        assert!(failure.entered_cooldown);
+
+        let selected = clients.select_peers(
+            snapshot.upstreams["backend"].as_ref(),
+            client_ip("198.51.100.10"),
+            2,
+        );
+        assert_eq!(selected.skipped_unhealthy, 1);
+        assert_eq!(selected.peers[0].url, fallback);
+    }
+
+    #[test]
+    fn ip_hash_distributes_multiple_client_ips_across_peers() {
+        let upstream = Upstream::new(
+            "backend".to_string(),
+            vec![
+                peer("http://127.0.0.1:9000"),
+                peer("http://127.0.0.1:9001"),
+                peer("http://127.0.0.1:9002"),
+            ],
+            UpstreamTls::NativeRoots,
+            UpstreamSettings {
+                load_balance: UpstreamLoadBalance::IpHash,
+                ..upstream_settings(UpstreamProtocol::Auto)
+            },
+        );
+        let snapshot = snapshot_with_upstream("backend", Arc::new(upstream));
+        let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+
+        let unique_primaries = (1..=16)
+            .map(|suffix| {
+                let ip = format!("198.51.100.{suffix}");
+                clients
+                    .select_peers(snapshot.upstreams["backend"].as_ref(), client_ip(&ip), 1)
+                    .peers[0]
+                    .url
+                    .clone()
+            })
+            .collect::<std::collections::HashSet<_>>();
+
+        assert!(
+            unique_primaries.len() >= 2,
+            "expected ip_hash to spread clients across at least two peers"
+        );
+    }
+
+    #[test]
+    fn weighted_ip_hash_prefers_heavier_peers() {
+        let upstream = Upstream::new(
+            "backend".to_string(),
+            vec![
+                peer_with_weight("http://127.0.0.1:9000", 5),
+                peer_with_weight("http://127.0.0.1:9001", 1),
+            ],
+            UpstreamTls::NativeRoots,
+            UpstreamSettings {
+                load_balance: UpstreamLoadBalance::IpHash,
+                ..upstream_settings(UpstreamProtocol::Auto)
+            },
+        );
+        let snapshot = snapshot_with_upstream("backend", Arc::new(upstream));
+        let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+
+        let heavy = (0..=255)
+            .filter(|suffix| {
+                let ip = format!("198.51.100.{suffix}");
+                clients
+                    .select_peers(snapshot.upstreams["backend"].as_ref(), client_ip(&ip), 1)
+                    .peers[0]
+                    .url
+                    == "http://127.0.0.1:9000"
+            })
+            .count();
+
+        assert!(heavy > 128, "expected weighted ip_hash to prefer the heavier peer");
+    }
+
+    #[test]
+    fn backup_peer_is_only_used_as_retry_candidate_while_primary_is_healthy() {
+        let upstream = Upstream::new(
+            "backend".to_string(),
+            vec![peer("http://127.0.0.1:9000"), peer_with_role("http://127.0.0.1:9010", 1, true)],
+            UpstreamTls::NativeRoots,
+            upstream_settings(UpstreamProtocol::Auto),
+        );
+        let snapshot = snapshot_with_upstream("backend", Arc::new(upstream));
+        let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+
+        let primary_only = clients.select_peers(
+            snapshot.upstreams["backend"].as_ref(),
+            client_ip("198.51.100.10"),
+            1,
+        );
+        assert_eq!(
+            primary_only.peers.iter().map(|peer| peer.url.as_str()).collect::<Vec<_>>(),
+            vec!["http://127.0.0.1:9000"]
+        );
+
+        let with_retry = clients.select_peers(
+            snapshot.upstreams["backend"].as_ref(),
+            client_ip("198.51.100.10"),
+            2,
+        );
+        assert_eq!(
+            with_retry.peers.iter().map(|peer| peer.url.as_str()).collect::<Vec<_>>(),
+            vec!["http://127.0.0.1:9000", "http://127.0.0.1:9010"]
+        );
+    }
+
+    #[test]
+    fn backup_peer_is_selected_when_primary_pool_is_unhealthy() {
+        let upstream = Upstream::new(
+            "backend".to_string(),
+            vec![peer("http://127.0.0.1:9000"), peer_with_role("http://127.0.0.1:9010", 1, true)],
+            UpstreamTls::NativeRoots,
+            UpstreamSettings {
+                unhealthy_after_failures: 1,
+                unhealthy_cooldown: Duration::from_secs(30),
+                ..upstream_settings(UpstreamProtocol::Auto)
+            },
+        );
+        let snapshot = snapshot_with_upstream("backend", Arc::new(upstream));
+        let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+
+        let failure = clients.record_peer_failure("backend", "http://127.0.0.1:9000");
+        assert!(failure.entered_cooldown);
+
+        let selected = clients.select_peers(
+            snapshot.upstreams["backend"].as_ref(),
+            client_ip("198.51.100.10"),
+            1,
+        );
+        assert_eq!(selected.skipped_unhealthy, 1);
+        assert_eq!(
+            selected.peers.iter().map(|peer| peer.url.as_str()).collect::<Vec<_>>(),
+            vec!["http://127.0.0.1:9010"]
+        );
+    }
+
+    #[test]
+    fn least_conn_prefers_peers_with_fewer_active_requests() {
+        let upstream = Upstream::new(
+            "backend".to_string(),
+            vec![
+                peer("http://127.0.0.1:9000"),
+                peer("http://127.0.0.1:9001"),
+                peer("http://127.0.0.1:9002"),
+            ],
+            UpstreamTls::NativeRoots,
+            UpstreamSettings {
+                load_balance: UpstreamLoadBalance::LeastConn,
+                ..upstream_settings(UpstreamProtocol::Auto)
+            },
+        );
+        let snapshot = snapshot_with_upstream("backend", Arc::new(upstream));
+        let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+
+        let _peer_a_1 = clients.track_active_request("backend", "http://127.0.0.1:9000");
+        let _peer_a_2 = clients.track_active_request("backend", "http://127.0.0.1:9000");
+        let _peer_b_1 = clients.track_active_request("backend", "http://127.0.0.1:9001");
+
+        let selected = clients.select_peers(
+            snapshot.upstreams["backend"].as_ref(),
+            client_ip("198.51.100.10"),
+            3,
+        );
+
+        assert_eq!(
+            selected.peers.iter().map(|peer| peer.url.as_str()).collect::<Vec<_>>(),
+            vec!["http://127.0.0.1:9002", "http://127.0.0.1:9001", "http://127.0.0.1:9000",]
+        );
+    }
+
+    #[test]
+    fn least_conn_uses_configured_peer_order_to_break_ties() {
+        let upstream = Upstream::new(
+            "backend".to_string(),
+            vec![
+                peer("http://127.0.0.1:9000"),
+                peer("http://127.0.0.1:9001"),
+                peer("http://127.0.0.1:9002"),
+            ],
+            UpstreamTls::NativeRoots,
+            UpstreamSettings {
+                load_balance: UpstreamLoadBalance::LeastConn,
+                ..upstream_settings(UpstreamProtocol::Auto)
+            },
+        );
+        let snapshot = snapshot_with_upstream("backend", Arc::new(upstream));
+        let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+
+        let selected = clients.select_peers(
+            snapshot.upstreams["backend"].as_ref(),
+            client_ip("198.51.100.10"),
+            3,
+        );
+
+        assert_eq!(
+            selected.peers.iter().map(|peer| peer.url.as_str()).collect::<Vec<_>>(),
+            vec!["http://127.0.0.1:9000", "http://127.0.0.1:9001", "http://127.0.0.1:9002",]
+        );
+    }
+
+    #[test]
+    fn weighted_least_conn_prefers_higher_capacity_peer_when_projected_load_ties() {
+        let upstream = Upstream::new(
+            "backend".to_string(),
+            vec![
+                peer_with_weight("http://127.0.0.1:9000", 3),
+                peer_with_weight("http://127.0.0.1:9001", 1),
+            ],
+            UpstreamTls::NativeRoots,
+            UpstreamSettings {
+                load_balance: UpstreamLoadBalance::LeastConn,
+                ..upstream_settings(UpstreamProtocol::Auto)
+            },
+        );
+        let snapshot = snapshot_with_upstream("backend", Arc::new(upstream));
+        let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+
+        let _peer_a_1 = clients.track_active_request("backend", "http://127.0.0.1:9000");
+        let _peer_a_2 = clients.track_active_request("backend", "http://127.0.0.1:9000");
+
+        let selected = clients.select_peers(
+            snapshot.upstreams["backend"].as_ref(),
+            client_ip("198.51.100.10"),
+            2,
+        );
+
+        assert_eq!(
+            selected.peers.iter().map(|peer| peer.url.as_str()).collect::<Vec<_>>(),
+            vec!["http://127.0.0.1:9000", "http://127.0.0.1:9001"]
+        );
+    }
+
+    #[test]
+    fn least_conn_ignores_backup_peers_while_primary_pool_is_available() {
+        let upstream = Upstream::new(
+            "backend".to_string(),
+            vec![peer("http://127.0.0.1:9000"), peer_with_role("http://127.0.0.1:9010", 1, true)],
+            UpstreamTls::NativeRoots,
+            UpstreamSettings {
+                load_balance: UpstreamLoadBalance::LeastConn,
+                ..upstream_settings(UpstreamProtocol::Auto)
+            },
+        );
+        let snapshot = snapshot_with_upstream("backend", Arc::new(upstream));
+        let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+
+        let selected = clients.select_peers(
+            snapshot.upstreams["backend"].as_ref(),
+            client_ip("198.51.100.10"),
+            1,
+        );
+        assert_eq!(
+            selected.peers.iter().map(|peer| peer.url.as_str()).collect::<Vec<_>>(),
+            vec!["http://127.0.0.1:9000"]
+        );
+    }
+
+    #[test]
     fn unhealthy_peer_is_skipped_after_consecutive_failures() {
         let snapshot = snapshot_with_upstream_policy(
             "backend",
@@ -1781,7 +2439,11 @@ mod tests {
         );
         let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
 
-        let first = clients.select_peers(snapshot.upstreams["backend"].as_ref(), 2);
+        let first = clients.select_peers(
+            snapshot.upstreams["backend"].as_ref(),
+            client_ip("198.51.100.10"),
+            2,
+        );
         assert_eq!(first.skipped_unhealthy, 0);
         assert_eq!(
             first.peers.iter().map(|peer| peer.url.as_str()).collect::<Vec<_>>(),
@@ -1796,7 +2458,11 @@ mod tests {
         assert_eq!(second_failure.consecutive_failures, 2);
         assert!(second_failure.entered_cooldown);
 
-        let selected = clients.select_peers(snapshot.upstreams["backend"].as_ref(), 2);
+        let selected = clients.select_peers(
+            snapshot.upstreams["backend"].as_ref(),
+            client_ip("198.51.100.10"),
+            2,
+        );
         assert_eq!(selected.skipped_unhealthy, 1);
         assert_eq!(
             selected.peers.iter().map(|peer| peer.url.as_str()).collect::<Vec<_>>(),
@@ -1817,7 +2483,11 @@ mod tests {
         let failure = clients.record_peer_failure("backend", "http://127.0.0.1:9000");
         assert!(failure.entered_cooldown);
 
-        let immediately = clients.select_peers(snapshot.upstreams["backend"].as_ref(), 2);
+        let immediately = clients.select_peers(
+            snapshot.upstreams["backend"].as_ref(),
+            client_ip("198.51.100.10"),
+            2,
+        );
         assert_eq!(immediately.skipped_unhealthy, 1);
         assert_eq!(
             immediately.peers.iter().map(|peer| peer.url.as_str()).collect::<Vec<_>>(),
@@ -1826,7 +2496,11 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(30)).await;
 
-        let recovered = clients.select_peers(snapshot.upstreams["backend"].as_ref(), 2);
+        let recovered = clients.select_peers(
+            snapshot.upstreams["backend"].as_ref(),
+            client_ip("198.51.100.10"),
+            2,
+        );
         assert_eq!(recovered.skipped_unhealthy, 0);
         assert_eq!(recovered.peers.len(), 2);
     }
@@ -1907,11 +2581,19 @@ mod tests {
         assert_eq!(tolerant_failure.consecutive_failures, 1);
         assert!(!tolerant_failure.entered_cooldown);
 
-        let fast_selected = clients.select_peers(snapshot.upstreams["fast-fail"].as_ref(), 1);
+        let fast_selected = clients.select_peers(
+            snapshot.upstreams["fast-fail"].as_ref(),
+            client_ip("198.51.100.10"),
+            1,
+        );
         assert!(fast_selected.peers.is_empty());
         assert_eq!(fast_selected.skipped_unhealthy, 1);
 
-        let tolerant_selected = clients.select_peers(snapshot.upstreams["tolerant"].as_ref(), 1);
+        let tolerant_selected = clients.select_peers(
+            snapshot.upstreams["tolerant"].as_ref(),
+            client_ip("198.51.100.10"),
+            1,
+        );
         assert_eq!(tolerant_selected.peers.len(), 1);
         assert_eq!(tolerant_selected.skipped_unhealthy, 0);
     }
@@ -1926,21 +2608,43 @@ mod tests {
         );
         let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
 
-        assert_eq!(clients.select_peers(snapshot.upstreams["backend"].as_ref(), 1).peers.len(), 1);
+        assert_eq!(
+            clients
+                .select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 1)
+                .peers
+                .len(),
+            1
+        );
         assert!(clients.record_active_peer_failure("backend", "http://127.0.0.1:9000"));
-        assert!(clients.select_peers(snapshot.upstreams["backend"].as_ref(), 1).peers.is_empty());
+        assert!(
+            clients
+                .select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 1)
+                .peers
+                .is_empty()
+        );
 
         let first_success =
             clients.record_active_peer_success("backend", "http://127.0.0.1:9000", 2);
         assert!(!first_success.recovered);
         assert_eq!(first_success.consecutive_successes, 1);
-        assert!(clients.select_peers(snapshot.upstreams["backend"].as_ref(), 1).peers.is_empty());
+        assert!(
+            clients
+                .select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 1)
+                .peers
+                .is_empty()
+        );
 
         let second_success =
             clients.record_active_peer_success("backend", "http://127.0.0.1:9000", 2);
         assert!(second_success.recovered);
         assert_eq!(second_success.consecutive_successes, 2);
-        assert_eq!(clients.select_peers(snapshot.upstreams["backend"].as_ref(), 1).peers.len(), 1);
+        assert_eq!(
+            clients
+                .select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 1)
+                .peers
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -1959,13 +2663,20 @@ mod tests {
         let peer = upstream.peers[0].clone();
 
         probe_upstream_peer(clients.clone(), metrics.clone(), upstream.clone(), peer.clone()).await;
-        assert!(clients.select_peers(upstream.as_ref(), 1).peers.is_empty());
+        assert!(
+            clients.select_peers(upstream.as_ref(), client_ip("198.51.100.10"), 1).peers.is_empty()
+        );
 
         probe_upstream_peer(clients.clone(), metrics.clone(), upstream.clone(), peer.clone()).await;
-        assert!(clients.select_peers(upstream.as_ref(), 1).peers.is_empty());
+        assert!(
+            clients.select_peers(upstream.as_ref(), client_ip("198.51.100.10"), 1).peers.is_empty()
+        );
 
         probe_upstream_peer(clients.clone(), metrics.clone(), upstream.clone(), peer).await;
-        assert_eq!(clients.select_peers(upstream.as_ref(), 1).peers.len(), 1);
+        assert_eq!(
+            clients.select_peers(upstream.as_ref(), client_ip("198.51.100.10"), 1).peers.len(),
+            1
+        );
         let rendered = metrics.render_prometheus();
         assert!(rendered.contains("rginx_active_health_checks_total"));
     }
@@ -1973,8 +2684,19 @@ mod tests {
     fn upstream_settings(protocol: UpstreamProtocol) -> UpstreamSettings {
         UpstreamSettings {
             protocol,
+            load_balance: UpstreamLoadBalance::RoundRobin,
             server_name_override: None,
             request_timeout: Duration::from_secs(30),
+            connect_timeout: Duration::from_secs(30),
+            write_timeout: Duration::from_secs(30),
+            idle_timeout: Duration::from_secs(30),
+            pool_idle_timeout: Some(Duration::from_secs(90)),
+            pool_max_idle_per_host: usize::MAX,
+            tcp_keepalive: None,
+            tcp_nodelay: false,
+            http2_keep_alive_interval: None,
+            http2_keep_alive_timeout: Duration::from_secs(20),
+            http2_keep_alive_while_idle: false,
             max_replayable_request_body_bytes: 64 * 1024,
             unhealthy_after_failures: 2,
             unhealthy_cooldown: Duration::from_secs(10),
@@ -1983,11 +2705,45 @@ mod tests {
     }
 
     fn peer(url: &str) -> UpstreamPeer {
+        peer_with_weight(url, 1)
+    }
+
+    fn peer_with_weight(url: &str, weight: u32) -> UpstreamPeer {
+        peer_with_role(url, weight, false)
+    }
+
+    fn peer_with_role(url: &str, weight: u32, backup: bool) -> UpstreamPeer {
         let uri: http::Uri = url.parse().expect("peer URL should parse");
         UpstreamPeer {
             url: url.to_string(),
             scheme: uri.scheme_str().expect("peer should have scheme").to_string(),
             authority: uri.authority().expect("peer should have authority").to_string(),
+            weight,
+            backup,
+        }
+    }
+
+    fn snapshot_with_upstream(name: &str, upstream: Arc<Upstream>) -> rginx_core::ConfigSnapshot {
+        rginx_core::ConfigSnapshot {
+            runtime: rginx_core::RuntimeSettings { shutdown_timeout: Duration::from_secs(1) },
+            server: rginx_core::Server {
+                listen_addr: "127.0.0.1:8080".parse().unwrap(),
+                trusted_proxies: Vec::new(),
+                keep_alive: true,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout: None,
+                tls: None,
+            },
+            default_vhost: rginx_core::VirtualHost {
+                id: "server".to_string(),
+                server_names: Vec::new(),
+                routes: Vec::new(),
+                tls: None,
+            },
+            vhosts: Vec::new(),
+            upstreams: HashMap::from([(name.to_string(), upstream)]),
         }
     }
 
@@ -2075,35 +2831,41 @@ mod tests {
         }
     }
 
+    fn client_ip(value: &str) -> IpAddr {
+        value.parse().expect("client IP should parse")
+    }
+
     async fn spawn_status_server(statuses: Arc<Mutex<VecDeque<StatusCode>>>) -> SocketAddr {
         let listener =
             TcpListener::bind(("127.0.0.1", 0)).expect("test status listener should bind");
         let listen_addr = listener.local_addr().expect("listener addr should exist");
 
-        thread::spawn(move || loop {
-            let Ok((mut stream, _)) = listener.accept() else {
-                break;
-            };
-            let statuses = statuses.clone();
-
-            thread::spawn(move || {
-                let mut buffer = [0u8; 1024];
-                let _ = stream.read(&mut buffer);
-                let status = {
-                    let mut statuses =
-                        statuses.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                    statuses.pop_front().unwrap_or(StatusCode::OK)
+        thread::spawn(move || {
+            loop {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
                 };
-                let reason = status.canonical_reason().unwrap_or("Unknown");
-                let response = format!(
-                    "HTTP/1.1 {} {}\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok",
-                    status.as_u16(),
-                    reason
-                );
+                let statuses = statuses.clone();
 
-                let _ = stream.write_all(response.as_bytes());
-                let _ = stream.flush();
-            });
+                thread::spawn(move || {
+                    let mut buffer = [0u8; 1024];
+                    let _ = stream.read(&mut buffer);
+                    let status = {
+                        let mut statuses =
+                            statuses.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                        statuses.pop_front().unwrap_or(StatusCode::OK)
+                    };
+                    let reason = status.canonical_reason().unwrap_or("Unknown");
+                    let response = format!(
+                        "HTTP/1.1 {} {}\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok",
+                        status.as_u16(),
+                        reason
+                    );
+
+                    let _ = stream.write_all(response.as_bytes());
+                    let _ = stream.flush();
+                });
+            }
         });
 
         listen_addr

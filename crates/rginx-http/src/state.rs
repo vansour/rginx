@@ -1,8 +1,9 @@
 use std::future::Future;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rginx_core::{ConfigSnapshot, Result};
-use tokio::sync::{watch, RwLock};
+use tokio::sync::{RwLock, watch};
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 
@@ -26,6 +27,7 @@ pub struct SharedState {
     rate_limiters: RateLimiters,
     tls_acceptor: Arc<RwLock<Option<TlsAcceptor>>>,
     background_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    request_ids: Arc<AtomicU64>,
 }
 
 impl SharedState {
@@ -45,6 +47,7 @@ impl SharedState {
             rate_limiters,
             tls_acceptor: Arc::new(RwLock::new(tls_acceptor)),
             background_tasks: Arc::new(Mutex::new(Vec::new())),
+            request_ids: Arc::new(AtomicU64::new(1)),
         })
     }
 
@@ -100,6 +103,11 @@ impl SharedState {
         tasks.push(handle);
     }
 
+    pub fn next_request_id(&self) -> String {
+        let next = self.request_ids.fetch_add(1, Ordering::Relaxed);
+        format!("rginx-{next:016x}")
+    }
+
     pub async fn drain_background_tasks(&self) {
         for task in take_background_tasks(&self.background_tasks) {
             if let Err(error) = task.await {
@@ -119,10 +127,10 @@ impl SharedState {
         }
 
         for task in tasks {
-            if let Err(error) = task.await {
-                if !error.is_cancelled() {
-                    tracing::warn!(%error, "background task failed after abort");
-                }
+            if let Err(error) = task.await
+                && !error.is_cancelled()
+            {
+                tracing::warn!(%error, "background task failed after abort");
             }
         }
     }

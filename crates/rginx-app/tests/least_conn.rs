@@ -5,17 +5,39 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[test]
-fn idempotent_requests_fail_over_after_upstream_timeout() {
-    let slow_peer = spawn_response_server(Duration::from_millis(1_500), "slow peer\n");
-    let fast_peer = spawn_response_server(Duration::from_millis(0), "fast peer\n");
+fn least_conn_prefers_the_peer_with_fewer_in_flight_requests() {
+    let (slow_tx, slow_rx) = mpsc::channel();
+    let slow_peer = spawn_response_server(Duration::from_millis(600), "slow-peer\n", Some(slow_tx));
+    let fast_peer = spawn_response_server(Duration::from_millis(0), "fast-peer\n", None);
     let listen_addr = reserve_loopback_addr();
     let mut server = TestServer::spawn(listen_addr, &[slow_peer, fast_peer]);
 
-    server.wait_for_body(listen_addr, "/api/demo", "fast peer\n", Duration::from_secs(5));
+    server.wait_for_success(listen_addr, "/api/ready", Duration::from_secs(5));
+    while slow_rx.try_recv().is_ok() {}
+
+    let first_request = thread::spawn(move || {
+        fetch_text_response(listen_addr, "/api/hold")
+            .expect("first least_conn request should eventually succeed")
+    });
+
+    slow_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("first request should hit the slow peer first");
+
+    let second = fetch_text_response(listen_addr, "/api/hold")
+        .expect("second least_conn request should succeed");
+    assert_eq!(second.0, 200);
+    assert_eq!(second.1, "fast-peer\n");
+
+    let first = first_request.join().expect("first request thread should finish");
+    assert_eq!(first.0, 200);
+    assert_eq!(first.1, "slow-peer\n");
+
     server.shutdown_and_wait(Duration::from_secs(5));
 }
 
@@ -26,11 +48,11 @@ struct TestServer {
 
 impl TestServer {
     fn spawn(listen_addr: SocketAddr, upstreams: &[SocketAddr]) -> Self {
-        let temp_dir = temp_dir("rginx-failover-test");
+        let temp_dir = temp_dir("rginx-least-conn-test");
         fs::create_dir_all(&temp_dir).expect("temp test dir should be created");
         let config_path = temp_dir.join("rginx.ron");
         fs::write(&config_path, proxy_config(listen_addr, upstreams))
-            .expect("proxy config should be written");
+            .expect("least_conn config should be written");
 
         let child = Command::new(binary_path())
             .arg("--config")
@@ -43,13 +65,7 @@ impl TestServer {
         Self { child, temp_dir }
     }
 
-    fn wait_for_body(
-        &mut self,
-        listen_addr: SocketAddr,
-        path: &str,
-        expected: &str,
-        timeout: Duration,
-    ) {
+    fn wait_for_success(&mut self, listen_addr: SocketAddr, path: &str, timeout: Duration) {
         let deadline = Instant::now() + timeout;
         let mut last_error = String::new();
 
@@ -57,7 +73,7 @@ impl TestServer {
             self.assert_running();
 
             match fetch_text_response(listen_addr, path) {
-                Ok((status, body)) if status == 200 && body == expected => return,
+                Ok((200, _body)) => return,
                 Ok((status, body)) => {
                     last_error = format!(
                         "unexpected response from {listen_addr}: status={status} body={body:?}"
@@ -70,8 +86,7 @@ impl TestServer {
         }
 
         panic!(
-            "timed out waiting for response body {:?} on {}; last error: {}",
-            expected, listen_addr, last_error
+            "timed out waiting for successful response on {listen_addr}; last error: {last_error}"
         );
     }
 
@@ -120,7 +135,11 @@ impl Drop for TestServer {
     }
 }
 
-fn spawn_response_server(delay: Duration, body: &'static str) -> SocketAddr {
+fn spawn_response_server(
+    delay: Duration,
+    body: &'static str,
+    accepted_signal: Option<mpsc::Sender<()>>,
+) -> SocketAddr {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("test upstream listener should bind");
     let listen_addr = listener.local_addr().expect("listener addr should be available");
 
@@ -129,6 +148,9 @@ fn spawn_response_server(delay: Duration, body: &'static str) -> SocketAddr {
             let Ok((mut stream, _)) = listener.accept() else {
                 break;
             };
+            if let Some(signal) = accepted_signal.as_ref() {
+                let _ = signal.send(());
+            }
 
             thread::spawn(move || {
                 let mut buffer = [0u8; 1024];
@@ -153,7 +175,7 @@ fn fetch_text_response(listen_addr: SocketAddr, path: &str) -> Result<(u16, Stri
     let mut stream = TcpStream::connect_timeout(&listen_addr, Duration::from_millis(200))
         .map_err(|error| format!("failed to connect to {listen_addr}: {error}"))?;
     stream
-        .set_read_timeout(Some(Duration::from_millis(2_500)))
+        .set_read_timeout(Some(Duration::from_secs(2)))
         .map_err(|error| format!("failed to set read timeout: {error}"))?;
     stream
         .set_write_timeout(Some(Duration::from_millis(500)))
@@ -195,7 +217,7 @@ fn proxy_config(listen_addr: SocketAddr, upstreams: &[SocketAddr]) -> String {
         .join(",\n");
 
     format!(
-        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [\n{}\n            ],\n            request_timeout_secs: Some(1),\n            unhealthy_after_failures: Some(2),\n            unhealthy_cooldown_secs: Some(1),\n        ),\n    ],\n    locations: [\n        LocationConfig(\n            matcher: Prefix(\"/api\"),\n            handler: Proxy(\n                upstream: \"backend\",\n            ),\n        ),\n    ],\n)\n",
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [\n{}\n            ],\n            load_balance: LeastConn,\n        ),\n    ],\n    locations: [\n        LocationConfig(\n            matcher: Prefix(\"/api\"),\n            handler: Proxy(\n                upstream: \"backend\",\n            ),\n        ),\n    ],\n)\n",
         listen_addr.to_string(),
         peers
     )

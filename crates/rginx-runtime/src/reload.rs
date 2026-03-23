@@ -30,7 +30,7 @@ mod tests {
 
     use rginx_core::{RuntimeSettings, Server, VirtualHost};
 
-    use super::{validate_reload, ConfigSnapshot};
+    use super::{ConfigSnapshot, validate_reload};
 
     fn snapshot(listen: &str) -> ConfigSnapshot {
         ConfigSnapshot {

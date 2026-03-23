@@ -9,13 +9,13 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[test]
-fn idempotent_requests_fail_over_after_upstream_timeout() {
-    let slow_peer = spawn_response_server(Duration::from_millis(1_500), "slow peer\n");
-    let fast_peer = spawn_response_server(Duration::from_millis(0), "fast peer\n");
+fn backup_peer_serves_requests_after_primary_timeout() {
+    let slow_primary = spawn_response_server(Duration::from_millis(1_500), "primary slow\n");
+    let fast_backup = spawn_response_server(Duration::from_millis(0), "backup fast\n");
     let listen_addr = reserve_loopback_addr();
-    let mut server = TestServer::spawn(listen_addr, &[slow_peer, fast_peer]);
+    let mut server = TestServer::spawn(listen_addr, slow_primary, fast_backup);
 
-    server.wait_for_body(listen_addr, "/api/demo", "fast peer\n", Duration::from_secs(5));
+    server.wait_for_body(listen_addr, "/api/demo", "backup fast\n", Duration::from_secs(5));
     server.shutdown_and_wait(Duration::from_secs(5));
 }
 
@@ -25,12 +25,12 @@ struct TestServer {
 }
 
 impl TestServer {
-    fn spawn(listen_addr: SocketAddr, upstreams: &[SocketAddr]) -> Self {
-        let temp_dir = temp_dir("rginx-failover-test");
+    fn spawn(listen_addr: SocketAddr, primary: SocketAddr, backup: SocketAddr) -> Self {
+        let temp_dir = temp_dir("rginx-backup-test");
         fs::create_dir_all(&temp_dir).expect("temp test dir should be created");
         let config_path = temp_dir.join("rginx.ron");
-        fs::write(&config_path, proxy_config(listen_addr, upstreams))
-            .expect("proxy config should be written");
+        fs::write(&config_path, proxy_config(listen_addr, primary, backup))
+            .expect("backup config should be written");
 
         let child = Command::new(binary_path())
             .arg("--config")
@@ -182,22 +182,12 @@ fn fetch_text_response(listen_addr: SocketAddr, path: &str) -> Result<(u16, Stri
     Ok((status, body.to_string()))
 }
 
-fn proxy_config(listen_addr: SocketAddr, upstreams: &[SocketAddr]) -> String {
-    let peers = upstreams
-        .iter()
-        .map(|addr| {
-            format!(
-                "                UpstreamPeerConfig(\n                    url: {:?},\n                )",
-                format!("http://{addr}")
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",\n");
-
+fn proxy_config(listen_addr: SocketAddr, primary: SocketAddr, backup: SocketAddr) -> String {
     format!(
-        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [\n{}\n            ],\n            request_timeout_secs: Some(1),\n            unhealthy_after_failures: Some(2),\n            unhealthy_cooldown_secs: Some(1),\n        ),\n    ],\n    locations: [\n        LocationConfig(\n            matcher: Prefix(\"/api\"),\n            handler: Proxy(\n                upstream: \"backend\",\n            ),\n        ),\n    ],\n)\n",
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [\n                UpstreamPeerConfig(\n                    url: {:?},\n                    weight: 1,\n                    backup: false,\n                ),\n                UpstreamPeerConfig(\n                    url: {:?},\n                    weight: 1,\n                    backup: true,\n                ),\n            ],\n            request_timeout_secs: Some(1),\n            unhealthy_after_failures: Some(1),\n            unhealthy_cooldown_secs: Some(30),\n        ),\n    ],\n    locations: [\n        LocationConfig(\n            matcher: Prefix(\"/api\"),\n            handler: Proxy(\n                upstream: \"backend\",\n            ),\n        ),\n    ],\n)\n",
         listen_addr.to_string(),
-        peers
+        format!("http://{primary}"),
+        format!("http://{backup}")
     )
 }
 

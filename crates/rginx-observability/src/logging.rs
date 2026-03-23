@@ -1,5 +1,5 @@
-use tracing_subscriber::fmt;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt;
 
 pub fn init_logging() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let filter = EnvFilter::try_from_default_env()

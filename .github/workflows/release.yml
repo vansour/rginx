@@ -226,8 +226,25 @@ jobs:
           SHORT_SHA="${COMMIT_SHA::7}"
           COMMIT_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${COMMIT_SHA}"
           PREVIOUS_TAG="$(git describe --tags --abbrev=0 "${COMMIT_SHA}^" 2>/dev/null || true)"
+          CHANGELOG_RANGE="${COMMIT_SHA}"
+          CHANGELOG_TITLE="Initial release changes"
+
+          if [[ -n "${PREVIOUS_TAG}" ]]; then
+            CHANGELOG_RANGE="${PREVIOUS_TAG}..${COMMIT_SHA}"
+            CHANGELOG_TITLE="Changes since \`${PREVIOUS_TAG}\`"
+          fi
 
           mkdir -p dist
+
+          git log \
+            --reverse \
+            --no-merges \
+            --pretty=format:"- [\`%h\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/%H) %s" \
+            "${CHANGELOG_RANGE}" > dist/changelog.md
+
+          if [[ ! -s dist/changelog.md ]]; then
+            echo "- No source changes found in the selected release range." > dist/changelog.md
+          fi
 
           {
             echo "Release for \`${TAG}\`"
@@ -236,6 +253,8 @@ jobs:
             if [[ -n "${PREVIOUS_TAG}" ]]; then
               echo "- Previous tag: \`${PREVIOUS_TAG}\`"
               echo "- Compare: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/compare/${PREVIOUS_TAG}...${TAG}"
+            else
+              echo "- Previous tag: none (initial release)"
             fi
             echo
             echo "## Assets"
@@ -244,11 +263,11 @@ jobs:
             done
             echo "- \`SHA256SUMS.txt\`"
             echo
-            if [[ -n "${PREVIOUS_TAG}" ]]; then
-              echo "## Included Commits"
-              git log --oneline --no-merges "${PREVIOUS_TAG}..${COMMIT_SHA}"
-              echo
-            fi
+            echo "## Changelog"
+            echo "${CHANGELOG_TITLE}"
+            echo
+            cat dist/changelog.md
+            echo
           } > dist/release-summary.md
 
           if [[ -n "${PREVIOUS_TAG}" ]]; then

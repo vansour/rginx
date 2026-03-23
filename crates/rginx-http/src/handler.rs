@@ -4,16 +4,16 @@ use std::net::SocketAddr;
 use std::time::Instant;
 
 use bytes::Bytes;
-use http::{header::HOST, HeaderMap, StatusCode, Uri};
-use http_body_util::combinators::UnsyncBoxBody;
+use http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header::HOST};
 use http_body_util::BodyExt;
 use http_body_util::Full;
+use http_body_util::combinators::UnsyncBoxBody;
 use hyper::body::Incoming;
 use hyper::{Request, Response};
-use rginx_core::{ActiveHealthCheck, ConfigSnapshot, Route, RouteAction};
+use rginx_core::{ActiveHealthCheck, ConfigSnapshot, Route, RouteAction, VirtualHost};
 use serde::Serialize;
 
-use crate::client_ip::{resolve_client_address, ClientAddress};
+use crate::client_ip::{ClientAddress, resolve_client_address};
 use crate::metrics::Metrics;
 use crate::proxy::PeerStatusSnapshot;
 use crate::router;
@@ -28,9 +28,22 @@ pub async fn handle(
     state: SharedState,
     remote_addr: SocketAddr,
 ) -> HttpResponse {
+    let mut request = request;
     let metrics = state.metrics();
     let active = state.snapshot().await;
     let method = request.method().clone();
+    let host = request_host(request.headers(), request.uri()).to_string();
+    let request_id = request
+        .headers()
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| state.next_request_id());
+    let request_id_header =
+        HeaderValue::from_str(&request_id).expect("generated request ids should be valid headers");
+    request.headers_mut().insert("x-request-id", request_id_header.clone());
     let path = request
         .uri()
         .path_and_query()
@@ -39,26 +52,35 @@ pub async fn handle(
     let started = Instant::now();
     let client_address =
         resolve_client_address(request.headers(), &active.config.server, remote_addr);
-    let selected_route =
-        select_route_for_request(active.config.as_ref(), request.headers(), request.uri());
-    let route_id =
-        selected_route.map(|route| route.id.clone()).unwrap_or_else(|| "__unmatched__".to_string());
-    let response = match selected_route {
+    let (selected_vhost_id, selected_route) = {
+        let selected_vhost =
+            select_vhost_for_request(active.config.as_ref(), request.headers(), request.uri());
+        (
+            selected_vhost.id.clone(),
+            router::select_route_in_vhost(selected_vhost, request.uri().path()).cloned(),
+        )
+    };
+    let route_id = selected_route
+        .as_ref()
+        .map(|route| route.id.clone())
+        .unwrap_or_else(|| "__unmatched__".to_string());
+    let mut response = match selected_route {
         Some(route) => {
-            if let Some(response) = authorize_route(route, &client_address) {
+            if let Some(response) = authorize_route(&route, &client_address) {
                 response
             } else if let Some(response) =
-                enforce_rate_limit(&state, route, &route_id, &client_address, &metrics)
+                enforce_rate_limit(&state, &route, &route_id, &client_address, &metrics)
             {
                 response
             } else {
                 build_route_response(
                     request,
                     state.clone(),
-                    route.action.clone(),
+                    route.action,
                     active,
                     metrics.clone(),
                     client_address.clone(),
+                    &request_id,
                 )
                 .await
             }
@@ -67,36 +89,56 @@ pub async fn handle(
             text_response(StatusCode::NOT_FOUND, "text/plain; charset=utf-8", "route not found\n")
         }
     };
+    if method == Method::HEAD {
+        response = strip_response_body(response);
+    }
+    response.headers_mut().insert("x-request-id", request_id_header);
 
     let status = response.status();
     metrics.observe_http_request(&route_id, status.as_u16(), started.elapsed().as_millis() as u64);
     tracing::info!(
+        request_id = %request_id,
         method = %method,
+        host = %host,
         path = %path,
         client_ip = %client_address.client_ip,
         client_ip_source = client_address.source.as_str(),
         peer_addr = %client_address.peer_addr,
+        vhost = %selected_vhost_id,
         route = %route_id,
         status = status.as_u16(),
         elapsed_ms = started.elapsed().as_millis() as u64,
-        "request handled"
+        "http access"
     );
 
     response
 }
 
+fn request_host<'a>(headers: &'a HeaderMap, uri: &'a Uri) -> &'a str {
+    headers
+        .get(HOST)
+        .and_then(|value| value.to_str().ok())
+        .or_else(|| uri.authority().map(|authority| authority.as_str()))
+        .unwrap_or_default()
+}
+
+fn select_vhost_for_request<'a>(
+    config: &'a ConfigSnapshot,
+    headers: &HeaderMap,
+    uri: &Uri,
+) -> &'a VirtualHost {
+    let host = request_host(headers, uri).to_string();
+    router::select_vhost(&config.vhosts, &config.default_vhost, &host)
+}
+
+#[cfg(test)]
 fn select_route_for_request<'a>(
     config: &'a ConfigSnapshot,
     headers: &HeaderMap,
     uri: &Uri,
 ) -> Option<&'a Route> {
-    let host = headers
-        .get(HOST)
-        .and_then(|value| value.to_str().ok())
-        .or_else(|| uri.authority().map(|authority| authority.as_str()))
-        .unwrap_or_default();
-    router::select_route_by_host(&config.default_vhost, &config.vhosts, host, uri.path())
-        .map(|(_, route)| route)
+    let vhost = select_vhost_for_request(config, headers, uri);
+    router::select_route_in_vhost(vhost, uri.path())
 }
 
 fn authorize_route(route: &Route, client_address: &ClientAddress) -> Option<HttpResponse> {
@@ -145,6 +187,7 @@ async fn build_route_response(
     active: ActiveState,
     metrics: Metrics,
     client_address: ClientAddress,
+    request_id: &str,
 ) -> HttpResponse {
     match &action {
         RouteAction::Static(response) => {
@@ -156,26 +199,28 @@ async fn build_route_response(
             crate::proxy::forward_request(
                 state,
                 active.clients,
-                metrics,
                 request,
                 proxy,
                 client_address,
                 downstream_proto,
                 active.config.server.max_request_body_bytes,
+                request_id,
             )
             .await
         }
         RouteAction::Status => status_response(&active),
         RouteAction::Metrics => metrics_response(&metrics),
-        RouteAction::File(ref target) => crate::file::serve_file(request, target).await,
-        RouteAction::Return(ref action) => {
+        RouteAction::File(target) => crate::file::serve_file(request, target).await,
+        RouteAction::Return(action) => {
             let body = action.body.clone().unwrap_or_else(|| {
                 format!("{}\n", action.status.canonical_reason().unwrap_or("Redirect"))
             });
+            let content_length = body.len();
 
             let mut builder = Response::builder()
                 .status(action.status)
-                .header("content-type", "text/plain; charset=utf-8");
+                .header("content-type", "text/plain; charset=utf-8")
+                .header("content-length", content_length.to_string());
 
             if !action.location.is_empty() {
                 builder = builder.header("location", &action.location);
@@ -194,7 +239,23 @@ fn status_response(active: &ActiveState) -> HttpResponse {
         .map(|upstream| UpstreamStatusPayload {
             name: upstream.name.clone(),
             protocol: upstream.protocol.as_str(),
+            load_balance: upstream.load_balance.as_str(),
             request_timeout_ms: upstream.request_timeout.as_millis() as u64,
+            read_timeout_ms: upstream.request_timeout.as_millis() as u64,
+            connect_timeout_ms: upstream.connect_timeout.as_millis() as u64,
+            write_timeout_ms: upstream.write_timeout.as_millis() as u64,
+            idle_timeout_ms: upstream.idle_timeout.as_millis() as u64,
+            pool_idle_timeout_ms: upstream
+                .pool_idle_timeout
+                .map(|timeout| timeout.as_millis() as u64),
+            pool_max_idle_per_host: upstream.pool_max_idle_per_host,
+            tcp_keepalive_ms: upstream.tcp_keepalive.map(|timeout| timeout.as_millis() as u64),
+            tcp_nodelay: upstream.tcp_nodelay,
+            http2_keep_alive_interval_ms: upstream
+                .http2_keep_alive_interval
+                .map(|timeout| timeout.as_millis() as u64),
+            http2_keep_alive_timeout_ms: upstream.http2_keep_alive_timeout.as_millis() as u64,
+            http2_keep_alive_while_idle: upstream.http2_keep_alive_while_idle,
             active_health_check: upstream.active_health_check.as_ref().map(health_check_payload),
             peers: active.clients.peer_statuses(upstream.as_ref()),
         })
@@ -214,10 +275,12 @@ fn status_response(active: &ActiveState) -> HttpResponse {
 }
 
 fn metrics_response(metrics: &Metrics) -> HttpResponse {
+    let body = metrics.render_prometheus();
     Response::builder()
         .status(StatusCode::OK)
         .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
-        .body(full_body(metrics.render_prometheus()))
+        .header("content-length", body.len().to_string())
+        .body(full_body(body))
         .expect("response builder should not fail for metrics responses")
 }
 
@@ -238,9 +301,11 @@ pub(crate) fn text_response(
     content_type: &str,
     body: impl Into<Bytes>,
 ) -> HttpResponse {
+    let body = body.into();
     Response::builder()
         .status(status)
         .header("content-type", content_type)
+        .header("content-length", body.len().to_string())
         .body(full_body(body))
         .expect("response builder should not fail for static responses")
 }
@@ -250,6 +315,7 @@ fn json_response(status: StatusCode, payload: &impl Serialize) -> HttpResponse {
     Response::builder()
         .status(status)
         .header("content-type", "application/json; charset=utf-8")
+        .header("content-length", body.len().to_string())
         .body(full_body(body))
         .expect("response builder should not fail for JSON responses")
 }
@@ -258,6 +324,11 @@ pub(crate) fn full_body(body: impl Into<Bytes>) -> HttpBody {
     Full::new(body.into())
         .map_err(|never: Infallible| -> BoxError { match never {} })
         .boxed_unsync()
+}
+
+fn strip_response_body(response: HttpResponse) -> HttpResponse {
+    let (parts, _body) = response.into_parts();
+    Response::from_parts(parts, full_body(Bytes::new()))
 }
 
 fn health_check_payload(health_check: &ActiveHealthCheck) -> ActiveHealthCheckPayload {
@@ -283,7 +354,19 @@ struct StatusPayload {
 struct UpstreamStatusPayload {
     name: String,
     protocol: &'static str,
+    load_balance: &'static str,
     request_timeout_ms: u64,
+    read_timeout_ms: u64,
+    connect_timeout_ms: u64,
+    write_timeout_ms: u64,
+    idle_timeout_ms: u64,
+    pool_idle_timeout_ms: Option<u64>,
+    pool_max_idle_per_host: usize,
+    tcp_keepalive_ms: Option<u64>,
+    tcp_nodelay: bool,
+    http2_keep_alive_interval_ms: Option<u64>,
+    http2_keep_alive_timeout_ms: u64,
+    http2_keep_alive_while_idle: bool,
     active_health_check: Option<ActiveHealthCheckPayload>,
     peers: Vec<PeerStatusSnapshot>,
 }
@@ -302,12 +385,12 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use http::{header::HOST, HeaderMap, HeaderValue, StatusCode};
+    use http::{HeaderMap, HeaderValue, StatusCode, header::HOST};
     use http_body_util::BodyExt;
     use rginx_core::{
         ActiveHealthCheck, ConfigSnapshot, Route, RouteAccessControl, RouteAction, RouteMatcher,
-        RouteRateLimit, RuntimeSettings, Server, StaticResponse, Upstream, UpstreamPeer,
-        UpstreamProtocol, UpstreamSettings, UpstreamTls, VirtualHost,
+        RouteRateLimit, RuntimeSettings, Server, StaticResponse, Upstream, UpstreamLoadBalance,
+        UpstreamPeer, UpstreamProtocol, UpstreamSettings, UpstreamTls, VirtualHost,
     };
     use serde_json::Value;
 
@@ -327,18 +410,25 @@ mod tests {
             vec![peer("http://127.0.0.1:9000")],
             UpstreamTls::NativeRoots,
             UpstreamSettings {
-                protocol: UpstreamProtocol::Auto,
-                server_name_override: None,
-                request_timeout: Duration::from_secs(30),
-                max_replayable_request_body_bytes: 64 * 1024,
-                unhealthy_after_failures: 2,
-                unhealthy_cooldown: Duration::from_secs(10),
+                load_balance: UpstreamLoadBalance::IpHash,
+                connect_timeout: Duration::from_secs(3),
+                request_timeout: Duration::from_secs(4),
+                write_timeout: Duration::from_secs(5),
+                idle_timeout: Duration::from_secs(6),
+                pool_idle_timeout: Some(Duration::from_secs(7)),
+                pool_max_idle_per_host: 8,
+                tcp_keepalive: Some(Duration::from_secs(9)),
+                tcp_nodelay: true,
+                http2_keep_alive_interval: Some(Duration::from_secs(10)),
+                http2_keep_alive_timeout: Duration::from_secs(11),
+                http2_keep_alive_while_idle: true,
                 active_health_check: Some(ActiveHealthCheck {
                     path: "/healthz".to_string(),
                     interval: Duration::from_secs(5),
                     timeout: Duration::from_secs(2),
                     healthy_successes_required: 2,
                 }),
+                ..upstream_settings()
             },
         ));
         let config = Arc::new(ConfigSnapshot {
@@ -384,8 +474,24 @@ mod tests {
         assert_eq!(json["upstream_count"], 1);
         assert_eq!(json["upstreams"][0]["name"], "backend");
         assert_eq!(json["upstreams"][0]["protocol"], "auto");
+        assert_eq!(json["upstreams"][0]["load_balance"], "ip_hash");
+        assert_eq!(json["upstreams"][0]["request_timeout_ms"], 4_000);
+        assert_eq!(json["upstreams"][0]["read_timeout_ms"], 4_000);
+        assert_eq!(json["upstreams"][0]["connect_timeout_ms"], 3_000);
+        assert_eq!(json["upstreams"][0]["write_timeout_ms"], 5_000);
+        assert_eq!(json["upstreams"][0]["idle_timeout_ms"], 6_000);
+        assert_eq!(json["upstreams"][0]["pool_idle_timeout_ms"], 7_000);
+        assert_eq!(json["upstreams"][0]["pool_max_idle_per_host"], 8);
+        assert_eq!(json["upstreams"][0]["tcp_keepalive_ms"], 9_000);
+        assert_eq!(json["upstreams"][0]["tcp_nodelay"], true);
+        assert_eq!(json["upstreams"][0]["http2_keep_alive_interval_ms"], 10_000);
+        assert_eq!(json["upstreams"][0]["http2_keep_alive_timeout_ms"], 11_000);
+        assert_eq!(json["upstreams"][0]["http2_keep_alive_while_idle"], true);
         assert_eq!(json["upstreams"][0]["active_health_check"]["path"], "/healthz");
         assert_eq!(json["upstreams"][0]["peers"][0]["url"], "http://127.0.0.1:9000");
+        assert_eq!(json["upstreams"][0]["peers"][0]["weight"], 1);
+        assert_eq!(json["upstreams"][0]["peers"][0]["backup"], false);
+        assert_eq!(json["upstreams"][0]["peers"][0]["active_requests"], 0);
         assert_eq!(json["upstreams"][0]["peers"][0]["healthy"], false);
         assert_eq!(json["upstreams"][0]["peers"][0]["active_unhealthy"], true);
     }
@@ -523,8 +629,10 @@ mod tests {
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
 
         let rendered = metrics.render_prometheus();
-        assert!(rendered
-            .contains("rginx_http_rate_limited_total{route=\"server/routes[0]|exact:/api\"} 1"));
+        assert!(
+            rendered
+                .contains("rginx_http_rate_limited_total{route=\"server/routes[0]|exact:/api\"} 1")
+        );
     }
 
     #[test]
@@ -662,6 +770,31 @@ mod tests {
             url: url.to_string(),
             scheme: uri.scheme_str().expect("peer should have scheme").to_string(),
             authority: uri.authority().expect("peer should have authority").to_string(),
+            weight: 1,
+            backup: false,
+        }
+    }
+
+    fn upstream_settings() -> UpstreamSettings {
+        UpstreamSettings {
+            protocol: UpstreamProtocol::Auto,
+            load_balance: UpstreamLoadBalance::RoundRobin,
+            server_name_override: None,
+            request_timeout: Duration::from_secs(30),
+            connect_timeout: Duration::from_secs(30),
+            write_timeout: Duration::from_secs(30),
+            idle_timeout: Duration::from_secs(30),
+            pool_idle_timeout: Some(Duration::from_secs(90)),
+            pool_max_idle_per_host: usize::MAX,
+            tcp_keepalive: None,
+            tcp_nodelay: false,
+            http2_keep_alive_interval: None,
+            http2_keep_alive_timeout: Duration::from_secs(20),
+            http2_keep_alive_while_idle: false,
+            max_replayable_request_body_bytes: 64 * 1024,
+            unhealthy_after_failures: 2,
+            unhealthy_cooldown: Duration::from_secs(10),
+            active_health_check: None,
         }
     }
 

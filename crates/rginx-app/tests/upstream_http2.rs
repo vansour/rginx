@@ -58,8 +58,8 @@ async fn proxies_to_https_upstreams_over_http2_when_alpn_negotiates_h2() {
     fs::remove_dir_all(upstream_temp_dir).expect("upstream temp dir should be removed");
 }
 
-async fn spawn_h2_upstream(
-) -> (SocketAddr, oneshot::Receiver<ObservedRequest>, JoinHandle<()>, PathBuf) {
+async fn spawn_h2_upstream()
+-> (SocketAddr, oneshot::Receiver<ObservedRequest>, JoinHandle<()>, PathBuf) {
     let temp_dir = temp_dir("rginx-upstream-h2");
     fs::create_dir_all(&temp_dir).expect("upstream temp dir should be created");
     let cert_path = temp_dir.join("upstream.crt");

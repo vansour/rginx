@@ -77,11 +77,7 @@ fn parse_x_forwarded_for(headers: &HeaderMap) -> Option<Vec<IpAddr>> {
         }
     }
 
-    if chain.is_empty() {
-        None
-    } else {
-        Some(chain)
-    }
+    if chain.is_empty() { None } else { Some(chain) }
 }
 
 fn parse_forwarded_ip(token: &str) -> Option<IpAddr> {
@@ -101,7 +97,7 @@ mod tests {
     use http::{HeaderMap, HeaderValue};
     use rginx_core::Server;
 
-    use super::{resolve_client_address, ClientIpSource};
+    use super::{ClientIpSource, resolve_client_address};
 
     #[test]
     fn untrusted_peer_ignores_spoofed_x_forwarded_for() {
