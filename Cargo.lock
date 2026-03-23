@@ -619,7 +619,7 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "rginx"
-version = "0.1.1-rc.2"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -641,7 +641,7 @@ dependencies = [
 
 [[package]]
 name = "rginx-config"
-version = "0.1.1-rc.2"
+version = "0.1.1"
 dependencies = [
  "http",
  "ipnet",
@@ -653,7 +653,7 @@ dependencies = [
 
 [[package]]
 name = "rginx-core"
-version = "0.1.1-rc.2"
+version = "0.1.1"
 dependencies = [
  "http",
  "ipnet",
@@ -662,7 +662,7 @@ dependencies = [
 
 [[package]]
 name = "rginx-http"
-version = "0.1.1-rc.2"
+version = "0.1.1"
 dependencies = [
  "bytes",
  "futures-util",
@@ -686,14 +686,14 @@ dependencies = [
 
 [[package]]
 name = "rginx-observability"
-version = "0.1.1-rc.2"
+version = "0.1.1"
 dependencies = [
  "tracing-subscriber",
 ]
 
 [[package]]
 name = "rginx-runtime"
-version = "0.1.1-rc.2"
+version = "0.1.1"
 dependencies = [
  "rginx-config",
  "rginx-core",

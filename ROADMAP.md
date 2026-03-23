@@ -1,6 +1,6 @@
-# Nginx -> Rginx 功能对标与实现进度
+# Rginx 功能边界与实现进度
 
-本文档用于追踪 rginx 与常见 Nginx 用途的功能差距，指导开发优先级。
+本文档用于追踪 rginx 在“面向中小规模部署的 Rust 入口反向代理”这一产品范围内，哪些能力已经稳定支持，哪些能力仍待补齐。
 
 状态说明：
 - ✅ **已支持**: 功能已实现并有测试覆盖。
@@ -12,9 +12,9 @@
 
 ## 1. 核心架构与配置
 
-| Nginx 能力 | Rginx 状态 | 说明 / 差异 |
+| 能力项 | Rginx 状态 | 说明 / 差异 |
 | :--- | :--- | :--- |
-| **单进程 / 多 Worker** | ❌ | 当前为单线程 Tokio runtime。P3 考虑多 Worker。 |
+| **单进程 / 多 Worker** | ❌ | 当前以单进程运行；后续再评估多 worker / `SO_REUSEPORT` 形态。 |
 | **配置热加载** | ✅ | 支持 SIGHUP 平滑加载，现有连接不中断。 |
 | **配置文件 Include** | ❌ | 暂不支持拆分配置文件。 |
 | **动态配置 / API** | ❌ | 无运行时 API 修改配置（P3）。 |
@@ -23,7 +23,7 @@
 
 ## 2. Server / 监听
 
-| Nginx 能力 | Rginx 状态 | 说明 / 差异 |
+| 能力项 | Rginx 状态 | 说明 / 差异 |
 | :--- | :--- | :--- |
 | **HTTP/1.1 监听** | ✅ | 支持。 |
 | **HTTPS/TLS 监听** | ✅ | 支持 PEM 格式证书/密钥。 |
@@ -35,7 +35,7 @@
 
 ## 3. 路由与匹配
 
-| Nginx 能力 | Rginx 状态 | 说明 / 差异 |
+| 能力项 | Rginx 状态 | 说明 / 差异 |
 | :--- | :--- | :--- |
 | **精确匹配 (=)** | ✅ | `MatcherConfig::Exact`。 |
 | **前缀匹配 (^~ / 无修饰)** | ✅ | `MatcherConfig::Prefix`。 |
@@ -45,7 +45,7 @@
 
 ## 4. 代理
 
-| Nginx 能力 | Rginx 状态 | 说明 / 差异 |
+| 能力项 | Rginx 状态 | 说明 / 差异 |
 | :--- | :--- | :--- |
 | **HTTP 反向代理** | ✅ | 基础功能完备。 |
 | **Websocket 透传** | ✅ | 支持 HTTP/1.1 `Connection: Upgrade` / WebSocket 透传；暂不含 HTTP/2 extended CONNECT。 |
@@ -57,7 +57,7 @@
 
 ### 4.1 请求/响应处理
 
-| Nginx 能力 | Rginx 状态 | 说明 / 差异 |
+| 能力项 | Rginx 状态 | 说明 / 差异 |
 | :--- | :--- | :--- |
 | **X-Forwarded-For** | ✅ | 自动追加，支持 Trusted Proxies。 |
 | **X-Forwarded-Proto** | ✅ | 自动添加。 |
@@ -69,7 +69,7 @@
 
 ## 5. 负载均衡
 
-| Nginx 能力 | Rginx 状态 | 说明 / 差异 |
+| 能力项 | Rginx 状态 | 说明 / 差异 |
 | :--- | :--- | :--- |
 | **Round Robin** | ✅ | 默认策略。 |
 | **Weight** | ✅ | 支持 `peer.weight`，适用于 `round_robin`、`ip_hash`、`least_conn`。 |
@@ -81,7 +81,7 @@
 
 ## 6. 流量治理
 
-| Nginx 能力 | Rginx 状态 | 说明 / 差异 |
+| 能力项 | Rginx 状态 | 说明 / 差异 |
 | :--- | :--- | :--- |
 | **限流** | ✅ | 支持基于 IP 的 Token Bucket。 |
 | **IP 黑白名单** | ✅ | 支持 CIDR allow/deny。 |
@@ -91,7 +91,7 @@
 
 ## 7. 内容服务
 
-| Nginx 能力 | Rginx 状态 | 说明 / 差异 |
+| 能力项 | Rginx 状态 | 说明 / 差异 |
 | :--- | :--- | :--- |
 | **静态文件** | ✅ | 支持 `root`、`try_files`、MIME 类型、`HEAD`、单段 `Range`。 |
 | **Index** | ✅ | 支持 `index` 指令指定默认索引文件。 |
@@ -100,7 +100,7 @@
 
 ## 8. 可观测性
 
-| Nginx 能力 | Rginx 状态 | 说明 / 差异 |
+| 能力项 | Rginx 状态 | 说明 / 差异 |
 | :--- | :--- | :--- |
 | **Access Log** | 🚧 | 通过 Tracing 输出结构化字段，已包含 `request_id` / `host` / `vhost` / `route`，但仍缺自定义格式。 |
 | **Error Log** | ✅ | Tracing 实现。 |
