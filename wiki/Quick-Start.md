@@ -4,9 +4,48 @@
 
 ## 前置条件
 
-- Rust 工具链可用
 - 本机可以绑定一个监听端口
+- 如果你要从源码构建，Rust 工具链需要可用
 - 如果你要测试热重载，建议在 Unix 环境下运行，因为 `SIGHUP` 只在 Unix 上启用
+
+## 一键安装与卸载
+
+源码目录下默认配置文件是 `configs/rginx.ron`。安装版会优先尝试 `<prefix>/etc/rginx/rginx.ron`。如果你安装时用了自定义 `--config-dir`，运行时请继续通过 `RGINX_CONFIG` 或 `--config` 显式指定。
+
+从源码仓库安装：
+
+```bash
+./scripts/install.sh --mode source
+```
+
+安装指定 GitHub Release 版本：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/vansour/rginx/main/scripts/install.sh | bash -s -- --mode release --version <tag>
+```
+
+其中 `latest` 只会解析最新稳定版；如果你要安装预发布版，请显式传入具体 tag，例如 `v0.1.1-rc.2`。
+
+默认安装位置：
+
+- `<prefix>/bin/rginx`
+- `<prefix>/bin/rginx-uninstall`
+- `<prefix>/etc/rginx/rginx.ron`
+- `<prefix>/share/rginx/configs`
+
+卸载：
+
+```bash
+rginx-uninstall
+rginx-uninstall --purge-config
+```
+
+安装完成后，默认配置路径可以直接这样验证：
+
+```bash
+rginx check
+rginx
+```
 
 ## 构建与启动
 
