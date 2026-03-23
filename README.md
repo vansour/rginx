@@ -8,6 +8,10 @@
 
 - [wiki/Release-Gate.md](wiki/Release-Gate.md)
 
+许可证见：
+
+- [LICENSE](LICENSE)
+
 当前包名和可执行文件名统一为 `rginx`。
 
 ## 当前能力
@@ -661,6 +665,10 @@ tag 被 push 之后，GitHub Actions 会自动：
 Release Notes 分类规则来自：
 
 - `.github/release.yml`
+
+当前仓库的 changelog 约定见：
+
+- [CHANGELOG.md](CHANGELOG.md)
 
 建议的本地发版前检查：
 

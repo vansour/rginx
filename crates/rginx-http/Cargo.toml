@@ -2,6 +2,14 @@
 name = "rginx-http"
 version.workspace = true
 edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "HTTP server, routing, proxying, file serving, and metrics for Rginx."
 
 [dependencies]
 bytes.workspace = true

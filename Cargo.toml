@@ -6,6 +6,13 @@ resolver = "2"
 [workspace.package]
 version = "0.1.1"
 edition = "2024"
+authors = ["vansour"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/vansour/rginx"
+homepage = "https://github.com/vansour/rginx"
+documentation = "https://github.com/vansour/rginx/tree/main/wiki"
+readme = "README.md"
+rust-version = "1.85"
 
 [workspace.dependencies]
 anyhow = "1.0"

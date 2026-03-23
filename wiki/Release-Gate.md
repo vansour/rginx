@@ -134,6 +134,7 @@ cargo run -p rginx -- --version
 - tag 对应的 release workflow 通过
 - 发布产物、`SHA256SUMS.txt` 和 Release notes 已生成
 - Release notes 包含具体 changelog，而不是只有 tag 与 commit
+- 仓库级 changelog 约定与实际 release notes 生成逻辑一致，见 [`/CHANGELOG.md`](../CHANGELOG.md)
 
 ## 如何使用这份文档
 
