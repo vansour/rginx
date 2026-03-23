@@ -45,7 +45,75 @@
 
 ## 快速开始
 
-默认配置文件是 `configs/rginx.ron`。
+源码目录下的默认配置文件是 `configs/rginx.ron`。安装版会优先尝试 `<prefix>/etc/rginx/rginx.ron`，也支持通过 `RGINX_CONFIG` 或 `--config` 显式指定配置文件。若你安装时使用了自定义 `--config-dir`，运行时也应继续通过 `RGINX_CONFIG` 或 `--config` 指向那份活跃配置。
+
+### 一键安装
+
+从当前源码仓库安装：
+
+```bash
+./scripts/install.sh --mode source
+```
+
+安装指定 GitHub Release 版本：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/vansour/rginx/main/scripts/install.sh | bash -s -- --mode release --version <tag>
+```
+
+其中 `latest` 只会解析最新稳定版；如果你要安装预发布版，请显式传入具体 tag，例如 `v0.1.1-rc.2`。
+
+安装脚本默认会：
+
+- 安装 `rginx` 到 `<prefix>/bin/rginx`
+- 安装卸载脚本到 `<prefix>/bin/rginx-uninstall`
+- 安装活跃配置到 `<prefix>/etc/rginx/rginx.ron`
+- 安装示例配置到 `<prefix>/share/rginx/configs`
+
+默认前缀：
+
+- Linux: `/usr/local`
+- macOS Intel: `/usr/local`
+- macOS Apple Silicon: `/opt/homebrew`（存在该目录时）
+
+常用参数：
+
+```bash
+./scripts/install.sh --mode source --prefix /tmp/rginx
+./scripts/install.sh --mode source --prefix /tmp/rginx --config-dir /tmp/rginx-config
+./scripts/install.sh --mode source --force
+```
+
+安装完成后，默认配置路径可以直接这样验证：
+
+```bash
+rginx check
+rginx
+```
+
+### 一键卸载
+
+安装完成后可以直接运行：
+
+```bash
+rginx-uninstall
+```
+
+默认会保留活跃配置目录；如果要连配置一起删除：
+
+```bash
+rginx-uninstall --purge-config
+```
+
+如果你使用了自定义前缀或配置目录，也可以显式指定：
+
+```bash
+./scripts/uninstall.sh --prefix /tmp/rginx --config-dir /tmp/rginx-config --purge-config
+```
+
+### 源码运行
+
+直接运行仓库内默认配置：
 
 ```bash
 cargo run -p rginx -- --config configs/rginx.ron
@@ -64,6 +132,8 @@ cargo build -p rginx
 ./target/debug/rginx --config configs/rginx.ron
 ./target/debug/rginx check --config configs/rginx.ron
 ```
+
+### 仓库自带示例配置
 
 仓库已自带几个示例配置：
 
@@ -661,6 +731,16 @@ tag 被 push 之后，GitHub Actions 会自动：
 - `aarch64-unknown-linux-gnu`
 - `x86_64-apple-darwin`
 - `aarch64-apple-darwin`
+
+每个 release archive 现在会同时包含：
+
+- `rginx`
+- `configs/`
+- `scripts/install.sh`
+- `scripts/uninstall.sh`
+- `README.md`
+- `CHANGELOG.md`
+- `LICENSE*`
 
 Release Notes 分类规则来自：
 

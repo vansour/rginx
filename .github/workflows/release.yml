@@ -172,7 +172,12 @@ jobs:
           mkdir -p "${INSTALL_DIR}"
           install -m 755 "target/${{ matrix.target }}/release/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}"
           cp README.md "${INSTALL_DIR}/README.md"
+          cp CHANGELOG.md "${INSTALL_DIR}/CHANGELOG.md"
+          cp LICENSE "${INSTALL_DIR}/LICENSE"
+          cp LICENSE-APACHE "${INSTALL_DIR}/LICENSE-APACHE"
+          cp LICENSE-MIT "${INSTALL_DIR}/LICENSE-MIT"
           cp -R configs "${INSTALL_DIR}/configs"
+          cp -R scripts "${INSTALL_DIR}/scripts"
 
           mkdir -p dist
           tar -C "${STAGING_ROOT}" -czf "dist/${ARCHIVE_NAME}" "${PKG_DIR}"
