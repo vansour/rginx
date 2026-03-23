@@ -9,6 +9,7 @@
 - [TLS and HTTP2](TLS-and-HTTP2.md)
 - [Operations](Operations.md)
 - [Release Gate](Release-Gate.md)
+- [Release Process](Release-Process.md)
 - [Examples](Examples.md)
 - [Development](Development.md)
 - [Roadmap and Gaps](Roadmap-and-Gaps.md)
