@@ -4,6 +4,10 @@
 
 当前正式发布线收口为 `v0.1.1`。此前的 `v0.1.1-rc.1` 与 `v0.1.1-rc.2` 仅用于这条稳定发布线的预发布验证。
 
+稳定支持范围、当前明确限制和正式版发布闸门见：
+
+- [wiki/Release-Gate.md](wiki/Release-Gate.md)
+
 当前包名和可执行文件名统一为 `rginx`。
 
 ## 当前能力
@@ -712,6 +716,8 @@ kill -HUP <pid>
 - 明文 HTTP/2（h2c）入站仍未支持
 - 明文 HTTP/2（h2c）upstream 仍未支持
 - 热重载不能切换监听地址
+
+更完整的稳定支持范围、非目标能力、运维前提和正式版发布闸门，见 [wiki/Release-Gate.md](wiki/Release-Gate.md)。
 
 ## 目标定位
 

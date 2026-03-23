@@ -166,6 +166,10 @@ Prometheus 指标当前包括：
 6. 至少跑过一次热重载演练
 7. 至少跑过一次平滑退出演练
 
+如果你在准备正式版发布，或者要判断某项能力是否已经进入稳定承诺，请再对照：
+
+- [Release Gate](Release-Gate.md)
+
 ## 典型排障思路
 
 ### 请求都打到 backup
@@ -196,3 +200,4 @@ Prometheus 指标当前包括：
 - [Upstreams](Upstreams.md)
 - [TLS and HTTP2](TLS-and-HTTP2.md)
 - [Examples](Examples.md)
+- [Release Gate](Release-Gate.md)
