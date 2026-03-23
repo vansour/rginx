@@ -20,6 +20,7 @@
 4. [Upstreams](Upstreams.md)
 5. [Operations](Operations.md)
 6. [Release Gate](Release-Gate.md)
+7. [Release Process](Release-Process.md)
 
 如果你要改代码，建议直接看：
 
@@ -59,6 +60,7 @@
 | [TLS and HTTP2](TLS-and-HTTP2.md) | 入站 TLS、SNI、ALPN、上游 TLS、HTTP/2 |
 | [Operations](Operations.md) | 日常运维、状态页、指标、日志、热重载、信号 |
 | [Release Gate](Release-Gate.md) | 当前稳定支持范围、明确限制和正式版发布闸门 |
+| [Release Process](Release-Process.md) | 正式版发布前预检、手工 smoke、切 tag 与发布后核对 |
 | [Examples](Examples.md) | 仓库内示例配置的用途和建议测试方式 |
 | [Development](Development.md) | crate 分工、测试体系、功能开发落点 |
 | [Roadmap and Gaps](Roadmap-and-Gaps.md) | 已支持/未支持清单与下一阶段建议 |

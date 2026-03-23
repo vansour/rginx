@@ -738,6 +738,7 @@ tag 被 push 之后，GitHub Actions 会自动：
 - `configs/`
 - `scripts/install.sh`
 - `scripts/uninstall.sh`
+- `scripts/prepare-release.sh`
 - `README.md`
 - `CHANGELOG.md`
 - `LICENSE*`
@@ -753,23 +754,23 @@ Release Notes 分类规则来自：
 建议的本地发版前检查：
 
 ```bash
-cargo fmt --all --check
-cargo test --workspace --locked
-cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+./scripts/prepare-release.sh --tag v0.1.1
 ```
 
 建议流程：
 
 1. 确认 `main` 上的 CI 通过。
 2. 确认工作区没有误提交的临时改动。
-3. 创建语义化版本 tag，例如 `v1.2.3` 或 `v1.2.3-rc.1`。
-4. push tag，等待 `release.yml` 完成。
-5. 到 GitHub Release 页面检查生成的 changelog、commit 链接和各平台产物是否齐全。
+3. 在 `main` 上执行 `./scripts/prepare-release.sh --tag v0.1.1`。
+4. 创建语义化版本 tag，例如 `v1.2.3` 或 `v1.2.3-rc.1`。
+5. push tag，等待 `release.yml` 完成。
+6. 到 GitHub Release 页面检查生成的 changelog、commit 链接和各平台产物是否齐全。
 
 说明：
 
 - 即使这是仓库的第一个 tag，没有“上一个版本”可比较，release workflow 也会基于当前 tag 所包含的提交历史自动写出 `## Changelog`
 - 如果存在上一个 tag，`## Changelog` 会列出从上一个 tag 到当前 tag 的具体提交
+- 正式版 tag 仍应直接切在 `origin/main` 当前 HEAD 上；更完整流程见 [wiki/Release-Process.md](wiki/Release-Process.md)
 
 产物命名规则示例：
 
