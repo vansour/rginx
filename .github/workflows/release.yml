@@ -61,6 +61,28 @@ jobs:
           echo "commit_sha=${COMMIT_SHA}" >> "${GITHUB_OUTPUT}"
           echo "prerelease=${PRERELEASE}" >> "${GITHUB_OUTPUT}"
 
+      - name: Validate Tag Commit Against Main
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG="${{ steps.meta.outputs.tag }}"
+          COMMIT_SHA="${{ steps.meta.outputs.commit_sha }}"
+          PRERELEASE="${{ steps.meta.outputs.prerelease }}"
+
+          git fetch --no-tags origin main
+          MAIN_SHA="$(git rev-parse origin/main)"
+
+          if ! git merge-base --is-ancestor "${COMMIT_SHA}" origin/main; then
+            echo "Release tag ${TAG} points to ${COMMIT_SHA}, which is not reachable from origin/main (${MAIN_SHA})." >&2
+            exit 1
+          fi
+
+          if [[ "${PRERELEASE}" != "true" && "${COMMIT_SHA}" != "${MAIN_SHA}" ]]; then
+            echo "Stable release tag ${TAG} must point to origin/main HEAD (${MAIN_SHA}), got ${COMMIT_SHA}." >&2
+            exit 1
+          fi
+
       - name: Install Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
