@@ -1,6 +1,6 @@
 # Quick Start
 
-本页目标是让你在几分钟内把 `Rginx` 跑起来，并验证一条最小可用的反向代理链路。
+本页目标是让你在几分钟内把 `rginx` 跑起来，并验证一条最小可用的反向代理链路。
 
 ## 前置条件
 
@@ -10,7 +10,7 @@
 
 ## 一键安装与卸载
 
-源码目录下默认配置文件是 `configs/rginx.ron`。安装版会优先尝试 `<prefix>/etc/rginx/rginx.ron`。如果你安装时用了自定义 `--config-dir`，运行时请继续通过 `RGINX_CONFIG` 或 `--config` 显式指定。
+源码目录下默认配置文件是 `configs/rginx.ron`。安装版会优先尝试 `<prefix>/etc/rginx/rginx.ron`。如果你安装时用了自定义 `--config-dir`，运行时请继续通过 `rginx_config` 或 `--config` 显式指定。
 
 从源码仓库安装：
 
@@ -24,7 +24,7 @@
 curl -fsSL https://raw.githubusercontent.com/vansour/rginx/main/scripts/install.sh | bash -s -- --mode release --version <tag>
 ```
 
-其中 `latest` 只会解析最新稳定版；如果你要安装预发布版，请显式传入具体 tag，例如 `v0.1.1-rc.2`。
+其中 `latest` 只会解析最新稳定版；如果你要安装预发布版，请显式传入具体 tag，例如 `v0.1.2-rc.1`。
 
 默认安装位置：
 
@@ -96,7 +96,7 @@ Config(
         LocationConfig(
             matcher: Exact("/"),
             handler: Static(
-                body: "Rginx is running.\n",
+                body: "rginx is running.\n",
             ),
         ),
         LocationConfig(
@@ -114,7 +114,7 @@ Config(
 
 `rginx check` 不只是语法检查。它会：
 
-- 读取并解析 RON 配置
+- 读取 RON 配置，并展开 `include` / 环境变量占位符
 - 执行语义校验
 - 编译成运行时 `ConfigSnapshot`
 - 初始化一轮运行时依赖，提前发现 TLS、upstream、路由等问题
@@ -122,7 +122,7 @@ Config(
 成功时会输出类似：
 
 ```text
-configuration is valid: listen=127.0.0.1:8080 tls=disabled vhosts=1 routes=2 upstreams=1
+configuration is valid: listen=127.0.0.1:8080 tls=disabled vhosts=1 routes=2 upstreams=1 worker_threads=auto accept_workers=1
 ```
 
 ## 仓库自带示例配置
@@ -172,7 +172,7 @@ kill -HUP <rginx-pid>
 注意：
 
 - 热重载不会中断现有连接
-- 监听地址变更不支持热重载，必须重启
+- `listen`、`runtime.worker_threads` 和 `runtime.accept_workers` 的变更不支持热重载，必须重启
 
 ## 下一步阅读
 

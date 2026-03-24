@@ -362,5 +362,5 @@ log "example configs: ${EXAMPLES_DIR}"
 log "default config search will now pick ${ACTIVE_CONFIG} when running ${BIN_DIR}/rginx"
 
 if [[ "${CONFIG_DIR}" != "${PREFIX}/etc/rginx" ]]; then
-    log "custom config dir detected; run with --config ${ACTIVE_CONFIG} or set RGINX_CONFIG=${ACTIVE_CONFIG}"
+    log "custom config dir detected; run with --config ${ACTIVE_CONFIG} or set rginx_config=${ACTIVE_CONFIG}"
 fi

@@ -28,7 +28,7 @@ Config(
             handler: Static(
                 status: Some(200),
                 content_type: Some("text/plain; charset=utf-8"),
-                body: "Rginx weighted upstream example\n",
+                body: "rginx weighted upstream example\n",
             ),
         ),
         LocationConfig(

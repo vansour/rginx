@@ -11,6 +11,8 @@ pub struct Metrics {
 struct MetricsInner {
     active_connections: AtomicU64,
     http_requests_total: Mutex<BTreeMap<HttpRequestKey, u64>>,
+    grpc_requests_total: Mutex<BTreeMap<GrpcRequestKey, u64>>,
+    grpc_responses_total: Mutex<BTreeMap<GrpcResponseKey, u64>>,
     http_rate_limited_total: Mutex<BTreeMap<RouteKey, u64>>,
     http_request_duration_ms: Mutex<BTreeMap<RouteKey, Histogram>>,
     upstream_requests_total: Mutex<BTreeMap<UpstreamRequestKey, u64>>,
@@ -27,6 +29,23 @@ struct HttpRequestKey {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct RouteKey {
     route: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct GrpcRequestKey {
+    route: String,
+    protocol: String,
+    service: String,
+    method: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct GrpcResponseKey {
+    route: String,
+    protocol: String,
+    service: String,
+    method: String,
+    grpc_status: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -102,6 +121,38 @@ impl Metrics {
             .observe(elapsed_ms);
     }
 
+    pub fn record_grpc_request(&self, route: &str, protocol: &str, service: &str, method: &str) {
+        increment_counter(
+            &self.inner.grpc_requests_total,
+            GrpcRequestKey {
+                route: route.to_string(),
+                protocol: protocol.to_string(),
+                service: service.to_string(),
+                method: method.to_string(),
+            },
+        );
+    }
+
+    pub fn record_grpc_response(
+        &self,
+        route: &str,
+        protocol: &str,
+        service: &str,
+        method: &str,
+        grpc_status: &str,
+    ) {
+        increment_counter(
+            &self.inner.grpc_responses_total,
+            GrpcResponseKey {
+                route: route.to_string(),
+                protocol: protocol.to_string(),
+                service: service.to_string(),
+                method: method.to_string(),
+                grpc_status: grpc_status.to_string(),
+            },
+        );
+    }
+
     pub fn record_rate_limited(&self, route: &str) {
         increment_counter(
             &self.inner.http_rate_limited_total,
@@ -158,6 +209,41 @@ impl Metrics {
                     "rginx_http_requests_total{{route=\"{}\",status=\"{}\"}} {}\n",
                     escape_label_value(&key.route),
                     key.status,
+                    value
+                ));
+            },
+        );
+
+        render_counter_family(
+            &mut output,
+            "rginx_grpc_requests_total",
+            "Total gRPC and grpc-web requests handled by route, protocol, service, and method.",
+            &*lock_map(&self.inner.grpc_requests_total),
+            |key, value, out| {
+                out.push_str(&format!(
+                    "rginx_grpc_requests_total{{route=\"{}\",protocol=\"{}\",service=\"{}\",method=\"{}\"}} {}\n",
+                    escape_label_value(&key.route),
+                    escape_label_value(&key.protocol),
+                    escape_label_value(&key.service),
+                    escape_label_value(&key.method),
+                    value
+                ));
+            },
+        );
+
+        render_counter_family(
+            &mut output,
+            "rginx_grpc_responses_total",
+            "Total gRPC and grpc-web responses handled by route, protocol, service, method, and grpc-status.",
+            &*lock_map(&self.inner.grpc_responses_total),
+            |key, value, out| {
+                out.push_str(&format!(
+                    "rginx_grpc_responses_total{{route=\"{}\",protocol=\"{}\",service=\"{}\",method=\"{}\",grpc_status=\"{}\"}} {}\n",
+                    escape_label_value(&key.route),
+                    escape_label_value(&key.protocol),
+                    escape_label_value(&key.service),
+                    escape_label_value(&key.method),
+                    escape_label_value(&key.grpc_status),
                     value
                 ));
             },
@@ -298,6 +384,19 @@ mod tests {
         let metrics = Metrics::default();
         metrics.increment_active_connections();
         metrics.observe_http_request("server/routes[0]|exact:/status", 200, 12);
+        metrics.record_grpc_request(
+            "server/routes[2]|exact:/grpc.health.v1.Health/Check",
+            "grpc-web",
+            "grpc.health.v1.Health",
+            "Check",
+        );
+        metrics.record_grpc_response(
+            "server/routes[2]|exact:/grpc.health.v1.Health/Check",
+            "grpc-web",
+            "grpc.health.v1.Health",
+            "Check",
+            "0",
+        );
         metrics.record_rate_limited("server/routes[1]|prefix:/api");
         metrics.record_upstream_request("backend", "http://127.0.0.1:9000", "success");
         metrics.record_active_health_check("backend", "http://127.0.0.1:9000", "healthy");
@@ -308,6 +407,12 @@ mod tests {
         assert!(rendered.contains("rginx_active_connections 1"));
         assert!(rendered.contains(
             "rginx_http_requests_total{route=\"server/routes[0]|exact:/status\",status=\"200\"} 1"
+        ));
+        assert!(rendered.contains(
+            "rginx_grpc_requests_total{route=\"server/routes[2]|exact:/grpc.health.v1.Health/Check\",protocol=\"grpc-web\",service=\"grpc.health.v1.Health\",method=\"Check\"} 1"
+        ));
+        assert!(rendered.contains(
+            "rginx_grpc_responses_total{route=\"server/routes[2]|exact:/grpc.health.v1.Health/Check\",protocol=\"grpc-web\",service=\"grpc.health.v1.Health\",method=\"Check\",grpc_status=\"0\"} 1"
         ));
         assert!(
             rendered.contains(

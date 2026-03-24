@@ -1,6 +1,6 @@
 # Changelog
 
-`Rginx` 目前以 GitHub Releases 作为正式发布线的权威 changelog 来源，而不是在仓库内手工维护一份持续追加的版本日志。
+`rginx` 目前以 GitHub Releases 作为正式发布线的权威 changelog 来源，而不是在仓库内手工维护一份持续追加的版本日志。
 
 规则如下：
 

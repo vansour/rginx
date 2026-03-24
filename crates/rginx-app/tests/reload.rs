@@ -1,15 +1,15 @@
 #![cfg(unix)]
 
-use std::env;
 use std::fs;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::net::{SocketAddr, TcpStream};
+use std::path::Path;
 use std::sync::{Mutex, OnceLock};
-use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
+
+mod support;
+
+use support::{READY_ROUTE_CONFIG, ServerHarness, reserve_loopback_addr};
 
 #[test]
 fn sighup_reload_applies_updated_routes() {
@@ -44,111 +44,119 @@ fn sighup_rejects_listen_address_changes() {
     server.shutdown_and_wait(Duration::from_secs(5));
 }
 
+#[test]
+fn sighup_rejects_accept_worker_changes() {
+    let _guard = test_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let listen_addr = reserve_loopback_addr();
+    let mut server = TestServer::spawn(listen_addr, "stable workers\n");
+
+    server.wait_for_body(listen_addr, "stable workers\n", Duration::from_secs(5));
+
+    server.write_config(static_config_with_runtime(
+        listen_addr,
+        "should not apply\n",
+        "        accept_workers: Some(2),\n",
+    ));
+    server.send_signal(libc::SIGHUP);
+
+    server.wait_for_body(listen_addr, "stable workers\n", Duration::from_secs(5));
+    server.kill_and_wait(Duration::from_secs(5));
+}
+
+#[test]
+fn sighup_rejects_runtime_worker_thread_changes() {
+    let _guard = test_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let listen_addr = reserve_loopback_addr();
+    let mut server = TestServer::spawn(listen_addr, "stable runtime\n");
+
+    server.wait_for_body(listen_addr, "stable runtime\n", Duration::from_secs(5));
+
+    server.write_config(static_config_with_runtime(
+        listen_addr,
+        "should not apply\n",
+        "        worker_threads: Some(2),\n",
+    ));
+    server.send_signal(libc::SIGHUP);
+
+    server.wait_for_body(listen_addr, "stable runtime\n", Duration::from_secs(5));
+    server.kill_and_wait(Duration::from_secs(5));
+}
+
+#[test]
+fn sighup_reload_picks_up_updated_included_fragments() {
+    let _guard = test_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let listen_addr = reserve_loopback_addr();
+    let mut server = TestServer::spawn_with_setup("rginx-reload-include-test", |temp_dir| {
+        fs::write(temp_dir.join("routes.ron"), static_route_fragment("before include reload\n"))
+            .expect("initial routes fragment should be written");
+        format!(
+            "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        // @include \"routes.ron\"\n    ],\n)\n",
+            listen_addr.to_string(),
+            ready_route = READY_ROUTE_CONFIG,
+        )
+    });
+    let routes_path = server.temp_dir().join("routes.ron");
+
+    server.wait_for_body(listen_addr, "before include reload\n", Duration::from_secs(5));
+
+    fs::write(&routes_path, static_route_fragment("after include reload\n"))
+        .expect("updated routes fragment should be written");
+    server.send_signal(libc::SIGHUP);
+
+    server.wait_for_body(listen_addr, "after include reload\n", Duration::from_secs(5));
+    server.shutdown_and_wait(Duration::from_secs(5));
+}
+
 struct TestServer {
-    child: Child,
-    config_path: PathBuf,
-    temp_dir: PathBuf,
+    inner: ServerHarness,
 }
 
 impl TestServer {
     fn spawn(listen_addr: SocketAddr, body: &str) -> Self {
-        let temp_dir = temp_dir("rginx-test");
-        fs::create_dir_all(&temp_dir).expect("temp test dir should be created");
-        let config_path = temp_dir.join("rginx.ron");
-        write_static_config(&config_path, listen_addr, body);
+        Self::spawn_with_config("rginx-test", static_config(listen_addr, body))
+    }
 
-        let child = Command::new(binary_path())
-            .arg("--config")
-            .arg(&config_path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("rginx should start");
+    fn spawn_with_config(prefix: &str, config: String) -> Self {
+        Self::spawn_with_setup(prefix, |_| config)
+    }
 
-        Self { child, config_path, temp_dir }
+    fn spawn_with_setup(prefix: &str, setup: impl FnOnce(&Path) -> String) -> Self {
+        Self { inner: ServerHarness::spawn(prefix, setup) }
     }
 
     fn write_static_config(&self, listen_addr: SocketAddr, body: &str) {
-        write_static_config(&self.config_path, listen_addr, body);
+        write_static_config(self.inner.config_path(), listen_addr, body);
+    }
+
+    fn write_config(&self, config: String) {
+        fs::write(self.inner.config_path(), config).expect("config file should be written");
     }
 
     fn wait_for_body(&mut self, listen_addr: SocketAddr, expected: &str, timeout: Duration) {
-        let deadline = Instant::now() + timeout;
-        let mut last_error = String::new();
-
-        while Instant::now() < deadline {
-            self.assert_running();
-
-            match fetch_text_response(listen_addr, "/") {
-                Ok((status, body)) if status == 200 && body == expected => return,
-                Ok((status, body)) => {
-                    last_error = format!(
-                        "unexpected response from {listen_addr}: status={status} body={body:?}"
-                    );
-                }
-                Err(error) => last_error = error,
-            }
-
-            thread::sleep(Duration::from_millis(50));
-        }
-
-        panic!(
-            "timed out waiting for response body {:?} on {}; last error: {}",
-            expected, listen_addr, last_error
+        self.inner.wait_for_http_text_response(
+            listen_addr,
+            &listen_addr.to_string(),
+            "/",
+            200,
+            expected,
+            timeout,
         );
     }
 
     fn send_signal(&self, signal: i32) {
-        let result = unsafe { libc::kill(self.child.id() as i32, signal) };
-        if result != 0 {
-            panic!(
-                "failed to send signal {} to pid {}: {}",
-                signal,
-                self.child.id(),
-                std::io::Error::last_os_error()
-            );
-        }
+        self.inner.send_signal(signal);
     }
 
     fn shutdown_and_wait(&mut self, timeout: Duration) {
-        self.send_signal(libc::SIGTERM);
-        let status = self.wait_for_exit(timeout);
-        assert!(status.success(), "rginx should exit successfully, got {status}");
+        self.inner.terminate_and_wait(timeout);
     }
 
-    fn wait_for_exit(&mut self, timeout: Duration) -> ExitStatus {
-        let deadline = Instant::now() + timeout;
-
-        loop {
-            if let Some(status) = self.child.try_wait().expect("child status should be readable") {
-                return status;
-            }
-
-            if Instant::now() >= deadline {
-                let _ = unsafe { libc::kill(self.child.id() as i32, libc::SIGKILL) };
-                let _ = self.child.wait();
-                panic!("timed out waiting for rginx to exit");
-            }
-
-            thread::sleep(Duration::from_millis(50));
-        }
+    fn kill_and_wait(&mut self, timeout: Duration) {
+        self.inner.kill_and_wait(timeout);
     }
 
-    fn assert_running(&mut self) {
-        if let Some(status) = self.child.try_wait().expect("child status should be readable") {
-            panic!("rginx exited unexpectedly with status {status}");
-        }
-    }
-}
-
-impl Drop for TestServer {
-    fn drop(&mut self) {
-        if let Ok(None) = self.child.try_wait() {
-            let _ = unsafe { libc::kill(self.child.id() as i32, libc::SIGKILL) };
-            let _ = self.child.wait();
-        }
-
-        let _ = fs::remove_dir_all(&self.temp_dir);
+    fn temp_dir(&self) -> &Path {
+        self.inner.temp_dir()
     }
 }
 
@@ -157,9 +165,22 @@ fn write_static_config(path: &Path, listen_addr: SocketAddr, body: &str) {
 }
 
 fn static_config(listen_addr: SocketAddr, body: &str) -> String {
+    static_config_with_runtime(listen_addr, body, "")
+}
+
+fn static_config_with_runtime(listen_addr: SocketAddr, body: &str, runtime_extra: &str) -> String {
     format!(
-        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [],\n    locations: [\n        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Static(\n                status: Some(200),\n                content_type: Some(\"text/plain; charset=utf-8\"),\n                body: {:?},\n            ),\n        ),\n    ],\n)\n",
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n{}    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Static(\n                status: Some(200),\n                content_type: Some(\"text/plain; charset=utf-8\"),\n                body: {:?},\n            ),\n        ),\n    ],\n)\n",
+        runtime_extra,
         listen_addr.to_string(),
+        body,
+        ready_route = READY_ROUTE_CONFIG,
+    )
+}
+
+fn static_route_fragment(body: &str) -> String {
+    format!(
+        "LocationConfig(\n    matcher: Exact(\"/\"),\n    handler: Static(\n        status: Some(200),\n        content_type: Some(\"text/plain; charset=utf-8\"),\n        body: {:?},\n    ),\n),\n",
         body
     )
 }
@@ -198,9 +219,9 @@ fn fetch_text_response(listen_addr: SocketAddr, path: &str) -> Result<(u16, Stri
 }
 
 fn assert_unreachable(listen_addr: SocketAddr, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
+    let deadline = std::time::Instant::now() + timeout;
 
-    while Instant::now() < deadline {
+    while std::time::Instant::now() < deadline {
         match fetch_text_response(listen_addr, "/") {
             Ok((status, body)) => {
                 panic!(
@@ -209,34 +230,10 @@ fn assert_unreachable(listen_addr: SocketAddr, timeout: Duration) {
                 );
             }
             Err(_) => {
-                thread::sleep(Duration::from_millis(50));
+                std::thread::sleep(Duration::from_millis(50));
             }
         }
     }
-}
-
-fn reserve_loopback_addr() -> SocketAddr {
-    let listener =
-        TcpListener::bind(("127.0.0.1", 0)).expect("ephemeral loopback listener should bind");
-    let addr = listener.local_addr().expect("listener addr should be available");
-    drop(listener);
-    addr
-}
-
-fn temp_dir(prefix: &str) -> PathBuf {
-    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time should be after unix epoch")
-        .as_nanos();
-    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    env::temp_dir().join(format!("{prefix}-{unique}-{id}"))
-}
-
-fn binary_path() -> PathBuf {
-    env::var_os("CARGO_BIN_EXE_rginx")
-        .map(PathBuf::from)
-        .expect("cargo should expose the rginx test binary path")
 }
 
 fn test_lock() -> &'static Mutex<()> {

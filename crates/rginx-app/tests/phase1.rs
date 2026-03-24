@@ -1,20 +1,21 @@
 use std::collections::HashMap;
-use std::env;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::Path;
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
+
+mod support;
+
+use support::{READY_ROUTE_CONFIG, ServerHarness, read_http_head, reserve_loopback_addr};
 
 #[test]
 fn static_responses_generate_and_preserve_request_id_headers() {
     let listen_addr = reserve_loopback_addr();
     let mut server =
-        TestServer::spawn("rginx-phase1-static", |_| static_config(listen_addr, "ok\n"));
-    wait_for_listener(listen_addr, Duration::from_secs(5));
+        ServerHarness::spawn("rginx-phase1-static", |_| static_config(listen_addr, "ok\n"));
+    server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
 
     let head_response = send_http_request(
         listen_addr,
@@ -71,8 +72,8 @@ fn proxy_preserves_request_id_end_to_end() {
 
     let listen_addr = reserve_loopback_addr();
     let mut server =
-        TestServer::spawn("rginx-phase1-proxy", |_| proxy_config(listen_addr, upstream_addr));
-    wait_for_listener(listen_addr, Duration::from_secs(5));
+        ServerHarness::spawn("rginx-phase1-proxy", |_| proxy_config(listen_addr, upstream_addr));
+    server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
 
     let response = send_http_request(
         listen_addr,
@@ -92,14 +93,14 @@ fn proxy_preserves_request_id_end_to_end() {
 #[test]
 fn file_routes_support_head_and_range_requests() {
     let listen_addr = reserve_loopback_addr();
-    let mut server = TestServer::spawn("rginx-phase1-file", |temp_dir| {
+    let mut server = ServerHarness::spawn("rginx-phase1-file", |temp_dir| {
         let root = temp_dir.join("public");
         fs::create_dir_all(&root).expect("file root should be created");
         fs::write(root.join("hello.txt"), b"0123456789abcdef")
             .expect("test file should be written");
         file_config(listen_addr, &root)
     });
-    wait_for_listener(listen_addr, Duration::from_secs(5));
+    server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
 
     let head_response = send_http_request(
         listen_addr,
@@ -128,66 +129,89 @@ fn file_routes_support_head_and_range_requests() {
     server.shutdown_and_wait(Duration::from_secs(5));
 }
 
-struct TestServer {
-    child: Child,
-    temp_dir: PathBuf,
+#[test]
+fn file_routes_support_autoindex_directory_listings() {
+    let listen_addr = reserve_loopback_addr();
+    let mut server = ServerHarness::spawn("rginx-phase1-autoindex", |temp_dir| {
+        let root = temp_dir.join("public");
+        fs::create_dir_all(root.join("nested")).expect("nested directory should be created");
+        fs::write(root.join("a-first.txt"), b"a").expect("first file should be written");
+        fs::write(root.join("z-last.txt"), b"z").expect("last file should be written");
+        fs::write(root.join("nested").join("hello.txt"), b"hello")
+            .expect("nested file should be written");
+        file_autoindex_config(listen_addr, &root)
+    });
+    server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
+
+    let get_response = send_http_request(
+        listen_addr,
+        &format!("GET / HTTP/1.1\r\nHost: {listen_addr}\r\nConnection: close\r\n\r\n"),
+    )
+    .expect("GET autoindex request should succeed");
+    assert_eq!(get_response.status, 200);
+    assert_eq!(get_response.header("content-type"), Some("text/html; charset=utf-8"));
+    let root_listing = String::from_utf8(get_response.body.clone())
+        .expect("autoindex response body should be valid UTF-8");
+    assert!(root_listing.contains("<h1>Index of /</h1>"));
+    assert!(root_listing.contains("href=\"/a-first.txt\""));
+    assert!(root_listing.contains("href=\"/nested/\""));
+    assert!(root_listing.contains("href=\"/z-last.txt\""));
+    assert!(
+        root_listing.find("href=\"/a-first.txt\"").expect("listing should contain a-first.txt")
+            < root_listing.find("href=\"/nested/\"").expect("listing should contain nested/")
+    );
+    assert!(
+        root_listing.find("href=\"/nested/\"").expect("listing should contain nested/")
+            < root_listing.find("href=\"/z-last.txt\"").expect("listing should contain z-last.txt")
+    );
+
+    let root_listing_len = get_response.body.len().to_string();
+    let head_response = send_http_request(
+        listen_addr,
+        &format!("HEAD / HTTP/1.1\r\nHost: {listen_addr}\r\nConnection: close\r\n\r\n"),
+    )
+    .expect("HEAD autoindex request should succeed");
+    assert_eq!(head_response.status, 200);
+    assert_eq!(head_response.body, b"");
+    assert_eq!(head_response.header("content-length"), Some(root_listing_len.as_str()));
+    assert_generated_request_id(head_response.header("x-request-id"));
+
+    let nested_response = send_http_request(
+        listen_addr,
+        &format!("GET /nested HTTP/1.1\r\nHost: {listen_addr}\r\nConnection: close\r\n\r\n"),
+    )
+    .expect("GET nested autoindex request should succeed");
+    assert_eq!(nested_response.status, 200);
+    let nested_listing = String::from_utf8(nested_response.body)
+        .expect("nested autoindex response body should be valid UTF-8");
+    assert!(nested_listing.contains("<h1>Index of /nested/</h1>"));
+    assert!(nested_listing.contains("<li><a href=\"/\">../</a></li>"));
+    assert!(nested_listing.contains("href=\"/nested/hello.txt\""));
+
+    server.shutdown_and_wait(Duration::from_secs(5));
 }
 
-impl TestServer {
-    fn spawn(prefix: &str, build_config: impl FnOnce(&Path) -> String) -> Self {
-        let temp_dir = temp_dir(prefix);
-        fs::create_dir_all(&temp_dir).expect("temp test dir should be created");
-        let config_path = temp_dir.join("rginx.ron");
-        fs::write(&config_path, build_config(&temp_dir)).expect("config should be written");
+#[test]
+fn file_routes_without_autoindex_keep_directory_requests_hidden() {
+    let listen_addr = reserve_loopback_addr();
+    let mut server = ServerHarness::spawn("rginx-phase1-file-no-autoindex", |temp_dir| {
+        let root = temp_dir.join("public");
+        fs::create_dir_all(root.join("nested")).expect("nested directory should be created");
+        fs::write(root.join("nested").join("hello.txt"), b"hello")
+            .expect("nested file should be written");
+        file_config(listen_addr, &root)
+    });
+    server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
 
-        let child = Command::new(binary_path())
-            .arg("--config")
-            .arg(&config_path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("rginx should start");
+    let response = send_http_request(
+        listen_addr,
+        &format!("GET /nested HTTP/1.1\r\nHost: {listen_addr}\r\nConnection: close\r\n\r\n"),
+    )
+    .expect("GET directory request should succeed");
+    assert_eq!(response.status, 404);
+    assert_eq!(response.body, b"not found\n");
 
-        Self { child, temp_dir }
-    }
-
-    fn shutdown_and_wait(&mut self, timeout: Duration) {
-        self.child.kill().expect("rginx should accept a kill signal");
-        let status = self.wait_for_exit(timeout);
-        assert!(
-            !status.success() || status.code() == Some(0),
-            "rginx should exit after the test, got {status}"
-        );
-    }
-
-    fn wait_for_exit(&mut self, timeout: Duration) -> ExitStatus {
-        let deadline = Instant::now() + timeout;
-
-        loop {
-            if let Some(status) = self.child.try_wait().expect("child status should be readable") {
-                return status;
-            }
-
-            if Instant::now() >= deadline {
-                let _ = self.child.kill();
-                let _ = self.child.wait();
-                panic!("timed out waiting for rginx to exit");
-            }
-
-            thread::sleep(Duration::from_millis(50));
-        }
-    }
-}
-
-impl Drop for TestServer {
-    fn drop(&mut self) {
-        if let Ok(None) = self.child.try_wait() {
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-        }
-
-        let _ = fs::remove_dir_all(&self.temp_dir);
-    }
+    server.shutdown_and_wait(Duration::from_secs(5));
 }
 
 #[derive(Debug)]
@@ -204,13 +228,27 @@ impl ParsedResponse {
 }
 
 fn send_http_request(listen_addr: SocketAddr, request: &str) -> Result<ParsedResponse, String> {
+    send_http_request_with_timeouts(
+        listen_addr,
+        request,
+        Duration::from_secs(2),
+        Duration::from_millis(500),
+    )
+}
+
+fn send_http_request_with_timeouts(
+    listen_addr: SocketAddr,
+    request: &str,
+    read_timeout: Duration,
+    write_timeout: Duration,
+) -> Result<ParsedResponse, String> {
     let mut stream = TcpStream::connect_timeout(&listen_addr, Duration::from_millis(200))
         .map_err(|error| format!("failed to connect to {listen_addr}: {error}"))?;
     stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
+        .set_read_timeout(Some(read_timeout))
         .map_err(|error| format!("failed to set read timeout: {error}"))?;
     stream
-        .set_write_timeout(Some(Duration::from_millis(500)))
+        .set_write_timeout(Some(write_timeout))
         .map_err(|error| format!("failed to set write timeout: {error}"))?;
     stream
         .write_all(request.as_bytes())
@@ -250,38 +288,6 @@ fn parse_http_response(bytes: &[u8]) -> Result<ParsedResponse, String> {
     Ok(ParsedResponse { status, headers, body: bytes[head_end + 4..].to_vec() })
 }
 
-fn wait_for_listener(listen_addr: SocketAddr, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
-    let mut last_error = String::new();
-
-    while Instant::now() < deadline {
-        match TcpStream::connect_timeout(&listen_addr, Duration::from_millis(200)) {
-            Ok(_) => return,
-            Err(error) => last_error = error.to_string(),
-        }
-
-        thread::sleep(Duration::from_millis(50));
-    }
-
-    panic!("timed out waiting for rginx to listen on {listen_addr}: {last_error}");
-}
-
-fn read_http_head(stream: &mut TcpStream) -> String {
-    let mut buffer = Vec::new();
-    let mut chunk = [0u8; 256];
-
-    loop {
-        let read = stream.read(&mut chunk).expect("HTTP head should be readable");
-        assert!(read > 0, "stream closed before the HTTP head was complete");
-        buffer.extend_from_slice(&chunk[..read]);
-
-        if let Some(head_end) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
-            return String::from_utf8(buffer[..head_end + 4].to_vec())
-                .expect("HTTP head should be valid UTF-8");
-        }
-    }
-}
-
 fn assert_generated_request_id(value: Option<&str>) {
     let value = value.expect("response should include x-request-id");
     assert_eq!(value.len(), "rginx-0000000000000000".len());
@@ -294,48 +300,36 @@ fn assert_generated_request_id(value: Option<&str>) {
 
 fn static_config(listen_addr: SocketAddr, body: &str) -> String {
     format!(
-        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [],\n    locations: [\n        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Static(\n                body: {:?},\n            ),\n        ),\n    ],\n)\n",
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Static(\n                body: {:?},\n            ),\n        ),\n    ],\n)\n",
         listen_addr.to_string(),
-        body
+        body,
+        ready_route = READY_ROUTE_CONFIG,
     )
 }
 
 fn proxy_config(listen_addr: SocketAddr, upstream_addr: SocketAddr) -> String {
     format!(
-        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [\n                UpstreamPeerConfig(\n                    url: {:?},\n                ),\n            ],\n        ),\n    ],\n    locations: [\n        LocationConfig(\n            matcher: Prefix(\"/api\"),\n            handler: Proxy(\n                upstream: \"backend\",\n            ),\n        ),\n    ],\n)\n",
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [\n                UpstreamPeerConfig(\n                    url: {:?},\n                ),\n            ],\n        ),\n    ],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Prefix(\"/api\"),\n            handler: Proxy(\n                upstream: \"backend\",\n            ),\n        ),\n    ],\n)\n",
         listen_addr.to_string(),
-        format!("http://{upstream_addr}")
+        format!("http://{upstream_addr}"),
+        ready_route = READY_ROUTE_CONFIG,
     )
 }
 
 fn file_config(listen_addr: SocketAddr, root: &Path) -> String {
     format!(
-        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [],\n    locations: [\n        LocationConfig(\n            matcher: Prefix(\"/\"),\n            handler: File(\n                root: {:?},\n                index: None,\n                try_files: Some([\"$uri\"]),\n            ),\n        ),\n    ],\n)\n",
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Prefix(\"/\"),\n            handler: File(\n                root: {:?},\n                index: None,\n                try_files: Some([\"$uri\"]),\n            ),\n        ),\n    ],\n)\n",
         listen_addr.to_string(),
-        root.display().to_string()
+        root.display().to_string(),
+        ready_route = READY_ROUTE_CONFIG,
     )
 }
 
-fn reserve_loopback_addr() -> SocketAddr {
-    let listener =
-        TcpListener::bind(("127.0.0.1", 0)).expect("ephemeral loopback listener should bind");
-    let addr = listener.local_addr().expect("listener addr should be available");
-    drop(listener);
-    addr
-}
-
-fn temp_dir(prefix: &str) -> PathBuf {
-    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time should be after unix epoch")
-        .as_nanos();
-    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    env::temp_dir().join(format!("{prefix}-{unique}-{id}"))
-}
-
-fn binary_path() -> PathBuf {
-    env::var_os("CARGO_BIN_EXE_rginx")
-        .map(PathBuf::from)
-        .expect("cargo should expose the rginx test binary path")
+fn file_autoindex_config(listen_addr: SocketAddr, root: &Path) -> String {
+    format!(
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Prefix(\"/\"),\n            handler: File(\n                root: {:?},\n                index: None,\n                try_files: None,\n                autoindex: Some(true),\n            ),\n        ),\n    ],\n)\n",
+        listen_addr.to_string(),
+        root.display().to_string(),
+        ready_route = READY_ROUTE_CONFIG,
+    )
 }

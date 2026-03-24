@@ -159,6 +159,7 @@ mod tests {
             UpstreamSettings {
                 active_health_check: Some(ActiveHealthCheck {
                     path: "/healthz".to_string(),
+                    grpc_service: None,
                     interval: Duration::from_secs(5),
                     timeout: Duration::from_secs(2),
                     healthy_successes_required: 2,
@@ -174,7 +175,11 @@ mod tests {
         ));
 
         let snapshot = ConfigSnapshot {
-            runtime: RuntimeSettings { shutdown_timeout: Duration::from_secs(1) },
+            runtime: RuntimeSettings {
+                shutdown_timeout: Duration::from_secs(1),
+                worker_threads: None,
+                accept_workers: 1,
+            },
             server: Server {
                 listen_addr: "127.0.0.1:8080".parse().unwrap(),
                 trusted_proxies: Vec::new(),
@@ -183,6 +188,9 @@ mod tests {
                 max_request_body_bytes: None,
                 max_connections: None,
                 header_read_timeout: None,
+                request_body_read_timeout: None,
+                response_write_timeout: None,
+                access_log_format: None,
                 tls: None,
             },
             default_vhost: VirtualHost {

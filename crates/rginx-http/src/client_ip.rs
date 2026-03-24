@@ -109,6 +109,9 @@ mod tests {
             max_request_body_bytes: None,
             max_connections: None,
             header_read_timeout: None,
+            request_body_read_timeout: None,
+            response_write_timeout: None,
+            access_log_format: None,
             tls: None,
         };
         let mut headers = HeaderMap::new();
@@ -131,6 +134,9 @@ mod tests {
             max_request_body_bytes: None,
             max_connections: None,
             header_read_timeout: None,
+            request_body_read_timeout: None,
+            response_write_timeout: None,
+            access_log_format: None,
             tls: None,
         };
         let mut headers = HeaderMap::new();
@@ -153,6 +159,9 @@ mod tests {
             max_request_body_bytes: None,
             max_connections: None,
             header_read_timeout: None,
+            request_body_read_timeout: None,
+            response_write_timeout: None,
+            access_log_format: None,
             tls: None,
         };
         let mut headers = HeaderMap::new();
@@ -174,6 +183,9 @@ mod tests {
             max_request_body_bytes: None,
             max_connections: None,
             header_read_timeout: None,
+            request_body_read_timeout: None,
+            response_write_timeout: None,
+            access_log_format: None,
             tls: None,
         };
         let mut headers = HeaderMap::new();
@@ -195,6 +207,9 @@ mod tests {
             max_request_body_bytes: None,
             max_connections: None,
             header_read_timeout: None,
+            request_body_read_timeout: None,
+            response_write_timeout: None,
+            access_log_format: None,
             tls: None,
         };
         let mut headers = HeaderMap::new();

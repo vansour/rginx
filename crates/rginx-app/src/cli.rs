@@ -23,7 +23,7 @@ pub enum Command {
 }
 
 fn default_config_path() -> PathBuf {
-    if let Some(path) = env::var_os("RGINX_CONFIG") {
+    if let Some(path) = env::var_os("rginx_config") {
         return PathBuf::from(path);
     }
 

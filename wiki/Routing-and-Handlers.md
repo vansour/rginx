@@ -1,13 +1,20 @@
 # Routing and Handlers
 
-本页说明请求如何匹配到虚拟主机、如何匹配到路由，以及六种 handler 的行为边界。
+本页说明请求如何匹配到虚拟主机、如何匹配到路由，以及七种 handler 的行为边界。
 
 ## 路由匹配模型
 
-`Rginx` 当前只支持两种 matcher：
+`rginx` 当前只支持两种 matcher：
 
 - `Exact("/foo")`
 - `Prefix("/api")`
+
+在此基础上，路由还可以额外声明：
+
+- `grpc_service`
+- `grpc_method`
+
+这两个字段不会替代路径 matcher，而是在路径命中后，对 gRPC / grpc-web 请求再做一层细分匹配。
 
 不支持：
 
@@ -22,11 +29,13 @@
 1. `Exact`
 2. `Prefix`
 3. 同类型下，路径更长的优先
+4. 同一路径 matcher 下，带更多 gRPC 约束的优先
 
 因此：
 
 - `/api` 的精确匹配会优先于 `/`
 - `/api/admin` 的前缀会优先于 `/api`
+- `Prefix("/") + grpc_service = "grpc.health.v1.Health" + grpc_method = "Check"` 会优先于只配置了 `grpc_service` 的 `/` 路由
 
 ## 前缀匹配的边界
 
@@ -59,7 +68,7 @@
 - 如果某个虚拟主机已经命中 `Host`，但里面没有匹配路径，请求直接返回 `404`
 - 不会因为路由未命中而回退到默认虚拟主机
 
-## 六种 handler
+## 七种 handler
 
 ### `Static`
 
@@ -94,6 +103,7 @@
 - 自动设置 `X-Forwarded-Host`
 - 自动透传 `X-Request-ID`
 - 支持 HTTP Upgrade / WebSocket 透传
+- gRPC / grpc-web 请求可以继续按 `grpc_service` / `grpc_method` 细分到不同 upstream
 
 ### `File`
 
@@ -104,6 +114,7 @@
 - `root`
 - `index`
 - `try_files`
+- `autoindex`
 - `HEAD`
 - 单段 `Range`
 - `206 Partial Content`
@@ -112,11 +123,11 @@
 
 - 对请求路径做 percent decode
 - 拒绝路径穿越
-- 只返回真实文件，不暴露目录列表
+- 默认只返回真实文件；只有显式配置 `autoindex: Some(true)` 时才会返回基础目录列表 HTML
+- 目录命中后的优先级是 `index > try_files > autoindex > 404`
 
 不支持：
 
-- Autoindex
 - 多段 `Range`
 
 ### `Return`
@@ -146,6 +157,24 @@
 ### `Metrics`
 
 输出 Prometheus 文本指标，适合被 Prometheus、VictoriaMetrics、Grafana Agent 等抓取。
+
+当前包含基础 gRPC 计数指标 `rginx_grpc_requests_total`，按 `route`、`protocol`、`service`、`method` 维度累计。
+
+### `Config`
+
+提供基础动态配置 API，典型用于受控内网里的运维入口。
+
+支持：
+
+- `GET` / `HEAD` 读取当前生效配置和修订号
+- `PUT` 提交完整 RON 文档并尝试在线替换
+
+安全边界：
+
+- 路由必须使用 `Exact(...)`
+- 必须显式配置非空 `allow_cidrs`
+- 当前只支持完整文档替换，不支持 partial patch
+- 仍然不能在线切换 `listen`、`runtime.worker_threads`、`runtime.accept_workers`
 
 ## `Proxy` 相关细节
 

@@ -1,6 +1,6 @@
 # Upstreams
 
-本页说明 `Rginx` 的 upstream 模型、负载均衡策略、故障转移与健康检查。
+本页说明 `rginx` 的 upstream 模型、负载均衡策略、故障转移与健康检查。
 
 ## 基本模型
 
@@ -123,7 +123,7 @@ peers: [
 
 ## 重试与 failover
 
-`Rginx` 只会对“幂等或可重放”的请求做 peer 级 failover。
+`rginx` 只会对“幂等或可重放”的请求做 peer 级 failover。
 
 当前规则：
 
@@ -202,13 +202,14 @@ peers: [
 关键字段：
 
 - `health_check_path`
+- `health_check_grpc_service`
 - `health_check_interval_secs`
 - `health_check_timeout_secs`
 - `healthy_successes_required`
 
 逻辑：
 
-1. 对每个配置了 `health_check_path` 的 peer 周期性发起探测请求。
+1. 对每个配置了 `health_check_path` 或 `health_check_grpc_service` 的 peer 周期性发起探测请求。
 2. 失败会把 peer 标记为主动不健康。
 3. 连续成功达到阈值后，再恢复为健康。
 
@@ -216,6 +217,25 @@ peers: [
 
 - 上游有明确的 `/healthz` / `/ready` 路径
 - 希望在真实用户流量到来前提前摘除故障节点
+
+### gRPC 主动健康检查
+
+当配置 `health_check_grpc_service` 时，`rginx` 会发送标准 gRPC health check：
+
+- method path 固定为 `/grpc.health.v1.Health/Check`
+- 如果未显式写 `health_check_path`，编译阶段会自动补这个默认 path
+- request body 使用 `grpc.health.v1.HealthCheckRequest`
+- 成功判定收口为：
+  - HTTP 状态码成功
+  - `grpc-status = 0`
+  - response body 中的 serving status = `SERVING`
+
+当前约束：
+
+- 只支持 `https://` peer
+- 只支持 `protocol = Auto` 或 `Http2`
+- 不支持明文 `h2c` gRPC health probe
+- 不支持自定义 gRPC health method path
 
 ## backup peer 与健康检查
 

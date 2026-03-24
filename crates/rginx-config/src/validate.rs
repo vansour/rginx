@@ -10,11 +10,21 @@ use crate::model::{
     UpstreamTlsConfig, VirtualHostConfig,
 };
 
+const DEFAULT_GRPC_HEALTH_CHECK_PATH: &str = "/grpc.health.v1.Health/Check";
+
 pub fn validate(config: &Config) -> Result<()> {
     if config.runtime.shutdown_timeout_secs == 0 {
         return Err(Error::Config(
             "runtime.shutdown_timeout_secs must be greater than 0".to_string(),
         ));
+    }
+
+    if config.runtime.worker_threads.is_some_and(|count| count == 0) {
+        return Err(Error::Config("runtime.worker_threads must be greater than 0".to_string()));
+    }
+
+    if config.runtime.accept_workers.is_some_and(|count| count == 0) {
+        return Err(Error::Config("runtime.accept_workers must be greater than 0".to_string()));
     }
 
     if config.locations.is_empty() {
@@ -43,6 +53,22 @@ pub fn validate(config: &Config) -> Result<()> {
         return Err(Error::Config(
             "server header_read_timeout_secs must be greater than 0".to_string(),
         ));
+    }
+
+    if config.server.request_body_read_timeout_secs.is_some_and(|timeout| timeout == 0) {
+        return Err(Error::Config(
+            "server request_body_read_timeout_secs must be greater than 0".to_string(),
+        ));
+    }
+
+    if config.server.response_write_timeout_secs.is_some_and(|timeout| timeout == 0) {
+        return Err(Error::Config(
+            "server response_write_timeout_secs must be greater than 0".to_string(),
+        ));
+    }
+
+    if config.server.access_log_format.as_deref().is_some_and(|format| format.trim().is_empty()) {
+        return Err(Error::Config("server access_log_format must not be empty".to_string()));
     }
 
     if let Some(ServerTlsConfig { cert_path, key_path }) = &config.server.tls {
@@ -230,12 +256,54 @@ pub fn validate(config: &Config) -> Result<()> {
             })?;
         }
 
+        if let Some(service) = &upstream.health_check_grpc_service {
+            if !service.is_empty() && service.trim().is_empty() {
+                return Err(Error::Config(format!(
+                    "upstream `{}` health_check_grpc_service must not be blank",
+                    upstream.name
+                )));
+            }
+
+            if service.contains('/') {
+                return Err(Error::Config(format!(
+                    "upstream `{}` health_check_grpc_service must not contain `/`",
+                    upstream.name
+                )));
+            }
+
+            if let Some(path) = &upstream.health_check_path
+                && path != DEFAULT_GRPC_HEALTH_CHECK_PATH
+            {
+                return Err(Error::Config(format!(
+                    "upstream `{}` health_check_grpc_service requires health_check_path to be `{DEFAULT_GRPC_HEALTH_CHECK_PATH}`",
+                    upstream.name
+                )));
+            }
+
+            if matches!(upstream.protocol, UpstreamProtocolConfig::Http1) {
+                return Err(Error::Config(format!(
+                    "upstream `{}` health_check_grpc_service requires protocol `Auto` or `Http2`",
+                    upstream.name
+                )));
+            }
+
+            if upstream.peers.iter().any(|peer| !peer.url.starts_with("https://")) {
+                return Err(Error::Config(format!(
+                    "upstream `{}` health_check_grpc_service currently requires all peers to use `https://`; cleartext h2c health checks are not supported",
+                    upstream.name
+                )));
+            }
+        }
+
         let has_active_health_overrides = upstream.health_check_interval_secs.is_some()
             || upstream.health_check_timeout_secs.is_some()
             || upstream.healthy_successes_required.is_some();
-        if upstream.health_check_path.is_none() && has_active_health_overrides {
+        if upstream.health_check_path.is_none()
+            && upstream.health_check_grpc_service.is_none()
+            && has_active_health_overrides
+        {
             return Err(Error::Config(format!(
-                "upstream `{}` active health-check tuning requires health_check_path to be set",
+                "upstream `{}` active health-check tuning requires health_check_path or health_check_grpc_service to be set",
                 upstream.name
             )));
         }
@@ -278,14 +346,31 @@ pub fn validate(config: &Config) -> Result<()> {
         };
 
         if let MatcherConfig::Exact(path) = &location.matcher
-            && !exact_routes.insert(path.clone())
+            && !exact_routes.insert(exact_route_key(
+                path,
+                location.grpc_service.as_deref(),
+                location.grpc_method.as_deref(),
+            ))
         {
-            return Err(Error::Config(format!("duplicate exact route `{path}`")));
+            return Err(Error::Config(format!(
+                "duplicate exact route `{path}` with the same gRPC route constraints"
+            )));
         }
 
         validate_route_cidrs(matcher_label, "allow_cidrs", &location.allow_cidrs)?;
         validate_route_cidrs(matcher_label, "deny_cidrs", &location.deny_cidrs)?;
         validate_route_rate_limit(matcher_label, location.requests_per_sec, location.burst)?;
+        validate_grpc_route_match(
+            &format!("route matcher `{matcher_label}`"),
+            location.grpc_service.as_deref(),
+            location.grpc_method.as_deref(),
+        )?;
+        validate_management_handler_constraints(
+            &format!("route matcher `{matcher_label}`"),
+            &location.matcher,
+            &location.handler,
+            &location.allow_cidrs,
+        )?;
 
         if let HandlerConfig::Proxy { upstream, strip_prefix, proxy_set_headers, .. } =
             &location.handler
@@ -320,7 +405,7 @@ pub fn validate(config: &Config) -> Result<()> {
             }
         }
 
-        if let HandlerConfig::File { root, index, try_files } = &location.handler {
+        if let HandlerConfig::File { root, index, try_files, autoindex: _ } = &location.handler {
             if root.trim().is_empty() {
                 return Err(Error::Config(format!(
                     "route matcher `{matcher_label}` file root must not be empty"
@@ -411,6 +496,63 @@ fn validate_route_rate_limit(
     }
 
     Ok(())
+}
+
+fn validate_management_handler_constraints(
+    route_scope: &str,
+    matcher: &MatcherConfig,
+    handler: &HandlerConfig,
+    allow_cidrs: &[String],
+) -> Result<()> {
+    if !matches!(handler, HandlerConfig::Config) {
+        return Ok(());
+    }
+
+    if !matches!(matcher, MatcherConfig::Exact(_)) {
+        return Err(Error::Config(format!(
+            "{route_scope} config handler requires an Exact(...) matcher"
+        )));
+    }
+
+    if allow_cidrs.is_empty() {
+        return Err(Error::Config(format!(
+            "{route_scope} config handler requires non-empty allow_cidrs"
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_grpc_route_match(
+    route_scope: &str,
+    grpc_service: Option<&str>,
+    grpc_method: Option<&str>,
+) -> Result<()> {
+    if let Some(service) = grpc_service {
+        if service.trim().is_empty() {
+            return Err(Error::Config(format!("{route_scope} grpc_service must not be empty")));
+        }
+        if service.contains('/') {
+            return Err(Error::Config(format!("{route_scope} grpc_service must not contain `/`")));
+        }
+    }
+
+    if let Some(method) = grpc_method {
+        if method.trim().is_empty() {
+            return Err(Error::Config(format!("{route_scope} grpc_method must not be empty")));
+        }
+        if method.contains('/') {
+            return Err(Error::Config(format!("{route_scope} grpc_method must not contain `/`")));
+        }
+    }
+
+    Ok(())
+}
+
+fn exact_route_key(path: &str, grpc_service: Option<&str>, grpc_method: Option<&str>) -> String {
+    let service = grpc_service.unwrap_or_default();
+    let method = grpc_method.unwrap_or_default();
+    format!("{path}\0{service}\0{method}")
 }
 
 fn validate_trusted_proxy(value: &str) -> Result<()> {
@@ -525,14 +667,31 @@ fn validate_virtual_hosts(
             };
 
             if let MatcherConfig::Exact(path) = &location.matcher
-                && !vhost_exact_routes.insert(path.clone())
+                && !vhost_exact_routes.insert(exact_route_key(
+                    path,
+                    location.grpc_service.as_deref(),
+                    location.grpc_method.as_deref(),
+                ))
             {
-                return Err(Error::Config(format!("{vhost_label} duplicate exact route `{path}`")));
+                return Err(Error::Config(format!(
+                    "{vhost_label} duplicate exact route `{path}` with the same gRPC route constraints"
+                )));
             }
 
             validate_route_cidrs(matcher_label, "allow_cidrs", &location.allow_cidrs)?;
             validate_route_cidrs(matcher_label, "deny_cidrs", &location.deny_cidrs)?;
             validate_route_rate_limit(matcher_label, location.requests_per_sec, location.burst)?;
+            validate_grpc_route_match(
+                &format!("{vhost_label} route matcher `{matcher_label}`"),
+                location.grpc_service.as_deref(),
+                location.grpc_method.as_deref(),
+            )?;
+            validate_management_handler_constraints(
+                &format!("{vhost_label} route matcher `{matcher_label}`"),
+                &location.matcher,
+                &location.handler,
+                &location.allow_cidrs,
+            )?;
 
             if let HandlerConfig::Proxy { upstream, strip_prefix, proxy_set_headers, .. } =
                 &location.handler
@@ -569,7 +728,8 @@ fn validate_virtual_hosts(
                 }
             }
 
-            if let HandlerConfig::File { root, index, try_files } = &location.handler {
+            if let HandlerConfig::File { root, index, try_files, autoindex: _ } = &location.handler
+            {
                 if root.trim().is_empty() {
                     return Err(Error::Config(format!(
                         "{vhost_label} route matcher `{matcher_label}` file root must not be empty"
@@ -776,6 +936,24 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_zero_runtime_worker_threads() {
+        let mut config = base_config();
+        config.runtime.worker_threads = Some(0);
+
+        let error = validate(&config).expect_err("zero runtime worker threads should be rejected");
+        assert!(error.to_string().contains("runtime.worker_threads must be greater than 0"));
+    }
+
+    #[test]
+    fn validate_rejects_zero_runtime_accept_workers() {
+        let mut config = base_config();
+        config.runtime.accept_workers = Some(0);
+
+        let error = validate(&config).expect_err("zero runtime accept workers should be rejected");
+        assert!(error.to_string().contains("runtime.accept_workers must be greater than 0"));
+    }
+
+    #[test]
     fn validate_rejects_zero_server_max_connections() {
         let mut config = base_config();
         config.server.max_connections = Some(0);
@@ -793,6 +971,40 @@ mod tests {
         assert!(
             error.to_string().contains("server header_read_timeout_secs must be greater than 0")
         );
+    }
+
+    #[test]
+    fn validate_rejects_zero_server_request_body_read_timeout() {
+        let mut config = base_config();
+        config.server.request_body_read_timeout_secs = Some(0);
+
+        let error =
+            validate(&config).expect_err("zero request body read timeout should be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("server request_body_read_timeout_secs must be greater than 0")
+        );
+    }
+
+    #[test]
+    fn validate_rejects_zero_server_response_write_timeout() {
+        let mut config = base_config();
+        config.server.response_write_timeout_secs = Some(0);
+
+        let error = validate(&config).expect_err("zero response write timeout should be rejected");
+        assert!(
+            error.to_string().contains("server response_write_timeout_secs must be greater than 0")
+        );
+    }
+
+    #[test]
+    fn validate_rejects_empty_server_access_log_format() {
+        let mut config = base_config();
+        config.server.access_log_format = Some("   ".to_string());
+
+        let error = validate(&config).expect_err("empty access log format should be rejected");
+        assert!(error.to_string().contains("server access_log_format must not be empty"));
     }
 
     #[test]
@@ -873,9 +1085,85 @@ mod tests {
         assert!(error.to_string().contains("servers[0] TLS requires at least one server_name"));
     }
 
+    #[test]
+    fn validate_rejects_config_handler_without_allow_cidrs() {
+        let mut config = base_config();
+        config.locations[0].matcher = MatcherConfig::Exact("/-/config".to_string());
+        config.locations[0].handler = HandlerConfig::Config;
+
+        let error = validate(&config).expect_err("config handler should require allow_cidrs");
+        assert!(error.to_string().contains("config handler requires non-empty allow_cidrs"));
+    }
+
+    #[test]
+    fn validate_rejects_config_handler_with_prefix_matcher() {
+        let mut config = base_config();
+        config.locations[0].matcher = MatcherConfig::Prefix("/-/config".to_string());
+        config.locations[0].handler = HandlerConfig::Config;
+        config.locations[0].allow_cidrs = vec!["127.0.0.1/32".to_string()];
+
+        let error = validate(&config).expect_err("config handler should require exact matcher");
+        assert!(error.to_string().contains("config handler requires an Exact(...) matcher"));
+    }
+
+    #[test]
+    fn validate_rejects_empty_grpc_service() {
+        let mut config = base_config();
+        config.locations[0].grpc_service = Some("   ".to_string());
+
+        let error = validate(&config).expect_err("empty grpc_service should be rejected");
+        assert!(error.to_string().contains("grpc_service must not be empty"));
+    }
+
+    #[test]
+    fn validate_allows_duplicate_exact_routes_when_grpc_constraints_differ() {
+        let mut config = base_config();
+        config.locations[0].matcher =
+            MatcherConfig::Exact("/grpc.health.v1.Health/Check".to_string());
+        config.locations.push(LocationConfig {
+            matcher: MatcherConfig::Exact("/grpc.health.v1.Health/Check".to_string()),
+            handler: HandlerConfig::Proxy {
+                upstream: "backend".to_string(),
+                preserve_host: None,
+                strip_prefix: None,
+                proxy_set_headers: std::collections::HashMap::new(),
+            },
+            grpc_service: Some("grpc.health.v1.Health".to_string()),
+            grpc_method: Some("Check".to_string()),
+            allow_cidrs: Vec::new(),
+            deny_cidrs: Vec::new(),
+            requests_per_sec: None,
+            burst: None,
+        });
+
+        validate(&config).expect("different gRPC route constraints should be allowed");
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_exact_routes_when_grpc_constraints_match() {
+        let mut config = base_config();
+        config.locations[0].matcher =
+            MatcherConfig::Exact("/grpc.health.v1.Health/Check".to_string());
+        config.locations[0].grpc_service = Some("grpc.health.v1.Health".to_string());
+        config.locations[0].grpc_method = Some("Check".to_string());
+        config.locations.push(config.locations[0].clone());
+
+        let error =
+            validate(&config).expect_err("duplicate exact route with same gRPC match should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate exact route `/grpc.health.v1.Health/Check` with the same gRPC route constraints")
+        );
+    }
+
     fn base_config() -> Config {
         Config {
-            runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
+            runtime: RuntimeConfig {
+                shutdown_timeout_secs: 10,
+                worker_threads: None,
+                accept_workers: None,
+            },
             server: ServerConfig {
                 listen: "127.0.0.1:8080".to_string(),
                 server_names: Vec::new(),
@@ -885,6 +1173,9 @@ mod tests {
                 max_request_body_bytes: None,
                 max_connections: None,
                 header_read_timeout_secs: None,
+                request_body_read_timeout_secs: None,
+                response_write_timeout_secs: None,
+                access_log_format: None,
                 tls: None,
             },
             upstreams: vec![UpstreamConfig {
@@ -914,6 +1205,7 @@ mod tests {
                 unhealthy_after_failures: None,
                 unhealthy_cooldown_secs: None,
                 health_check_path: None,
+                health_check_grpc_service: None,
                 health_check_interval_secs: None,
                 health_check_timeout_secs: None,
                 healthy_successes_required: None,
@@ -926,6 +1218,10 @@ mod tests {
                     strip_prefix: None,
                     proxy_set_headers: std::collections::HashMap::new(),
                 },
+                grpc_service: None,
+
+                grpc_method: None,
+
                 allow_cidrs: Vec::new(),
                 deny_cidrs: Vec::new(),
                 requests_per_sec: None,
@@ -944,6 +1240,48 @@ mod tests {
         assert!(
             error.to_string().contains("active health-check tuning requires health_check_path")
         );
+    }
+
+    #[test]
+    fn validate_allows_grpc_health_check_with_default_path() {
+        let mut config = base_config();
+        config.upstreams[0].peers[0].url = "https://example.com".to_string();
+        config.upstreams[0].health_check_grpc_service = Some("grpc.health.v1.Health".to_string());
+
+        validate(&config).expect("gRPC health-check config should validate");
+    }
+
+    #[test]
+    fn validate_rejects_grpc_health_check_with_non_default_path() {
+        let mut config = base_config();
+        config.upstreams[0].peers[0].url = "https://example.com".to_string();
+        config.upstreams[0].health_check_path = Some("/custom".to_string());
+        config.upstreams[0].health_check_grpc_service = Some("grpc.health.v1.Health".to_string());
+
+        let error =
+            validate(&config).expect_err("custom gRPC health-check path should be rejected");
+        assert!(error.to_string().contains(super::DEFAULT_GRPC_HEALTH_CHECK_PATH));
+    }
+
+    #[test]
+    fn validate_rejects_grpc_health_check_for_http1_upstream() {
+        let mut config = base_config();
+        config.upstreams[0].peers[0].url = "https://example.com".to_string();
+        config.upstreams[0].protocol = UpstreamProtocolConfig::Http1;
+        config.upstreams[0].health_check_grpc_service = Some("grpc.health.v1.Health".to_string());
+
+        let error = validate(&config).expect_err("http1 gRPC health-check should be rejected");
+        assert!(error.to_string().contains("requires protocol `Auto` or `Http2`"));
+    }
+
+    #[test]
+    fn validate_rejects_grpc_health_check_for_cleartext_peer() {
+        let mut config = base_config();
+        config.upstreams[0].health_check_grpc_service = Some("grpc.health.v1.Health".to_string());
+
+        let error =
+            validate(&config).expect_err("cleartext gRPC health-check peer should be rejected");
+        assert!(error.to_string().contains("cleartext h2c health checks are not supported"));
     }
 
     #[test]
@@ -1018,6 +1356,10 @@ mod tests {
                     content_type: Some("text/plain; charset=utf-8".to_string()),
                     body: "vhost\n".to_string(),
                 },
+                grpc_service: None,
+
+                grpc_method: None,
+
                 allow_cidrs: Vec::new(),
                 deny_cidrs: Vec::new(),
                 requests_per_sec: None,

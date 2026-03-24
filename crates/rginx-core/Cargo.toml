@@ -9,7 +9,7 @@ homepage.workspace = true
 documentation.workspace = true
 readme.workspace = true
 rust-version.workspace = true
-description = "Core types and shared runtime models for Rginx."
+description = "Core types and shared runtime models for rginx."
 
 [dependencies]
 http.workspace = true

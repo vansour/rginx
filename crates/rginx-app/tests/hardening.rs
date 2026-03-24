@@ -1,15 +1,14 @@
 #![cfg(unix)]
 
-use std::env;
-use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::path::PathBuf;
-use std::process::{Child, ExitStatus};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
+
+mod support;
+
+use support::{READY_ROUTE_CONFIG, ServerHarness, reserve_loopback_addr};
 
 #[test]
 fn header_read_timeout_closes_slow_request_connections() {
@@ -135,7 +134,7 @@ fn max_request_body_bytes_rejects_chunked_proxy_requests_that_exceed_limit() {
         proxy_config(listen_addr, upstream_addr, Some("max_request_body_bytes: Some(8),")),
     );
 
-    server.wait_for_body(listen_addr, "/api/ready", "backend ok\n", Duration::from_secs(5));
+    server.wait_for_ready(listen_addr, Duration::from_secs(5));
 
     let mut stream = TcpStream::connect_timeout(&listen_addr, Duration::from_millis(200))
         .expect("client should connect");
@@ -154,28 +153,63 @@ fn max_request_body_bytes_rejects_chunked_proxy_requests_that_exceed_limit() {
     server.shutdown_and_wait(Duration::from_secs(5));
 }
 
+#[test]
+fn request_body_read_timeout_rejects_stalled_proxy_uploads() {
+    let _guard = test_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let upstream_addr = spawn_drain_request_server();
+    let listen_addr = reserve_loopback_addr();
+    let mut server = TestServer::spawn(
+        listen_addr,
+        proxy_config_with_upstream_extra(
+            listen_addr,
+            upstream_addr,
+            Some("request_body_read_timeout_secs: Some(1),"),
+            Some(
+                "request_timeout_secs: Some(5),\n            unhealthy_after_failures: Some(2),\n            unhealthy_cooldown_secs: Some(1),",
+            ),
+        ),
+    );
+
+    server.wait_for_ready(listen_addr, Duration::from_secs(5));
+
+    let mut stream = TcpStream::connect_timeout(&listen_addr, Duration::from_millis(200))
+        .expect("client should connect");
+    stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    stream.set_write_timeout(Some(Duration::from_millis(500))).unwrap();
+    write!(
+        stream,
+        "POST /api/upload HTTP/1.1\r\nHost: {listen_addr}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhello\r\n"
+    )
+    .unwrap();
+    stream.flush().unwrap();
+
+    thread::sleep(Duration::from_millis(1_500));
+
+    let response = read_http_response_bytes(&mut stream).expect("response should be readable");
+    let parsed = parse_http_response(&response).expect("response should be valid HTTP");
+    assert_eq!(parsed.status, 502, "expected 502 for timed out upload, got {parsed:?}");
+    assert!(
+        String::from_utf8_lossy(&parsed.body).contains("upstream `backend` is unavailable"),
+        "unexpected timeout response body: {:?}",
+        String::from_utf8_lossy(&parsed.body)
+    );
+    server.shutdown_and_wait(Duration::from_secs(5));
+}
+
+#[derive(Debug)]
+struct ParsedResponse {
+    status: u16,
+    body: Vec<u8>,
+}
+
 struct TestServer {
-    child: Child,
-    temp_dir: PathBuf,
+    inner: ServerHarness,
 }
 
 impl TestServer {
     fn spawn(listen_addr: SocketAddr, config: String) -> Self {
-        let temp_dir = temp_dir("rginx-hardening-test");
-        fs::create_dir_all(&temp_dir).expect("temp test dir should be created");
-        let config_path = temp_dir.join("rginx.ron");
-        fs::write(&config_path, config).expect("config should be written");
-
-        let child = std::process::Command::new(binary_path())
-            .arg("--config")
-            .arg(&config_path)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .expect("rginx should start");
-
         let _ = listen_addr;
-        Self { child, temp_dir }
+        Self { inner: ServerHarness::spawn("rginx-hardening-test", |_| config) }
     }
 
     fn wait_for_body(
@@ -185,92 +219,32 @@ impl TestServer {
         expected: &str,
         timeout: Duration,
     ) {
-        let deadline = Instant::now() + timeout;
-        let mut last_error = String::new();
-
-        while Instant::now() < deadline {
-            self.assert_running();
-
-            match fetch_text_response(listen_addr, path) {
-                Ok((status, body)) if status == 200 && body == expected => return,
-                Ok((status, body)) => {
-                    last_error = format!(
-                        "unexpected response from {listen_addr}: status={status} body={body:?}"
-                    );
-                }
-                Err(error) => last_error = error,
-            }
-
-            thread::sleep(Duration::from_millis(50));
-        }
-
-        panic!(
-            "timed out waiting for response body {:?} on {}; last error: {}",
-            expected, listen_addr, last_error
+        self.inner.wait_for_http_text_response(
+            listen_addr,
+            &listen_addr.to_string(),
+            path,
+            200,
+            expected,
+            timeout,
         );
     }
 
-    fn send_signal(&self, signal: i32) {
-        let result = unsafe { libc::kill(self.child.id() as i32, signal) };
-        if result != 0 {
-            panic!(
-                "failed to send signal {} to pid {}: {}",
-                signal,
-                self.child.id(),
-                std::io::Error::last_os_error()
-            );
-        }
+    fn wait_for_ready(&mut self, listen_addr: SocketAddr, timeout: Duration) {
+        self.inner.wait_for_http_ready(listen_addr, timeout);
     }
-
     fn shutdown_and_wait(&mut self, timeout: Duration) {
-        self.send_signal(libc::SIGTERM);
-        let status = self.wait_for_exit(timeout);
-        assert!(status.success(), "rginx should exit successfully, got {status}");
-    }
-
-    fn wait_for_exit(&mut self, timeout: Duration) -> ExitStatus {
-        let deadline = Instant::now() + timeout;
-
-        loop {
-            if let Some(status) = self.child.try_wait().expect("child status should be readable") {
-                return status;
-            }
-
-            if Instant::now() >= deadline {
-                let _ = unsafe { libc::kill(self.child.id() as i32, libc::SIGKILL) };
-                let _ = self.child.wait();
-                panic!("timed out waiting for rginx to exit");
-            }
-
-            thread::sleep(Duration::from_millis(50));
-        }
-    }
-
-    fn assert_running(&mut self) {
-        if let Some(status) = self.child.try_wait().expect("child status should be readable") {
-            panic!("rginx exited unexpectedly with status {status}");
-        }
-    }
-}
-
-impl Drop for TestServer {
-    fn drop(&mut self) {
-        if let Ok(None) = self.child.try_wait() {
-            let _ = unsafe { libc::kill(self.child.id() as i32, libc::SIGKILL) };
-            let _ = self.child.wait();
-        }
-
-        let _ = fs::remove_dir_all(&self.temp_dir);
+        self.inner.terminate_and_wait(timeout);
     }
 }
 
 fn static_config(listen_addr: SocketAddr, server_extra: Option<&str>, body: &str) -> String {
     let extra = server_extra.map(|value| format!("\n        {value}")).unwrap_or_default();
     format!(
-        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},{}\n    ),\n    upstreams: [],\n    locations: [\n        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Static(\n                status: Some(200),\n                content_type: Some(\"text/plain; charset=utf-8\"),\n                body: {:?},\n            ),\n        ),\n    ],\n)\n",
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},{}\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Static(\n                status: Some(200),\n                content_type: Some(\"text/plain; charset=utf-8\"),\n                body: {:?},\n            ),\n        ),\n    ],\n)\n",
         listen_addr.to_string(),
         extra,
-        body
+        body,
+        ready_route = READY_ROUTE_CONFIG,
     )
 }
 
@@ -279,35 +253,29 @@ fn proxy_config(
     upstream_addr: SocketAddr,
     server_extra: Option<&str>,
 ) -> String {
-    let extra = server_extra.map(|value| format!("\n        {value}")).unwrap_or_default();
-    format!(
-        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},{}\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [\n                UpstreamPeerConfig(\n                    url: {:?},\n                ),\n            ],\n            request_timeout_secs: Some(2),\n            unhealthy_after_failures: Some(2),\n            unhealthy_cooldown_secs: Some(1),\n        ),\n    ],\n    locations: [\n        LocationConfig(\n            matcher: Prefix(\"/api\"),\n            handler: Proxy(\n                upstream: \"backend\",\n            ),\n        ),\n    ],\n)\n",
-        listen_addr.to_string(),
-        extra,
-        format!("http://{upstream_addr}")
-    )
+    proxy_config_with_upstream_extra(listen_addr, upstream_addr, server_extra, None)
 }
 
-fn fetch_text_response(listen_addr: SocketAddr, path: &str) -> Result<(u16, String), String> {
-    let mut stream = TcpStream::connect_timeout(&listen_addr, Duration::from_millis(200))
-        .map_err(|error| format!("failed to connect to {listen_addr}: {error}"))?;
-    stream
-        .set_read_timeout(Some(Duration::from_millis(500)))
-        .map_err(|error| format!("failed to set read timeout: {error}"))?;
-    stream
-        .set_write_timeout(Some(Duration::from_millis(500)))
-        .map_err(|error| format!("failed to set write timeout: {error}"))?;
-
-    write!(stream, "{}", request_bytes(listen_addr, path))
-        .map_err(|error| format!("failed to write request: {error}"))?;
-    stream.flush().map_err(|error| format!("failed to flush request: {error}"))?;
-
-    let mut response = String::new();
-    stream
-        .read_to_string(&mut response)
-        .map_err(|error| format!("failed to read response: {error}"))?;
-
-    parse_response(&response)
+fn proxy_config_with_upstream_extra(
+    listen_addr: SocketAddr,
+    upstream_addr: SocketAddr,
+    server_extra: Option<&str>,
+    upstream_extra: Option<&str>,
+) -> String {
+    let extra = server_extra.map(|value| format!("\n        {value}")).unwrap_or_default();
+    let upstream_extra = upstream_extra
+        .unwrap_or(
+            "request_timeout_secs: Some(2),\n            unhealthy_after_failures: Some(2),\n            unhealthy_cooldown_secs: Some(1),",
+        )
+        .to_string();
+    format!(
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},{}\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [\n                UpstreamPeerConfig(\n                    url: {:?},\n                ),\n            ],\n            {}\n        ),\n    ],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Prefix(\"/api\"),\n            handler: Proxy(\n                upstream: \"backend\",\n            ),\n        ),\n    ],\n)\n",
+        listen_addr.to_string(),
+        extra,
+        format!("http://{upstream_addr}"),
+        upstream_extra,
+        ready_route = READY_ROUTE_CONFIG,
+    )
 }
 
 fn request_bytes(listen_addr: SocketAddr, path: &str) -> String {
@@ -327,6 +295,38 @@ fn parse_response(response: &str) -> Result<(u16, String), String> {
         .map_err(|error| format!("invalid status code: {error}"))?;
 
     Ok((status, body.to_string()))
+}
+
+fn read_http_response_bytes(stream: &mut TcpStream) -> Result<Vec<u8>, String> {
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .map_err(|error| format!("failed to read response bytes: {error}"))?;
+    Ok(response)
+}
+
+fn parse_http_response(bytes: &[u8]) -> Result<ParsedResponse, String> {
+    let head_end = bytes
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| format!("malformed response: {bytes:?}"))?;
+    let head = String::from_utf8(bytes[..head_end].to_vec())
+        .map_err(|error| format!("response head should be valid UTF-8: {error}"))?;
+    let status = head
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .ok_or_else(|| format!("missing status line: {head:?}"))?
+        .parse::<u16>()
+        .map_err(|error| format!("invalid status code: {error}"))?;
+
+    for line in head.lines().skip(1) {
+        if line.split_once(':').is_none() {
+            return Err(format!("malformed header line: {line:?}"));
+        }
+    }
+
+    Ok(ParsedResponse { status, body: bytes[head_end + 4..].to_vec() })
 }
 
 fn read_http_response_once(stream: &mut TcpStream) -> Result<String, String> {
@@ -384,14 +384,6 @@ fn assert_connection_closed(stream: &mut TcpStream, trailing_bytes: Option<&[u8]
     }
 }
 
-fn reserve_loopback_addr() -> SocketAddr {
-    let listener =
-        TcpListener::bind(("127.0.0.1", 0)).expect("ephemeral loopback listener should bind");
-    let addr = listener.local_addr().expect("listener addr should be available");
-    drop(listener);
-    addr
-}
-
 fn spawn_response_server(body: &'static str) -> SocketAddr {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("test upstream listener should bind");
     let listen_addr = listener.local_addr().expect("listener addr should be available");
@@ -419,20 +411,29 @@ fn spawn_response_server(body: &'static str) -> SocketAddr {
     listen_addr
 }
 
-fn temp_dir(prefix: &str) -> PathBuf {
-    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time should be after unix epoch")
-        .as_nanos();
-    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    env::temp_dir().join(format!("{prefix}-{unique}-{id}"))
-}
+fn spawn_drain_request_server() -> SocketAddr {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("test upstream listener should bind");
+    let listen_addr = listener.local_addr().expect("listener addr should be available");
 
-fn binary_path() -> PathBuf {
-    env::var_os("CARGO_BIN_EXE_rginx")
-        .map(PathBuf::from)
-        .expect("cargo should expose the rginx test binary path")
+    thread::spawn(move || {
+        loop {
+            let Ok((mut stream, _)) = listener.accept() else {
+                break;
+            };
+
+            thread::spawn(move || {
+                let mut buffer = [0u8; 4096];
+                loop {
+                    match stream.read(&mut buffer) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {}
+                    }
+                }
+            });
+        }
+    });
+
+    listen_addr
 }
 
 fn test_lock() -> &'static Mutex<()> {

@@ -9,10 +9,13 @@ homepage.workspace = true
 documentation.workspace = true
 readme.workspace = true
 rust-version.workspace = true
-description = "HTTP server, routing, proxying, file serving, and metrics for Rginx."
+description = "HTTP server, routing, proxying, file serving, and metrics for rginx."
 
 [dependencies]
+base64.workspace = true
+brotli.workspace = true
 bytes.workspace = true
+flate2.workspace = true
 futures-util.workspace = true
 http.workspace = true
 http-body-util.workspace = true
@@ -21,6 +24,7 @@ hyper-rustls.workspace = true
 hyper-util.workspace = true
 percent-encoding.workspace = true
 pin-project-lite.workspace = true
+rginx-config = { path = "../rginx-config" }
 rginx-core = { path = "../rginx-core" }
 rustls.workspace = true
 rustls-pemfile.workspace = true

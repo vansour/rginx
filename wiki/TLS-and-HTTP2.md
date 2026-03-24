@@ -1,6 +1,6 @@
 # TLS and HTTP2
 
-本页说明 `Rginx` 当前支持的 TLS 与 HTTP/2 能力，以及几个常见限制。
+本页说明 `rginx` 当前支持的 TLS 与 HTTP/2 能力，以及几个常见限制。
 
 ## 入站 TLS
 
@@ -23,7 +23,7 @@ server: ServerConfig(
 
 ## SNI 与多证书
 
-`Rginx` 支持基于 SNI 选择不同证书。
+`rginx` 支持基于 SNI 选择不同证书。
 
 来源：
 
@@ -136,11 +136,35 @@ tls: Some(CustomCa(
 - HTTP/2 extended CONNECT
 - 完整 gRPC 语义代理
 
+## 基础 gRPC over HTTP/2
+
+当前支持：
+
+- `application/grpc` 请求经 HTTP/2 upstream 透传
+- 基础 `application/grpc-web(+proto)` / `application/grpc-web-text(+proto)` 请求可转换后转发到 HTTP/2 upstream
+- 基于标准 `/grpc.health.v1.Health/Check` 的 gRPC 主动健康检查
+- `TE: trailers` 请求头透传到 HTTP/2 upstream
+- 下游 `grpc-timeout` 会参与 upstream 整体 deadline 计算，取其与 upstream `request_timeout` 的较小值；它同时约束等待响应头和后续响应 body 流；非法值会返回 `grpc-status = 3`
+- 若下游在 gRPC / grpc-web 响应流结束前提前取消读取，且代理尚未观察到最终 `grpc-status`，则 access log 与 `rginx_grpc_responses_total` 会补记为 `grpc-status = 1`
+- gRPC request trailer 透传到 HTTP/2 upstream
+- grpc-web request trailer frame 可转换为 upstream HTTP/2 request trailers
+- upstream 响应 body 与 trailing headers 透传给下游 HTTP/2 客户端
+- upstream gRPC trailers 可编码回 grpc-web trailer frame，并在 text 模式下继续做 base64 编码后返回给下游客户端
+- 当请求在代理本地失败时，`application/grpc` 会返回 trailers-only 风格的 `grpc-status` / `grpc-message`，grpc-web 会返回对应 trailer frame，而不是仅返回裸 HTTP 文本错误
+
+当前仍不支持：
+
+- 明文 `h2c` gRPC upstream
+- 明文 `h2c` gRPC health probe
+- 更高阶的 gRPC 语义，例如更主动的 cancellation 协同，或更完整的协议级兼容
+
 ## 常见限制
 
 - 入站只支持 TLS 上的 HTTP/2，不支持 h2c
-- upstream `Http2` 只支持 `https://` peer
-- gRPC 所需的 trailer / streaming 语义尚未补齐
+- grpc-web 当前只覆盖基础 binary/text 模式，不是完整的 grpc-web 语义代理
+- upstream `Http2` 只支持 `https://` peer，经 TLS/ALPN 建链，不支持明文 h2c
+- gRPC 主动健康检查同样只支持 `https://` peer，不支持明文 h2c
+- 当前不是完整的 gRPC 语义代理实现
 
 ## 推荐阅读
 

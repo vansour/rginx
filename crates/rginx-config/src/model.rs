@@ -16,6 +16,10 @@ pub struct Config {
 #[derive(Debug, Clone, Deserialize)]
 pub struct RuntimeConfig {
     pub shutdown_timeout_secs: u64,
+    #[serde(default)]
+    pub worker_threads: Option<u64>,
+    #[serde(default)]
+    pub accept_workers: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -35,6 +39,12 @@ pub struct ServerConfig {
     pub max_connections: Option<u64>,
     #[serde(default)]
     pub header_read_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub request_body_read_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub response_write_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub access_log_format: Option<String>,
     #[serde(default)]
     pub tls: Option<ServerTlsConfig>,
 }
@@ -89,6 +99,8 @@ pub struct UpstreamConfig {
     #[serde(default)]
     pub health_check_path: Option<String>,
     #[serde(default)]
+    pub health_check_grpc_service: Option<String>,
+    #[serde(default)]
     pub health_check_interval_secs: Option<u64>,
     #[serde(default)]
     pub health_check_timeout_secs: Option<u64>,
@@ -137,6 +149,10 @@ pub struct LocationConfig {
     pub matcher: MatcherConfig,
     pub handler: HandlerConfig,
     #[serde(default)]
+    pub grpc_service: Option<String>,
+    #[serde(default)]
+    pub grpc_method: Option<String>,
+    #[serde(default)]
     pub allow_cidrs: Vec<String>,
     #[serde(default)]
     pub deny_cidrs: Vec<String>,
@@ -174,6 +190,8 @@ pub enum HandlerConfig {
         index: Option<String>,
         #[serde(default)]
         try_files: Option<Vec<String>>,
+        #[serde(default)]
+        autoindex: Option<bool>,
     },
     Return {
         status: u16,
@@ -183,6 +201,7 @@ pub enum HandlerConfig {
     },
     Status,
     Metrics,
+    Config,
 }
 
 #[derive(Debug, Clone, Deserialize)]
