@@ -39,6 +39,8 @@
 
 当前正式发布线收口为 `v0.1.1`。
 
+当前正在准备下一条预发布标签 `v0.1.2-rc.1`，主要用于验证最近补上的 active health、dynamic config / reload 边界，以及 gRPC / grpc-web observability 集成覆盖。
+
 这条版本线的工程重点不是继续无边界堆功能，而是：
 
 1. 保持现有稳定能力与代码结构一致。

@@ -2,7 +2,7 @@
 
 `rginx` 的产品定义是：一个面向中小规模部署的 Rust 入口反向代理，稳定支持 TLS 终止、Host/Path 路由、上游代理、基础静态文件、基础流量治理、健康检查、热重载和可观测性。
 
-当前正式发布线收口为 `v0.1.1`。此前的 `v0.1.1-rc.1` 与 `v0.1.1-rc.2` 仅用于这条稳定发布线的预发布验证。
+当前正式发布线收口为 `v0.1.1`。当前正在准备下一条预发布标签 `v0.1.2-rc.1`，用于验证最近一轮测试、文档和发布流程补强。
 
 稳定支持范围、当前明确限制和正式版发布闸门见：
 
@@ -105,7 +105,7 @@
 curl -fsSL https://raw.githubusercontent.com/vansour/rginx/main/scripts/install.sh | bash -s -- --mode release --version <tag>
 ```
 
-其中 `latest` 只会解析最新稳定版；如果你要安装预发布版，请显式传入具体 tag，例如 `v0.1.1-rc.2`。
+其中 `latest` 只会解析最新稳定版；如果你要安装预发布版，请显式传入具体 tag，例如 `v0.1.2-rc.1`。
 
 安装脚本默认会：
 
@@ -953,14 +953,14 @@ Release Notes 分类规则来自：
 建议的本地发版前检查：
 
 ```bash
-./scripts/prepare-release.sh --tag v0.1.1
+./scripts/prepare-release.sh --tag v0.1.2-rc.1
 ```
 
 建议流程：
 
 1. 确认 `main` 上的 CI 通过。
 2. 确认工作区没有误提交的临时改动。
-3. 在 `main` 上执行 `./scripts/prepare-release.sh --tag v0.1.1`。
+3. 在目标提交上执行 `./scripts/prepare-release.sh --tag <tag>`。
 4. 创建语义化版本 tag，例如 `v1.2.3` 或 `v1.2.3-rc.1`。
 5. push tag，等待 `release.yml` 完成。
 6. 到 GitHub Release 页面检查生成的 changelog、commit 链接和各平台产物是否齐全。
@@ -969,7 +969,7 @@ Release Notes 分类规则来自：
 
 - 即使这是仓库的第一个 tag，没有“上一个版本”可比较，release workflow 也会基于当前 tag 所包含的提交历史自动写出 `## Changelog`
 - 如果存在上一个 tag，`## Changelog` 会列出从上一个 tag 到当前 tag 的具体提交
-- 正式版 tag 仍应直接切在 `origin/main` 当前 HEAD 上；更完整流程见 [wiki/Release-Process.md](wiki/Release-Process.md)
+- 预发布 tag 允许指向已被 `origin/main` 包含的历史提交；正式版 tag 仍应直接切在 `origin/main` 当前 HEAD 上；更完整流程见 [wiki/Release-Process.md](wiki/Release-Process.md)
 
 产物命名规则示例：
 
