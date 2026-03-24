@@ -12,10 +12,11 @@ use crate::model::{
 use http::StatusCode;
 use ipnet::IpNet;
 use rginx_core::{
-    ActiveHealthCheck, ConfigSnapshot, Error, FileTarget, ProxyTarget, Result, ReturnAction, Route,
-    RouteAccessControl, RouteAction, RouteMatcher, RouteRateLimit, RuntimeSettings, Server,
-    ServerTls, StaticResponse, Upstream, UpstreamLoadBalance, UpstreamPeer, UpstreamProtocol,
-    UpstreamSettings, UpstreamTls, VirtualHost,
+    AccessLogFormat, ActiveHealthCheck, ConfigSnapshot, Error, FileTarget, GrpcRouteMatch,
+    ProxyTarget, Result, ReturnAction, Route, RouteAccessControl, RouteAction, RouteMatcher,
+    RouteRateLimit, RuntimeSettings, Server, ServerTls, StaticResponse, Upstream,
+    UpstreamLoadBalance, UpstreamPeer, UpstreamProtocol, UpstreamSettings, UpstreamTls,
+    VirtualHost,
 };
 use rustls::pki_types::ServerName;
 
@@ -35,6 +36,7 @@ const DEFAULT_HEALTH_CHECK_INTERVAL_SECS: u64 = 5;
 const DEFAULT_HEALTH_CHECK_TIMEOUT_SECS: u64 = 2;
 const DEFAULT_HEALTHY_SUCCESSES_REQUIRED: u32 = 2;
 const DEFAULT_VHOST_ID: &str = "server";
+const DEFAULT_GRPC_HEALTH_CHECK_PATH: &str = "/grpc.health.v1.Health/Check";
 
 pub fn compile(raw: Config) -> Result<ConfigSnapshot> {
     compile_with_base(raw, Path::new("."))
@@ -45,6 +47,8 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
     let base_dir = base_dir.as_ref();
 
     let Config { runtime, server, upstreams: raw_upstreams, locations, servers: raw_servers } = raw;
+    let crate::model::RuntimeConfig { shutdown_timeout_secs, worker_threads, accept_workers } =
+        runtime;
     let crate::model::ServerConfig {
         listen,
         server_names,
@@ -54,6 +58,9 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
         max_request_body_bytes,
         max_connections,
         header_read_timeout_secs,
+        request_body_read_timeout_secs,
+        response_write_timeout_secs,
+        access_log_format,
         tls,
     } = server;
 
@@ -64,7 +71,12 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
     let max_request_body_bytes = compile_max_request_body_bytes(max_request_body_bytes)?;
     let max_connections = compile_max_connections(max_connections)?;
     let header_read_timeout = header_read_timeout_secs.map(Duration::from_secs);
+    let request_body_read_timeout = request_body_read_timeout_secs.map(Duration::from_secs);
+    let response_write_timeout = response_write_timeout_secs.map(Duration::from_secs);
+    let access_log_format = compile_access_log_format(access_log_format)?;
     let server_tls = compile_server_tls(tls, base_dir)?;
+    let worker_threads = compile_runtime_worker_threads(worker_threads)?;
+    let accept_workers = compile_runtime_accept_workers(accept_workers)?;
     let upstreams = raw_upstreams
         .into_iter()
         .map(|upstream| {
@@ -91,6 +103,7 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
                 unhealthy_after_failures,
                 unhealthy_cooldown_secs,
                 health_check_path,
+                health_check_grpc_service,
                 health_check_interval_secs,
                 health_check_timeout_secs,
                 healthy_successes_required,
@@ -171,6 +184,7 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
             let active_health_check = compile_active_health_check(
                 &name,
                 health_check_path,
+                health_check_grpc_service,
                 health_check_interval_secs,
                 health_check_timeout_secs,
                 healthy_successes_required,
@@ -222,7 +236,9 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
 
     Ok(ConfigSnapshot {
         runtime: RuntimeSettings {
-            shutdown_timeout: Duration::from_secs(runtime.shutdown_timeout_secs),
+            shutdown_timeout: Duration::from_secs(shutdown_timeout_secs),
+            worker_threads,
+            accept_workers,
         },
         server: Server {
             listen_addr,
@@ -232,6 +248,9 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
             max_request_body_bytes,
             max_connections,
             header_read_timeout,
+            request_body_read_timeout,
+            response_write_timeout,
+            access_log_format,
             tls: server_tls,
         },
         default_vhost,
@@ -248,6 +267,27 @@ fn compile_max_headers(max_headers: Option<u64>) -> Result<Option<usize>> {
             })
         })
         .transpose()
+}
+
+fn compile_runtime_worker_threads(worker_threads: Option<u64>) -> Result<Option<usize>> {
+    worker_threads
+        .map(|value| {
+            usize::try_from(value).map_err(|_| {
+                Error::Config(format!("runtime worker_threads `{value}` exceeds platform limits"))
+            })
+        })
+        .transpose()
+}
+
+fn compile_runtime_accept_workers(accept_workers: Option<u64>) -> Result<usize> {
+    accept_workers
+        .map(|value| {
+            usize::try_from(value).map_err(|_| {
+                Error::Config(format!("runtime accept_workers `{value}` exceeds platform limits"))
+            })
+        })
+        .transpose()
+        .map(|value| value.unwrap_or(1))
 }
 
 fn compile_max_request_body_bytes(max_request_body_bytes: Option<u64>) -> Result<Option<usize>> {
@@ -270,6 +310,10 @@ fn compile_max_connections(max_connections: Option<u64>) -> Result<Option<usize>
             })
         })
         .transpose()
+}
+
+fn compile_access_log_format(access_log_format: Option<String>) -> Result<Option<AccessLogFormat>> {
+    access_log_format.map(AccessLogFormat::parse).transpose()
 }
 
 fn compile_timeout_secs(raw: u64, upstream_name: &str, field: &str) -> Result<Duration> {
@@ -418,6 +462,8 @@ fn compile_routes(
             let crate::model::LocationConfig {
                 matcher,
                 handler,
+                grpc_service,
+                grpc_method,
                 allow_cidrs,
                 deny_cidrs,
                 requests_per_sec,
@@ -427,7 +473,20 @@ fn compile_routes(
                 MatcherConfig::Exact(path) => RouteMatcher::Exact(path),
                 MatcherConfig::Prefix(path) => RouteMatcher::Prefix(path),
             };
-            let route_id = format!("{vhost_id}/routes[{route_index}]|{}", matcher.id_fragment());
+            let grpc_match = if grpc_service.is_some() || grpc_method.is_some() {
+                Some(GrpcRouteMatch { service: grpc_service, method: grpc_method })
+            } else {
+                None
+            };
+            let route_id = if let Some(grpc_match) = &grpc_match {
+                format!(
+                    "{vhost_id}/routes[{route_index}]|{}|{}",
+                    matcher.id_fragment(),
+                    grpc_match.id_fragment()
+                )
+            } else {
+                format!("{vhost_id}/routes[{route_index}]|{}", matcher.id_fragment())
+            };
             let access_control = compile_route_access_control(&matcher, allow_cidrs, deny_cidrs)?;
             let rate_limit = compile_route_rate_limit(&matcher, requests_per_sec, burst)?;
 
@@ -478,12 +537,13 @@ fn compile_routes(
                         proxy_set_headers,
                     })
                 }
-                HandlerConfig::File { root, index, try_files } => {
+                HandlerConfig::File { root, index, try_files, autoindex } => {
                     let root = resolve_path(base_dir, root);
                     RouteAction::File(FileTarget {
                         root,
                         index: index.and_then(|s| if s.trim().is_empty() { None } else { Some(s) }),
                         try_files: try_files.unwrap_or_default(),
+                        autoindex: autoindex.unwrap_or(false),
                     })
                 }
                 HandlerConfig::Return { status, location, body } => {
@@ -495,13 +555,14 @@ fn compile_routes(
                 }
                 HandlerConfig::Status => RouteAction::Status,
                 HandlerConfig::Metrics => RouteAction::Metrics,
+                HandlerConfig::Config => RouteAction::Config,
             };
 
-            Ok(Route { id: route_id, matcher, action, access_control, rate_limit })
+            Ok(Route { id: route_id, matcher, grpc_match, action, access_control, rate_limit })
         })
         .collect::<Result<Vec<_>>>()?;
 
-    routes.sort_by(|left, right| right.matcher.priority().cmp(&left.matcher.priority()));
+    routes.sort_by_key(|route| std::cmp::Reverse(route.priority()));
 
     Ok(routes)
 }
@@ -553,12 +614,15 @@ fn compile_max_replayable_request_body_bytes(
 fn compile_active_health_check(
     upstream_name: &str,
     health_check_path: Option<String>,
+    health_check_grpc_service: Option<String>,
     health_check_interval_secs: Option<u64>,
     health_check_timeout_secs: Option<u64>,
     healthy_successes_required: Option<u32>,
 ) -> Result<Option<ActiveHealthCheck>> {
-    let Some(path) = health_check_path else {
-        return Ok(None);
+    let path = match (health_check_path, health_check_grpc_service.as_ref()) {
+        (Some(path), _) => path,
+        (None, Some(_)) => DEFAULT_GRPC_HEALTH_CHECK_PATH.to_string(),
+        (None, None) => return Ok(None),
     };
 
     http::uri::PathAndQuery::from_str(&path).map_err(|error| {
@@ -569,6 +633,7 @@ fn compile_active_health_check(
 
     Ok(Some(ActiveHealthCheck {
         path,
+        grpc_service: health_check_grpc_service,
         interval: Duration::from_secs(
             health_check_interval_secs.unwrap_or(DEFAULT_HEALTH_CHECK_INTERVAL_SECS),
         ),
@@ -706,7 +771,11 @@ mod tests {
     #[test]
     fn compile_accepts_https_upstreams() {
         let config = Config {
-            runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
+            runtime: RuntimeConfig {
+                shutdown_timeout_secs: 10,
+                worker_threads: None,
+                accept_workers: None,
+            },
             server: ServerConfig {
                 listen: "127.0.0.1:8080".to_string(),
                 server_names: Vec::new(),
@@ -716,6 +785,9 @@ mod tests {
                 max_request_body_bytes: None,
                 max_connections: None,
                 header_read_timeout_secs: None,
+                request_body_read_timeout_secs: None,
+                response_write_timeout_secs: None,
+                access_log_format: None,
                 tls: None,
             },
             upstreams: vec![UpstreamConfig {
@@ -745,6 +817,7 @@ mod tests {
                 unhealthy_after_failures: None,
                 unhealthy_cooldown_secs: None,
                 health_check_path: Some("/healthz".to_string()),
+                health_check_grpc_service: None,
                 health_check_interval_secs: None,
                 health_check_timeout_secs: None,
                 healthy_successes_required: None,
@@ -757,6 +830,10 @@ mod tests {
                     strip_prefix: None,
                     proxy_set_headers: std::collections::HashMap::new(),
                 },
+                grpc_service: None,
+
+                grpc_method: None,
+
                 allow_cidrs: Vec::new(),
                 deny_cidrs: Vec::new(),
                 requests_per_sec: None,
@@ -796,15 +873,20 @@ mod tests {
             .as_ref()
             .expect("active health-check config should compile");
         assert_eq!(active_health.path, "/healthz");
+        assert_eq!(active_health.grpc_service, None);
         assert_eq!(active_health.interval, Duration::from_secs(DEFAULT_HEALTH_CHECK_INTERVAL_SECS));
         assert_eq!(active_health.timeout, Duration::from_secs(DEFAULT_HEALTH_CHECK_TIMEOUT_SECS));
         assert_eq!(active_health.healthy_successes_required, DEFAULT_HEALTHY_SUCCESSES_REQUIRED);
     }
 
     #[test]
-    fn compile_applies_granular_upstream_transport_settings() {
+    fn compile_defaults_grpc_health_check_path_when_service_is_set() {
         let config = Config {
-            runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
+            runtime: RuntimeConfig {
+                shutdown_timeout_secs: 10,
+                worker_threads: None,
+                accept_workers: None,
+            },
             server: ServerConfig {
                 listen: "127.0.0.1:8080".to_string(),
                 server_names: Vec::new(),
@@ -814,6 +896,195 @@ mod tests {
                 max_request_body_bytes: None,
                 max_connections: None,
                 header_read_timeout_secs: None,
+                request_body_read_timeout_secs: None,
+                response_write_timeout_secs: None,
+                access_log_format: None,
+                tls: None,
+            },
+            upstreams: vec![UpstreamConfig {
+                name: "grpc-backend".to_string(),
+                peers: vec![UpstreamPeerConfig {
+                    url: "https://example.com".to_string(),
+                    weight: 1,
+                    backup: false,
+                }],
+                tls: None,
+                protocol: UpstreamProtocolConfig::Auto,
+                load_balance: UpstreamLoadBalanceConfig::RoundRobin,
+                server_name_override: None,
+                request_timeout_secs: None,
+                connect_timeout_secs: None,
+                read_timeout_secs: None,
+                write_timeout_secs: None,
+                idle_timeout_secs: None,
+                pool_idle_timeout_secs: None,
+                pool_max_idle_per_host: None,
+                tcp_keepalive_secs: None,
+                tcp_nodelay: None,
+                http2_keep_alive_interval_secs: None,
+                http2_keep_alive_timeout_secs: None,
+                http2_keep_alive_while_idle: None,
+                max_replayable_request_body_bytes: None,
+                unhealthy_after_failures: None,
+                unhealthy_cooldown_secs: None,
+                health_check_path: None,
+                health_check_grpc_service: Some("grpc.health.v1.Health".to_string()),
+                health_check_interval_secs: None,
+                health_check_timeout_secs: None,
+                healthy_successes_required: None,
+            }],
+            locations: vec![LocationConfig {
+                matcher: MatcherConfig::Prefix("/".to_string()),
+                handler: HandlerConfig::Proxy {
+                    upstream: "grpc-backend".to_string(),
+                    preserve_host: None,
+                    strip_prefix: None,
+                    proxy_set_headers: std::collections::HashMap::new(),
+                },
+                grpc_service: None,
+
+                grpc_method: None,
+
+                allow_cidrs: Vec::new(),
+                deny_cidrs: Vec::new(),
+                requests_per_sec: None,
+                burst: None,
+            }],
+            servers: Vec::new(),
+        };
+
+        let snapshot = compile(config).expect("gRPC health-check config should compile");
+        let proxy = match &snapshot.default_vhost.routes[0].action {
+            rginx_core::RouteAction::Proxy(proxy) => proxy,
+            _ => panic!("expected proxy route"),
+        };
+
+        let active_health = proxy
+            .upstream
+            .active_health_check
+            .as_ref()
+            .expect("gRPC active health-check config should compile");
+        assert_eq!(active_health.path, super::DEFAULT_GRPC_HEALTH_CHECK_PATH);
+        assert_eq!(active_health.grpc_service.as_deref(), Some("grpc.health.v1.Health"));
+    }
+
+    #[test]
+    fn compile_propagates_file_autoindex_setting() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        let base_dir =
+            std::env::temp_dir().join(format!("rginx-file-autoindex-config-test-{unique}"));
+        fs::create_dir_all(&base_dir).expect("temp base dir should be created");
+
+        let config = Config {
+            runtime: RuntimeConfig {
+                shutdown_timeout_secs: 10,
+                worker_threads: None,
+                accept_workers: None,
+            },
+            server: ServerConfig {
+                listen: "127.0.0.1:8080".to_string(),
+                server_names: Vec::new(),
+                trusted_proxies: Vec::new(),
+                keep_alive: None,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout_secs: None,
+                request_body_read_timeout_secs: None,
+                response_write_timeout_secs: None,
+                access_log_format: None,
+                tls: None,
+            },
+            upstreams: Vec::new(),
+            locations: vec![
+                LocationConfig {
+                    matcher: MatcherConfig::Exact("/on".to_string()),
+                    handler: HandlerConfig::File {
+                        root: "public".to_string(),
+                        index: None,
+                        try_files: None,
+                        autoindex: Some(true),
+                    },
+                    grpc_service: None,
+                    grpc_method: None,
+                    allow_cidrs: Vec::new(),
+                    deny_cidrs: Vec::new(),
+                    requests_per_sec: None,
+                    burst: None,
+                },
+                LocationConfig {
+                    matcher: MatcherConfig::Exact("/off".to_string()),
+                    handler: HandlerConfig::File {
+                        root: "assets".to_string(),
+                        index: None,
+                        try_files: None,
+                        autoindex: None,
+                    },
+                    grpc_service: None,
+                    grpc_method: None,
+                    allow_cidrs: Vec::new(),
+                    deny_cidrs: Vec::new(),
+                    requests_per_sec: None,
+                    burst: None,
+                },
+            ],
+            servers: Vec::new(),
+        };
+
+        let snapshot = compile_with_base(config, &base_dir).expect("file routes should compile");
+        let enabled_route = snapshot
+            .default_vhost
+            .routes
+            .iter()
+            .find(|route| route.id.contains("exact:/on"))
+            .expect("enabled file route should exist");
+        let disabled_route = snapshot
+            .default_vhost
+            .routes
+            .iter()
+            .find(|route| route.id.contains("exact:/off"))
+            .expect("disabled file route should exist");
+
+        let enabled_target = match &enabled_route.action {
+            rginx_core::RouteAction::File(target) => target,
+            _ => panic!("expected file route"),
+        };
+        let disabled_target = match &disabled_route.action {
+            rginx_core::RouteAction::File(target) => target,
+            _ => panic!("expected file route"),
+        };
+
+        assert_eq!(enabled_target.root, base_dir.join("public"));
+        assert!(enabled_target.autoindex);
+        assert_eq!(disabled_target.root, base_dir.join("assets"));
+        assert!(!disabled_target.autoindex);
+
+        fs::remove_dir_all(&base_dir).expect("temp base dir should be removed");
+    }
+
+    #[test]
+    fn compile_applies_granular_upstream_transport_settings() {
+        let config = Config {
+            runtime: RuntimeConfig {
+                shutdown_timeout_secs: 10,
+                worker_threads: None,
+                accept_workers: None,
+            },
+            server: ServerConfig {
+                listen: "127.0.0.1:8080".to_string(),
+                server_names: Vec::new(),
+                trusted_proxies: Vec::new(),
+                keep_alive: None,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout_secs: None,
+                request_body_read_timeout_secs: None,
+                response_write_timeout_secs: None,
+                access_log_format: None,
                 tls: None,
             },
             upstreams: vec![UpstreamConfig {
@@ -843,6 +1114,7 @@ mod tests {
                 unhealthy_after_failures: None,
                 unhealthy_cooldown_secs: None,
                 health_check_path: None,
+                health_check_grpc_service: None,
                 health_check_interval_secs: None,
                 health_check_timeout_secs: None,
                 healthy_successes_required: None,
@@ -855,6 +1127,10 @@ mod tests {
                     strip_prefix: None,
                     proxy_set_headers: std::collections::HashMap::new(),
                 },
+                grpc_service: None,
+
+                grpc_method: None,
+
                 allow_cidrs: Vec::new(),
                 deny_cidrs: Vec::new(),
                 requests_per_sec: None,
@@ -886,7 +1162,11 @@ mod tests {
     #[test]
     fn compile_accepts_least_conn_load_balance() {
         let config = Config {
-            runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
+            runtime: RuntimeConfig {
+                shutdown_timeout_secs: 10,
+                worker_threads: None,
+                accept_workers: None,
+            },
             server: ServerConfig {
                 listen: "127.0.0.1:8080".to_string(),
                 server_names: Vec::new(),
@@ -896,6 +1176,9 @@ mod tests {
                 max_request_body_bytes: None,
                 max_connections: None,
                 header_read_timeout_secs: None,
+                request_body_read_timeout_secs: None,
+                response_write_timeout_secs: None,
+                access_log_format: None,
                 tls: None,
             },
             upstreams: vec![UpstreamConfig {
@@ -932,6 +1215,7 @@ mod tests {
                 unhealthy_after_failures: None,
                 unhealthy_cooldown_secs: None,
                 health_check_path: None,
+                health_check_grpc_service: None,
                 health_check_interval_secs: None,
                 health_check_timeout_secs: None,
                 healthy_successes_required: None,
@@ -944,6 +1228,10 @@ mod tests {
                     strip_prefix: None,
                     proxy_set_headers: std::collections::HashMap::new(),
                 },
+                grpc_service: None,
+
+                grpc_method: None,
+
                 allow_cidrs: Vec::new(),
                 deny_cidrs: Vec::new(),
                 requests_per_sec: None,
@@ -964,7 +1252,11 @@ mod tests {
     #[test]
     fn compile_applies_peer_weights() {
         let config = Config {
-            runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
+            runtime: RuntimeConfig {
+                shutdown_timeout_secs: 10,
+                worker_threads: None,
+                accept_workers: None,
+            },
             server: ServerConfig {
                 listen: "127.0.0.1:8080".to_string(),
                 server_names: Vec::new(),
@@ -974,6 +1266,9 @@ mod tests {
                 max_request_body_bytes: None,
                 max_connections: None,
                 header_read_timeout_secs: None,
+                request_body_read_timeout_secs: None,
+                response_write_timeout_secs: None,
+                access_log_format: None,
                 tls: None,
             },
             upstreams: vec![UpstreamConfig {
@@ -1010,6 +1305,7 @@ mod tests {
                 unhealthy_after_failures: None,
                 unhealthy_cooldown_secs: None,
                 health_check_path: None,
+                health_check_grpc_service: None,
                 health_check_interval_secs: None,
                 health_check_timeout_secs: None,
                 healthy_successes_required: None,
@@ -1022,6 +1318,10 @@ mod tests {
                     strip_prefix: None,
                     proxy_set_headers: std::collections::HashMap::new(),
                 },
+                grpc_service: None,
+
+                grpc_method: None,
+
                 allow_cidrs: Vec::new(),
                 deny_cidrs: Vec::new(),
                 requests_per_sec: None,
@@ -1057,7 +1357,11 @@ mod tests {
     #[test]
     fn compile_accepts_backup_peers() {
         let config = Config {
-            runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
+            runtime: RuntimeConfig {
+                shutdown_timeout_secs: 10,
+                worker_threads: None,
+                accept_workers: None,
+            },
             server: ServerConfig {
                 listen: "127.0.0.1:8080".to_string(),
                 server_names: Vec::new(),
@@ -1067,6 +1371,9 @@ mod tests {
                 max_request_body_bytes: None,
                 max_connections: None,
                 header_read_timeout_secs: None,
+                request_body_read_timeout_secs: None,
+                response_write_timeout_secs: None,
+                access_log_format: None,
                 tls: None,
             },
             upstreams: vec![UpstreamConfig {
@@ -1103,6 +1410,7 @@ mod tests {
                 unhealthy_after_failures: None,
                 unhealthy_cooldown_secs: None,
                 health_check_path: None,
+                health_check_grpc_service: None,
                 health_check_interval_secs: None,
                 health_check_timeout_secs: None,
                 healthy_successes_required: None,
@@ -1115,6 +1423,10 @@ mod tests {
                     strip_prefix: None,
                     proxy_set_headers: std::collections::HashMap::new(),
                 },
+                grpc_service: None,
+
+                grpc_method: None,
+
                 allow_cidrs: Vec::new(),
                 deny_cidrs: Vec::new(),
                 requests_per_sec: None,
@@ -1150,7 +1462,11 @@ mod tests {
     #[test]
     fn compile_uses_legacy_request_timeout_fallbacks_and_disables_pool_idle_timeout() {
         let config = Config {
-            runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
+            runtime: RuntimeConfig {
+                shutdown_timeout_secs: 10,
+                worker_threads: None,
+                accept_workers: None,
+            },
             server: ServerConfig {
                 listen: "127.0.0.1:8080".to_string(),
                 server_names: Vec::new(),
@@ -1160,6 +1476,9 @@ mod tests {
                 max_request_body_bytes: None,
                 max_connections: None,
                 header_read_timeout_secs: None,
+                request_body_read_timeout_secs: None,
+                response_write_timeout_secs: None,
+                access_log_format: None,
                 tls: None,
             },
             upstreams: vec![UpstreamConfig {
@@ -1189,6 +1508,7 @@ mod tests {
                 unhealthy_after_failures: None,
                 unhealthy_cooldown_secs: None,
                 health_check_path: None,
+                health_check_grpc_service: None,
                 health_check_interval_secs: None,
                 health_check_timeout_secs: None,
                 healthy_successes_required: None,
@@ -1201,6 +1521,10 @@ mod tests {
                     strip_prefix: None,
                     proxy_set_headers: std::collections::HashMap::new(),
                 },
+                grpc_service: None,
+
+                grpc_method: None,
+
                 allow_cidrs: Vec::new(),
                 deny_cidrs: Vec::new(),
                 requests_per_sec: None,
@@ -1230,7 +1554,11 @@ mod tests {
     #[test]
     fn compile_uses_default_pool_idle_timeout() {
         let config = Config {
-            runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
+            runtime: RuntimeConfig {
+                shutdown_timeout_secs: 10,
+                worker_threads: None,
+                accept_workers: None,
+            },
             server: ServerConfig {
                 listen: "127.0.0.1:8080".to_string(),
                 server_names: Vec::new(),
@@ -1240,6 +1568,9 @@ mod tests {
                 max_request_body_bytes: None,
                 max_connections: None,
                 header_read_timeout_secs: None,
+                request_body_read_timeout_secs: None,
+                response_write_timeout_secs: None,
+                access_log_format: None,
                 tls: None,
             },
             upstreams: vec![UpstreamConfig {
@@ -1269,6 +1600,7 @@ mod tests {
                 unhealthy_after_failures: None,
                 unhealthy_cooldown_secs: None,
                 health_check_path: None,
+                health_check_grpc_service: None,
                 health_check_interval_secs: None,
                 health_check_timeout_secs: None,
                 healthy_successes_required: None,
@@ -1281,6 +1613,10 @@ mod tests {
                     strip_prefix: None,
                     proxy_set_headers: std::collections::HashMap::new(),
                 },
+                grpc_service: None,
+
+                grpc_method: None,
+
                 allow_cidrs: Vec::new(),
                 deny_cidrs: Vec::new(),
                 requests_per_sec: None,
@@ -1313,7 +1649,11 @@ mod tests {
         fs::write(&ca_path, b"placeholder").expect("temp CA file should be written");
 
         let config = Config {
-            runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
+            runtime: RuntimeConfig {
+                shutdown_timeout_secs: 10,
+                worker_threads: None,
+                accept_workers: None,
+            },
             server: ServerConfig {
                 listen: "127.0.0.1:8080".to_string(),
                 server_names: Vec::new(),
@@ -1323,6 +1663,9 @@ mod tests {
                 max_request_body_bytes: None,
                 max_connections: None,
                 header_read_timeout_secs: None,
+                request_body_read_timeout_secs: None,
+                response_write_timeout_secs: None,
+                access_log_format: None,
                 tls: None,
             },
             upstreams: vec![UpstreamConfig {
@@ -1352,6 +1695,7 @@ mod tests {
                 unhealthy_after_failures: Some(3),
                 unhealthy_cooldown_secs: Some(15),
                 health_check_path: Some("/ready".to_string()),
+                health_check_grpc_service: None,
                 health_check_interval_secs: Some(7),
                 health_check_timeout_secs: Some(3),
                 healthy_successes_required: Some(4),
@@ -1364,6 +1708,10 @@ mod tests {
                     strip_prefix: None,
                     proxy_set_headers: std::collections::HashMap::new(),
                 },
+                grpc_service: None,
+
+                grpc_method: None,
+
                 allow_cidrs: Vec::new(),
                 deny_cidrs: Vec::new(),
                 requests_per_sec: None,
@@ -1395,6 +1743,7 @@ mod tests {
             .as_ref()
             .expect("custom active health-check config should compile");
         assert_eq!(active_health.path, "/ready");
+        assert_eq!(active_health.grpc_service, None);
         assert_eq!(active_health.interval, Duration::from_secs(7));
         assert_eq!(active_health.timeout, Duration::from_secs(3));
         assert_eq!(active_health.healthy_successes_required, 4);
@@ -1406,7 +1755,11 @@ mod tests {
     #[test]
     fn compile_normalizes_server_name_override() {
         let config = Config {
-            runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
+            runtime: RuntimeConfig {
+                shutdown_timeout_secs: 10,
+                worker_threads: None,
+                accept_workers: None,
+            },
             server: ServerConfig {
                 listen: "127.0.0.1:8080".to_string(),
                 server_names: Vec::new(),
@@ -1416,6 +1769,9 @@ mod tests {
                 max_request_body_bytes: None,
                 max_connections: None,
                 header_read_timeout_secs: None,
+                request_body_read_timeout_secs: None,
+                response_write_timeout_secs: None,
+                access_log_format: None,
                 tls: None,
             },
             upstreams: vec![UpstreamConfig {
@@ -1445,6 +1801,7 @@ mod tests {
                 unhealthy_after_failures: None,
                 unhealthy_cooldown_secs: None,
                 health_check_path: None,
+                health_check_grpc_service: None,
                 health_check_interval_secs: None,
                 health_check_timeout_secs: None,
                 healthy_successes_required: None,
@@ -1457,6 +1814,10 @@ mod tests {
                     strip_prefix: None,
                     proxy_set_headers: std::collections::HashMap::new(),
                 },
+                grpc_service: None,
+
+                grpc_method: None,
+
                 allow_cidrs: Vec::new(),
                 deny_cidrs: Vec::new(),
                 requests_per_sec: None,
@@ -1477,7 +1838,11 @@ mod tests {
     #[test]
     fn compile_rejects_invalid_server_name_override() {
         let config = Config {
-            runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
+            runtime: RuntimeConfig {
+                shutdown_timeout_secs: 10,
+                worker_threads: None,
+                accept_workers: None,
+            },
             server: ServerConfig {
                 listen: "127.0.0.1:8080".to_string(),
                 server_names: Vec::new(),
@@ -1487,6 +1852,9 @@ mod tests {
                 max_request_body_bytes: None,
                 max_connections: None,
                 header_read_timeout_secs: None,
+                request_body_read_timeout_secs: None,
+                response_write_timeout_secs: None,
+                access_log_format: None,
                 tls: None,
             },
             upstreams: vec![UpstreamConfig {
@@ -1516,6 +1884,7 @@ mod tests {
                 unhealthy_after_failures: None,
                 unhealthy_cooldown_secs: None,
                 health_check_path: None,
+                health_check_grpc_service: None,
                 health_check_interval_secs: None,
                 health_check_timeout_secs: None,
                 healthy_successes_required: None,
@@ -1528,6 +1897,10 @@ mod tests {
                     strip_prefix: None,
                     proxy_set_headers: std::collections::HashMap::new(),
                 },
+                grpc_service: None,
+
+                grpc_method: None,
+
                 allow_cidrs: Vec::new(),
                 deny_cidrs: Vec::new(),
                 requests_per_sec: None,
@@ -1543,7 +1916,11 @@ mod tests {
     #[test]
     fn compile_accepts_status_routes() {
         let config = Config {
-            runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
+            runtime: RuntimeConfig {
+                shutdown_timeout_secs: 10,
+                worker_threads: None,
+                accept_workers: None,
+            },
             server: ServerConfig {
                 listen: "127.0.0.1:8080".to_string(),
                 server_names: Vec::new(),
@@ -1553,12 +1930,19 @@ mod tests {
                 max_request_body_bytes: None,
                 max_connections: None,
                 header_read_timeout_secs: None,
+                request_body_read_timeout_secs: None,
+                response_write_timeout_secs: None,
+                access_log_format: None,
                 tls: None,
             },
             upstreams: Vec::new(),
             locations: vec![LocationConfig {
                 matcher: MatcherConfig::Exact("/status".to_string()),
                 handler: HandlerConfig::Status,
+                grpc_service: None,
+
+                grpc_method: None,
+
                 allow_cidrs: Vec::new(),
                 deny_cidrs: Vec::new(),
                 requests_per_sec: None,
@@ -1574,7 +1958,11 @@ mod tests {
     #[test]
     fn compile_accepts_metrics_routes() {
         let config = Config {
-            runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
+            runtime: RuntimeConfig {
+                shutdown_timeout_secs: 10,
+                worker_threads: None,
+                accept_workers: None,
+            },
             server: ServerConfig {
                 listen: "127.0.0.1:8080".to_string(),
                 server_names: Vec::new(),
@@ -1584,12 +1972,19 @@ mod tests {
                 max_request_body_bytes: None,
                 max_connections: None,
                 header_read_timeout_secs: None,
+                request_body_read_timeout_secs: None,
+                response_write_timeout_secs: None,
+                access_log_format: None,
                 tls: None,
             },
             upstreams: Vec::new(),
             locations: vec![LocationConfig {
                 matcher: MatcherConfig::Exact("/metrics".to_string()),
                 handler: HandlerConfig::Metrics,
+                grpc_service: None,
+
+                grpc_method: None,
+
                 allow_cidrs: Vec::new(),
                 deny_cidrs: Vec::new(),
                 requests_per_sec: None,
@@ -1606,9 +2001,13 @@ mod tests {
     }
 
     #[test]
-    fn compile_attaches_route_access_control() {
+    fn compile_accepts_config_routes() {
         let config = Config {
-            runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
+            runtime: RuntimeConfig {
+                shutdown_timeout_secs: 10,
+                worker_threads: None,
+                accept_workers: None,
+            },
             server: ServerConfig {
                 listen: "127.0.0.1:8080".to_string(),
                 server_names: Vec::new(),
@@ -1618,12 +2017,61 @@ mod tests {
                 max_request_body_bytes: None,
                 max_connections: None,
                 header_read_timeout_secs: None,
+                request_body_read_timeout_secs: None,
+                response_write_timeout_secs: None,
+                access_log_format: None,
+                tls: None,
+            },
+            upstreams: Vec::new(),
+            locations: vec![LocationConfig {
+                matcher: MatcherConfig::Exact("/-/config".to_string()),
+                handler: HandlerConfig::Config,
+                grpc_service: None,
+
+                grpc_method: None,
+
+                allow_cidrs: vec!["127.0.0.1/32".to_string()],
+                deny_cidrs: Vec::new(),
+                requests_per_sec: None,
+                burst: None,
+            }],
+            servers: Vec::new(),
+        };
+
+        let snapshot = compile(config).expect("config route should compile");
+        assert!(matches!(snapshot.default_vhost.routes[0].action, rginx_core::RouteAction::Config));
+    }
+
+    #[test]
+    fn compile_attaches_route_access_control() {
+        let config = Config {
+            runtime: RuntimeConfig {
+                shutdown_timeout_secs: 10,
+                worker_threads: None,
+                accept_workers: None,
+            },
+            server: ServerConfig {
+                listen: "127.0.0.1:8080".to_string(),
+                server_names: Vec::new(),
+                trusted_proxies: Vec::new(),
+                keep_alive: None,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout_secs: None,
+                request_body_read_timeout_secs: None,
+                response_write_timeout_secs: None,
+                access_log_format: None,
                 tls: None,
             },
             upstreams: Vec::new(),
             locations: vec![LocationConfig {
                 matcher: MatcherConfig::Exact("/status".to_string()),
                 handler: HandlerConfig::Status,
+                grpc_service: None,
+
+                grpc_method: None,
+
                 allow_cidrs: vec!["127.0.0.1/32".to_string(), "::1/128".to_string()],
                 deny_cidrs: vec!["127.0.0.2/32".to_string()],
                 requests_per_sec: None,
@@ -1640,7 +2088,11 @@ mod tests {
     #[test]
     fn compile_attaches_route_rate_limit() {
         let config = Config {
-            runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
+            runtime: RuntimeConfig {
+                shutdown_timeout_secs: 10,
+                worker_threads: None,
+                accept_workers: None,
+            },
             server: ServerConfig {
                 listen: "127.0.0.1:8080".to_string(),
                 server_names: Vec::new(),
@@ -1650,6 +2102,9 @@ mod tests {
                 max_request_body_bytes: None,
                 max_connections: None,
                 header_read_timeout_secs: None,
+                request_body_read_timeout_secs: None,
+                response_write_timeout_secs: None,
+                access_log_format: None,
                 tls: None,
             },
             upstreams: Vec::new(),
@@ -1660,6 +2115,10 @@ mod tests {
                     content_type: Some("text/plain; charset=utf-8".to_string()),
                     body: "ok\n".to_string(),
                 },
+                grpc_service: None,
+
+                grpc_method: None,
+
                 allow_cidrs: Vec::new(),
                 deny_cidrs: Vec::new(),
                 requests_per_sec: Some(20),
@@ -1678,7 +2137,11 @@ mod tests {
     #[test]
     fn compile_generates_distinct_route_and_vhost_ids() {
         let config = Config {
-            runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
+            runtime: RuntimeConfig {
+                shutdown_timeout_secs: 10,
+                worker_threads: None,
+                accept_workers: None,
+            },
             server: ServerConfig {
                 listen: "127.0.0.1:8080".to_string(),
                 server_names: vec!["default.example.com".to_string()],
@@ -1688,12 +2151,19 @@ mod tests {
                 max_request_body_bytes: None,
                 max_connections: None,
                 header_read_timeout_secs: None,
+                request_body_read_timeout_secs: None,
+                response_write_timeout_secs: None,
+                access_log_format: None,
                 tls: None,
             },
             upstreams: Vec::new(),
             locations: vec![LocationConfig {
                 matcher: MatcherConfig::Exact("/status".to_string()),
                 handler: HandlerConfig::Status,
+                grpc_service: None,
+
+                grpc_method: None,
+
                 allow_cidrs: Vec::new(),
                 deny_cidrs: Vec::new(),
                 requests_per_sec: None,
@@ -1704,6 +2174,10 @@ mod tests {
                 locations: vec![LocationConfig {
                     matcher: MatcherConfig::Exact("/status".to_string()),
                     handler: HandlerConfig::Status,
+                    grpc_service: None,
+
+                    grpc_method: None,
+
                     allow_cidrs: Vec::new(),
                     deny_cidrs: Vec::new(),
                     requests_per_sec: None,
@@ -1737,7 +2211,11 @@ mod tests {
         fs::write(&key_path, b"placeholder").expect("temp key file should be written");
 
         let config = Config {
-            runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
+            runtime: RuntimeConfig {
+                shutdown_timeout_secs: 10,
+                worker_threads: None,
+                accept_workers: None,
+            },
             server: ServerConfig {
                 listen: "127.0.0.1:8080".to_string(),
                 server_names: Vec::new(),
@@ -1747,6 +2225,9 @@ mod tests {
                 max_request_body_bytes: None,
                 max_connections: None,
                 header_read_timeout_secs: None,
+                request_body_read_timeout_secs: None,
+                response_write_timeout_secs: None,
+                access_log_format: None,
                 tls: Some(ServerTlsConfig {
                     cert_path: "server.crt".to_string(),
                     key_path: "server.key".to_string(),
@@ -1760,6 +2241,10 @@ mod tests {
                     content_type: Some("text/plain; charset=utf-8".to_string()),
                     body: "ok\n".to_string(),
                 },
+                grpc_service: None,
+
+                grpc_method: None,
+
                 allow_cidrs: Vec::new(),
                 deny_cidrs: Vec::new(),
                 requests_per_sec: None,
@@ -1781,7 +2266,11 @@ mod tests {
     #[test]
     fn compile_normalizes_trusted_proxy_ips_and_cidrs() {
         let config = Config {
-            runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
+            runtime: RuntimeConfig {
+                shutdown_timeout_secs: 10,
+                worker_threads: None,
+                accept_workers: None,
+            },
             server: ServerConfig {
                 listen: "127.0.0.1:8080".to_string(),
                 server_names: Vec::new(),
@@ -1791,6 +2280,9 @@ mod tests {
                 max_request_body_bytes: None,
                 max_connections: None,
                 header_read_timeout_secs: None,
+                request_body_read_timeout_secs: None,
+                response_write_timeout_secs: None,
+                access_log_format: None,
                 tls: None,
             },
             upstreams: Vec::new(),
@@ -1801,6 +2293,10 @@ mod tests {
                     content_type: Some("text/plain; charset=utf-8".to_string()),
                     body: "ok\n".to_string(),
                 },
+                grpc_service: None,
+
+                grpc_method: None,
+
                 allow_cidrs: Vec::new(),
                 deny_cidrs: Vec::new(),
                 requests_per_sec: None,
@@ -1818,7 +2314,11 @@ mod tests {
     #[test]
     fn compile_attaches_server_hardening_settings() {
         let config = Config {
-            runtime: RuntimeConfig { shutdown_timeout_secs: 10 },
+            runtime: RuntimeConfig {
+                shutdown_timeout_secs: 10,
+                worker_threads: Some(3),
+                accept_workers: Some(2),
+            },
             server: ServerConfig {
                 listen: "127.0.0.1:8080".to_string(),
                 server_names: Vec::new(),
@@ -1828,6 +2328,9 @@ mod tests {
                 max_request_body_bytes: Some(1024),
                 max_connections: Some(256),
                 header_read_timeout_secs: Some(3),
+                request_body_read_timeout_secs: Some(4),
+                response_write_timeout_secs: Some(5),
+                access_log_format: Some("$request_id $status $request".to_string()),
                 tls: None,
             },
             upstreams: Vec::new(),
@@ -1838,6 +2341,10 @@ mod tests {
                     content_type: Some("text/plain; charset=utf-8".to_string()),
                     body: "ok\n".to_string(),
                 },
+                grpc_service: None,
+
+                grpc_method: None,
+
                 allow_cidrs: Vec::new(),
                 deny_cidrs: Vec::new(),
                 requests_per_sec: None,
@@ -1847,10 +2354,134 @@ mod tests {
         };
 
         let snapshot = compile(config).expect("server hardening settings should compile");
+        assert_eq!(snapshot.runtime.worker_threads, Some(3));
+        assert_eq!(snapshot.runtime.accept_workers, 2);
         assert!(!snapshot.server.keep_alive);
         assert_eq!(snapshot.server.max_headers, Some(32));
         assert_eq!(snapshot.server.max_request_body_bytes, Some(1024));
         assert_eq!(snapshot.server.max_connections, Some(256));
         assert_eq!(snapshot.server.header_read_timeout, Some(Duration::from_secs(3)));
+        assert_eq!(snapshot.server.request_body_read_timeout, Some(Duration::from_secs(4)));
+        assert_eq!(snapshot.server.response_write_timeout, Some(Duration::from_secs(5)));
+        let access_log_format =
+            snapshot.server.access_log_format.as_ref().expect("access log format should compile");
+        assert_eq!(access_log_format.template(), "$request_id $status $request");
+    }
+
+    #[test]
+    fn compile_prioritizes_grpc_constrained_routes_with_same_path_matcher() {
+        let config = Config {
+            runtime: RuntimeConfig {
+                shutdown_timeout_secs: 10,
+                worker_threads: None,
+                accept_workers: None,
+            },
+            server: ServerConfig {
+                listen: "127.0.0.1:8080".to_string(),
+                server_names: Vec::new(),
+                trusted_proxies: Vec::new(),
+                keep_alive: None,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout_secs: None,
+                request_body_read_timeout_secs: None,
+                response_write_timeout_secs: None,
+                access_log_format: None,
+                tls: None,
+            },
+            upstreams: Vec::new(),
+            locations: vec![
+                LocationConfig {
+                    matcher: MatcherConfig::Prefix("/".to_string()),
+                    handler: HandlerConfig::Static {
+                        status: Some(200),
+                        content_type: Some("text/plain; charset=utf-8".to_string()),
+                        body: "fallback\n".to_string(),
+                    },
+                    grpc_service: None,
+                    grpc_method: None,
+                    allow_cidrs: Vec::new(),
+                    deny_cidrs: Vec::new(),
+                    requests_per_sec: None,
+                    burst: None,
+                },
+                LocationConfig {
+                    matcher: MatcherConfig::Prefix("/".to_string()),
+                    handler: HandlerConfig::Static {
+                        status: Some(200),
+                        content_type: Some("text/plain; charset=utf-8".to_string()),
+                        body: "grpc\n".to_string(),
+                    },
+                    grpc_service: Some("grpc.health.v1.Health".to_string()),
+                    grpc_method: Some("Check".to_string()),
+                    allow_cidrs: Vec::new(),
+                    deny_cidrs: Vec::new(),
+                    requests_per_sec: None,
+                    burst: None,
+                },
+            ],
+            servers: Vec::new(),
+        };
+
+        let snapshot = compile(config).expect("gRPC route constraints should compile");
+        let routes = &snapshot.default_vhost.routes;
+        assert_eq!(routes.len(), 2);
+        assert_eq!(
+            routes[0].grpc_match.as_ref().and_then(|grpc| grpc.service.as_deref()),
+            Some("grpc.health.v1.Health")
+        );
+        assert_eq!(
+            routes[0].grpc_match.as_ref().and_then(|grpc| grpc.method.as_deref()),
+            Some("Check")
+        );
+        assert!(routes[0].id.contains("grpc:service=grpc.health.v1.Health,method=Check"));
+        assert!(routes[1].grpc_match.is_none());
+    }
+
+    #[test]
+    fn compile_rejects_invalid_server_access_log_format() {
+        let config = Config {
+            runtime: RuntimeConfig {
+                shutdown_timeout_secs: 10,
+                worker_threads: None,
+                accept_workers: None,
+            },
+            server: ServerConfig {
+                listen: "127.0.0.1:8080".to_string(),
+                server_names: Vec::new(),
+                trusted_proxies: Vec::new(),
+                keep_alive: None,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout_secs: None,
+                request_body_read_timeout_secs: None,
+                response_write_timeout_secs: None,
+                access_log_format: Some("$trace_id $status".to_string()),
+                tls: None,
+            },
+            upstreams: Vec::new(),
+            locations: vec![LocationConfig {
+                matcher: MatcherConfig::Exact("/".to_string()),
+                handler: HandlerConfig::Static {
+                    status: Some(200),
+                    content_type: Some("text/plain; charset=utf-8".to_string()),
+                    body: "ok\n".to_string(),
+                },
+                grpc_service: None,
+
+                grpc_method: None,
+
+                allow_cidrs: Vec::new(),
+                deny_cidrs: Vec::new(),
+                requests_per_sec: None,
+                burst: None,
+            }],
+            servers: Vec::new(),
+        };
+
+        let error = compile(config).expect_err("unknown access log variables should be rejected");
+        assert!(error.to_string().contains("access_log_format variable `$trace_id`"));
     }
 }

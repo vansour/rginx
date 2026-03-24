@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use futures_util::TryStreamExt;
@@ -6,6 +7,7 @@ use http::{HeaderMap, Method, StatusCode};
 use http_body_util::{BodyExt, StreamBody};
 use hyper::body::{Frame, Incoming};
 use hyper::{Request, Response};
+use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
 use tokio_util::io::ReaderStream;
@@ -15,6 +17,18 @@ use rginx_core::FileTarget;
 use crate::handler::{BoxError, HttpBody, HttpResponse, full_body, text_response};
 
 const FILE_STREAM_CHUNK_SIZE: usize = 64 * 1024;
+const DIRECTORY_LISTING_CONTENT_TYPE: &str = "text/html; charset=utf-8";
+const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'`')
+    .add(b'{')
+    .add(b'}');
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ByteRange {
@@ -26,6 +40,18 @@ impl ByteRange {
     fn len(self) -> u64 {
         self.end - self.start + 1
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DirectoryListingEntry {
+    name: String,
+    is_dir: bool,
+}
+
+#[derive(Debug)]
+enum ResolvedFileTarget {
+    File(PathBuf),
+    DirectoryListing(PathBuf),
 }
 
 pub async fn serve_file(request: Request<Incoming>, target: &FileTarget) -> HttpResponse {
@@ -52,8 +78,35 @@ pub async fn serve_file(request: Request<Incoming>, target: &FileTarget) -> Http
         return text_response(StatusCode::FORBIDDEN, "text/plain; charset=utf-8", "forbidden\n");
     }
 
-    let Some(file_path) = resolve_file_target(&target.root, &decoded_path, target) else {
+    let Some(resolved_target) = resolve_file_target(&target.root, &decoded_path, target) else {
         return text_response(StatusCode::NOT_FOUND, "text/plain; charset=utf-8", "not found\n");
+    };
+
+    let file_path = match resolved_target {
+        ResolvedFileTarget::File(file_path) => file_path,
+        ResolvedFileTarget::DirectoryListing(directory_path) => {
+            return match build_directory_listing_response(
+                &directory_path,
+                decoded_path.as_ref(),
+                head_only,
+            )
+            .await
+            {
+                Ok(response) => response,
+                Err(err) => {
+                    tracing::error!(
+                        path = %directory_path.display(),
+                        error = %err,
+                        "failed to render directory listing"
+                    );
+                    text_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "text/plain; charset=utf-8",
+                        "internal server error\n",
+                    )
+                }
+            };
+        }
     };
 
     let metadata = match tokio::fs::metadata(&file_path).await {
@@ -166,24 +219,188 @@ pub async fn serve_file(request: Request<Incoming>, target: &FileTarget) -> Http
     }
 }
 
-fn resolve_file_target(root: &Path, request_path: &str, target: &FileTarget) -> Option<PathBuf> {
+async fn build_directory_listing_response(
+    directory_path: &Path,
+    request_path: &str,
+    head_only: bool,
+) -> Result<HttpResponse, std::io::Error> {
+    let entries = read_directory_listing(directory_path).await?;
+    let html = render_directory_listing_html(request_path, &entries);
+    let content_length = html.len().to_string();
+    let builder = Response::builder()
+        .status(StatusCode::OK)
+        .header("content-type", DIRECTORY_LISTING_CONTENT_TYPE)
+        .header(CONTENT_LENGTH, content_length);
+
+    if head_only {
+        Ok(builder
+            .body(full_body(Vec::new()))
+            .expect("response builder should not fail for HEAD directory listings"))
+    } else {
+        Ok(builder
+            .body(full_body(html.into_bytes()))
+            .expect("response builder should not fail for directory listings"))
+    }
+}
+
+async fn read_directory_listing(
+    directory_path: &Path,
+) -> Result<Vec<DirectoryListingEntry>, std::io::Error> {
+    let mut read_dir = tokio::fs::read_dir(directory_path).await?;
+    let mut entries = Vec::new();
+
+    while let Some(entry) = read_dir.next_entry().await? {
+        let file_type = entry.file_type().await?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        entries.push(DirectoryListingEntry { name, is_dir: file_type.is_dir() });
+    }
+
+    entries.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(entries)
+}
+
+fn render_directory_listing_html(request_path: &str, entries: &[DirectoryListingEntry]) -> String {
+    let directory_path = normalize_directory_request_path(request_path);
+    let title = format!("Index of {directory_path}");
+    let mut sorted_entries = entries.iter().collect::<Vec<_>>();
+    sorted_entries.sort_by(|left, right| left.name.cmp(&right.name));
+    let mut html = String::new();
+
+    html.push_str("<!doctype html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n");
+    writeln!(html, "<title>{}</title>", escape_html(&title))
+        .expect("writing directory listing HTML should not fail");
+    html.push_str("</head>\n<body>\n");
+    writeln!(html, "<h1>{}</h1>", escape_html(&title))
+        .expect("writing directory listing HTML should not fail");
+    html.push_str("<ul>\n");
+
+    if directory_path != "/" {
+        writeln!(
+            html,
+            "<li><a href=\"{}\">../</a></li>",
+            escape_html(&encode_href_path(&parent_directory_path(&directory_path)))
+        )
+        .expect("writing directory listing HTML should not fail");
+    }
+
+    for entry in sorted_entries {
+        let display_name =
+            if entry.is_dir { format!("{}/", entry.name) } else { entry.name.clone() };
+        let href = if directory_path == "/" {
+            format!("/{}{suffix}", entry.name, suffix = if entry.is_dir { "/" } else { "" })
+        } else {
+            format!(
+                "{}{}{suffix}",
+                directory_path,
+                entry.name,
+                suffix = if entry.is_dir { "/" } else { "" }
+            )
+        };
+        writeln!(
+            html,
+            "<li><a href=\"{}\">{}</a></li>",
+            escape_html(&encode_href_path(&href)),
+            escape_html(&display_name)
+        )
+        .expect("writing directory listing HTML should not fail");
+    }
+
+    html.push_str("</ul>\n</body>\n</html>\n");
+    html
+}
+
+fn normalize_directory_request_path(request_path: &str) -> String {
+    let mut normalized = if request_path.is_empty() {
+        "/".to_string()
+    } else if request_path.starts_with('/') {
+        request_path.to_string()
+    } else {
+        format!("/{request_path}")
+    };
+
+    if normalized != "/" && !normalized.ends_with('/') {
+        normalized.push('/');
+    }
+
+    normalized
+}
+
+fn parent_directory_path(request_path: &str) -> String {
+    let normalized = normalize_directory_request_path(request_path);
+    if normalized == "/" {
+        return normalized;
+    }
+
+    let trimmed = normalized.trim_end_matches('/');
+    match trimmed.rfind('/') {
+        Some(0) | None => "/".to_string(),
+        Some(index) => format!("{}/", &trimmed[..index]),
+    }
+}
+
+fn encode_href_path(path: &str) -> String {
+    let trailing_slash = path.ends_with('/') && path != "/";
+    let segments: Vec<String> = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .map(|segment| utf8_percent_encode(segment, PATH_SEGMENT_ENCODE_SET).to_string())
+        .collect();
+
+    if segments.is_empty() {
+        return "/".to_string();
+    }
+
+    let mut encoded = format!("/{}", segments.join("/"));
+    if trailing_slash {
+        encoded.push('/');
+    }
+    encoded
+}
+
+fn escape_html(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
+}
+
+fn resolve_file_target(
+    root: &Path,
+    request_path: &str,
+    target: &FileTarget,
+) -> Option<ResolvedFileTarget> {
     let file_path = resolve_file_path(root, request_path);
 
     if !file_path.exists() {
-        return resolve_try_files(root, request_path, &target.try_files);
+        return resolve_try_files(root, request_path, &target.try_files)
+            .map(ResolvedFileTarget::File);
     }
 
     if file_path.is_dir() {
         if let Some(ref index) = target.index {
             let index_path = file_path.join(index);
             if index_path.exists() && index_path.is_file() {
-                return Some(index_path);
+                return Some(ResolvedFileTarget::File(index_path));
             }
         }
-        return resolve_try_files(root, request_path, &target.try_files);
+        if let Some(resolved) = resolve_try_files(root, request_path, &target.try_files) {
+            return Some(ResolvedFileTarget::File(resolved));
+        }
+        if target.autoindex {
+            return Some(ResolvedFileTarget::DirectoryListing(file_path));
+        }
+        return None;
     }
 
-    file_path.is_file().then_some(file_path)
+    file_path.is_file().then_some(ResolvedFileTarget::File(file_path))
 }
 
 fn stream_file_body<R>(reader: R) -> HttpBody
@@ -418,5 +635,43 @@ mod tests {
 
         let range = parse_range_header(&headers, 100).expect("multi-range fallback should parse");
         assert_eq!(range, None);
+    }
+
+    #[test]
+    fn render_directory_listing_html_sorts_entries_and_adds_parent_link() {
+        let html = render_directory_listing_html(
+            "/nested",
+            &[
+                DirectoryListingEntry { name: "z-last.txt".to_string(), is_dir: false },
+                DirectoryListingEntry { name: "assets".to_string(), is_dir: true },
+                DirectoryListingEntry { name: "a-first.txt".to_string(), is_dir: false },
+            ],
+        );
+
+        assert!(html.contains("<h1>Index of /nested/</h1>"));
+        assert!(html.contains("<li><a href=\"/\">../</a></li>"));
+        assert!(html.contains("<li><a href=\"/nested/assets/\">assets/</a></li>"));
+        assert!(
+            html.find("href=\"/nested/a-first.txt\"").expect("listing should contain a-first.txt")
+                < html.find("href=\"/nested/assets/\"").expect("listing should contain assets/")
+        );
+        assert!(
+            html.find("href=\"/nested/assets/\"").expect("listing should contain assets/")
+                < html
+                    .find("href=\"/nested/z-last.txt\"")
+                    .expect("listing should contain z-last.txt")
+        );
+    }
+
+    #[test]
+    fn render_directory_listing_html_escapes_display_names_and_hrefs() {
+        let html = render_directory_listing_html(
+            "/",
+            &[DirectoryListingEntry { name: "a & b<#>.txt".to_string(), is_dir: false }],
+        );
+
+        assert!(html.contains("<h1>Index of /</h1>"));
+        assert!(html.contains("href=\"/a%20&amp;%20b%3C%23%3E.txt\""));
+        assert!(html.contains(">a &amp; b&lt;#&gt;.txt</a>"));
     }
 }

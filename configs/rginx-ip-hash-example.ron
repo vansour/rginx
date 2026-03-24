@@ -28,7 +28,7 @@ Config(
             handler: Static(
                 status: Some(200),
                 content_type: Some("text/plain; charset=utf-8"),
-                body: "Rginx ip_hash example\n",
+                body: "rginx ip_hash example\n",
             ),
         ),
         LocationConfig(

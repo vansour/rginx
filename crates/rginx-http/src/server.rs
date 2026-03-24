@@ -11,6 +11,8 @@ use tokio::sync::watch;
 use tokio::task::{JoinError, JoinSet};
 use tokio_rustls::TlsAcceptor;
 
+use crate::timeout::WriteTimeoutIo;
+
 const ALPN_H2: &[u8] = b"h2";
 
 #[derive(Clone, Copy)]
@@ -18,6 +20,7 @@ struct Http1ConnectionOptions {
     keep_alive: bool,
     max_headers: Option<usize>,
     header_read_timeout: Option<std::time::Duration>,
+    response_write_timeout: Option<std::time::Duration>,
 }
 
 pub async fn serve(
@@ -81,6 +84,7 @@ pub async fn serve(
                         keep_alive: current_config.server.keep_alive,
                         max_headers: current_config.server.max_headers,
                         header_read_timeout: current_config.server.header_read_timeout,
+                        response_write_timeout: current_config.server.response_write_timeout,
                     };
 
                     connections.spawn(async move {
@@ -134,6 +138,11 @@ async fn serve_connection(
         match tls_acceptor.accept(stream).await {
             Ok(stream) => {
                 if negotiated_h2(&stream) {
+                    let stream = WriteTimeoutIo::new(
+                        stream,
+                        http1.response_write_timeout,
+                        format!("downstream response to {remote_addr}"),
+                    );
                     serve_h2_connection_io(
                         TokioIo::new(stream),
                         state,
@@ -143,6 +152,11 @@ async fn serve_connection(
                     )
                     .await;
                 } else {
+                    let stream = WriteTimeoutIo::new(
+                        stream,
+                        http1.response_write_timeout,
+                        format!("downstream response to {remote_addr}"),
+                    );
                     serve_h1_connection_io(
                         TokioIo::new(stream),
                         state,
@@ -162,6 +176,11 @@ async fn serve_connection(
         return;
     }
 
+    let stream = WriteTimeoutIo::new(
+        stream,
+        http1.response_write_timeout,
+        format!("downstream response to {remote_addr}"),
+    );
     serve_h1_connection_io(TokioIo::new(stream), state, metrics, remote_addr, shutdown, http1)
         .await;
 }

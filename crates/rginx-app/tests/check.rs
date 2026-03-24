@@ -26,6 +26,8 @@ fn check_succeeds_without_binding_listener() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("configuration is valid"));
     assert!(stdout.contains(&listen_addr.to_string()));
+    assert!(stdout.contains("worker_threads=auto"));
+    assert!(stdout.contains("accept_workers=1"));
 
     drop(reserved);
     let _ = fs::remove_dir_all(temp_dir);
@@ -105,6 +107,67 @@ fn check_reports_total_routes_and_vhosts_for_vhost_config() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("vhosts=3"), "stdout should report total vhost count: {stdout}");
     assert!(stdout.contains("routes=4"), "stdout should report total route count: {stdout}");
+
+    let _ = fs::remove_dir_all(temp_dir);
+}
+
+#[test]
+fn check_reports_runtime_worker_settings() {
+    let temp_dir = temp_dir("rginx-check-test");
+    fs::create_dir_all(&temp_dir).expect("temp test dir should be created");
+    let config_path = temp_dir.join("runtime-workers.ron");
+    let listen_addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+
+    fs::write(
+        &config_path,
+        format!(
+            "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n        worker_threads: Some(4),\n        accept_workers: Some(2),\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [],\n    locations: [\n        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Static(\n                status: Some(200),\n                content_type: Some(\"text/plain; charset=utf-8\"),\n                body: \"checked\\n\",\n            ),\n        ),\n    ],\n)\n",
+            listen_addr.to_string()
+        ),
+    )
+    .expect("runtime worker config should be written");
+
+    let output = run_rginx(["check", "--config", config_path.to_str().unwrap()]);
+
+    assert!(output.status.success(), "check should succeed: {}", render_output(&output));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("worker_threads=4"));
+    assert!(stdout.contains("accept_workers=2"));
+
+    let _ = fs::remove_dir_all(temp_dir);
+}
+
+#[test]
+fn check_supports_relative_includes_and_environment_expansion() {
+    let temp_dir = temp_dir("rginx-check-include-env-test");
+    fs::create_dir_all(temp_dir.join("fragments")).expect("temp fragments dir should be created");
+    let config_path = temp_dir.join("rginx.ron");
+    let routes_path = temp_dir.join("fragments/routes.ron");
+    let listen_addr: SocketAddr = "127.0.0.1:18082".parse().unwrap();
+
+    fs::write(
+        &routes_path,
+        "LocationConfig(\n    matcher: Exact(\"/\"),\n    handler: Static(\n        status: Some(200),\n        content_type: Some(\"text/plain; charset=utf-8\"),\n        body: \"${rginx_check_body:-included body\\n}\",\n    ),\n),\n",
+    )
+    .expect("routes fragment should be written");
+    fs::write(
+        &config_path,
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: \"${rginx_check_listen}\",\n    ),\n    upstreams: [],\n    locations: [\n        // @include \"fragments/routes.ron\"\n    ],\n)\n",
+    )
+    .expect("root config should be written");
+
+    let output = Command::new(binary_path())
+        .env("rginx_check_listen", listen_addr.to_string())
+        .env("rginx_check_body", "body from env\n")
+        .arg("check")
+        .arg("--config")
+        .arg(&config_path)
+        .output()
+        .expect("rginx should run");
+
+    assert!(output.status.success(), "check should succeed: {}", render_output(&output));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains(&listen_addr.to_string()));
 
     let _ = fs::remove_dir_all(temp_dir);
 }

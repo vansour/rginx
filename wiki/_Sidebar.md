@@ -1,15 +1,16 @@
-# Rginx Wiki
+# rginx Wiki
 
 - [Home](Home.md)
 - [Quick Start](Quick-Start.md)
+- [Examples](Examples.md)
 - [Architecture](Architecture.md)
 - [Configuration](Configuration.md)
 - [Routing and Handlers](Routing-and-Handlers.md)
 - [Upstreams](Upstreams.md)
 - [TLS and HTTP2](TLS-and-HTTP2.md)
 - [Operations](Operations.md)
-- [Release Gate](Release-Gate.md)
-- [Release Process](Release-Process.md)
-- [Examples](Examples.md)
-- [Development](Development.md)
 - [Roadmap and Gaps](Roadmap-and-Gaps.md)
+- [Release Gate](Release-Gate.md)
+- [Development](Development.md)
+- [Refactor Plan](Refactor-Plan.md)
+- [Release Process](Release-Process.md)

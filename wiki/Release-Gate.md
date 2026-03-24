@@ -12,6 +12,7 @@
 
 ### 入口协议与 TLS
 
+- 单进程多 worker 运行时：`runtime.worker_threads`、`runtime.accept_workers`
 - HTTP/1.1 入站监听
 - HTTPS/TLS 终止
 - TLS/ALPN 协商的入站 HTTP/2
@@ -34,6 +35,8 @@
 - 幂等或可重放请求的 failover / retry
 - HTTP/1.1 `Upgrade` / WebSocket 透传
 - 上游 HTTPS + TLS/ALPN 协商到 HTTP/2
+- 基础 gRPC over HTTP/2 代理：透传 `application/grpc`、`TE: trailers`、请求 trailer 和响应 trailer，支持基础 grpc-web binary/text 转换、`grpc-timeout` deadline、按 `grpc_service` / `grpc_method` 路由、本地代理错误到 `grpc-status` 的转换，以及下游提前取消时的 `grpc-status = 1` 记账
+- 基础 br/gzip 响应压缩协商
 
 ### 基础静态文件
 
@@ -41,6 +44,7 @@
 - `root`
 - `index`
 - `try_files`
+- `autoindex`
 - `HEAD`
 - 单段 `Range`
 
@@ -51,15 +55,21 @@
 - `max_connections`
 - `max_request_body_bytes`
 - `header_read_timeout`
+- `request_body_read_timeout`
+- `response_write_timeout`
 - `trusted_proxies` + `X-Forwarded-For` 真实客户端 IP 解析
 
 ### 健康检查、热重载与可观测性
 
 - `rginx check` 配置检查
 - `SIGHUP` 热重载
+- `Config` handler 动态配置 API：读取当前生效配置，并通过 HTTP `PUT` 应用完整 RON 文档
+- 配置 include 与字符串环境变量展开
 - `Ctrl-C` / `SIGTERM` 平滑退出
 - `X-Request-ID` 透传或生成
 - 结构化 access log / error log
+- `server.access_log_format` 自定义 access log 模板
+- 基础 gRPC access log 字段，以及 `rginx_grpc_requests_total` / `rginx_grpc_responses_total` 指标
 - `/status` JSON 状态页
 - `/metrics` Prometheus 指标页
 
@@ -71,14 +81,11 @@
 - 不支持明文 upstream HTTP/2（`h2c`）
 - 热重载不能切换 `listen` 地址；变更监听地址必须重启
 - 不支持正则路由
-- 不支持完整的 gRPC 代理语义
+- 只支持基础 `grpc-web` binary/text 模式；不支持完整的高级 gRPC 代理语义
 - 不支持 Proxy Protocol
-- 不支持 Autoindex
-- 不支持 Gzip / Brotli 压缩
-- 不支持自定义 access log 格式
-- 客户端侧超时治理仍未补齐；当前稳定承诺只覆盖 `header_read_timeout` 和 upstream `connect/read/write/idle` 超时
-- 不支持配置 include、环境变量展开、动态配置 API
-- 当前不承诺多 worker / `SO_REUSEPORT` 架构
+- 不支持更完整的高级压缩策略（当前只支持基础 br/gzip 协商）
+- 动态配置 API 当前只支持完整文档替换，不支持 partial patch
+- 不支持 `SO_REUSEPORT` 多进程 worker 架构
 - 当前产品定位不是其他入口代理的 drop-in replacement，也不承诺语义级全面兼容
 
 ## 运维前提
@@ -87,9 +94,9 @@
 
 1. 发布前先执行 `rginx check`，不要把配置校验留到启动时碰运气。
 2. 如果前面有 LB、CDN 或其他代理，`trusted_proxies` 必须配置准确，否则限流、ACL、`ip_hash` 和日志里的客户端 IP 都会失真。
-3. `/status` 和 `/metrics` 应只暴露给内网、抓取器或受控运维入口，不应直接暴露公网。
+3. `/status`、`/metrics` 和任何 `Config` 管理路由都应只暴露给内网、抓取器或受控运维入口，不应直接暴露公网。
 4. upstream timeout、健康检查路径和健康检查阈值需要按你的业务特性做配置，不应完全依赖默认值。
-5. 需要热重载时，只应修改可热更新的配置；涉及 `listen` 变化时必须走重启流程。
+5. 需要热重载时，只应修改可热更新的配置；涉及 `listen`、`runtime.worker_threads` 或 `runtime.accept_workers` 变化时必须走重启流程。
 6. 进程生命周期默认由外部 supervisor 管理，例如 systemd、容器运行时或编排系统；仓库当前提供基础安装/卸载脚本，但不内置 systemd 或其他服务单元。
 
 ## 正式版发布闸门
@@ -121,7 +128,7 @@ cargo run -p rginx -- --version
 
 1. `rginx check --config ...` 成功，并输出合理的监听、vhost、route、upstream 摘要。
 2. 一条基础代理路由可以正常回源。
-3. 一条静态文件路由可以正常返回文件，且 `HEAD` / 单段 `Range` 行为正常。
+3. 一条静态文件路由可以正常返回文件；目录请求在开启 `autoindex` 时能返回列表页，且 `HEAD` / 单段 `Range` 行为正常。
 4. 入站 TLS 可用，HTTP/2 可经 ALPN 正常协商。
 5. `/status` 与 `/metrics` 可访问，且输出字段符合预期。
 6. 被动或主动健康检查能驱动 failover。

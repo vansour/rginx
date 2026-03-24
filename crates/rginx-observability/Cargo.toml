@@ -9,7 +9,7 @@ homepage.workspace = true
 documentation.workspace = true
 readme.workspace = true
 rust-version.workspace = true
-description = "Tracing and logging initialization for Rginx."
+description = "Tracing and logging initialization for rginx."
 
 [dependencies]
 tracing-subscriber.workspace = true

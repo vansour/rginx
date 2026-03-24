@@ -9,7 +9,7 @@ homepage.workspace = true
 documentation.workspace = true
 readme.workspace = true
 rust-version.workspace = true
-description = "Configuration loading, validation, and compilation for Rginx."
+description = "Configuration loading, validation, and compilation for rginx."
 
 [dependencies]
 http.workspace = true

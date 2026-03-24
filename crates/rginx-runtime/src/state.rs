@@ -11,7 +11,10 @@ pub struct RuntimeState {
 
 impl RuntimeState {
     pub fn new(config_path: PathBuf, config: ConfigSnapshot) -> Result<Self> {
-        Ok(Self { config_path, http: rginx_http::SharedState::from_config(config)? })
+        Ok(Self {
+            config_path: config_path.clone(),
+            http: rginx_http::SharedState::from_config_path(config_path, config)?,
+        })
     }
 
     pub async fn current_config(&self) -> Arc<ConfigSnapshot> {

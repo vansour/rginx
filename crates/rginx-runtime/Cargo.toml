@@ -9,7 +9,7 @@ homepage.workspace = true
 documentation.workspace = true
 readme.workspace = true
 rust-version.workspace = true
-description = "Runtime orchestration, reload, shutdown, and health checks for Rginx."
+description = "Runtime orchestration, reload, shutdown, and health checks for rginx."
 
 [dependencies]
 rginx-config = { path = "../rginx-config" }

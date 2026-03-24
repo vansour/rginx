@@ -14,18 +14,30 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
     let state = RuntimeState::new(config_path, config)?;
     let metrics = state.http.metrics();
     let current_config = state.current_config().await;
-    let listener = TcpListener::bind(current_config.server.listen_addr).await?;
+    let listeners = bind_server_listeners(
+        current_config.server.listen_addr,
+        current_config.runtime.accept_workers,
+    )
+    .await?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     tracing::info!(
         listen = %current_config.server.listen_addr,
+        worker_threads = current_config.runtime.worker_threads,
+        accept_workers = current_config.runtime.accept_workers,
         vhosts = current_config.total_vhost_count(),
         routes = current_config.total_route_count(),
         "starting rginx runtime"
     );
 
-    let mut server_task =
-        tokio::spawn(rginx_http::serve(listener, state.http.clone(), shutdown_rx));
+    let mut server_tasks = listeners
+        .into_iter()
+        .enumerate()
+        .map(|(worker_index, listener)| {
+            tracing::info!(worker = worker_index, "starting accept worker");
+            tokio::spawn(rginx_http::serve(listener, state.http.clone(), shutdown_rx.clone()))
+        })
+        .collect::<Vec<_>>();
     let mut health_task = tokio::spawn(health::run(state.http.clone(), shutdown_tx.subscribe()));
 
     while let RuntimeSignal::Reload = shutdown::wait_for_signal().await? {
@@ -57,9 +69,7 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
     let _ = shutdown_tx.send(true);
 
     match tokio::time::timeout(current_config.runtime.shutdown_timeout, async {
-        (&mut server_task)
-            .await
-            .map_err(|error| Error::Server(format!("http task failed to join: {error}")))??;
+        join_server_tasks(&mut server_tasks).await?;
         (&mut health_task).await.map_err(|error| {
             Error::Server(format!("active health task failed to join: {error}"))
         })?;
@@ -75,14 +85,10 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
             tracing::warn!(
                 "shutdown timeout reached before background tasks drained all active work"
             );
-            server_task.abort();
+            abort_server_tasks(&server_tasks);
             health_task.abort();
 
-            if let Err(error) = server_task.await
-                && !error.is_cancelled()
-            {
-                tracing::warn!(%error, "http task failed after abort");
-            }
+            join_aborted_server_tasks(server_tasks).await;
 
             if let Err(error) = health_task.await
                 && !error.is_cancelled()
@@ -95,4 +101,46 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn bind_server_listeners(
+    listen_addr: std::net::SocketAddr,
+    accept_workers: usize,
+) -> Result<Vec<TcpListener>> {
+    let listener = TcpListener::bind(listen_addr).await?;
+    let std_listener = listener.into_std()?;
+    let mut listeners = Vec::with_capacity(accept_workers);
+
+    for _ in 1..accept_workers {
+        listeners.push(TcpListener::from_std(std_listener.try_clone()?)?);
+    }
+    listeners.push(TcpListener::from_std(std_listener)?);
+
+    Ok(listeners)
+}
+
+async fn join_server_tasks(server_tasks: &mut [tokio::task::JoinHandle<Result<()>>]) -> Result<()> {
+    for (worker_index, server_task) in server_tasks.iter_mut().enumerate() {
+        server_task.await.map_err(|error| {
+            Error::Server(format!("http worker {worker_index} failed to join: {error}"))
+        })??;
+    }
+
+    Ok(())
+}
+
+fn abort_server_tasks(server_tasks: &[tokio::task::JoinHandle<Result<()>>]) {
+    for server_task in server_tasks {
+        server_task.abort();
+    }
+}
+
+async fn join_aborted_server_tasks(server_tasks: Vec<tokio::task::JoinHandle<Result<()>>>) {
+    for server_task in server_tasks {
+        if let Err(error) = server_task.await
+            && !error.is_cancelled()
+        {
+            tracing::warn!(%error, "http worker failed after abort");
+        }
+    }
 }

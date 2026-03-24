@@ -5,8 +5,7 @@ use clap::Parser;
 
 use crate::cli::{Cli, Command};
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     rginx_observability::init_logging()
@@ -21,17 +20,36 @@ async fn main() -> anyhow::Result<()> {
                 .context("failed to initialize runtime dependencies")?;
 
             println!(
-                "configuration is valid: listen={} tls={} vhosts={} routes={} upstreams={}",
+                "configuration is valid: listen={} tls={} vhosts={} routes={} upstreams={} worker_threads={} accept_workers={}",
                 config.server.listen_addr,
                 if config.server.tls.is_some() { "enabled" } else { "disabled" },
                 config.total_vhost_count(),
                 config.total_route_count(),
-                config.upstreams.len()
+                config.upstreams.len(),
+                config
+                    .runtime
+                    .worker_threads
+                    .map(|count| count.to_string())
+                    .unwrap_or_else(|| "auto".to_string()),
+                config.runtime.accept_workers,
             );
             Ok(())
         }
         None => {
-            rginx_runtime::run(cli.config, config).await.context("runtime exited with an error")
+            let runtime = build_runtime(config.runtime.worker_threads)
+                .context("failed to construct tokio runtime")?;
+            runtime
+                .block_on(rginx_runtime::run(cli.config, config))
+                .context("runtime exited with an error")
         }
     }
+}
+
+fn build_runtime(worker_threads: Option<usize>) -> anyhow::Result<tokio::runtime::Runtime> {
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.enable_all();
+    if let Some(worker_threads) = worker_threads {
+        builder.worker_threads(worker_threads);
+    }
+    builder.build().map_err(|error| anyhow!("failed to build tokio runtime: {error}"))
 }

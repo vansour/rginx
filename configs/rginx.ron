@@ -29,7 +29,7 @@ Config(
             handler: Static(
                 status: Some(200),
                 content_type: Some("text/plain; charset=utf-8"),
-                body: "Rginx is running.\n",
+                body: "rginx is running.\n",
             ),
         ),
         LocationConfig(

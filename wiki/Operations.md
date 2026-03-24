@@ -2,6 +2,19 @@
 
 本页面向运维和上线场景，覆盖配置检查、热重载、状态页、指标和日志。
 
+## 压缩
+
+当前支持基础 br/gzip 响应压缩：
+
+- 只在客户端发送 `Accept-Encoding: br` 或 `Accept-Encoding: gzip` 时启用
+- 会按 `q` 值协商 `br` / `gzip`，同分时优先 `br`
+- 主要面向小体积文本类响应
+- 会跳过 `206 Partial Content`、`Range`、gRPC、已有 `Content-Encoding` 的响应
+
+当前仍不支持：
+
+- 面向所有流式 upstream 响应的通用压缩
+
 ## 常用命令
 
 检查配置：
@@ -23,6 +36,53 @@ cargo build -p rginx
 ./target/debug/rginx --config configs/rginx.ron
 ```
 
+## Runtime Worker
+
+当前支持单进程多 worker 运行时：
+
+- `runtime.worker_threads` 控制 tokio runtime worker 线程数
+- `runtime.accept_workers` 控制监听 socket 的 accept worker 数
+
+当前不支持：
+
+- `SO_REUSEPORT` 多进程 worker 形态
+
+## 动态配置 API
+
+如果你显式配置了 `Config` 管理路由，就可以通过 HTTP 读取当前生效配置，或用完整 RON 文档在线替换配置。
+
+最小示例：
+
+```ron
+LocationConfig(
+    matcher: Exact("/-/config"),
+    handler: Config,
+    allow_cidrs: ["127.0.0.1/32", "::1/128"],
+)
+```
+
+读取当前生效配置：
+
+```bash
+curl http://127.0.0.1:8080/-/config
+```
+
+应用新配置：
+
+```bash
+curl -X PUT \
+  -H 'Content-Type: application/ron; charset=utf-8' \
+  --data-binary @configs/rginx.ron \
+  http://127.0.0.1:8080/-/config
+```
+
+边界：
+
+- `Config` 路由必须是 `Exact(...)`，并且必须配置非空 `allow_cidrs`
+- 当前只支持完整文档替换，不支持 partial patch
+- 新配置会先通过 validate + compile，再落盘并切换到新的运行时快照
+- `listen`、`runtime.worker_threads`、`runtime.accept_workers` 仍然不能在线变更
+
 ## 日志
 
 日志通过 `tracing` 输出，默认级别大致是：
@@ -37,7 +97,7 @@ cargo build -p rginx
 RUST_LOG=debug,rginx_http=trace ./target/debug/rginx --config configs/rginx.ron
 ```
 
-访问日志字段当前已包含：
+默认 access log 是结构化 tracing 事件，字段当前已包含：
 
 - `request_id`
 - `method`
@@ -49,7 +109,53 @@ RUST_LOG=debug,rginx_http=trace ./target/debug/rginx --config configs/rginx.ron
 - `vhost`
 - `route`
 - `status`
+- `grpc_protocol`
+- `grpc_service`
+- `grpc_method`
+- `grpc_status`
+- `grpc_message`
 - `elapsed_ms`
+
+其中：
+
+- `grpc_status` / `grpc_message` 会优先取最终 gRPC trailers
+- 对 `grpc-web` / `grpc-web-text`，会从最终 trailer frame 中提取同名字段
+- 如果没有 trailers，再回退读取响应头中的 `grpc-status` / `grpc-message`
+- 如果下游在响应流结束前提前取消，且代理尚未观察到最终 `grpc-status`，则会补记 `grpc_status = 1`
+
+如果你想要更接近传统反向代理的单行日志，可以在 `server.access_log_format` 里定义模板：
+
+```ron
+ServerConfig(
+    listen: "0.0.0.0:8080",
+    access_log_format: Some("reqid=$request_id grpc=$grpc_protocol svc=$grpc_service rpc=$grpc_method status=$status grpc_status=$grpc_status request=\"$request\" bytes=$body_bytes_sent elapsed=$request_time_ms"),
+)
+```
+
+当前支持的变量包括：
+
+- `$request_id`
+- `$remote_addr`
+- `$peer_addr`
+- `$method`
+- `$host`
+- `$path`
+- `$request`
+- `$status`
+- `$body_bytes_sent`
+- `$request_time_ms`
+- `$client_ip_source`
+- `$vhost`
+- `$route`
+- `$scheme`
+- `$http_version`
+- `$http_user_agent`
+- `$http_referer`
+- `$grpc_protocol`
+- `$grpc_service`
+- `$grpc_method`
+- `$grpc_status`
+- `$grpc_message`
 
 ## 热重载
 
@@ -69,6 +175,8 @@ kill -HUP <pid>
 限制：
 
 - `listen` 地址不能变
+- `runtime.worker_threads` 不能变
+- `runtime.accept_workers` 不能变
 - 如果你需要改监听地址，请重启进程
 
 ## 平滑退出
@@ -125,6 +233,8 @@ Prometheus 指标当前包括：
 
 - `rginx_active_connections`
 - `rginx_http_requests_total`
+- `rginx_grpc_requests_total`
+- `rginx_grpc_responses_total`
 - `rginx_http_rate_limited_total`
 - `rginx_http_request_duration_ms`
 - `rginx_upstream_requests_total`
@@ -139,7 +249,7 @@ Prometheus 指标当前包括：
 
 ## 真实客户端 IP
 
-如果 `Rginx` 前面还有一层代理、LB 或 CDN，需要配置 `trusted_proxies`。
+如果 `rginx` 前面还有一层代理、LB 或 CDN，需要配置 `trusted_proxies`。
 
 流程：
 
@@ -159,9 +269,9 @@ Prometheus 指标当前包括：
 上线前建议逐项检查：
 
 1. `rginx check` 已通过
-2. `/status` 和 `/metrics` 已限制访问范围
+2. `/status`、`/metrics` 和任何 `Config` 管理路由都已限制访问范围
 3. `trusted_proxies` 配置准确
-4. upstream timeout 合理
+4. upstream timeout 和 server timeout 合理
 5. 主动健康检查路径稳定可用
 6. 至少跑过一次热重载演练
 7. 至少跑过一次平滑退出演练
