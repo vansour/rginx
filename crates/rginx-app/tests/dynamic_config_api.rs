@@ -124,6 +124,60 @@ fn config_api_rejects_restart_required_changes() {
     server.shutdown_and_wait(Duration::from_secs(5));
 }
 
+#[test]
+fn config_api_rejects_invalid_config_without_changing_revision_or_disk_state() {
+    let listen_addr = reserve_loopback_addr();
+    let initial_config = dynamic_config_source(listen_addr, "stable dynamic config\n");
+    let mut server =
+        ServerHarness::spawn("rginx-dynamic-config-invalid", |_| initial_config.clone());
+    server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
+
+    let invalid_config = dynamic_config_source(listen_addr, "broken dynamic config\n").replace(
+        "            allow_cidrs: [\"127.0.0.1/32\", \"::1/128\"],\n",
+        "            allow_cidrs: [],\n",
+    );
+    let response =
+        send_http_request(listen_addr, "PUT", "/-/config", Some(invalid_config.as_bytes()))
+            .expect("invalid config PUT should respond");
+    assert_eq!(response.status, 400);
+    let payload: Value =
+        serde_json::from_slice(&response.body).expect("invalid config PUT should return JSON");
+    assert!(
+        payload["error"]
+            .as_str()
+            .expect("error payload should contain a message")
+            .contains("requires non-empty allow_cidrs")
+    );
+
+    let response = send_http_request(listen_addr, "GET", "/-/config", None)
+        .expect("config GET should succeed after rejected update");
+    assert_eq!(response.status, 200);
+    let payload: Value =
+        serde_json::from_slice(&response.body).expect("config GET should return JSON");
+    assert_eq!(payload["revision"], 0);
+    assert!(
+        payload["config"]
+            .as_str()
+            .expect("config GET should keep the original config")
+            .contains("stable dynamic config\\n")
+    );
+    assert_eq!(
+        fs::read_to_string(server.config_path()).expect("config file should stay unchanged"),
+        initial_config
+    );
+
+    server.wait_for_http_text_response(
+        listen_addr,
+        &listen_addr.to_string(),
+        "/app",
+        200,
+        "stable dynamic config\n",
+        Duration::from_secs(5),
+    );
+
+    server.shutdown_and_wait(Duration::from_secs(5));
+}
+
 #[derive(Debug)]
 struct ParsedResponse {
     status: u16,
@@ -205,9 +259,13 @@ fn parse_http_response(bytes: &[u8]) -> Result<ParsedResponse, String> {
 }
 
 fn dynamic_config_source(listen_addr: SocketAddr, app_body: &str) -> String {
+    dynamic_config_source_with_listen(&listen_addr.to_string(), app_body)
+}
+
+fn dynamic_config_source_with_listen(listen: &str, app_body: &str) -> String {
     format!(
         "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/app\"),\n            handler: Static(\n                status: Some(200),\n                content_type: Some(\"text/plain; charset=utf-8\"),\n                body: {:?},\n            ),\n        ),\n        LocationConfig(\n            matcher: Exact(\"/-/config\"),\n            handler: Config,\n            allow_cidrs: [\"127.0.0.1/32\", \"::1/128\"],\n        ),\n    ],\n)\n",
-        listen_addr.to_string(),
+        listen,
         app_body,
         ready_route = READY_ROUTE_CONFIG,
     )

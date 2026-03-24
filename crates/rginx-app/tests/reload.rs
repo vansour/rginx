@@ -64,6 +64,25 @@ fn sighup_rejects_accept_worker_changes() {
 }
 
 #[test]
+fn sighup_rejects_runtime_worker_thread_changes() {
+    let _guard = test_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let listen_addr = reserve_loopback_addr();
+    let mut server = TestServer::spawn(listen_addr, "stable runtime\n");
+
+    server.wait_for_body(listen_addr, "stable runtime\n", Duration::from_secs(5));
+
+    server.write_config(static_config_with_runtime(
+        listen_addr,
+        "should not apply\n",
+        "        worker_threads: Some(2),\n",
+    ));
+    server.send_signal(libc::SIGHUP);
+
+    server.wait_for_body(listen_addr, "stable runtime\n", Duration::from_secs(5));
+    server.kill_and_wait(Duration::from_secs(5));
+}
+
+#[test]
 fn sighup_reload_picks_up_updated_included_fragments() {
     let _guard = test_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let listen_addr = reserve_loopback_addr();
