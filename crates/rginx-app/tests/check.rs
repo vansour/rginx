@@ -172,6 +172,27 @@ fn check_supports_relative_includes_and_environment_expansion() {
     let _ = fs::remove_dir_all(temp_dir);
 }
 
+#[test]
+fn check_succeeds_for_admin_operations_example() {
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("workspace root should resolve");
+    let config_path = workspace_root.join("configs/rginx-admin-example.ron");
+
+    let output = run_rginx(["check", "--config", config_path.to_str().unwrap()]);
+
+    assert!(
+        output.status.success(),
+        "admin operations example should validate: {}",
+        render_output(&output)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("listen=0.0.0.0:8080"));
+    assert!(stdout.contains("routes=6"));
+    assert!(stdout.contains("upstreams=1"));
+}
+
 fn run_rginx(args: impl IntoIterator<Item = impl AsRef<str>>) -> Output {
     let mut command = Command::new(binary_path());
     for arg in args {

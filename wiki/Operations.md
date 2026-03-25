@@ -79,6 +79,8 @@ curl -X PUT \
 边界：
 
 - `Config` 路由必须是 `Exact(...)`，并且必须配置非空 `allow_cidrs`
+- `PUT` body 必须是非空、有效 UTF-8 的完整 RON 文档
+- `PUT` body 当前限制为 1 MiB；超限会返回 `413 Payload Too Large`
 - 当前只支持完整文档替换，不支持 partial patch
 - 新配置会先通过 validate + compile，再落盘并切换到新的运行时快照
 - `listen`、`runtime.worker_threads`、`runtime.accept_workers` 仍然不能在线变更
@@ -215,10 +217,20 @@ LocationConfig(
 
 - `revision`
 - `listen`
+- `tls_enabled`
+- `keep_alive`
+- `max_connections`
+- `trusted_proxy_count`
+- `active_connections`
 - `vhost_count`
 - `route_count`
 - `upstream_count`
-- 每个 upstream 的 transport / pool / health 配置
+- 每个 upstream 的：
+  - `peer_count`
+  - `healthy_peer_count`
+  - `backup_peer_count`
+  - `active_requests`
+  - transport / pool / health 配置
 - 每个 peer 的：
   - `weight`
   - `backup`
@@ -226,6 +238,12 @@ LocationConfig(
   - `active_requests`
   - 被动失败与冷却信息
   - 主动健康状态
+
+说明：
+
+- `active_connections` 表示当前进程持有的活跃客户端连接数，适合快速判断连接压力和命中 `max_connections` 的风险
+- `trusted_proxy_count` 只反映配置里受信 CIDR 条目数，不代表实时代理层数
+- `read_timeout_ms` 当前为了兼容已有状态页字段，仍等同于 upstream 的整体 `request_timeout_ms`，并不是单独的 socket read timeout
 
 ## `/metrics`
 
@@ -240,6 +258,12 @@ Prometheus 指标当前包括：
 - `rginx_upstream_requests_total`
 - `rginx_active_health_checks_total`
 - `rginx_config_reloads_total`
+
+指标维度约定：
+
+- 优先保持 metric name 稳定，不轻易重命名已有指标
+- label 只放低基数、便于聚合的维度，比如 `route`、`status`、`protocol`、`service`、`method`、`upstream`、`peer`、`result`
+- 不要把 `request_id`、客户端 IP、原始 `host`、原始 path、User-Agent 等高基数字段放进 label；这些信息应放到 access log
 
 建议只开放给：
 
@@ -289,6 +313,7 @@ Prometheus 指标当前包括：
 - `/status` 里主 peer 是否不健康
 - `unhealthy_after_failures` 是否过小
 - 主动健康检查路径是否错误
+- `healthy_peer_count` 是否已经降到只剩 backup 可用
 
 ### `ip_hash` 看起来不稳定
 
@@ -305,9 +330,18 @@ Prometheus 指标当前包括：
 - 是否修改了监听地址
 - TLS 文件或 CA 文件路径是否错误
 
+### 请求量正常但延迟突然升高
+
+优先看：
+
+- `/metrics` 里的 `rginx_http_request_duration_ms`
+- `/status` 里的 `active_connections` 和 upstream `active_requests`
+- access log 里的 `route`、`status`、`elapsed_ms`
+
 ## 推荐阅读
 
 - [Upstreams](Upstreams.md)
 - [TLS and HTTP2](TLS-and-HTTP2.md)
+- [Deployment and Service Hosting](Deployment-and-Service-Hosting.md)
 - [Examples](Examples.md)
 - [Release Gate](Release-Gate.md)

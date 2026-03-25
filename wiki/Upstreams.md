@@ -259,6 +259,13 @@ backup peer 也会参与健康状态维护：
 - 被动冷却剩余时间
 - 主动健康状态
 
+对应的 upstream 级摘要还会包含：
+
+- `peer_count`
+- `healthy_peer_count`
+- `backup_peer_count`
+- `active_requests`
+
 这对排查下面的问题很有用：
 
 - 为什么流量没有打到某个 peer

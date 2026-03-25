@@ -130,6 +130,7 @@ configuration is valid: listen=127.0.0.1:8080 tls=disabled vhosts=1 routes=2 ups
 | 文件 | 场景 |
 | --- | --- |
 | `configs/rginx.ron` | 基础代理、状态页、指标页 |
+| `configs/rginx-admin-example.ron` | 管理接口隔离、动态配置入口与运维网段示例 |
 | `configs/rginx-ip-hash-example.ron` | 基于客户端 IP 的粘性转发 |
 | `configs/rginx-least-conn-example.ron` | 最少连接数转发 |
 | `configs/rginx-weighted-example.ron` | 加权分流 |
@@ -179,3 +180,4 @@ kill -HUP <rginx-pid>
 - [Configuration](Configuration.md)
 - [Routing and Handlers](Routing-and-Handlers.md)
 - [Upstreams](Upstreams.md)
+- [Deployment and Service Hosting](Deployment-and-Service-Hosting.md)

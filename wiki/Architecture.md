@@ -43,6 +43,12 @@ crates/rginx-config/src/
   load.rs
   validate.rs
   compile.rs
+  compile/
+    runtime.rs
+    server.rs
+    upstream.rs
+    route.rs
+    vhost.rs
   model.rs
 
 crates/rginx-http/src/
@@ -121,6 +127,14 @@ crates/rginx-http/src/
 - 计算默认值
 - 生成 `ConfigSnapshot`
 - 把 route / upstream / vhost 转成请求路径里直接使用的结构
+
+当前内部已经继续细分到：
+
+- `compile/runtime.rs`
+- `compile/server.rs`
+- `compile/upstream.rs`
+- `compile/route.rs`
+- `compile/vhost.rs`
 
 配置编译完成后的核心运行时模型位于：
 
@@ -321,7 +335,9 @@ proxy 子系统已经按职责拆开，当前边界比较自然：
 | `proxy/clients.rs` | 复用的 upstream client 缓存与 TLS profile 选择 |
 | `proxy/request_body.rs` | 下游请求体预处理、重放能力判断、grpc-web 请求体转换 |
 | `proxy/forward.rs` | 主转发流程、failover、timeout、downstream response 构造 |
-| `proxy/health.rs` | passive / active 健康状态、least_conn、主动 probe |
+| `proxy/health.rs` | 主动 probe 编排与健康检查请求构造 |
+| `proxy/health/registry.rs` | passive / active 健康状态、least_conn、active request 计数 |
+| `proxy/health/grpc_health_codec.rs` | gRPC health request/response 编解码与探测结果判定 |
 | `proxy/grpc_web.rs` | grpc-web binary / text 请求与响应转换 |
 | `proxy/upgrade.rs` | HTTP Upgrade / WebSocket 双向隧道 |
 
@@ -350,6 +366,13 @@ proxy health 同时承担两类逻辑：
   - probe 结果会驱动 active health 状态
 
 least_conn 也依赖同一套 peer health registry 中的 active request 计数。
+
+当前内部已经继续按子领域拆成：
+
+- `proxy/health/registry.rs`
+- `proxy/health/grpc_health_codec.rs`
+
+这样 `health.rs` 本身主要只保留 probe orchestration 和 health request 构造。
 
 ## TLS 与证书选择
 
