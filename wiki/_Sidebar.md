@@ -1,6 +1,7 @@
 # rginx Wiki
 
 - [Home](Home.md)
+- [Capability Matrix](Capability-Matrix.md)
 - [Quick Start](Quick-Start.md)
 - [Examples](Examples.md)
 - [Architecture](Architecture.md)
@@ -9,6 +10,7 @@
 - [Upstreams](Upstreams.md)
 - [TLS and HTTP2](TLS-and-HTTP2.md)
 - [Operations](Operations.md)
+- [Deployment and Service Hosting](Deployment-and-Service-Hosting.md)
 - [Roadmap and Gaps](Roadmap-and-Gaps.md)
 - [Release Gate](Release-Gate.md)
 - [Development](Development.md)

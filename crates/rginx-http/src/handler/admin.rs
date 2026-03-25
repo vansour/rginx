@@ -1,4 +1,5 @@
 use super::*;
+use hyper::body::Body as _;
 
 pub(super) async fn config_response(
     request: Request<Incoming>,
@@ -33,9 +34,15 @@ async fn config_state_response(state: &SharedState, active: &ActiveState) -> Htt
 }
 
 async fn config_update_response(request: Request<Incoming>, state: SharedState) -> HttpResponse {
-    let collected = match request.into_body().collect().await {
-        Ok(collected) => collected.to_bytes(),
-        Err(error) => {
+    let collected = match read_config_request_body(request.into_body()).await {
+        Ok(collected) => collected,
+        Err(ConfigRequestBodyError::PayloadTooLarge) => {
+            return json_error_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                &format!("config body exceeds {MAX_CONFIG_API_BODY_BYTES} bytes"),
+            );
+        }
+        Err(ConfigRequestBodyError::Read(error)) => {
             tracing::warn!(%error, "failed to read dynamic config request body");
             return json_error_response(
                 StatusCode::BAD_REQUEST,
@@ -46,13 +53,6 @@ async fn config_update_response(request: Request<Incoming>, state: SharedState) 
 
     if collected.is_empty() {
         return json_error_response(StatusCode::BAD_REQUEST, "config body must not be empty");
-    }
-
-    if collected.len() > MAX_CONFIG_API_BODY_BYTES {
-        return json_error_response(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            &format!("config body exceeds {MAX_CONFIG_API_BODY_BYTES} bytes"),
-        );
     }
 
     let config_source = match String::from_utf8(collected.to_vec()) {
@@ -97,33 +97,75 @@ async fn config_update_response(request: Request<Incoming>, state: SharedState) 
     }
 }
 
-pub(super) fn status_response(active: &ActiveState) -> HttpResponse {
+#[derive(Debug)]
+enum ConfigRequestBodyError {
+    PayloadTooLarge,
+    Read(BoxError),
+}
+
+async fn read_config_request_body(
+    mut body: Incoming,
+) -> std::result::Result<Bytes, ConfigRequestBodyError> {
+    if body.size_hint().lower() > MAX_CONFIG_API_BODY_BYTES as u64 {
+        return Err(ConfigRequestBodyError::PayloadTooLarge);
+    }
+
+    let mut collected = BytesMut::new();
+
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|error| ConfigRequestBodyError::Read(error.into()))?;
+        let frame = match frame.into_data() {
+            Ok(data) => data,
+            Err(_) => continue,
+        };
+
+        if frame.len() > MAX_CONFIG_API_BODY_BYTES.saturating_sub(collected.len()) {
+            return Err(ConfigRequestBodyError::PayloadTooLarge);
+        }
+
+        collected.extend_from_slice(&frame);
+    }
+
+    Ok(collected.freeze())
+}
+
+pub(super) fn status_response(active: &ActiveState, active_connections: u64) -> HttpResponse {
     let mut upstreams = active
         .config
         .upstreams
         .values()
-        .map(|upstream| UpstreamStatusPayload {
-            name: upstream.name.clone(),
-            protocol: upstream.protocol.as_str(),
-            load_balance: upstream.load_balance.as_str(),
-            request_timeout_ms: upstream.request_timeout.as_millis() as u64,
-            read_timeout_ms: upstream.request_timeout.as_millis() as u64,
-            connect_timeout_ms: upstream.connect_timeout.as_millis() as u64,
-            write_timeout_ms: upstream.write_timeout.as_millis() as u64,
-            idle_timeout_ms: upstream.idle_timeout.as_millis() as u64,
-            pool_idle_timeout_ms: upstream
-                .pool_idle_timeout
-                .map(|timeout| timeout.as_millis() as u64),
-            pool_max_idle_per_host: upstream.pool_max_idle_per_host,
-            tcp_keepalive_ms: upstream.tcp_keepalive.map(|timeout| timeout.as_millis() as u64),
-            tcp_nodelay: upstream.tcp_nodelay,
-            http2_keep_alive_interval_ms: upstream
-                .http2_keep_alive_interval
-                .map(|timeout| timeout.as_millis() as u64),
-            http2_keep_alive_timeout_ms: upstream.http2_keep_alive_timeout.as_millis() as u64,
-            http2_keep_alive_while_idle: upstream.http2_keep_alive_while_idle,
-            active_health_check: upstream.active_health_check.as_ref().map(health_check_payload),
-            peers: active.clients.peer_statuses(upstream.as_ref()),
+        .map(|upstream| {
+            let peers = active.clients.peer_statuses(upstream.as_ref());
+            UpstreamStatusPayload {
+                name: upstream.name.clone(),
+                protocol: upstream.protocol.as_str(),
+                load_balance: upstream.load_balance.as_str(),
+                peer_count: peers.len(),
+                healthy_peer_count: peers.iter().filter(|peer| peer.healthy).count(),
+                backup_peer_count: peers.iter().filter(|peer| peer.backup).count(),
+                active_requests: peers.iter().map(|peer| peer.active_requests).sum(),
+                request_timeout_ms: upstream.request_timeout.as_millis() as u64,
+                read_timeout_ms: upstream.request_timeout.as_millis() as u64,
+                connect_timeout_ms: upstream.connect_timeout.as_millis() as u64,
+                write_timeout_ms: upstream.write_timeout.as_millis() as u64,
+                idle_timeout_ms: upstream.idle_timeout.as_millis() as u64,
+                pool_idle_timeout_ms: upstream
+                    .pool_idle_timeout
+                    .map(|timeout| timeout.as_millis() as u64),
+                pool_max_idle_per_host: upstream.pool_max_idle_per_host,
+                tcp_keepalive_ms: upstream.tcp_keepalive.map(|timeout| timeout.as_millis() as u64),
+                tcp_nodelay: upstream.tcp_nodelay,
+                http2_keep_alive_interval_ms: upstream
+                    .http2_keep_alive_interval
+                    .map(|timeout| timeout.as_millis() as u64),
+                http2_keep_alive_timeout_ms: upstream.http2_keep_alive_timeout.as_millis() as u64,
+                http2_keep_alive_while_idle: upstream.http2_keep_alive_while_idle,
+                active_health_check: upstream
+                    .active_health_check
+                    .as_ref()
+                    .map(health_check_payload),
+                peers,
+            }
         })
         .collect::<Vec<_>>();
     upstreams.sort_by(|left, right| left.name.cmp(&right.name));
@@ -131,6 +173,11 @@ pub(super) fn status_response(active: &ActiveState) -> HttpResponse {
     let payload = StatusPayload {
         revision: active.revision,
         listen: active.config.server.listen_addr.to_string(),
+        tls_enabled: active.config.server.tls.is_some(),
+        keep_alive: active.config.server.keep_alive,
+        max_connections: active.config.server.max_connections,
+        trusted_proxy_count: active.config.server.trusted_proxies.len(),
+        active_connections,
         vhost_count: active.config.total_vhost_count(),
         route_count: active.config.total_route_count(),
         upstream_count: active.config.upstreams.len(),
@@ -216,6 +263,11 @@ fn health_check_payload(health_check: &ActiveHealthCheck) -> ActiveHealthCheckPa
 struct StatusPayload {
     revision: u64,
     listen: String,
+    tls_enabled: bool,
+    keep_alive: bool,
+    max_connections: Option<usize>,
+    trusted_proxy_count: usize,
+    active_connections: u64,
     vhost_count: usize,
     route_count: usize,
     upstream_count: usize,
@@ -252,6 +304,10 @@ struct UpstreamStatusPayload {
     name: String,
     protocol: &'static str,
     load_balance: &'static str,
+    peer_count: usize,
+    healthy_peer_count: usize,
+    backup_peer_count: usize,
+    active_requests: u64,
     request_timeout_ms: u64,
     read_timeout_ms: u64,
     connect_timeout_ms: u64,

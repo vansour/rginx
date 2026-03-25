@@ -148,10 +148,15 @@
 
 - 配置修订号
 - 监听地址
+- TLS 是否启用
+- keepalive 是否启用
+- 当前连接上限
+- trusted proxy 条目数
+- 当前活跃客户端连接数
 - vhost 数
 - route 数
 - upstream 数
-- 每个 upstream 的 transport / pool / health 配置
+- 每个 upstream 的 peer 总数、健康 peer 数、backup peer 数、当前活跃请求汇总，以及 transport / pool / health 配置
 - 每个 peer 的 `weight`、`backup`、健康状态和当前活跃请求数
 
 ### `Metrics`
@@ -159,6 +164,12 @@
 输出 Prometheus 文本指标，适合被 Prometheus、VictoriaMetrics、Grafana Agent 等抓取。
 
 当前包含基础 gRPC 计数指标 `rginx_grpc_requests_total`，按 `route`、`protocol`、`service`、`method` 维度累计。
+
+约定：
+
+- 保持 metric name 稳定，优先扩文档和排障语义，而不是频繁改名
+- label 只放低基数维度，如 `route`、`status`、`protocol`、`service`、`method`、`upstream`、`peer`、`result`
+- 不要把 `request_id`、客户端 IP、原始 path、host 等高基数字段放进指标 label
 
 ### `Config`
 
@@ -173,6 +184,8 @@
 
 - 路由必须使用 `Exact(...)`
 - 必须显式配置非空 `allow_cidrs`
+- `PUT` body 必须是非空、有效 UTF-8 的完整 RON 文档
+- `PUT` body 当前限制为 1 MiB；超限会返回 `413 Payload Too Large`
 - 当前只支持完整文档替换，不支持 partial patch
 - 仍然不能在线切换 `listen`、`runtime.worker_threads`、`runtime.accept_workers`
 
