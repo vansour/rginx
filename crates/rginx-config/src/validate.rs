@@ -71,6 +71,10 @@ pub fn validate(config: &Config) -> Result<()> {
         return Err(Error::Config("server access_log_format must not be empty".to_string()));
     }
 
+    if config.server.config_api_token.as_deref().is_some_and(|token| token.trim().is_empty()) {
+        return Err(Error::Config("server config_api_token must not be empty".to_string()));
+    }
+
     if let Some(ServerTlsConfig { cert_path, key_path }) = &config.server.tls {
         if cert_path.trim().is_empty() {
             return Err(Error::Config("server TLS certificate path must not be empty".to_string()));
@@ -370,6 +374,7 @@ pub fn validate(config: &Config) -> Result<()> {
             &location.matcher,
             &location.handler,
             &location.allow_cidrs,
+            config.server.config_api_token.as_deref(),
         )?;
 
         if let HandlerConfig::Proxy { upstream, strip_prefix, proxy_set_headers, .. } =
@@ -454,7 +459,12 @@ pub fn validate(config: &Config) -> Result<()> {
 
     let mut all_server_names = HashSet::new();
     validate_server_names("server", &config.server.server_names, &mut all_server_names)?;
-    validate_virtual_hosts(&config.servers, &upstream_names, &mut all_server_names)?;
+    validate_virtual_hosts(
+        &config.servers,
+        &upstream_names,
+        &mut all_server_names,
+        config.server.config_api_token.as_deref(),
+    )?;
 
     Ok(())
 }
@@ -503,6 +513,7 @@ fn validate_management_handler_constraints(
     matcher: &MatcherConfig,
     handler: &HandlerConfig,
     allow_cidrs: &[String],
+    config_api_token: Option<&str>,
 ) -> Result<()> {
     if !matches!(handler, HandlerConfig::Config) {
         return Ok(());
@@ -517,6 +528,12 @@ fn validate_management_handler_constraints(
     if allow_cidrs.is_empty() {
         return Err(Error::Config(format!(
             "{route_scope} config handler requires non-empty allow_cidrs"
+        )));
+    }
+
+    if config_api_token.is_none() {
+        return Err(Error::Config(format!(
+            "{route_scope} config handler requires server.config_api_token"
         )));
     }
 
@@ -617,6 +634,7 @@ fn validate_virtual_hosts(
     vhosts: &[VirtualHostConfig],
     upstream_names: &HashSet<String>,
     all_server_names: &mut HashSet<String>,
+    config_api_token: Option<&str>,
 ) -> Result<()> {
     for (idx, vhost) in vhosts.iter().enumerate() {
         let vhost_label = format!("servers[{idx}]");
@@ -691,6 +709,7 @@ fn validate_virtual_hosts(
                 &location.matcher,
                 &location.handler,
                 &location.allow_cidrs,
+                config_api_token.as_deref(),
             )?;
 
             if let HandlerConfig::Proxy { upstream, strip_prefix, proxy_set_headers, .. } =
@@ -1107,6 +1126,17 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_config_handler_without_server_token() {
+        let mut config = base_config();
+        config.locations[0].matcher = MatcherConfig::Exact("/-/config".to_string());
+        config.locations[0].handler = HandlerConfig::Config;
+        config.locations[0].allow_cidrs = vec!["127.0.0.1/32".to_string()];
+
+        let error = validate(&config).expect_err("config handler should require server token");
+        assert!(error.to_string().contains("config handler requires server.config_api_token"));
+    }
+
+    #[test]
     fn validate_rejects_empty_grpc_service() {
         let mut config = base_config();
         config.locations[0].grpc_service = Some("   ".to_string());
@@ -1176,6 +1206,7 @@ mod tests {
                 request_body_read_timeout_secs: None,
                 response_write_timeout_secs: None,
                 access_log_format: None,
+                config_api_token: None,
                 tls: None,
             },
             upstreams: vec![UpstreamConfig {

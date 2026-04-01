@@ -45,7 +45,7 @@ pub async fn handle(
     let route_match_context = route_match_context(&request_path, grpc_request);
     let started = Instant::now();
     let client_address = resolve_client_address(request.headers(), &config.server, remote_addr);
-    let downstream_scheme = if config.server.tls.is_some() { "https" } else { "http" };
+    let downstream_scheme = if config.tls_enabled() { "https" } else { "http" };
     let (selected_vhost_id, selected_route) = {
         let selected_vhost =
             select_vhost_for_request(config.as_ref(), request.headers(), request.uri());
@@ -295,8 +295,7 @@ async fn build_route_response(
             text_response(response.status, &response.content_type, response.body.clone())
         }
         RouteAction::Proxy(proxy) => {
-            let downstream_proto =
-                if active.config.server.tls.is_some() { "https" } else { "http" };
+            let downstream_proto = if active.config.tls_enabled() { "https" } else { "http" };
             crate::proxy::forward_request(
                 state,
                 active.clients,

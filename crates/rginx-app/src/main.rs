@@ -22,7 +22,7 @@ fn main() -> anyhow::Result<()> {
             println!(
                 "configuration is valid: listen={} tls={} vhosts={} routes={} upstreams={} worker_threads={} accept_workers={}",
                 config.server.listen_addr,
-                if config.server.tls.is_some() { "enabled" } else { "disabled" },
+                if config.tls_enabled() { "enabled" } else { "disabled" },
                 config.total_vhost_count(),
                 config.total_route_count(),
                 config.upstreams.len(),

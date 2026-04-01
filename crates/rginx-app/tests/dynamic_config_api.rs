@@ -10,6 +10,8 @@ mod support;
 
 use support::{READY_ROUTE_CONFIG, ServerHarness, reserve_loopback_addr};
 
+const CONFIG_API_TOKEN: &str = "test-config-token";
+
 #[test]
 fn config_api_reads_and_applies_updated_config() {
     let listen_addr = reserve_loopback_addr();
@@ -25,7 +27,7 @@ fn config_api_reads_and_applies_updated_config() {
         Duration::from_secs(5),
     );
 
-    let response = send_http_request(listen_addr, "GET", "/-/config", None)
+    let response = send_http_request(listen_addr, "GET", "/-/config", None, Some(CONFIG_API_TOKEN))
         .expect("config GET should succeed");
     assert_eq!(response.status, 200);
     let payload: Value =
@@ -40,9 +42,14 @@ fn config_api_reads_and_applies_updated_config() {
     );
 
     let updated_config = dynamic_config_source(listen_addr, "after dynamic config\n");
-    let response =
-        send_http_request(listen_addr, "PUT", "/-/config", Some(updated_config.as_bytes()))
-            .expect("config PUT should succeed");
+    let response = send_http_request(
+        listen_addr,
+        "PUT",
+        "/-/config",
+        Some(updated_config.as_bytes()),
+        Some(CONFIG_API_TOKEN),
+    )
+    .expect("config PUT should succeed");
     assert_eq!(response.status, 200);
     let payload: Value =
         serde_json::from_slice(&response.body).expect("config PUT should return JSON");
@@ -58,7 +65,7 @@ fn config_api_reads_and_applies_updated_config() {
         Duration::from_secs(5),
     );
 
-    let response = send_http_request(listen_addr, "GET", "/-/config", None)
+    let response = send_http_request(listen_addr, "GET", "/-/config", None, Some(CONFIG_API_TOKEN))
         .expect("config GET should succeed");
     let payload: Value =
         serde_json::from_slice(&response.body).expect("config GET should return JSON");
@@ -72,6 +79,43 @@ fn config_api_reads_and_applies_updated_config() {
     assert_eq!(
         fs::read_to_string(server.config_path()).expect("config file should be readable"),
         updated_config
+    );
+
+    server.shutdown_and_wait(Duration::from_secs(5));
+}
+
+#[test]
+fn config_api_rejects_requests_without_a_valid_bearer_token() {
+    let listen_addr = reserve_loopback_addr();
+    let initial_config = dynamic_config_source(listen_addr, "secured dynamic config\n");
+    let mut server = ServerHarness::spawn("rginx-dynamic-config-auth", |_| initial_config.clone());
+    server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
+
+    let response =
+        send_http_request(listen_addr, "GET", "/-/config", None, None).expect("unauthorized GET should respond");
+    assert_eq!(response.status, 401);
+    assert_eq!(
+        response.header("www-authenticate"),
+        Some("Bearer realm=\"rginx-config\"")
+    );
+
+    let response = send_http_request(
+        listen_addr,
+        "PUT",
+        "/-/config",
+        Some(initial_config.as_bytes()),
+        Some("wrong-token"),
+    )
+    .expect("unauthorized PUT should respond");
+    assert_eq!(response.status, 401);
+
+    server.wait_for_http_text_response(
+        listen_addr,
+        &listen_addr.to_string(),
+        "/app",
+        200,
+        "secured dynamic config\n",
+        Duration::from_secs(5),
     );
 
     server.shutdown_and_wait(Duration::from_secs(5));
@@ -95,9 +139,14 @@ fn config_api_rejects_restart_required_changes() {
 
     let rejected_addr = reserve_loopback_addr();
     let rejected_config = dynamic_config_source(rejected_addr, "should not apply\n");
-    let response =
-        send_http_request(listen_addr, "PUT", "/-/config", Some(rejected_config.as_bytes()))
-            .expect("rejected config PUT should respond");
+    let response = send_http_request(
+        listen_addr,
+        "PUT",
+        "/-/config",
+        Some(rejected_config.as_bytes()),
+        Some(CONFIG_API_TOKEN),
+    )
+    .expect("rejected config PUT should respond");
     assert_eq!(response.status, 400);
     let payload: Value =
         serde_json::from_slice(&response.body).expect("rejected config PUT should return JSON");
@@ -136,9 +185,14 @@ fn config_api_rejects_invalid_config_without_changing_revision_or_disk_state() {
         "            allow_cidrs: [\"127.0.0.1/32\", \"::1/128\"],\n",
         "            allow_cidrs: [],\n",
     );
-    let response =
-        send_http_request(listen_addr, "PUT", "/-/config", Some(invalid_config.as_bytes()))
-            .expect("invalid config PUT should respond");
+    let response = send_http_request(
+        listen_addr,
+        "PUT",
+        "/-/config",
+        Some(invalid_config.as_bytes()),
+        Some(CONFIG_API_TOKEN),
+    )
+    .expect("invalid config PUT should respond");
     assert_eq!(response.status, 400);
     let payload: Value =
         serde_json::from_slice(&response.body).expect("invalid config PUT should return JSON");
@@ -149,7 +203,7 @@ fn config_api_rejects_invalid_config_without_changing_revision_or_disk_state() {
             .contains("requires non-empty allow_cidrs")
     );
 
-    let response = send_http_request(listen_addr, "GET", "/-/config", None)
+    let response = send_http_request(listen_addr, "GET", "/-/config", None, Some(CONFIG_API_TOKEN))
         .expect("config GET should succeed after rejected update");
     assert_eq!(response.status, 200);
     let payload: Value =
@@ -197,6 +251,7 @@ fn send_http_request(
     method: &str,
     path: &str,
     body: Option<&[u8]>,
+    bearer_token: Option<&str>,
 ) -> Result<ParsedResponse, String> {
     let mut stream = TcpStream::connect_timeout(&listen_addr, Duration::from_millis(200))
         .map_err(|error| format!("failed to connect to {listen_addr}: {error}"))?;
@@ -209,6 +264,11 @@ fn send_http_request(
 
     write!(stream, "{method} {path} HTTP/1.1\r\nHost: {listen_addr}\r\nConnection: close\r\n")
         .map_err(|error| format!("failed to write request head: {error}"))?;
+
+    if let Some(bearer_token) = bearer_token {
+        write!(stream, "Authorization: Bearer {bearer_token}\r\n")
+            .map_err(|error| format!("failed to write authorization header: {error}"))?;
+    }
 
     if let Some(body) = body {
         write!(
@@ -264,8 +324,9 @@ fn dynamic_config_source(listen_addr: SocketAddr, app_body: &str) -> String {
 
 fn dynamic_config_source_with_listen(listen: &str, app_body: &str) -> String {
     format!(
-        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/app\"),\n            handler: Static(\n                status: Some(200),\n                content_type: Some(\"text/plain; charset=utf-8\"),\n                body: {:?},\n            ),\n        ),\n        LocationConfig(\n            matcher: Exact(\"/-/config\"),\n            handler: Config,\n            allow_cidrs: [\"127.0.0.1/32\", \"::1/128\"],\n        ),\n    ],\n)\n",
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n        config_api_token: Some({:?}),\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/app\"),\n            handler: Static(\n                status: Some(200),\n                content_type: Some(\"text/plain; charset=utf-8\"),\n                body: {:?},\n            ),\n        ),\n        LocationConfig(\n            matcher: Exact(\"/-/config\"),\n            handler: Config,\n            allow_cidrs: [\"127.0.0.1/32\", \"::1/128\"],\n        ),\n    ],\n)\n",
         listen,
+        CONFIG_API_TOKEN,
         app_body,
         ready_route = READY_ROUTE_CONFIG,
     )
