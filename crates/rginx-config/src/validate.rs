@@ -596,6 +596,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn validate_rejects_invalid_http2_upstream_peer_uri() {
+        let mut config = base_config();
+        config.upstreams[0].protocol = UpstreamProtocolConfig::Http2;
+        config.upstreams[0].peers[0].url = "not a uri".to_string();
+
+        let error = validate(&config).expect_err("invalid http2 peer URI should be rejected");
+        assert!(error.to_string().contains("peer url `not a uri` is not a valid URI"));
+    }
+
     fn sample_vhost(server_names: Vec<&str>) -> VirtualHostConfig {
         VirtualHostConfig {
             server_names: server_names.into_iter().map(str::to_string).collect(),

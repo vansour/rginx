@@ -60,9 +60,12 @@ pub(super) fn validate_upstreams(upstreams: &[UpstreamConfig]) -> Result<HashSet
 
         if matches!(upstream.protocol, UpstreamProtocolConfig::Http2) {
             for peer in &upstream.peers {
-                let Ok(uri) = peer.url.parse::<http::Uri>() else {
-                    continue;
-                };
+                let uri = peer.url.parse::<http::Uri>().map_err(|error| {
+                    Error::Config(format!(
+                        "upstream `{}` peer url `{}` is not a valid URI: {error}",
+                        upstream.name, peer.url
+                    ))
+                })?;
 
                 if uri.scheme_str() != Some("https") {
                     return Err(Error::Config(format!(

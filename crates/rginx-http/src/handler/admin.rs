@@ -34,6 +34,13 @@ async fn config_state_response(state: &SharedState, active: &ActiveState) -> Htt
 }
 
 async fn config_update_response(request: Request<Incoming>, state: SharedState) -> HttpResponse {
+    if request_declares_oversized_body(request.headers(), request.body()) {
+        return json_error_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            &format!("config body exceeds {MAX_CONFIG_API_BODY_BYTES} bytes"),
+        );
+    }
+
     let collected = match read_config_request_body(request.into_body()).await {
         Ok(collected) => collected,
         Err(ConfigRequestBodyError::PayloadTooLarge) => {
@@ -106,7 +113,7 @@ enum ConfigRequestBodyError {
 async fn read_config_request_body(
     mut body: Incoming,
 ) -> std::result::Result<Bytes, ConfigRequestBodyError> {
-    if body.size_hint().lower() > MAX_CONFIG_API_BODY_BYTES as u64 {
+    if body_size_hint_exceeds_limit(body.size_hint()) {
         return Err(ConfigRequestBodyError::PayloadTooLarge);
     }
 
@@ -127,6 +134,25 @@ async fn read_config_request_body(
     }
 
     Ok(collected.freeze())
+}
+
+fn request_declares_oversized_body(headers: &HeaderMap, body: &Incoming) -> bool {
+    body_size_hint_exceeds_limit(body.size_hint()) || content_length_exceeds_limit(headers)
+}
+
+fn body_size_hint_exceeds_limit(size_hint: hyper::body::SizeHint) -> bool {
+    match size_hint.upper() {
+        Some(upper) => upper > MAX_CONFIG_API_BODY_BYTES as u64,
+        None => size_hint.lower() > MAX_CONFIG_API_BODY_BYTES as u64,
+    }
+}
+
+fn content_length_exceeds_limit(headers: &HeaderMap) -> bool {
+    headers
+        .get(http::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|length| length > MAX_CONFIG_API_BODY_BYTES as u64)
 }
 
 pub(super) fn status_response(active: &ActiveState, active_connections: u64) -> HttpResponse {
@@ -241,6 +267,44 @@ fn method_not_allowed_response(allow: &'static str) -> HttpResponse {
     let mut response = json_error_response(StatusCode::METHOD_NOT_ALLOWED, "method not allowed");
     response.headers_mut().insert(http::header::ALLOW, HeaderValue::from_static(allow));
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use http::{HeaderMap, HeaderValue};
+    use hyper::body::SizeHint;
+
+    use super::{
+        MAX_CONFIG_API_BODY_BYTES, body_size_hint_exceeds_limit, content_length_exceeds_limit,
+    };
+
+    #[test]
+    fn body_size_hint_rejects_declared_upper_bounds_above_limit() {
+        let mut size_hint = SizeHint::new();
+        size_hint.set_upper(MAX_CONFIG_API_BODY_BYTES as u64 + 1);
+
+        assert!(body_size_hint_exceeds_limit(size_hint));
+    }
+
+    #[test]
+    fn body_size_hint_accepts_unknown_upper_bounds_with_small_lower_bound() {
+        let mut size_hint = SizeHint::new();
+        size_hint.set_lower(0);
+
+        assert!(!body_size_hint_exceeds_limit(size_hint));
+    }
+
+    #[test]
+    fn content_length_rejects_values_above_limit() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_LENGTH,
+            HeaderValue::from_str(&(MAX_CONFIG_API_BODY_BYTES as u64 + 1).to_string())
+                .expect("content-length should be valid"),
+        );
+
+        assert!(content_length_exceeds_limit(&headers));
+    }
 }
 
 pub(crate) fn full_body(body: impl Into<Bytes>) -> HttpBody {

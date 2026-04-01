@@ -16,12 +16,6 @@ struct PeerHealthPolicy {
     cooldown: Duration,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct PeerHealthKey {
-    upstream_name: String,
-    peer_url: String,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PeerFailureStatus {
     pub consecutive_failures: u32,
@@ -62,7 +56,7 @@ struct PeerHealth {
 #[derive(Clone)]
 pub(crate) struct PeerHealthRegistry {
     policies: Arc<HashMap<String, PeerHealthPolicy>>,
-    peers: Arc<HashMap<PeerHealthKey, Arc<PeerHealth>>>,
+    peers: Arc<HashMap<String, HashMap<String, Arc<PeerHealth>>>>,
 }
 
 pub(crate) struct SelectedPeers {
@@ -104,16 +98,13 @@ impl PeerHealthRegistry {
         let peers = config
             .upstreams
             .iter()
-            .flat_map(|(upstream_name, upstream)| {
-                upstream.peers.iter().map(|peer| {
-                    (
-                        PeerHealthKey {
-                            upstream_name: upstream_name.clone(),
-                            peer_url: peer.url.clone(),
-                        },
-                        Arc::new(PeerHealth::default()),
-                    )
-                })
+            .map(|(upstream_name, upstream)| {
+                let peers = upstream
+                    .peers
+                    .iter()
+                    .map(|peer| (peer.url.clone(), Arc::new(PeerHealth::default())))
+                    .collect::<HashMap<_, _>>();
+                (upstream_name.clone(), peers)
             })
             .collect::<HashMap<_, _>>();
 
@@ -318,10 +309,7 @@ impl PeerHealthRegistry {
     }
 
     fn get(&self, upstream_name: &str, peer_url: &str) -> Option<&Arc<PeerHealth>> {
-        self.peers.get(&PeerHealthKey {
-            upstream_name: upstream_name.to_string(),
-            peer_url: peer_url.to_string(),
-        })
+        self.peers.get(upstream_name).and_then(|upstream_peers| upstream_peers.get(peer_url))
     }
 
     pub(crate) fn snapshot(
@@ -532,4 +520,35 @@ fn projected_least_conn_load(
     let right =
         u128::from(right_active_requests.saturating_add(1)) * u128::from(left_weight.max(1));
     left.cmp(&right)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use super::{PeerHealth, PeerHealthRegistry};
+
+    #[test]
+    fn get_supports_borrowed_upstream_and_peer_lookups() {
+        let expected = Arc::new(PeerHealth::default());
+        let registry = PeerHealthRegistry {
+            policies: Arc::new(HashMap::new()),
+            peers: Arc::new(HashMap::from([(
+                "backend".to_string(),
+                HashMap::from([("http://127.0.0.1:8080".to_string(), expected.clone())]),
+            )])),
+        };
+
+        let actual = registry
+            .get("backend", "http://127.0.0.1:8080")
+            .expect("borrowed lookup should find peer");
+
+        assert!(Arc::ptr_eq(actual, &expected));
+
+        let guard = registry.track_active_request("backend", "http://127.0.0.1:8080");
+        assert_eq!(registry.active_requests("backend", "http://127.0.0.1:8080"), 1);
+        drop(guard);
+        assert_eq!(registry.active_requests("backend", "http://127.0.0.1:8080"), 0);
+    }
 }
