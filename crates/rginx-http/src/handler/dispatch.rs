@@ -311,7 +311,7 @@ async fn build_route_response(
             )
             .await
         }
-        RouteAction::Status => status_response(&active),
+        RouteAction::Status => status_response(&active, metrics.active_connections()),
         RouteAction::Metrics => metrics_response(&metrics),
         RouteAction::Config => config_response(request, state, active).await,
         RouteAction::File(target) => crate::file::serve_file(request, target).await,

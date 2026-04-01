@@ -129,6 +129,7 @@ mod tests {
                 request_body_read_timeout: None,
                 response_write_timeout: None,
                 access_log_format: None,
+                config_api_token: None,
                 tls: None,
             },
             default_vhost: VirtualHost {
@@ -143,7 +144,7 @@ mod tests {
         let clients = ProxyClients::from_config(config.as_ref()).expect("clients should build");
         clients.record_active_peer_failure("backend", "http://127.0.0.1:9000");
 
-        let response = status_response(&ActiveState { revision: 3, config, clients });
+        let response = status_response(&ActiveState { revision: 3, config, clients }, 12);
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response.headers().get("content-type").and_then(|value| value.to_str().ok()),
@@ -157,12 +158,21 @@ mod tests {
 
         assert_eq!(json["revision"], 3);
         assert_eq!(json["listen"], "127.0.0.1:8080");
+        assert_eq!(json["tls_enabled"], false);
+        assert_eq!(json["keep_alive"], true);
+        assert_eq!(json["max_connections"], Value::Null);
+        assert_eq!(json["trusted_proxy_count"], 0);
+        assert_eq!(json["active_connections"], 12);
         assert_eq!(json["vhost_count"], 1);
         assert_eq!(json["route_count"], 0);
         assert_eq!(json["upstream_count"], 1);
         assert_eq!(json["upstreams"][0]["name"], "backend");
         assert_eq!(json["upstreams"][0]["protocol"], "auto");
         assert_eq!(json["upstreams"][0]["load_balance"], "ip_hash");
+        assert_eq!(json["upstreams"][0]["peer_count"], 1);
+        assert_eq!(json["upstreams"][0]["healthy_peer_count"], 0);
+        assert_eq!(json["upstreams"][0]["backup_peer_count"], 0);
+        assert_eq!(json["upstreams"][0]["active_requests"], 0);
         assert_eq!(json["upstreams"][0]["request_timeout_ms"], 4_000);
         assert_eq!(json["upstreams"][0]["read_timeout_ms"], 4_000);
         assert_eq!(json["upstreams"][0]["connect_timeout_ms"], 3_000);
@@ -190,7 +200,7 @@ mod tests {
 
     #[tokio::test]
     async fn status_response_counts_routes_across_all_vhosts() {
-        let config = Arc::new(test_config(
+        let mut config = test_config(
             test_vhost(
                 "server",
                 vec!["default.example.com"],
@@ -210,16 +220,24 @@ mod tests {
                     ),
                 ],
             )],
-        ));
+        );
+        config.server.keep_alive = false;
+        config.server.max_connections = Some(256);
+        config.server.trusted_proxies = vec!["10.0.0.0/8".parse().unwrap()];
+        let config = Arc::new(config);
         let clients = ProxyClients::from_config(config.as_ref()).expect("clients should build");
 
-        let response = status_response(&ActiveState { revision: 7, config, clients });
+        let response = status_response(&ActiveState { revision: 7, config, clients }, 4);
         let body =
             response.into_body().collect().await.expect("status body should collect").to_bytes();
         let json: Value =
             serde_json::from_slice(&body).expect("status payload should be valid JSON");
 
         assert_eq!(json["revision"], 7);
+        assert_eq!(json["keep_alive"], false);
+        assert_eq!(json["max_connections"], 256);
+        assert_eq!(json["trusted_proxy_count"], 1);
+        assert_eq!(json["active_connections"], 4);
         assert_eq!(json["vhost_count"], 2);
         assert_eq!(json["route_count"], 3);
         assert_eq!(json["upstream_count"], 0);
@@ -291,6 +309,7 @@ mod tests {
                 request_body_read_timeout: None,
                 response_write_timeout: None,
                 access_log_format: None,
+                config_api_token: None,
                 tls: None,
             },
             default_vhost: VirtualHost {
@@ -980,6 +999,7 @@ mod tests {
                 request_body_read_timeout: None,
                 response_write_timeout: None,
                 access_log_format: None,
+                config_api_token: None,
                 tls: None,
             },
             default_vhost,

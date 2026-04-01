@@ -510,10 +510,7 @@ fn resolve_try_files(
 
 fn is_request_path_safe(request_path: &str) -> bool {
     !Path::new(request_path).components().any(|component| {
-        matches!(
-            component,
-            std::path::Component::ParentDir | std::path::Component::Prefix(_)
-        )
+        matches!(component, std::path::Component::ParentDir | std::path::Component::Prefix(_))
     })
 }
 

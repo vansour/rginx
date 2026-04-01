@@ -1,4 +1,5 @@
 use super::*;
+use hyper::body::Body as _;
 
 pub(super) async fn config_response(
     request: Request<Incoming>,
@@ -16,7 +17,10 @@ pub(super) async fn config_response(
     }
 }
 
-fn authorize_config_request(headers: &HeaderMap, server: &rginx_core::Server) -> Option<HttpResponse> {
+fn authorize_config_request(
+    headers: &HeaderMap,
+    server: &rginx_core::Server,
+) -> Option<HttpResponse> {
     let expected_token = server.config_api_token.as_deref()?;
     let provided = headers
         .get(http::header::AUTHORIZATION)
@@ -27,7 +31,8 @@ fn authorize_config_request(headers: &HeaderMap, server: &rginx_core::Server) ->
         return None;
     }
 
-    let mut response = json_error_response(StatusCode::UNAUTHORIZED, "config API authorization required");
+    let mut response =
+        json_error_response(StatusCode::UNAUTHORIZED, "config API authorization required");
     response.headers_mut().insert(
         http::header::WWW_AUTHENTICATE,
         HeaderValue::from_static("Bearer realm=\"rginx-config\""),
@@ -66,9 +71,22 @@ async fn config_state_response(state: &SharedState, active: &ActiveState) -> Htt
 }
 
 async fn config_update_response(request: Request<Incoming>, state: SharedState) -> HttpResponse {
-    let collected = match request.into_body().collect().await {
-        Ok(collected) => collected.to_bytes(),
-        Err(error) => {
+    if request_declares_oversized_body(request.headers(), request.body()) {
+        return json_error_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            &format!("config body exceeds {MAX_CONFIG_API_BODY_BYTES} bytes"),
+        );
+    }
+
+    let collected = match read_config_request_body(request.into_body()).await {
+        Ok(collected) => collected,
+        Err(ConfigRequestBodyError::PayloadTooLarge) => {
+            return json_error_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                &format!("config body exceeds {MAX_CONFIG_API_BODY_BYTES} bytes"),
+            );
+        }
+        Err(ConfigRequestBodyError::Read(error)) => {
             tracing::warn!(%error, "failed to read dynamic config request body");
             return json_error_response(
                 StatusCode::BAD_REQUEST,
@@ -79,13 +97,6 @@ async fn config_update_response(request: Request<Incoming>, state: SharedState) 
 
     if collected.is_empty() {
         return json_error_response(StatusCode::BAD_REQUEST, "config body must not be empty");
-    }
-
-    if collected.len() > MAX_CONFIG_API_BODY_BYTES {
-        return json_error_response(
-            StatusCode::PAYLOAD_TOO_LARGE,
-            &format!("config body exceeds {MAX_CONFIG_API_BODY_BYTES} bytes"),
-        );
     }
 
     let config_source = match String::from_utf8(collected.to_vec()) {
@@ -130,33 +141,94 @@ async fn config_update_response(request: Request<Incoming>, state: SharedState) 
     }
 }
 
-pub(super) fn status_response(active: &ActiveState) -> HttpResponse {
+#[derive(Debug)]
+enum ConfigRequestBodyError {
+    PayloadTooLarge,
+    Read(BoxError),
+}
+
+async fn read_config_request_body(
+    mut body: Incoming,
+) -> std::result::Result<Bytes, ConfigRequestBodyError> {
+    if body_size_hint_exceeds_limit(body.size_hint()) {
+        return Err(ConfigRequestBodyError::PayloadTooLarge);
+    }
+
+    let mut collected = BytesMut::new();
+
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|error| ConfigRequestBodyError::Read(error.into()))?;
+        let frame = match frame.into_data() {
+            Ok(data) => data,
+            Err(_) => continue,
+        };
+
+        if frame.len() > MAX_CONFIG_API_BODY_BYTES.saturating_sub(collected.len()) {
+            return Err(ConfigRequestBodyError::PayloadTooLarge);
+        }
+
+        collected.extend_from_slice(&frame);
+    }
+
+    Ok(collected.freeze())
+}
+
+fn request_declares_oversized_body(headers: &HeaderMap, body: &Incoming) -> bool {
+    body_size_hint_exceeds_limit(body.size_hint()) || content_length_exceeds_limit(headers)
+}
+
+fn body_size_hint_exceeds_limit(size_hint: hyper::body::SizeHint) -> bool {
+    match size_hint.upper() {
+        Some(upper) => upper > MAX_CONFIG_API_BODY_BYTES as u64,
+        None => size_hint.lower() > MAX_CONFIG_API_BODY_BYTES as u64,
+    }
+}
+
+fn content_length_exceeds_limit(headers: &HeaderMap) -> bool {
+    headers
+        .get(http::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|length| length > MAX_CONFIG_API_BODY_BYTES as u64)
+}
+
+pub(super) fn status_response(active: &ActiveState, active_connections: u64) -> HttpResponse {
     let mut upstreams = active
         .config
         .upstreams
         .values()
-        .map(|upstream| UpstreamStatusPayload {
-            name: upstream.name.clone(),
-            protocol: upstream.protocol.as_str(),
-            load_balance: upstream.load_balance.as_str(),
-            request_timeout_ms: upstream.request_timeout.as_millis() as u64,
-            read_timeout_ms: upstream.request_timeout.as_millis() as u64,
-            connect_timeout_ms: upstream.connect_timeout.as_millis() as u64,
-            write_timeout_ms: upstream.write_timeout.as_millis() as u64,
-            idle_timeout_ms: upstream.idle_timeout.as_millis() as u64,
-            pool_idle_timeout_ms: upstream
-                .pool_idle_timeout
-                .map(|timeout| timeout.as_millis() as u64),
-            pool_max_idle_per_host: upstream.pool_max_idle_per_host,
-            tcp_keepalive_ms: upstream.tcp_keepalive.map(|timeout| timeout.as_millis() as u64),
-            tcp_nodelay: upstream.tcp_nodelay,
-            http2_keep_alive_interval_ms: upstream
-                .http2_keep_alive_interval
-                .map(|timeout| timeout.as_millis() as u64),
-            http2_keep_alive_timeout_ms: upstream.http2_keep_alive_timeout.as_millis() as u64,
-            http2_keep_alive_while_idle: upstream.http2_keep_alive_while_idle,
-            active_health_check: upstream.active_health_check.as_ref().map(health_check_payload),
-            peers: active.clients.peer_statuses(upstream.as_ref()),
+        .map(|upstream| {
+            let peers = active.clients.peer_statuses(upstream.as_ref());
+            UpstreamStatusPayload {
+                name: upstream.name.clone(),
+                protocol: upstream.protocol.as_str(),
+                load_balance: upstream.load_balance.as_str(),
+                peer_count: peers.len(),
+                healthy_peer_count: peers.iter().filter(|peer| peer.healthy).count(),
+                backup_peer_count: peers.iter().filter(|peer| peer.backup).count(),
+                active_requests: peers.iter().map(|peer| peer.active_requests).sum(),
+                request_timeout_ms: upstream.request_timeout.as_millis() as u64,
+                read_timeout_ms: upstream.request_timeout.as_millis() as u64,
+                connect_timeout_ms: upstream.connect_timeout.as_millis() as u64,
+                write_timeout_ms: upstream.write_timeout.as_millis() as u64,
+                idle_timeout_ms: upstream.idle_timeout.as_millis() as u64,
+                pool_idle_timeout_ms: upstream
+                    .pool_idle_timeout
+                    .map(|timeout| timeout.as_millis() as u64),
+                pool_max_idle_per_host: upstream.pool_max_idle_per_host,
+                tcp_keepalive_ms: upstream.tcp_keepalive.map(|timeout| timeout.as_millis() as u64),
+                tcp_nodelay: upstream.tcp_nodelay,
+                http2_keep_alive_interval_ms: upstream
+                    .http2_keep_alive_interval
+                    .map(|timeout| timeout.as_millis() as u64),
+                http2_keep_alive_timeout_ms: upstream.http2_keep_alive_timeout.as_millis() as u64,
+                http2_keep_alive_while_idle: upstream.http2_keep_alive_while_idle,
+                active_health_check: upstream
+                    .active_health_check
+                    .as_ref()
+                    .map(health_check_payload),
+                peers,
+            }
         })
         .collect::<Vec<_>>();
     upstreams.sort_by(|left, right| left.name.cmp(&right.name));
@@ -164,6 +236,11 @@ pub(super) fn status_response(active: &ActiveState) -> HttpResponse {
     let payload = StatusPayload {
         revision: active.revision,
         listen: active.config.server.listen_addr.to_string(),
+        tls_enabled: active.config.server.tls.is_some(),
+        keep_alive: active.config.server.keep_alive,
+        max_connections: active.config.server.max_connections,
+        trusted_proxy_count: active.config.server.trusted_proxies.len(),
+        active_connections,
         vhost_count: active.config.total_vhost_count(),
         route_count: active.config.total_route_count(),
         upstream_count: active.config.upstreams.len(),
@@ -229,6 +306,44 @@ fn method_not_allowed_response(allow: &'static str) -> HttpResponse {
     response
 }
 
+#[cfg(test)]
+mod tests {
+    use http::{HeaderMap, HeaderValue};
+    use hyper::body::SizeHint;
+
+    use super::{
+        MAX_CONFIG_API_BODY_BYTES, body_size_hint_exceeds_limit, content_length_exceeds_limit,
+    };
+
+    #[test]
+    fn body_size_hint_rejects_declared_upper_bounds_above_limit() {
+        let mut size_hint = SizeHint::new();
+        size_hint.set_upper(MAX_CONFIG_API_BODY_BYTES as u64 + 1);
+
+        assert!(body_size_hint_exceeds_limit(size_hint));
+    }
+
+    #[test]
+    fn body_size_hint_accepts_unknown_upper_bounds_with_small_lower_bound() {
+        let mut size_hint = SizeHint::new();
+        size_hint.set_lower(0);
+
+        assert!(!body_size_hint_exceeds_limit(size_hint));
+    }
+
+    #[test]
+    fn content_length_rejects_values_above_limit() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_LENGTH,
+            HeaderValue::from_str(&(MAX_CONFIG_API_BODY_BYTES as u64 + 1).to_string())
+                .expect("content-length should be valid"),
+        );
+
+        assert!(content_length_exceeds_limit(&headers));
+    }
+}
+
 pub(crate) fn full_body(body: impl Into<Bytes>) -> HttpBody {
     Full::new(body.into())
         .map_err(|never: Infallible| -> BoxError { match never {} })
@@ -249,6 +364,11 @@ fn health_check_payload(health_check: &ActiveHealthCheck) -> ActiveHealthCheckPa
 struct StatusPayload {
     revision: u64,
     listen: String,
+    tls_enabled: bool,
+    keep_alive: bool,
+    max_connections: Option<usize>,
+    trusted_proxy_count: usize,
+    active_connections: u64,
     vhost_count: usize,
     route_count: usize,
     upstream_count: usize,
@@ -285,6 +405,10 @@ struct UpstreamStatusPayload {
     name: String,
     protocol: &'static str,
     load_balance: &'static str,
+    peer_count: usize,
+    healthy_peer_count: usize,
+    backup_peer_count: usize,
+    active_requests: u64,
     request_timeout_ms: u64,
     read_timeout_ms: u64,
     connect_timeout_ms: u64,

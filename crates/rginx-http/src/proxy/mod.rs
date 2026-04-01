@@ -3,9 +3,8 @@ use std::fs::File;
 use std::future::Future;
 use std::io::BufReader;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
-use std::time::Instant;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
@@ -26,13 +25,12 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use pin_project_lite::pin_project;
 use rginx_core::{
-    ActiveHealthCheck, ConfigSnapshot, Error, ProxyTarget, Upstream, UpstreamLoadBalance,
-    UpstreamPeer, UpstreamProtocol, UpstreamTls,
+    ActiveHealthCheck, ConfigSnapshot, Error, ProxyTarget, Upstream, UpstreamPeer,
+    UpstreamProtocol, UpstreamTls,
 };
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
-use serde::Serialize;
 use tokio::io::copy_bidirectional;
 use tokio::time::Instant as TokioInstant;
 
@@ -57,7 +55,6 @@ const GRPC_WEB_CONTENT_TYPE_PREFIX: &str = "application/grpc-web";
 const GRPC_WEB_TEXT_CONTENT_TYPE_PREFIX: &str = "application/grpc-web-text";
 const GRPC_TIMEOUT_HEADER: &str = "grpc-timeout";
 const MAX_GRPC_TIMEOUT_DIGITS: usize = 8;
-const GRPC_HEALTH_SERVING_STATUS_SERVING: u64 = 1;
 
 pub use clients::{ProxyClient, ProxyClients};
 pub use forward::{DownstreamRequestOptions, forward_request};
@@ -796,6 +793,7 @@ mod tests {
                 request_body_read_timeout: None,
                 response_write_timeout: None,
                 access_log_format: None,
+                config_api_token: None,
                 tls: None,
             },
             default_vhost: rginx_core::VirtualHost {
@@ -879,6 +877,7 @@ mod tests {
                 request_body_read_timeout: None,
                 response_write_timeout: None,
                 access_log_format: None,
+                config_api_token: None,
                 tls: None,
             },
             default_vhost: rginx_core::VirtualHost {
@@ -949,6 +948,7 @@ mod tests {
                 request_body_read_timeout: None,
                 response_write_timeout: None,
                 access_log_format: None,
+                config_api_token: None,
                 tls: None,
             },
             default_vhost: rginx_core::VirtualHost {
@@ -1504,6 +1504,7 @@ mod tests {
                 request_body_read_timeout: None,
                 response_write_timeout: None,
                 access_log_format: None,
+                config_api_token: None,
                 tls: None,
             },
             default_vhost: rginx_core::VirtualHost {
@@ -1687,6 +1688,7 @@ mod tests {
                 request_body_read_timeout: None,
                 response_write_timeout: None,
                 access_log_format: None,
+                config_api_token: None,
                 tls: None,
             },
             default_vhost: rginx_core::VirtualHost {
@@ -1734,6 +1736,7 @@ mod tests {
                 request_body_read_timeout: None,
                 response_write_timeout: None,
                 access_log_format: None,
+                config_api_token: None,
                 tls: None,
             },
             default_vhost: rginx_core::VirtualHost {
@@ -1786,6 +1789,7 @@ mod tests {
                 request_body_read_timeout: None,
                 response_write_timeout: None,
                 access_log_format: None,
+                config_api_token: None,
                 tls: None,
             },
             default_vhost: rginx_core::VirtualHost {

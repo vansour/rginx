@@ -91,13 +91,10 @@ fn config_api_rejects_requests_without_a_valid_bearer_token() {
     let mut server = ServerHarness::spawn("rginx-dynamic-config-auth", |_| initial_config.clone());
     server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
 
-    let response =
-        send_http_request(listen_addr, "GET", "/-/config", None, None).expect("unauthorized GET should respond");
+    let response = send_http_request(listen_addr, "GET", "/-/config", None, None)
+        .expect("unauthorized GET should respond");
     assert_eq!(response.status, 401);
-    assert_eq!(
-        response.header("www-authenticate"),
-        Some("Bearer realm=\"rginx-config\"")
-    );
+    assert_eq!(response.header("www-authenticate"), Some("Bearer realm=\"rginx-config\""));
 
     let response = send_http_request(
         listen_addr,
@@ -228,6 +225,76 @@ fn config_api_rejects_invalid_config_without_changing_revision_or_disk_state() {
         "stable dynamic config\n",
         Duration::from_secs(5),
     );
+
+    server.shutdown_and_wait(Duration::from_secs(5));
+}
+
+#[test]
+fn config_api_rejects_oversized_body_without_changing_revision_or_disk_state() {
+    let listen_addr = reserve_loopback_addr();
+    let initial_config = dynamic_config_source(listen_addr, "stable dynamic config\n");
+    let mut server =
+        ServerHarness::spawn("rginx-dynamic-config-oversized", |_| initial_config.clone());
+    server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
+
+    let oversized_body = vec![b'x'; 1024 * 1024 + 1];
+    let response = send_http_request(
+        listen_addr,
+        "PUT",
+        "/-/config",
+        Some(&oversized_body),
+        Some(CONFIG_API_TOKEN),
+    )
+    .expect("oversized config PUT should respond");
+    assert_eq!(response.status, 413);
+    let payload: Value =
+        serde_json::from_slice(&response.body).expect("oversized config PUT should return JSON");
+    assert!(
+        payload["error"]
+            .as_str()
+            .expect("error payload should contain a message")
+            .contains("exceeds 1048576 bytes")
+    );
+
+    let response = send_http_request(listen_addr, "GET", "/-/config", None, Some(CONFIG_API_TOKEN))
+        .expect("config GET should succeed after rejected oversized update");
+    assert_eq!(response.status, 200);
+    let payload: Value =
+        serde_json::from_slice(&response.body).expect("config GET should return JSON");
+    assert_eq!(payload["revision"], 0);
+    assert_eq!(
+        fs::read_to_string(server.config_path()).expect("config file should stay unchanged"),
+        initial_config
+    );
+
+    server.wait_for_http_text_response(
+        listen_addr,
+        &listen_addr.to_string(),
+        "/app",
+        200,
+        "stable dynamic config\n",
+        Duration::from_secs(5),
+    );
+
+    server.shutdown_and_wait(Duration::from_secs(5));
+}
+
+#[test]
+fn config_api_rejects_unsupported_methods_with_allow_header() {
+    let listen_addr = reserve_loopback_addr();
+    let initial_config = dynamic_config_source(listen_addr, "stable dynamic config\n");
+    let mut server =
+        ServerHarness::spawn("rginx-dynamic-config-methods", |_| initial_config.clone());
+    server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
+
+    let response =
+        send_http_request(listen_addr, "POST", "/-/config", None, Some(CONFIG_API_TOKEN))
+            .expect("unsupported config method should respond");
+    assert_eq!(response.status, 405);
+    assert_eq!(response.header("allow"), Some("GET, HEAD, PUT"));
+    let payload: Value =
+        serde_json::from_slice(&response.body).expect("method-not-allowed body should be JSON");
+    assert_eq!(payload["error"], "method not allowed");
 
     server.shutdown_and_wait(Duration::from_secs(5));
 }

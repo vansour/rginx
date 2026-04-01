@@ -6,6 +6,7 @@
 
 稳定支持范围、当前明确限制和正式版发布闸门见：
 
+- [wiki/Capability-Matrix.md](wiki/Capability-Matrix.md)
 - [ROADMAP.md](ROADMAP.md)
 - [wiki/Release-Gate.md](wiki/Release-Gate.md)
 
@@ -180,6 +181,7 @@ cargo build -p rginx
 仓库已自带几个示例配置：
 
 - `configs/rginx.ron`
+- `configs/rginx-admin-example.ron`
 - `configs/rginx-ip-hash-example.ron`
 - `configs/rginx-least-conn-example.ron`
 - `configs/rginx-weighted-example.ron`
@@ -208,6 +210,7 @@ cargo build -p rginx
 - [wiki/Routing-and-Handlers.md](wiki/Routing-and-Handlers.md)
 - [wiki/Upstreams.md](wiki/Upstreams.md)
 - [wiki/Operations.md](wiki/Operations.md)
+- [wiki/Deployment-and-Service-Hosting.md](wiki/Deployment-and-Service-Hosting.md)
 - [wiki/Roadmap-and-Gaps.md](wiki/Roadmap-and-Gaps.md)
 
 ## 配置结构
@@ -454,10 +457,15 @@ locations: [
 
 - 当前配置修订号 `revision`
 - 监听地址 `listen`
+- 是否启用了下游 TLS 的 `tls_enabled`
+- HTTP/1 keepalive 开关 `keep_alive`
+- 当前连接上限 `max_connections`
+- 受信代理条目数 `trusted_proxy_count`
+- 当前活跃客户端连接数 `active_connections`
 - 虚拟主机数 `vhost_count`
 - 路由总数 `route_count`
 - 上游数 `upstream_count`
-- 每个上游的负载均衡策略、连接/读写/空闲超时、连接池参数、TCP/HTTP2 keepalive 参数、主动健康检查参数、每个 peer 的 `weight` / `backup`、健康状态与当前活跃请求数
+- 每个上游的 peer 总数、健康 peer 数、backup peer 数、当前 peer 活跃请求汇总，以及负载均衡策略、连接/读写/空闲超时、连接池参数、TCP/HTTP2 keepalive 参数、主动健康检查参数、每个 peer 的 `weight` / `backup`、健康状态与当前活跃请求数
 
 其中 `route_count` 是默认虚拟主机和所有额外虚拟主机路由数的总和。
 
@@ -478,23 +486,32 @@ locations: [
 如果你希望通过 HTTP 管理运行中配置，可以显式配置一个 `Config` 路由：
 
 ```ron
+server: ServerConfig(
+    listen: "127.0.0.1:8080",
+    config_api_token: Some("change-me-admin-token"),
+),
+locations: [
 LocationConfig(
     matcher: Exact("/-/config"),
     handler: Config,
     allow_cidrs: ["127.0.0.1/32", "::1/128"],
 )
+]
 ```
 
 读取当前生效配置：
 
 ```bash
-curl http://127.0.0.1:8080/-/config
+curl \
+  -H 'Authorization: Bearer change-me-admin-token' \
+  http://127.0.0.1:8080/-/config
 ```
 
 用完整 RON 文档替换运行中配置：
 
 ```bash
 curl -X PUT \
+  -H 'Authorization: Bearer change-me-admin-token' \
   -H 'Content-Type: application/ron; charset=utf-8' \
   --data-binary @configs/rginx.ron \
   http://127.0.0.1:8080/-/config
@@ -502,6 +519,9 @@ curl -X PUT \
 
 边界说明：
 
+- `Config` 路由要求 `server.config_api_token`，并通过 `Authorization: Bearer <token>` 访问
+- `PUT` body 必须是非空、有效 UTF-8 的完整 RON 文档
+- `PUT` body 当前限制为 1 MiB；超限会返回 `413 Payload Too Large`
 - 当前只支持完整文档替换，不支持 partial patch
 - 仍然不能在线变更 `listen`、`runtime.worker_threads`、`runtime.accept_workers`
 - 新配置会先通过 validate + compile，再落盘并切换到新的运行时快照
@@ -969,6 +989,8 @@ Release Notes 分类规则来自：
 
 ## 运维操作
 
+如果你需要更具体的“安装布局、管理接口隔离、外部 supervisor 托管”建议，见 [wiki/Deployment-and-Service-Hosting.md](wiki/Deployment-and-Service-Hosting.md)。
+
 ### 热重载
 
 向进程发送 `SIGHUP` 会重新加载配置：
@@ -1000,6 +1022,8 @@ kill -HUP <pid>
 - 热重载不能切换监听地址、`runtime.worker_threads` 或 `runtime.accept_workers`
 
 更完整的稳定支持范围、非目标能力、运维前提和正式版发布闸门，见 [wiki/Release-Gate.md](wiki/Release-Gate.md)。
+
+如果你想快速看“当前稳定支持什么、主要由哪些测试覆盖”，见 [wiki/Capability-Matrix.md](wiki/Capability-Matrix.md)。
 
 更细致的能力矩阵、工程演进观察和建议阶段规划，见 [ROADMAP.md](ROADMAP.md)。
 
