@@ -4,6 +4,7 @@
 
 如果你只想快速判断“这个能力现在能不能放心写进对外承诺”，请先看：
 
+- [wiki/Capability-Matrix.md](wiki/Capability-Matrix.md)
 - [wiki/Release-Gate.md](wiki/Release-Gate.md)
 
 如果你想判断“项目下一步最自然该做什么”，继续读本文即可。
@@ -247,23 +248,22 @@
 ### 已完成的结构收口
 
 - 配置链路已经稳定分成 `load -> validate -> compile` 三层。
+- `rginx-config/src/compile.rs` 已开始继续按 `runtime / server / upstream / route / vhost` 子领域拆分。
 - 请求处理主入口已经收口到 `handler/dispatch.rs`，而不是把所有 handler 逻辑混在一个文件里。
 - proxy 主逻辑已经按“client / request body / forward / health / grpc-web / upgrade”拆开。
+- `proxy/health` 内部已经继续按 `registry / probe / grpc_health_codec` 子领域收口，降低了 health 相关实现的认知负担。
 - 集成测试里重复的 child 启动、ready 检查和日志收集已经提取到共享 harness。
 
 ### 仍然值得持续关注的大文件
 
 - [`crates/rginx-core/src/config.rs`](crates/rginx-core/src/config.rs)
-- [`crates/rginx-config/src/compile.rs`](crates/rginx-config/src/compile.rs)
 - [`crates/rginx-config/src/validate.rs`](crates/rginx-config/src/validate.rs)
-- [`crates/rginx-http/src/proxy/health.rs`](crates/rginx-http/src/proxy/health.rs)
 
 这些文件当前的问题不是职责混乱，而是体量大、领域细节密度高。下一步如果继续拆，最自然的方向不是“为了拆而拆”，而是按子领域边界拆：
 
 - 配置编译：`runtime / server / upstream / route / vhost`
 - 配置校验：`runtime / server / upstream / route / vhost`
 - 核心模型：`route / access_log / upstream`
-- proxy health：`registry / probe / grpc_health_codec`
 
 ## 建议的下一阶段路线
 

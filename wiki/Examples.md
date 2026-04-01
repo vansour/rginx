@@ -7,6 +7,7 @@
 | 文件 | 用途 |
 | --- | --- |
 | `configs/rginx.ron` | 基础代理、状态页、指标页 |
+| `configs/rginx-admin-example.ron` | 管理接口隔离、运维网段与动态配置入口示例 |
 | `configs/rginx-ip-hash-example.ron` | 客户端 IP 粘性转发 |
 | `configs/rginx-least-conn-example.ron` | 最少连接数转发 |
 | `configs/rginx-weighted-example.ron` | 加权流量分配 |
@@ -40,6 +41,14 @@ cargo run -p rginx -- --config configs/rginx-weighted-example.ron
 - `/status`
 - `/metrics`
 - 基础 `/api` 代理
+
+### `configs/rginx-admin-example.ron`
+
+建议验证：
+
+- `/status`、`/metrics`、`/-/config` 是否都带了明确的 `allow_cidrs`
+- `trusted_proxies` 和 access log 模板是否符合你的部署网络
+- 是否能作为 systemd / 容器托管时的起点配置
 
 ### `configs/rginx-ip-hash-example.ron`
 
@@ -109,9 +118,10 @@ cargo run -p rginx -- check --config configs/rginx-backup-example.ron
 如果你想按复杂度逐步理解功能，建议顺序是：
 
 1. `configs/rginx.ron`
-2. `configs/rginx-vhosts-example.ron`
-3. `configs/rginx-ip-hash-example.ron`
-4. `configs/rginx-least-conn-example.ron`
-5. `configs/rginx-weighted-example.ron`
-6. `configs/rginx-backup-example.ron`
-7. 三个 HTTPS 示例
+2. `configs/rginx-admin-example.ron`
+3. `configs/rginx-vhosts-example.ron`
+4. `configs/rginx-ip-hash-example.ron`
+5. `configs/rginx-least-conn-example.ron`
+6. `configs/rginx-weighted-example.ron`
+7. `configs/rginx-backup-example.ron`
+8. 三个 HTTPS 示例

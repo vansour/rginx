@@ -17,6 +17,7 @@
 | 文档 | 作用 |
 | --- | --- |
 | [README.md](../README.md) | 对外总览、能力清单、快速开始、配置结构、示例 |
+| [Capability Matrix](Capability-Matrix.md) | 当前稳定支持能力域、主要测试覆盖与快速判断入口 |
 | [ROADMAP.md](../ROADMAP.md) | 更细的能力矩阵、明确限制、工程演进观察和下一阶段建议 |
 | `wiki/*.md` | 按主题展开说明：架构、配置、运维、开发、发布 |
 
@@ -45,9 +46,11 @@
 建议按下面顺序读：
 
 1. [ROADMAP.md](../ROADMAP.md)
-2. [Release Gate](Release-Gate.md)
-3. [TLS and HTTP2](TLS-and-HTTP2.md)
-4. [Operations](Operations.md)
+2. [Capability Matrix](Capability-Matrix.md)
+3. [Release Gate](Release-Gate.md)
+4. [TLS and HTTP2](TLS-and-HTTP2.md)
+5. [Operations](Operations.md)
+6. [Deployment and Service Hosting](Deployment-and-Service-Hosting.md)
 
 ### 如果你准备改代码
 
@@ -104,6 +107,7 @@
 
 更完整说明见：
 
+- [Capability Matrix](Capability-Matrix.md)
 - [ROADMAP.md](../ROADMAP.md)
 - [Release Gate](Release-Gate.md)
 
@@ -112,12 +116,14 @@
 | 页面 | 重点内容 |
 | --- | --- |
 | [Quick Start](Quick-Start.md) | 构建、启动、配置检查、第一条代理规则 |
+| [Capability Matrix](Capability-Matrix.md) | 当前稳定支持能力域、主要测试覆盖与快速判断入口 |
 | [Architecture](Architecture.md) | 工作区结构、运行时生命周期、请求链路、内部模块边界 |
 | [Configuration](Configuration.md) | 顶层配置结构、字段语义、默认值与约束 |
 | [Routing and Handlers](Routing-and-Handlers.md) | 虚拟主机、路由匹配、handler、文件服务、ACL、限流 |
 | [Upstreams](Upstreams.md) | peer、负载均衡、权重、backup、超时、重试、健康检查 |
 | [TLS and HTTP2](TLS-and-HTTP2.md) | 入站 TLS、SNI、ALPN、上游 TLS、HTTP/2、gRPC |
 | [Operations](Operations.md) | 日常运维、状态页、指标、日志、热重载、信号 |
+| [Deployment and Service Hosting](Deployment-and-Service-Hosting.md) | 安装布局、管理接口隔离、外部 supervisor 托管建议 |
 | [Examples](Examples.md) | 仓库内示例配置的用途和建议测试方式 |
 | [Development](Development.md) | crate 分工、模块落点、测试体系、开发约束 |
 | [Roadmap and Gaps](Roadmap-and-Gaps.md) | 对顶层 ROADMAP 的简版摘要 |

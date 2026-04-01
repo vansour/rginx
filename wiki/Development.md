@@ -25,7 +25,12 @@
 | 新增原始配置字段 | `crates/rginx-config/src/model.rs` |
 | 配置预处理 | `crates/rginx-config/src/load.rs` |
 | 配置语义校验 | `crates/rginx-config/src/validate.rs` |
-| 默认值、路径归一化、编译映射 | `crates/rginx-config/src/compile.rs` |
+| 配置编译总入口 | `crates/rginx-config/src/compile.rs` |
+| runtime 编译 | `crates/rginx-config/src/compile/runtime.rs` |
+| server 默认值、路径归一化与 TLS / trusted proxy 编译 | `crates/rginx-config/src/compile/server.rs` |
+| upstream transport / health 编译 | `crates/rginx-config/src/compile/upstream.rs` |
+| route action、ACL 与限流编译 | `crates/rginx-config/src/compile/route.rs` |
+| vhost 编译 | `crates/rginx-config/src/compile/vhost.rs` |
 | 共享运行时模型 | `crates/rginx-core/src/config.rs` |
 | 请求主调度 | `crates/rginx-http/src/handler/dispatch.rs` |
 | access log | `crates/rginx-http/src/handler/access_log.rs` |
@@ -36,7 +41,9 @@
 | upstream client 缓存与 TLS profile | `crates/rginx-http/src/proxy/clients.rs` |
 | 请求体预处理与重放判断 | `crates/rginx-http/src/proxy/request_body.rs` |
 | 主转发流程 | `crates/rginx-http/src/proxy/forward.rs` |
-| 被动 / 主动健康检查与 least_conn | `crates/rginx-http/src/proxy/health.rs` |
+| 主动健康检查编排与 health request 构造 | `crates/rginx-http/src/proxy/health.rs` |
+| peer 健康状态、least_conn 与 active request 计数 | `crates/rginx-http/src/proxy/health/registry.rs` |
+| gRPC health probe 编解码与结果判定 | `crates/rginx-http/src/proxy/health/grpc_health_codec.rs` |
 | grpc-web 编解码 | `crates/rginx-http/src/proxy/grpc_web.rs` |
 | Upgrade / WebSocket 隧道 | `crates/rginx-http/src/proxy/upgrade.rs` |
 | 静态文件 | `crates/rginx-http/src/file.rs` |
@@ -69,6 +76,9 @@ crates/rginx-http/src/proxy/
   request_body.rs
   forward.rs
   health.rs
+  health/
+    registry.rs
+    grpc_health_codec.rs
   grpc_web.rs
   upgrade.rs
 ```
@@ -277,7 +287,6 @@ RUST_LOG=debug,rginx_http=trace cargo run -p rginx -- --config configs/rginx.ron
 虽然 `handler/` 和 `proxy/` 已经拆得比较自然，但下面这些文件仍值得继续观察：
 
 - `crates/rginx-core/src/config.rs`
-- `crates/rginx-config/src/compile.rs`
 - `crates/rginx-config/src/validate.rs`
 - `crates/rginx-http/src/proxy/health.rs`
 

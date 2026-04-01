@@ -10,6 +10,10 @@
 2. 哪些能力当前明确不在稳定承诺内。
 3. 发布正式版前，最少要验过哪些事情。
 
+如果你想先快速判断“当前稳定支持哪些能力域，以及主要由哪些测试覆盖”，可以先看：
+
+- [Capability Matrix](Capability-Matrix.md)
+
 ## `v0.1.1` 稳定支持范围
 
 ### 入口协议与 TLS
@@ -81,12 +85,17 @@
 
 - 不支持明文入站 HTTP/2（`h2c`）
 - 不支持明文 upstream HTTP/2（`h2c`）
+- 不支持明文 `h2c` gRPC upstream
+- 主动 gRPC health check 当前只支持 `https://` upstream，不支持明文 `h2c`
 - 热重载不能切换 `listen` 地址；变更监听地址必须重启
+- 热重载不能切换 `runtime.worker_threads`
+- 热重载不能切换 `runtime.accept_workers`
 - 不支持正则路由
 - 只支持基础 `grpc-web` binary/text 模式；不支持完整的高级 gRPC 代理语义
 - 不支持 Proxy Protocol
 - 不支持更完整的高级压缩策略（当前只支持基础 br/gzip 协商）
 - 动态配置 API 当前只支持完整文档替换，不支持 partial patch
+- 不支持 multipart `Range`
 - 不支持 `SO_REUSEPORT` 多进程 worker 架构
 - 当前产品定位不是其他入口代理的 drop-in replacement，也不承诺语义级全面兼容
 
@@ -99,7 +108,7 @@
 3. `/status`、`/metrics` 和任何 `Config` 管理路由都应只暴露给内网、抓取器或受控运维入口，不应直接暴露公网。
 4. upstream timeout、健康检查路径和健康检查阈值需要按你的业务特性做配置，不应完全依赖默认值。
 5. 需要热重载时，只应修改可热更新的配置；涉及 `listen`、`runtime.worker_threads` 或 `runtime.accept_workers` 变化时必须走重启流程。
-6. 进程生命周期默认由外部 supervisor 管理，例如 systemd、容器运行时或编排系统；仓库当前提供基础安装/卸载脚本，但不内置 systemd 或其他服务单元。
+6. 进程生命周期默认由外部 supervisor 管理，例如 systemd、容器运行时或编排系统；仓库当前提供基础安装/卸载脚本，但不内置 systemd 或其他服务单元。托管建议和示例见 [Deployment and Service Hosting](Deployment-and-Service-Hosting.md)。
 
 ## 正式版发布闸门
 

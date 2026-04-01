@@ -82,7 +82,6 @@
 但下面这些文件仍然偏大，后续可以继续按子领域拆：
 
 - `crates/rginx-core/src/config.rs`
-- `crates/rginx-config/src/compile.rs`
 - `crates/rginx-config/src/validate.rs`
 - `crates/rginx-http/src/proxy/health.rs`
 
