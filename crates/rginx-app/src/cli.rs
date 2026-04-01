@@ -34,12 +34,8 @@ fn default_config_path() -> PathBuf {
         return path;
     }
 
-    #[cfg(unix)]
-    for candidate in [
-        "/etc/rginx/rginx.ron",
-        "/usr/local/etc/rginx/rginx.ron",
-        "/opt/homebrew/etc/rginx/rginx.ron",
-    ] {
+    #[cfg(target_os = "linux")]
+    for candidate in ["/etc/rginx/rginx.ron", "/usr/local/etc/rginx/rginx.ron"] {
         let path = PathBuf::from(candidate);
         if path.exists() {
             return path;

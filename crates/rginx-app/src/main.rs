@@ -1,5 +1,8 @@
 mod cli;
 
+#[cfg(not(target_os = "linux"))]
+compile_error!("rginx supports Linux only");
+
 use anyhow::{Context, anyhow};
 use clap::Parser;
 

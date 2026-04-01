@@ -144,9 +144,8 @@ cat <<EOF
 
 [release-prep] preflight checks passed for ${TAG}
 [release-prep] next steps:
-  1. Complete the manual smoke checklist in wiki/Release-Process.md
-  2. Create the tag: git tag ${TAG}
-  3. Push the tag:   git push origin ${TAG}
-  4. Verify the GitHub Release artifacts and release notes
+  1. Create the tag: git tag ${TAG}
+  2. Push the tag:   git push origin ${TAG}
+  3. Verify the GitHub Release artifacts and release notes
 
 EOF
