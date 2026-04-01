@@ -8,6 +8,7 @@ pub(super) fn validate_virtual_hosts(
     vhosts: &[VirtualHostConfig],
     upstream_names: &HashSet<String>,
     all_server_names: &mut HashSet<String>,
+    config_api_token: Option<&str>,
 ) -> Result<()> {
     for (idx, vhost) in vhosts.iter().enumerate() {
         let vhost_label = format!("servers[{idx}]");
@@ -44,7 +45,12 @@ pub(super) fn validate_virtual_hosts(
             }
         }
 
-        super::route::validate_locations(Some(&vhost_label), &vhost.locations, upstream_names)?;
+        super::route::validate_locations(
+            Some(&vhost_label),
+            &vhost.locations,
+            upstream_names,
+            config_api_token,
+        )?;
     }
 
     Ok(())

@@ -118,8 +118,6 @@ curl -fsSL https://raw.githubusercontent.com/vansour/rginx/main/scripts/install.
 默认前缀：
 
 - Linux: `/usr/local`
-- macOS Intel: `/usr/local`
-- macOS Apple Silicon: `/opt/homebrew`（存在该目录时）
 
 常用参数：
 
@@ -488,23 +486,32 @@ locations: [
 如果你希望通过 HTTP 管理运行中配置，可以显式配置一个 `Config` 路由：
 
 ```ron
+server: ServerConfig(
+    listen: "127.0.0.1:8080",
+    config_api_token: Some("change-me-admin-token"),
+),
+locations: [
 LocationConfig(
     matcher: Exact("/-/config"),
     handler: Config,
     allow_cidrs: ["127.0.0.1/32", "::1/128"],
 )
+]
 ```
 
 读取当前生效配置：
 
 ```bash
-curl http://127.0.0.1:8080/-/config
+curl \
+  -H 'Authorization: Bearer change-me-admin-token' \
+  http://127.0.0.1:8080/-/config
 ```
 
 用完整 RON 文档替换运行中配置：
 
 ```bash
 curl -X PUT \
+  -H 'Authorization: Bearer change-me-admin-token' \
   -H 'Content-Type: application/ron; charset=utf-8' \
   --data-binary @configs/rginx.ron \
   http://127.0.0.1:8080/-/config
@@ -512,6 +519,7 @@ curl -X PUT \
 
 边界说明：
 
+- `Config` 路由要求 `server.config_api_token`，并通过 `Authorization: Bearer <token>` 访问
 - `PUT` body 必须是非空、有效 UTF-8 的完整 RON 文档
 - `PUT` body 当前限制为 1 MiB；超限会返回 `413 Payload Too Large`
 - 当前只支持完整文档替换，不支持 partial patch
@@ -937,8 +945,6 @@ tag 被 push 之后，GitHub Actions 会自动：
 
 - `x86_64-unknown-linux-gnu`
 - `aarch64-unknown-linux-gnu`
-- `x86_64-apple-darwin`
-- `aarch64-apple-darwin`
 
 每个 release archive 现在会同时包含：
 
@@ -949,16 +955,11 @@ tag 被 push 之后，GitHub Actions 会自动：
 - `scripts/prepare-release.sh`
 - `scripts/sync-wiki.sh`
 - `README.md`
-- `CHANGELOG.md`
 - `LICENSE*`
 
 Release Notes 分类规则来自：
 
 - `.github/release.yml`
-
-当前仓库的 changelog 约定见：
-
-- [CHANGELOG.md](CHANGELOG.md)
 
 建议的本地发版前检查：
 
@@ -979,14 +980,12 @@ Release Notes 分类规则来自：
 
 - 即使这是仓库的第一个 tag，没有“上一个版本”可比较，release workflow 也会基于当前 tag 所包含的提交历史自动写出 `## Changelog`
 - 如果存在上一个 tag，`## Changelog` 会列出从上一个 tag 到当前 tag 的具体提交
-- 预发布 tag 允许指向已被 `origin/main` 包含的历史提交；正式版 tag 仍应直接切在 `origin/main` 当前 HEAD 上；更完整流程见 [wiki/Release-Process.md](wiki/Release-Process.md)
+- 预发布 tag 允许指向已被 `origin/main` 包含的历史提交；正式版 tag 仍应直接切在 `origin/main` 当前 HEAD 上
 
 产物命名规则示例：
 
 - `rginx-v1.2.3-linux-amd64.tar.gz`
 - `rginx-v1.2.3-linux-arm64.tar.gz`
-- `rginx-v1.2.3-darwin-amd64.tar.gz`
-- `rginx-v1.2.3-darwin-arm64.tar.gz`
 
 ## 运维操作
 

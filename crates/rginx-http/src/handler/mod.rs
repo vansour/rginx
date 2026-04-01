@@ -129,6 +129,7 @@ mod tests {
                 request_body_read_timeout: None,
                 response_write_timeout: None,
                 access_log_format: None,
+                config_api_token: None,
                 tls: None,
             },
             default_vhost: VirtualHost {
@@ -308,6 +309,7 @@ mod tests {
                 request_body_read_timeout: None,
                 response_write_timeout: None,
                 access_log_format: None,
+                config_api_token: None,
                 tls: None,
             },
             default_vhost: VirtualHost {
@@ -997,6 +999,7 @@ mod tests {
                 request_body_read_timeout: None,
                 response_write_timeout: None,
                 access_log_format: None,
+                config_api_token: None,
                 tls: None,
             },
             default_vhost,

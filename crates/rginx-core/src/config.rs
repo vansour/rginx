@@ -29,6 +29,10 @@ impl ConfigSnapshot {
     pub fn total_vhost_count(&self) -> usize {
         1 + self.vhosts.len()
     }
+
+    pub fn tls_enabled(&self) -> bool {
+        self.default_vhost.tls.is_some() || self.vhosts.iter().any(|vhost| vhost.tls.is_some())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -75,6 +79,7 @@ pub struct Server {
     pub request_body_read_timeout: Option<Duration>,
     pub response_write_timeout: Option<Duration>,
     pub access_log_format: Option<AccessLogFormat>,
+    pub config_api_token: Option<String>,
     pub tls: Option<ServerTls>,
 }
 
@@ -859,6 +864,7 @@ mod tests {
             request_body_read_timeout: None,
             response_write_timeout: None,
             access_log_format: None,
+            config_api_token: None,
             tls: None,
         };
 
@@ -886,6 +892,7 @@ mod tests {
                 request_body_read_timeout: None,
                 response_write_timeout: None,
                 access_log_format: None,
+                config_api_token: None,
                 tls: None,
             },
             default_vhost: VirtualHost {

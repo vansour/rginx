@@ -214,6 +214,33 @@ fn file_routes_without_autoindex_keep_directory_requests_hidden() {
     server.shutdown_and_wait(Duration::from_secs(5));
 }
 
+#[cfg(unix)]
+#[test]
+fn file_routes_block_symlink_escapes_outside_the_document_root() {
+    use std::os::unix::fs::symlink;
+
+    let listen_addr = reserve_loopback_addr();
+    let mut server = ServerHarness::spawn("rginx-phase1-file-symlink-escape", |temp_dir| {
+        let root = temp_dir.join("public");
+        fs::create_dir_all(&root).expect("file root should be created");
+        let outside = temp_dir.join("outside.txt");
+        fs::write(&outside, b"top secret\n").expect("outside file should be written");
+        symlink(&outside, root.join("leak.txt")).expect("symlink should be created");
+        file_config(listen_addr, &root)
+    });
+    server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
+
+    let response = send_http_request(
+        listen_addr,
+        &format!("GET /leak.txt HTTP/1.1\r\nHost: {listen_addr}\r\nConnection: close\r\n\r\n"),
+    )
+    .expect("symlink request should respond");
+    assert_eq!(response.status, 404);
+    assert_eq!(response.body, b"not found\n");
+
+    server.shutdown_and_wait(Duration::from_secs(5));
+}
+
 #[derive(Debug)]
 struct ParsedResponse {
     status: u16,

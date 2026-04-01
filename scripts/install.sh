@@ -29,7 +29,7 @@ Options:
   --version <tag|latest>
       release 模式下使用的版本，默认 latest；latest 只解析最新稳定版
   --prefix <path>
-      安装前缀。Linux 默认 /usr/local；macOS arm64 且存在 /opt/homebrew 时默认 /opt/homebrew
+      安装前缀。默认 /usr/local
   --config-dir <path>
       活跃配置目录，默认 <prefix>/etc/rginx
   --force
@@ -108,15 +108,6 @@ while [[ $# -gt 0 ]]; do
 done
 
 default_prefix() {
-    local os arch
-    os="$(uname -s)"
-    arch="$(uname -m)"
-
-    if [[ "${os}" == "Darwin" && "${arch}" == "arm64" && -d /opt/homebrew ]]; then
-        printf '%s\n' "/opt/homebrew"
-        return
-    fi
-
     printf '%s\n' "/usr/local"
 }
 
@@ -165,11 +156,8 @@ detect_release_platform() {
         Linux)
             RELEASE_OS="linux"
             ;;
-        Darwin)
-            RELEASE_OS="darwin"
-            ;;
         *)
-            die "unsupported operating system: ${os}"
+            die "unsupported operating system: ${os} (rginx supports Linux only)"
             ;;
     esac
 

@@ -47,6 +47,17 @@ pub(super) fn validate_server(server: &ServerConfig) -> Result<()> {
         return Err(Error::Config("server access_log_format must not be empty".to_string()));
     }
 
+    if server
+        .config_api_token
+        .as_deref()
+        .is_some_and(|token| token.trim().is_empty() || token.trim() != token)
+    {
+        return Err(Error::Config(
+            "server config_api_token must not be empty or contain leading/trailing whitespace"
+                .to_string(),
+        ));
+    }
+
     if let Some(ServerTlsConfig { cert_path, key_path }) = &server.tls {
         if cert_path.trim().is_empty() {
             return Err(Error::Config("server TLS certificate path must not be empty".to_string()));

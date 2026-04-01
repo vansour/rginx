@@ -18,14 +18,23 @@ pub fn validate(config: &Config) -> Result<()> {
     if config.locations.is_empty() {
         return Err(Error::Config("at least one location must be configured".to_string()));
     }
-
     server::validate_server(&config.server)?;
     let upstream_names = upstream::validate_upstreams(&config.upstreams)?;
-    route::validate_locations(None, &config.locations, &upstream_names)?;
+    route::validate_locations(
+        None,
+        &config.locations,
+        &upstream_names,
+        config.server.config_api_token.as_deref(),
+    )?;
 
     let mut all_server_names = HashSet::new();
     server::validate_server_names("server", &config.server.server_names, &mut all_server_names)?;
-    vhost::validate_virtual_hosts(&config.servers, &upstream_names, &mut all_server_names)?;
+    vhost::validate_virtual_hosts(
+        &config.servers,
+        &upstream_names,
+        &mut all_server_names,
+        config.server.config_api_token.as_deref(),
+    )?;
 
     Ok(())
 }
@@ -357,6 +366,17 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_config_handler_without_server_token() {
+        let mut config = base_config();
+        config.locations[0].matcher = MatcherConfig::Exact("/-/config".to_string());
+        config.locations[0].handler = HandlerConfig::Config;
+        config.locations[0].allow_cidrs = vec!["127.0.0.1/32".to_string()];
+
+        let error = validate(&config).expect_err("config handler should require server token");
+        assert!(error.to_string().contains("config handler requires server.config_api_token"));
+    }
+
+    #[test]
     fn validate_rejects_empty_grpc_service() {
         let mut config = base_config();
         config.locations[0].grpc_service = Some("   ".to_string());
@@ -426,6 +446,7 @@ mod tests {
                 request_body_read_timeout_secs: None,
                 response_write_timeout_secs: None,
                 access_log_format: None,
+                config_api_token: None,
                 tls: None,
             },
             upstreams: vec![UpstreamConfig {

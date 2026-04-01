@@ -6,11 +6,48 @@ pub(super) async fn config_response(
     state: SharedState,
     active: ActiveState,
 ) -> HttpResponse {
+    if let Some(response) = authorize_config_request(request.headers(), &active.config.server) {
+        return response;
+    }
+
     match *request.method() {
         Method::GET | Method::HEAD => config_state_response(&state, &active).await,
         Method::PUT => config_update_response(request, state).await,
         _ => method_not_allowed_response(CONFIG_API_ALLOW),
     }
+}
+
+fn authorize_config_request(
+    headers: &HeaderMap,
+    server: &rginx_core::Server,
+) -> Option<HttpResponse> {
+    let expected_token = server.config_api_token.as_deref()?;
+    let provided = headers
+        .get(http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_bearer_token);
+
+    if provided == Some(expected_token) {
+        return None;
+    }
+
+    let mut response =
+        json_error_response(StatusCode::UNAUTHORIZED, "config API authorization required");
+    response.headers_mut().insert(
+        http::header::WWW_AUTHENTICATE,
+        HeaderValue::from_static("Bearer realm=\"rginx-config\""),
+    );
+    Some(response)
+}
+
+fn parse_bearer_token(value: &str) -> Option<&str> {
+    let (scheme, token) = value.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+
+    let token = token.trim();
+    (!token.is_empty()).then_some(token)
 }
 
 async fn config_state_response(state: &SharedState, active: &ActiveState) -> HttpResponse {

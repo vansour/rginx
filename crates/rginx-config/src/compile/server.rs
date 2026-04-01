@@ -26,6 +26,7 @@ pub(super) fn compile_server(server: ServerConfig, base_dir: &Path) -> Result<Co
         request_body_read_timeout_secs,
         response_write_timeout_secs,
         access_log_format,
+        config_api_token,
         tls,
     } = server;
 
@@ -42,6 +43,7 @@ pub(super) fn compile_server(server: ServerConfig, base_dir: &Path) -> Result<Co
             request_body_read_timeout: request_body_read_timeout_secs.map(Duration::from_secs),
             response_write_timeout: response_write_timeout_secs.map(Duration::from_secs),
             access_log_format: compile_access_log_format(access_log_format)?,
+            config_api_token,
             tls: server_tls.clone(),
         },
         server_names,

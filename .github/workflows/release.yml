@@ -122,18 +122,6 @@ jobs:
             arch: arm64
             archive_ext: tar.gz
             asset_name: linux-arm64
-          - runner: macos-15-intel
-            target: x86_64-apple-darwin
-            os: darwin
-            arch: amd64
-            archive_ext: tar.gz
-            asset_name: darwin-amd64
-          - runner: macos-15
-            target: aarch64-apple-darwin
-            os: darwin
-            arch: arm64
-            archive_ext: tar.gz
-            asset_name: darwin-arm64
     steps:
       - name: Check Out Source
         uses: actions/checkout@v6.0.2
@@ -172,7 +160,6 @@ jobs:
           mkdir -p "${INSTALL_DIR}"
           install -m 755 "target/${{ matrix.target }}/release/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}"
           cp README.md "${INSTALL_DIR}/README.md"
-          cp CHANGELOG.md "${INSTALL_DIR}/CHANGELOG.md"
           cp LICENSE "${INSTALL_DIR}/LICENSE"
           cp LICENSE-APACHE "${INSTALL_DIR}/LICENSE-APACHE"
           cp LICENSE-MIT "${INSTALL_DIR}/LICENSE-MIT"

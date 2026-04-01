@@ -69,7 +69,7 @@ pub async fn serve_file(request: Request<Incoming>, target: &FileTarget) -> Http
         }
     };
 
-    if !is_path_safe(&target.root, &decoded_path) {
+    if !is_request_path_safe(&decoded_path) {
         tracing::warn!(
             path = %request_path,
             root = %target.root.display(),
@@ -377,30 +377,36 @@ fn resolve_file_target(
     request_path: &str,
     target: &FileTarget,
 ) -> Option<ResolvedFileTarget> {
+    let canonical_root = canonical_root(root)?;
     let file_path = resolve_file_path(root, request_path);
 
     if !file_path.exists() {
-        return resolve_try_files(root, request_path, &target.try_files)
+        return resolve_try_files(root, &canonical_root, request_path, &target.try_files)
             .map(ResolvedFileTarget::File);
     }
 
     if file_path.is_dir() {
+        let directory_path = resolve_existing_path_within_root(&canonical_root, &file_path)?;
         if let Some(ref index) = target.index {
             let index_path = file_path.join(index);
-            if index_path.exists() && index_path.is_file() {
+            if let Some(index_path) =
+                resolve_existing_file_within_root(&canonical_root, &index_path)
+            {
                 return Some(ResolvedFileTarget::File(index_path));
             }
         }
-        if let Some(resolved) = resolve_try_files(root, request_path, &target.try_files) {
+        if let Some(resolved) =
+            resolve_try_files(root, &canonical_root, request_path, &target.try_files)
+        {
             return Some(ResolvedFileTarget::File(resolved));
         }
         if target.autoindex {
-            return Some(ResolvedFileTarget::DirectoryListing(file_path));
+            return Some(ResolvedFileTarget::DirectoryListing(directory_path));
         }
         return None;
     }
 
-    file_path.is_file().then_some(ResolvedFileTarget::File(file_path))
+    resolve_existing_file_within_root(&canonical_root, &file_path).map(ResolvedFileTarget::File)
 }
 
 fn stream_file_body<R>(reader: R) -> HttpBody
@@ -476,7 +482,12 @@ fn resolve_file_path(root: &Path, request_path: &str) -> PathBuf {
     root.join(relative_path)
 }
 
-fn resolve_try_files(root: &Path, request_path: &str, try_files: &[String]) -> Option<PathBuf> {
+fn resolve_try_files(
+    root: &Path,
+    canonical_root: &Path,
+    request_path: &str,
+    try_files: &[String],
+) -> Option<PathBuf> {
     for candidate in try_files {
         let resolved = if candidate == "$uri" {
             resolve_file_path(root, request_path)
@@ -490,52 +501,31 @@ fn resolve_try_files(root: &Path, request_path: &str, try_files: &[String]) -> O
             base.parent().map(|p| p.join(candidate)).unwrap_or_else(|| base.clone())
         };
 
-        if resolved.exists()
-            && is_path_safe(root, &resolved.to_string_lossy())
-            && resolved.is_file()
-        {
+        if let Some(resolved) = resolve_existing_file_within_root(canonical_root, &resolved) {
             return Some(resolved);
         }
     }
     None
 }
 
-fn is_path_safe(root: &Path, request_path: &str) -> bool {
-    if request_path.contains("..") {
-        return false;
-    }
-
-    let resolved = resolve_file_path(root, request_path);
-    let normalized = normalize_path(&resolved);
-
-    normalized.starts_with(root) || is_subpath(root, &normalized)
+fn is_request_path_safe(request_path: &str) -> bool {
+    !Path::new(request_path).components().any(|component| {
+        matches!(component, std::path::Component::ParentDir | std::path::Component::Prefix(_))
+    })
 }
 
-fn is_subpath(parent: &Path, child: &Path) -> bool {
-    let parent_components: Vec<_> = parent.components().collect();
-    let child_components: Vec<_> = child.components().collect();
-
-    if child_components.len() < parent_components.len() {
-        return false;
-    }
-
-    parent_components.iter().zip(child_components.iter()).all(|(p, c)| p == c)
+fn canonical_root(root: &Path) -> Option<PathBuf> {
+    root.canonicalize().ok().filter(|path| path.is_dir())
 }
 
-fn normalize_path(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                if !normalized.pop() {
-                    return PathBuf::new();
-                }
-            }
-            _ => normalized.push(component),
-        }
-    }
-    normalized
+fn resolve_existing_file_within_root(canonical_root: &Path, path: &Path) -> Option<PathBuf> {
+    let resolved = resolve_existing_path_within_root(canonical_root, path)?;
+    resolved.is_file().then_some(resolved)
+}
+
+fn resolve_existing_path_within_root(canonical_root: &Path, path: &Path) -> Option<PathBuf> {
+    let canonical_path = path.canonicalize().ok()?;
+    canonical_path.starts_with(canonical_root).then_some(canonical_path)
 }
 
 fn detect_content_type(path: &Path) -> String {
@@ -580,15 +570,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn is_path_safe_rejects_traversal() {
-        assert!(!is_path_safe(Path::new("/var/www"), "../../../etc/passwd"));
-        assert!(!is_path_safe(Path::new("/var/www"), "/static/../etc/passwd"));
+    fn is_request_path_safe_rejects_traversal() {
+        assert!(!is_request_path_safe("../../../etc/passwd"));
+        assert!(!is_request_path_safe("/static/../etc/passwd"));
     }
 
     #[test]
-    fn is_path_safe_accepts_valid_paths() {
-        assert!(is_path_safe(Path::new("/var/www"), "/index.html"));
-        assert!(is_path_safe(Path::new("/var/www"), "/static/app.js"));
+    fn is_request_path_safe_accepts_valid_paths() {
+        assert!(is_request_path_safe("/index.html"));
+        assert!(is_request_path_safe("/static/app.js"));
+        assert!(is_request_path_safe("/static/app..js"));
     }
 
     #[test]

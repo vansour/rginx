@@ -9,6 +9,7 @@ Config(
             "192.168.0.0/16",
         ],
         access_log_format: Some("reqid=$request_id remote=$remote_addr peer=$peer_addr route=$route status=$status bytes=$body_bytes_sent elapsed=$request_time_ms"),
+        config_api_token: Some("change-me-admin-token"),
     ),
     upstreams: [
         UpstreamConfig(

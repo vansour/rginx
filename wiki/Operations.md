@@ -54,23 +54,32 @@ cargo build -p rginx
 最小示例：
 
 ```ron
+server: ServerConfig(
+    listen: "127.0.0.1:8080",
+    config_api_token: Some("change-me-admin-token"),
+),
+locations: [
 LocationConfig(
     matcher: Exact("/-/config"),
     handler: Config,
     allow_cidrs: ["127.0.0.1/32", "::1/128"],
 )
+]
 ```
 
 读取当前生效配置：
 
 ```bash
-curl http://127.0.0.1:8080/-/config
+curl \
+  -H 'Authorization: Bearer change-me-admin-token' \
+  http://127.0.0.1:8080/-/config
 ```
 
 应用新配置：
 
 ```bash
 curl -X PUT \
+  -H 'Authorization: Bearer change-me-admin-token' \
   -H 'Content-Type: application/ron; charset=utf-8' \
   --data-binary @configs/rginx.ron \
   http://127.0.0.1:8080/-/config
@@ -79,6 +88,7 @@ curl -X PUT \
 边界：
 
 - `Config` 路由必须是 `Exact(...)`，并且必须配置非空 `allow_cidrs`
+- `Config` 路由还要求 `server.config_api_token`，请求必须带 `Authorization: Bearer <token>`
 - `PUT` body 必须是非空、有效 UTF-8 的完整 RON 文档
 - `PUT` body 当前限制为 1 MiB；超限会返回 `413 Payload Too Large`
 - 当前只支持完整文档替换，不支持 partial patch
