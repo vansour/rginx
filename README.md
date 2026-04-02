@@ -4,11 +4,9 @@
 
 当前正式发布线收口为 `v0.1.1`。当前正在准备下一条预发布标签 `v0.1.2-rc.1`，用于验证最近一轮测试、文档和发布流程补强。
 
-稳定支持范围、当前明确限制和正式版发布闸门见：
+当前明确限制、演进方向和发布前收口项见：
 
-- [wiki/Capability-Matrix.md](wiki/Capability-Matrix.md)
 - [ROADMAP.md](ROADMAP.md)
-- [wiki/Release-Gate.md](wiki/Release-Gate.md)
 
 许可证见：
 
@@ -74,23 +72,19 @@
 如果你想先判断项目边界，建议优先看：
 
 - [ROADMAP.md](ROADMAP.md)
-- [wiki/Release-Gate.md](wiki/Release-Gate.md)
 
-如果你想先跑起来，建议按下面顺序读：
+如果你想先跑起来，优先看本 README 里的“快速开始”和“配置结构”两节。
 
-- [wiki/Quick-Start.md](wiki/Quick-Start.md)
-- [wiki/Configuration.md](wiki/Configuration.md)
-- [wiki/Examples.md](wiki/Examples.md)
+如果你准备改代码，建议从下面这些目录开始：
 
-如果你准备改代码，建议优先看：
-
-- [wiki/Architecture.md](wiki/Architecture.md)
-- [wiki/Development.md](wiki/Development.md)
-- [wiki/Refactor-Plan.md](wiki/Refactor-Plan.md)
+- `crates/rginx-app/src`
+- `crates/rginx-config/src`
+- `crates/rginx-http/src`
+- `crates/rginx-runtime/src`
 
 ## 快速开始
 
-源码目录下的默认配置文件是 `configs/rginx.ron`。安装版会优先尝试 `<prefix>/etc/rginx/rginx.ron`，也支持通过 `rginx_config` 或 `--config` 显式指定配置文件。若你安装时使用了自定义 `--config-dir`，运行时也应继续通过 `rginx_config` 或 `--config` 指向那份活跃配置。
+源码目录下的默认配置文件是 `configs/rginx.ron`。安装版会优先尝试固定的 nginx 风格活跃配置 `/etc/rginx/rginx.conf`。也支持通过 `rginx_config` 或 `--config` 显式指定配置文件。
 
 ### 一键安装
 
@@ -110,20 +104,15 @@ curl -fsSL https://raw.githubusercontent.com/vansour/rginx/main/scripts/install.
 
 安装脚本默认会：
 
-- 安装 `rginx` 到 `<prefix>/bin/rginx`
-- 安装卸载脚本到 `<prefix>/bin/rginx-uninstall`
-- 安装活跃配置到 `<prefix>/etc/rginx/rginx.ron`
-- 安装示例配置到 `<prefix>/share/rginx/configs`
-
-默认前缀：
-
-- Linux: `/usr/local`
+- 安装 `rginx` 到 `/usr/sbin/rginx`
+- 安装卸载脚本到 `/usr/sbin/rginx-uninstall`
+- 安装活跃配置到 `/etc/rginx/rginx.conf`
+- 创建 `conf.d` 目录 `/etc/rginx/conf.d`
+- 安装示例配置到同一配置目录下的 `examples/`
 
 常用参数：
 
 ```bash
-./scripts/install.sh --mode source --prefix /tmp/rginx
-./scripts/install.sh --mode source --prefix /tmp/rginx --config-dir /tmp/rginx-config
 ./scripts/install.sh --mode source --force
 ```
 
@@ -146,12 +135,6 @@ rginx-uninstall
 
 ```bash
 rginx-uninstall --purge-config
-```
-
-如果你使用了自定义前缀或配置目录，也可以显式指定：
-
-```bash
-./scripts/uninstall.sh --prefix /tmp/rginx --config-dir /tmp/rginx-config --purge-config
 ```
 
 ### 源码运行
@@ -190,28 +173,6 @@ cargo build -p rginx
 - `configs/rginx-https-custom-ca-example.ron`
 - `configs/rginx-https-insecure-example.ron`
 - `configs/rginx-vhosts-example.ron`
-
-## Wiki
-
-仓库内已经补了一套本地 wiki，入口见：
-
-- [wiki/Home.md](wiki/Home.md)
-
-如果要把仓库内 `wiki/` 同步到 GitHub Wiki 仓库，可直接运行：
-
-```bash
-./scripts/sync-wiki.sh
-```
-
-推荐阅读顺序：
-
-- [wiki/Quick-Start.md](wiki/Quick-Start.md)
-- [wiki/Configuration.md](wiki/Configuration.md)
-- [wiki/Routing-and-Handlers.md](wiki/Routing-and-Handlers.md)
-- [wiki/Upstreams.md](wiki/Upstreams.md)
-- [wiki/Operations.md](wiki/Operations.md)
-- [wiki/Deployment-and-Service-Hosting.md](wiki/Deployment-and-Service-Hosting.md)
-- [wiki/Roadmap-and-Gaps.md](wiki/Roadmap-and-Gaps.md)
 
 ## 配置结构
 
@@ -953,7 +914,6 @@ tag 被 push 之后，GitHub Actions 会自动：
 - `scripts/install.sh`
 - `scripts/uninstall.sh`
 - `scripts/prepare-release.sh`
-- `scripts/sync-wiki.sh`
 - `README.md`
 - `LICENSE*`
 
@@ -989,7 +949,11 @@ Release Notes 分类规则来自：
 
 ## 运维操作
 
-如果你需要更具体的“安装布局、管理接口隔离、外部 supervisor 托管”建议，见 [wiki/Deployment-and-Service-Hosting.md](wiki/Deployment-and-Service-Hosting.md)。
+如果你需要更具体的“安装布局、管理接口隔离、外部 supervisor 托管”建议，可以直接按下面的约定部署：
+
+- 默认前缀 `/usr` 时使用 `/usr/sbin/rginx`
+- 活跃配置使用 `/etc/rginx/rginx.conf`
+- 预留附加配置目录 `/etc/rginx/conf.d`
 
 ### 热重载
 
@@ -1020,10 +984,6 @@ kill -HUP <pid>
 - 动态配置 API 当前只支持完整文档替换，不支持 partial patch
 - `SO_REUSEPORT` 多进程 worker 形态当前仍未支持
 - 热重载不能切换监听地址、`runtime.worker_threads` 或 `runtime.accept_workers`
-
-更完整的稳定支持范围、非目标能力、运维前提和正式版发布闸门，见 [wiki/Release-Gate.md](wiki/Release-Gate.md)。
-
-如果你想快速看“当前稳定支持什么、主要由哪些测试覆盖”，见 [wiki/Capability-Matrix.md](wiki/Capability-Matrix.md)。
 
 更细致的能力矩阵、工程演进观察和建议阶段规划，见 [ROADMAP.md](ROADMAP.md)。
 
