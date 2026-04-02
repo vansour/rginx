@@ -10,8 +10,6 @@ LOCAL_ROOT=""
 
 MODE="auto"
 VERSION="latest"
-PREFIX=""
-CONFIG_DIR=""
 FORCE=0
 TMP_ROOT=""
 SUDO=""
@@ -28,10 +26,6 @@ Options:
       release : 直接从 GitHub Release 下载并安装
   --version <tag|latest>
       release 模式下使用的版本，默认 latest；latest 只解析最新稳定版
-  --prefix <path>
-      安装前缀。默认 /usr/local
-  --config-dir <path>
-      活跃配置目录，默认 <prefix>/etc/rginx
   --force
       强制覆盖已存在的活跃配置文件
   -h, --help
@@ -83,16 +77,6 @@ while [[ $# -gt 0 ]]; do
             VERSION="$2"
             shift 2
             ;;
-        --prefix)
-            [[ $# -ge 2 ]] || die "--prefix requires a value"
-            PREFIX="$2"
-            shift 2
-            ;;
-        --config-dir)
-            [[ $# -ge 2 ]] || die "--config-dir requires a value"
-            CONFIG_DIR="$2"
-            shift 2
-            ;;
         --force)
             FORCE=1
             shift
@@ -106,10 +90,6 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
-
-default_prefix() {
-    printf '%s\n' "/usr/local"
-}
 
 nearest_existing_parent() {
     local path="$1"
@@ -128,7 +108,7 @@ prepare_privileges() {
         return
     fi
 
-    for target in "${BIN_DIR}" "${CONFIG_DIR}" "${DOC_DIR}" "${SHARE_DIR}"; do
+    for target in "${SBIN_DIR}" "${CONFIG_DIR}" "${DOC_DIR}" "${SHARE_DIR}"; do
         parent="$(nearest_existing_parent "${target}")"
         if [[ ! -w "${parent}" ]]; then
             have sudo || die "install target requires elevated privileges, but sudo is not available"
@@ -275,14 +255,14 @@ stage_from_release() {
     STAGED_UNINSTALL="${unpack_dir}/scripts/uninstall.sh"
 }
 
-PREFIX="${PREFIX:-$(default_prefix)}"
-CONFIG_DIR="${CONFIG_DIR:-${PREFIX}/etc/rginx}"
-BIN_DIR="${PREFIX}/bin"
-SHARE_DIR="${PREFIX}/share/rginx"
-DOC_DIR="${PREFIX}/share/doc/rginx"
-EXAMPLES_DIR="${SHARE_DIR}/configs"
-MANIFEST_PATH="${SHARE_DIR}/install-manifest.txt"
-ACTIVE_CONFIG="${CONFIG_DIR}/rginx.ron"
+PREFIX="/usr"
+CONFIG_DIR="/etc/rginx"
+SBIN_DIR="/usr/sbin"
+SHARE_DIR="/usr/share/rginx"
+DOC_DIR="/usr/share/doc/rginx"
+CONF_D_DIR="${CONFIG_DIR}/conf.d"
+EXAMPLES_DIR="${CONFIG_DIR}/examples"
+ACTIVE_CONFIG="${CONFIG_DIR}/rginx.conf"
 
 resolve_mode
 
@@ -306,12 +286,12 @@ prepare_privileges
 
 log "resolved install mode: ${MODE}"
 log "installing to prefix ${PREFIX}"
-run_root install -d "${BIN_DIR}" "${CONFIG_DIR}" "${SHARE_DIR}" "${DOC_DIR}"
+run_root install -d "${SBIN_DIR}" "${CONFIG_DIR}" "${CONF_D_DIR}" "${SHARE_DIR}" "${DOC_DIR}"
 run_root rm -rf "${EXAMPLES_DIR}"
 run_root install -d "${EXAMPLES_DIR}"
 
-run_root install -m 755 "${STAGED_BIN}" "${BIN_DIR}/rginx"
-run_root install -m 755 "${STAGED_UNINSTALL}" "${BIN_DIR}/rginx-uninstall"
+run_root install -m 755 "${STAGED_BIN}" "${SBIN_DIR}/rginx"
+run_root install -m 755 "${STAGED_UNINSTALL}" "${SBIN_DIR}/rginx-uninstall"
 
 for doc in README.md CHANGELOG.md LICENSE LICENSE-APACHE LICENSE-MIT; do
     if [[ -f "${STAGED_ROOT}/${doc}" ]]; then
@@ -330,25 +310,9 @@ else
     ACTIVE_CONFIG_RESULT="preserved"
 fi
 
-TMP_MANIFEST="$(mktemp)"
-{
-    printf 'prefix=%q\n' "${PREFIX}"
-    printf 'config_dir=%q\n' "${CONFIG_DIR}"
-    printf 'bin_dir=%q\n' "${BIN_DIR}"
-    printf 'share_dir=%q\n' "${SHARE_DIR}"
-    printf 'doc_dir=%q\n' "${DOC_DIR}"
-    printf 'examples_dir=%q\n' "${EXAMPLES_DIR}"
-    printf 'active_config=%q\n' "${ACTIVE_CONFIG}"
-} > "${TMP_MANIFEST}"
-run_root install -m 644 "${TMP_MANIFEST}" "${MANIFEST_PATH}"
-rm -f "${TMP_MANIFEST}"
-
-log "binary: ${BIN_DIR}/rginx"
-log "uninstall: ${BIN_DIR}/rginx-uninstall"
+log "binary: ${SBIN_DIR}/rginx"
+log "uninstall: ${SBIN_DIR}/rginx-uninstall"
 log "active config (${ACTIVE_CONFIG_RESULT}): ${ACTIVE_CONFIG}"
+log "conf.d dir: ${CONF_D_DIR}"
 log "example configs: ${EXAMPLES_DIR}"
-log "default config search will now pick ${ACTIVE_CONFIG} when running ${BIN_DIR}/rginx"
-
-if [[ "${CONFIG_DIR}" != "${PREFIX}/etc/rginx" ]]; then
-    log "custom config dir detected; run with --config ${ACTIVE_CONFIG} or set rginx_config=${ACTIVE_CONFIG}"
-fi
+log "default config search will now pick ${ACTIVE_CONFIG} when running ${SBIN_DIR}/rginx"

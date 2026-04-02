@@ -35,7 +35,7 @@ fn default_config_path() -> PathBuf {
     }
 
     #[cfg(target_os = "linux")]
-    for candidate in ["/etc/rginx/rginx.ron", "/usr/local/etc/rginx/rginx.ron"] {
+    for candidate in ["/etc/rginx/rginx.conf", "/etc/rginx/rginx.ron"] {
         let path = PathBuf::from(candidate);
         if path.exists() {
             return path;
@@ -46,7 +46,15 @@ fn default_config_path() -> PathBuf {
 }
 
 fn installed_config_path(executable: &Path) -> Option<PathBuf> {
-    executable.parent()?.parent().map(|prefix| prefix.join("etc/rginx/rginx.ron"))
+    let bin_dir = executable.parent()?;
+    let prefix = bin_dir.parent()?;
+    let bin_dir_name = bin_dir.file_name()?.to_str()?;
+
+    if prefix != Path::new("/usr") || !matches!(bin_dir_name, "sbin" | "bin") {
+        return None;
+    }
+
+    Some(PathBuf::from("/etc/rginx/rginx.conf"))
 }
 
 #[cfg(test)]
@@ -56,18 +64,25 @@ mod tests {
     use super::installed_config_path;
 
     #[test]
-    fn installed_config_path_uses_prefix_relative_etc_directory() {
-        let executable = PathBuf::from("/usr/local/bin/rginx");
+    fn installed_config_path_uses_etc_directory_for_usr_sbin_layout() {
+        let executable = PathBuf::from("/usr/sbin/rginx");
 
         assert_eq!(
             installed_config_path(&executable),
-            Some(PathBuf::from("/usr/local/etc/rginx/rginx.ron"))
+            Some(PathBuf::from("/etc/rginx/rginx.conf"))
         );
     }
 
     #[test]
     fn installed_config_path_returns_none_for_rootless_paths() {
         let executable = PathBuf::from("rginx");
+
+        assert_eq!(installed_config_path(&executable), None);
+    }
+
+    #[test]
+    fn installed_config_path_returns_none_for_non_system_prefixes() {
+        let executable = PathBuf::from("/usr/local/sbin/rginx");
 
         assert_eq!(installed_config_path(&executable), None);
     }
