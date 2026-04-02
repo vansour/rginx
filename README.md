@@ -1,8 +1,8 @@
 # rginx
 
-`rginx` 的产品定义是：一个面向中小规模部署的 Rust 入口反向代理，稳定支持 TLS 终止、Host/Path 路由、上游代理、基础静态文件、基础流量治理、健康检查、热重载和可观测性。
+`rginx` 的产品定义是：一个面向中小规模部署的 Rust 入口反向代理，稳定支持 TLS 终止、Host/Path 路由、上游代理、基础流量治理、健康检查、热重载和可观测性。
 
-当前正式发布线收口为 `v0.1.1`。当前正在准备下一条预发布标签 `v0.1.2-rc.1`，用于验证最近一轮测试、文档和发布流程补强。
+当前正式发布线收口为 `v0.1.1`。当前正在准备下一条预发布标签 `v0.1.2-rc.2`，用于验证最近一轮测试、文档和发布流程补强。
 
 当前明确限制、演进方向和发布前收口项见：
 
@@ -19,7 +19,7 @@
 - 基于 RON 配置文件启动反向代理
 - 单进程多 worker 运行时，支持可配置的 tokio worker 线程数与 accept worker 数
 - `Exact("/foo")` / `Prefix("/api")` 两种路由匹配，并支持按 `grpc_service` / `grpc_method` 细分 gRPC 路由
-- `Static` / `Proxy` / `File` / `Return` / `Status` / `Metrics` / `Config` 七种处理器
+- `Proxy` / `Return` / `Status` / `Metrics` / `Config` 五种处理器
 - 多上游节点轮询、加权与主备转发
 - 支持 `round_robin`、`ip_hash`、`least_conn` 三种 upstream 选择策略，以及 peer `weight` / `backup`
 - 幂等或可重放请求的上游重试
@@ -38,7 +38,6 @@
 - 支持 `server.access_log_format` 自定义 access log 模板
 - 基础动态配置 API：显式配置 `Config` 管理路由后，可读取当前生效配置并通过 HTTP `PUT` 应用完整 RON 配置
 - 配置支持相对 `include` 和字符串环境变量展开
-- 静态文件支持 `index` / `try_files` / 可选 `autoindex`、`HEAD`、单段 `Range` 和 `206 Partial Content`
 - 入站 TLS 终止：`server.tls`
 - 出站 TLS 模式：
   - `NativeRoots`
@@ -59,7 +58,7 @@
 | `crates/rginx-app` | 二进制入口、CLI、集成测试 |
 | `crates/rginx-config` | 配置加载、`include` / 环境变量展开、校验、编译 |
 | `crates/rginx-core` | 共享运行时模型、错误类型、upstream 选择逻辑 |
-| `crates/rginx-http` | HTTP 服务、handler、proxy、文件服务、限流、指标、TLS |
+| `crates/rginx-http` | HTTP 服务、handler、proxy、限流、指标、TLS |
 | `crates/rginx-runtime` | 运行时编排、信号处理、热重载、主动健康检查 |
 | `crates/rginx-observability` | tracing / logging 初始化 |
 
@@ -84,7 +83,7 @@
 
 ## 快速开始
 
-源码目录下的默认配置文件是 `configs/rginx.ron`。安装版会优先尝试固定的 nginx 风格活跃配置 `/etc/rginx/rginx.conf`。也支持通过 `rginx_config` 或 `--config` 显式指定配置文件。
+源码目录下的默认配置文件是 `configs/rginx.ron`。安装版会优先尝试固定的活跃配置 `/etc/rginx/rginx.ron`。也支持通过 `rginx_config` 或 `--config` 显式指定配置文件。
 
 ### 一键安装
 
@@ -100,15 +99,14 @@
 curl -fsSL https://raw.githubusercontent.com/vansour/rginx/main/scripts/install.sh | bash -s -- --mode release --version <tag>
 ```
 
-其中 `latest` 只会解析最新稳定版；如果你要安装预发布版，请显式传入具体 tag，例如 `v0.1.2-rc.1`。
+其中 `latest` 只会解析最新稳定版；如果你要安装预发布版，请显式传入具体 tag，例如 `v0.1.2-rc.2`。
 
 安装脚本默认会：
 
 - 安装 `rginx` 到 `/usr/sbin/rginx`
 - 安装卸载脚本到 `/usr/sbin/rginx-uninstall`
-- 安装活跃配置到 `/etc/rginx/rginx.conf`
-- 创建 `conf.d` 目录 `/etc/rginx/conf.d`
-- 安装示例配置到同一配置目录下的 `examples/`
+- 安装活跃配置到 `/etc/rginx/rginx.ron`
+- 安装默认站点片段到 `/etc/rginx/conf.d/default.ron`
 
 常用参数：
 
@@ -120,6 +118,7 @@ curl -fsSL https://raw.githubusercontent.com/vansour/rginx/main/scripts/install.
 
 ```bash
 rginx check
+rginx -t
 rginx
 ```
 
@@ -149,6 +148,7 @@ cargo run -p rginx -- --config configs/rginx.ron
 
 ```bash
 cargo run -p rginx -- check --config configs/rginx.ron
+cargo run -p rginx -- -t --config configs/rginx.ron
 ```
 
 如果你先构建：
@@ -159,20 +159,12 @@ cargo build -p rginx
 ./target/debug/rginx check --config configs/rginx.ron
 ```
 
-### 仓库自带示例配置
+### 仓库默认配置
 
-仓库已自带几个示例配置：
+仓库里的 `configs/` 现在直接镜像安装后的活跃配置目录：
 
 - `configs/rginx.ron`
-- `configs/rginx-admin-example.ron`
-- `configs/rginx-ip-hash-example.ron`
-- `configs/rginx-least-conn-example.ron`
-- `configs/rginx-weighted-example.ron`
-- `configs/rginx-backup-example.ron`
-- `configs/rginx-https-example.ron`
-- `configs/rginx-https-custom-ca-example.ron`
-- `configs/rginx-https-insecure-example.ron`
-- `configs/rginx-vhosts-example.ron`
+- `configs/conf.d/default.ron`
 
 ## 配置结构
 
@@ -186,7 +178,7 @@ Config(
         accept_workers: None,
     ),
     server: ServerConfig(
-        listen: "0.0.0.0:8080",
+        listen: "0.0.0.0:80",
         server_names: [],
         trusted_proxies: [],
         tls: None,
@@ -195,8 +187,10 @@ Config(
     locations: [
         LocationConfig(
             matcher: Exact("/"),
-            handler: Static(
-                body: "ok\n",
+            handler: Return(
+                status: 200,
+                location: "",
+                body: Some("ok\n"),
             ),
         ),
     ],
@@ -209,13 +203,14 @@ Config(
 配置加载阶段支持两类轻量预处理：
 
 - 独立一行的 `// @include "relative/path.ron"`，会把目标文件内容按当前位置做文本级拼接
+- 独立一行的 `// @include "conf.d/*.ron"`，会把目录下按文件名字典序排序的 `*.ron` 片段依次展开
 - 双引号字符串里的 `${VAR}` 和 `${VAR:-default}`，会在解析前按进程环境变量展开
 
 示例：
 
 ```ron
 server: ServerConfig(
-    listen: "${rginx_listen:-127.0.0.1:8080}",
+    listen: "${rginx_listen:-0.0.0.0:80}",
 ),
 locations: [
     // @include "fragments/routes.ron"
@@ -225,10 +220,21 @@ locations: [
 边界：
 
 - `include` 路径相对“当前包含它的配置文件所在目录”解析
+- `// @include "conf.d/*.ron"` 目前只支持 `*.ron` 这种文件通配形式
 - `include` 指令必须单独占一行；被包含文件内容必须在插入位置本身就是合法 RON 片段
 - 环境变量只在普通双引号字符串里展开，不会替换数字、枚举名或其他非字符串 token
 - 如果你需要字符串里保留字面量 `$`，使用 `$$`
 - 缺失的 `${VAR}` 会直接报配置错误；`${VAR:-default}` 会使用默认值
+
+如果你想按 nginx 风格拆站点配置，推荐让 `/etc/rginx/rginx.ron` 保留全局 `runtime / server / upstreams / locations`，并在 `servers` 里写：
+
+```ron
+servers: [
+    // @include "conf.d/*.ron"
+],
+```
+
+仓库默认只自带 `/etc/rginx/conf.d/default.ron` 这一个站点片段；如果你后续要继续按 nginx 风格拆更多站点，直接往 `/etc/rginx/conf.d/*.ron` 里追加新的 `VirtualHostConfig(...)` 文件即可。
 
 ### `runtime`
 
@@ -238,7 +244,7 @@ locations: [
 
 ### `server`
 
-- `listen`: 监听地址，例如 `"0.0.0.0:8080"`
+- `listen`: 监听地址，例如 `"0.0.0.0:80"`
 - `server_names`: 可选。默认虚拟主机匹配的域名列表；为空时可作为兜底主机使用
 - `trusted_proxies`: 可选。只有当 `rginx` 部署在另一层代理、LB 或 CDN 后面时才需要配置，可写单个 IP 或 CIDR
 - `keep_alive`: 可选。是否启用 HTTP/1.1 keep-alive，默认 `true`
@@ -340,7 +346,7 @@ locations: [
 每个路由可配置：
 
 - `matcher`: `Exact("/foo")` 或 `Prefix("/api")`
-- `handler`: `Static` / `Proxy` / `File` / `Return` / `Status` / `Metrics` / `Config`
+- `handler`: `Proxy` / `Return` / `Status` / `Metrics` / `Config`
 - `grpc_service`: 可选。只在 gRPC / grpc-web 请求且 service 匹配时命中
 - `grpc_method`: 可选。只在 gRPC / grpc-web 请求且 method 匹配时命中
 - `allow_cidrs`
@@ -365,7 +371,7 @@ Config(
         shutdown_timeout_secs: 10,
     ),
     server: ServerConfig(
-        listen: "0.0.0.0:8080",
+        listen: "0.0.0.0:80",
     ),
     upstreams: [
         UpstreamConfig(
@@ -381,10 +387,10 @@ Config(
     locations: [
         LocationConfig(
             matcher: Exact("/"),
-            handler: Static(
-                status: Some(200),
-                content_type: Some("text/plain; charset=utf-8"),
-                body: "rginx is running.\n",
+            handler: Return(
+                status: 200,
+                location: "",
+                body: Some("rginx is running.\n"),
             ),
         ),
         LocationConfig(
@@ -448,7 +454,7 @@ locations: [
 
 ```ron
 server: ServerConfig(
-    listen: "127.0.0.1:8080",
+    listen: "0.0.0.0:80",
     config_api_token: Some("change-me-admin-token"),
 ),
 locations: [
@@ -465,7 +471,7 @@ LocationConfig(
 ```bash
 curl \
   -H 'Authorization: Bearer change-me-admin-token' \
-  http://127.0.0.1:8080/-/config
+  http://127.0.0.1/-/config
 ```
 
 用完整 RON 文档替换运行中配置：
@@ -475,7 +481,7 @@ curl -X PUT \
   -H 'Authorization: Bearer change-me-admin-token' \
   -H 'Content-Type: application/ron; charset=utf-8' \
   --data-binary @configs/rginx.ron \
-  http://127.0.0.1:8080/-/config
+  http://127.0.0.1/-/config
 ```
 
 边界说明：
@@ -506,7 +512,7 @@ LocationConfig(
 
 ```ron
 server: ServerConfig(
-    listen: "0.0.0.0:8080",
+    listen: "0.0.0.0:80",
     trusted_proxies: [
         "10.0.0.0/8",
         "192.168.0.0/16",
@@ -551,15 +557,17 @@ Config(
         shutdown_timeout_secs: 10,
     ),
     server: ServerConfig(
-        listen: "0.0.0.0:8080",
+        listen: "0.0.0.0:80",
         server_names: ["default.example.com"],
     ),
     upstreams: [],
     locations: [
         LocationConfig(
             matcher: Exact("/"),
-            handler: Static(
-                body: "default site\n",
+            handler: Return(
+                status: 200,
+                location: "",
+                body: Some("default site\n"),
             ),
         ),
     ],
@@ -569,14 +577,18 @@ Config(
             locations: [
                 LocationConfig(
                     matcher: Exact("/"),
-                    handler: Static(
-                        body: "api root\n",
+                    handler: Return(
+                        status: 200,
+                        location: "",
+                        body: Some("api root\n"),
                     ),
                 ),
                 LocationConfig(
                     matcher: Prefix("/v1"),
-                    handler: Static(
-                        body: "api v1\n",
+                    handler: Return(
+                        status: 200,
+                        location: "",
+                        body: Some("api v1\n"),
                     ),
                 ),
             ],
@@ -586,8 +598,10 @@ Config(
             locations: [
                 LocationConfig(
                     matcher: Exact("/"),
-                    handler: Static(
-                        body: "internal site\n",
+                    handler: Return(
+                        status: 200,
+                        location: "",
+                        body: Some("internal site\n"),
                     ),
                 ),
             ],
@@ -691,7 +705,7 @@ UpstreamConfig(
 
 ```ron
 server: ServerConfig(
-    listen: "0.0.0.0:8080",
+    listen: "0.0.0.0:80",
     trusted_proxies: ["127.0.0.1/32"],
 ),
 
@@ -812,7 +826,7 @@ upstreams: [
 
 ```ron
 ServerConfig(
-    listen: "0.0.0.0:8080",
+    listen: "0.0.0.0:80",
     access_log_format: Some("reqid=$request_id grpc=$grpc_protocol svc=$grpc_service rpc=$grpc_method status=$status grpc_status=$grpc_status request=\"$request\" bytes=$body_bytes_sent elapsed=$request_time_ms"),
 )
 ```
@@ -924,7 +938,7 @@ Release Notes 分类规则来自：
 建议的本地发版前检查：
 
 ```bash
-./scripts/prepare-release.sh --tag v0.1.2-rc.1
+./scripts/prepare-release.sh --tag v0.1.2-rc.2
 ```
 
 建议流程：
@@ -952,8 +966,8 @@ Release Notes 分类规则来自：
 如果你需要更具体的“安装布局、管理接口隔离、外部 supervisor 托管”建议，可以直接按下面的约定部署：
 
 - 默认前缀 `/usr` 时使用 `/usr/sbin/rginx`
-- 活跃配置使用 `/etc/rginx/rginx.conf`
-- 预留附加配置目录 `/etc/rginx/conf.d`
+- 活跃配置使用 `/etc/rginx/rginx.ron`
+- 站点拆分配置放在 `/etc/rginx/conf.d/*.ron`
 
 ### 热重载
 
@@ -961,6 +975,12 @@ Release Notes 分类规则来自：
 
 ```bash
 kill -HUP <pid>
+```
+
+也支持 nginx 风格命令：
+
+```bash
+rginx -s reload
 ```
 
 当前热重载有几个启动期限制：`listen`、`runtime.worker_threads` 和 `runtime.accept_workers` 不能在重载时修改，变更这些参数需要重启进程。
@@ -971,8 +991,16 @@ kill -HUP <pid>
 
 - `Ctrl-C`
 - `SIGTERM`
+- `SIGQUIT`
 
 `rginx` 会停止接受新连接，并在 `runtime.shutdown_timeout_secs` 内等待已有请求排空。
+
+也支持 nginx 风格命令：
+
+```bash
+rginx -s quit
+rginx -s stop
+```
 
 ## 当前限制
 
@@ -995,7 +1023,7 @@ kill -HUP <pid>
 - TLS 终止
 - 上游 HTTPS
 - Host/Path 路由
-- 基础静态文件
+- 状态与管理响应
 - 状态与指标
 - ACL 与限流
 - 健康检查

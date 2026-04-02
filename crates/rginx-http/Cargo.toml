@@ -9,7 +9,7 @@ homepage.workspace = true
 documentation.workspace = true
 readme.workspace = true
 rust-version.workspace = true
-description = "HTTP server, routing, proxying, file serving, and metrics for rginx."
+description = "HTTP server, routing, proxying, and metrics for rginx."
 
 [dependencies]
 base64.workspace = true
@@ -22,7 +22,6 @@ http-body-util.workspace = true
 hyper.workspace = true
 hyper-rustls.workspace = true
 hyper-util.workspace = true
-percent-encoding.workspace = true
 pin-project-lite.workspace = true
 rginx-config = { path = "../rginx-config" }
 rginx-core = { path = "../rginx-core" }
@@ -32,5 +31,4 @@ serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util"] }
 tokio-rustls.workspace = true
-tokio-util.workspace = true
 tracing.workspace = true

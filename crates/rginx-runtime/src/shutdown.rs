@@ -11,11 +11,13 @@ pub async fn wait_for_signal() -> Result<RuntimeSignal> {
     use tokio::signal::unix::{SignalKind, signal};
 
     let mut terminate = signal(SignalKind::terminate())?;
+    let mut quit = signal(SignalKind::quit())?;
     let mut hangup = signal(SignalKind::hangup())?;
 
     tokio::select! {
         _ = tokio::signal::ctrl_c() => Ok(RuntimeSignal::Shutdown),
         _ = terminate.recv() => Ok(RuntimeSignal::Shutdown),
+        _ = quit.recv() => Ok(RuntimeSignal::Shutdown),
         _ = hangup.recv() => Ok(RuntimeSignal::Reload),
     }
 }

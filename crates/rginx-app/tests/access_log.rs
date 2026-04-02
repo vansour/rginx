@@ -9,7 +9,7 @@ use support::{READY_ROUTE_CONFIG, ServerHarness, reserve_loopback_addr};
 #[test]
 fn custom_access_log_format_emits_expected_line() {
     let listen_addr = reserve_loopback_addr();
-    let mut server = ServerHarness::spawn("rginx-access-log", |_| static_config(listen_addr));
+    let mut server = ServerHarness::spawn("rginx-access-log", |_| return_config(listen_addr));
     server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
 
     let response = send_http_request(
@@ -31,9 +31,9 @@ fn custom_access_log_format_emits_expected_line() {
     );
 }
 
-fn static_config(listen_addr: SocketAddr) -> String {
+fn return_config(listen_addr: SocketAddr) -> String {
     format!(
-        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n        access_log_format: Some(\"ACCESS reqid=$request_id status=$status request=\\\"$request\\\" bytes=$body_bytes_sent ua=\\\"$http_user_agent\\\"\"),\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Static(\n                status: Some(200),\n                content_type: Some(\"text/plain; charset=utf-8\"),\n                body: \"ok\\n\",\n            ),\n        ),\n    ],\n)\n",
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n        access_log_format: Some(\"ACCESS reqid=$request_id status=$status request=\\\"$request\\\" bytes=$body_bytes_sent ua=\\\"$http_user_agent\\\"\"),\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Return(\n                status: 200,\n                location: \"\",\n                body: Some(\"ok\\n\"),\n            ),\n        ),\n    ],\n)\n",
         listen_addr.to_string(),
         ready_route = READY_ROUTE_CONFIG,
     )

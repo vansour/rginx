@@ -16,7 +16,7 @@ fn header_read_timeout_closes_slow_request_connections() {
     let listen_addr = reserve_loopback_addr();
     let mut server = TestServer::spawn(
         listen_addr,
-        static_config(listen_addr, Some("header_read_timeout_secs: Some(1),"), "ok\n"),
+        return_config(listen_addr, Some("header_read_timeout_secs: Some(1),"), "ok\n"),
     );
 
     server.wait_for_body(listen_addr, "/", "ok\n", Duration::from_secs(5));
@@ -40,7 +40,7 @@ fn max_connections_rejects_new_connections_when_limit_is_reached() {
     let listen_addr = reserve_loopback_addr();
     let mut server = TestServer::spawn(
         listen_addr,
-        static_config(listen_addr, Some("max_connections: Some(1),"), "ok\n"),
+        return_config(listen_addr, Some("max_connections: Some(1),"), "ok\n"),
     );
 
     server.wait_for_body(listen_addr, "/", "ok\n", Duration::from_secs(5));
@@ -73,7 +73,7 @@ fn keep_alive_disabled_closes_connections_after_each_response() {
     let listen_addr = reserve_loopback_addr();
     let mut server = TestServer::spawn(
         listen_addr,
-        static_config(listen_addr, Some("keep_alive: Some(false),"), "ok\n"),
+        return_config(listen_addr, Some("keep_alive: Some(false),"), "ok\n"),
     );
 
     server.wait_for_body(listen_addr, "/", "ok\n", Duration::from_secs(5));
@@ -100,7 +100,7 @@ fn max_headers_rejects_requests_with_too_many_headers() {
     let listen_addr = reserve_loopback_addr();
     let mut server = TestServer::spawn(
         listen_addr,
-        static_config(listen_addr, Some("max_headers: Some(2),"), "ok\n"),
+        return_config(listen_addr, Some("max_headers: Some(2),"), "ok\n"),
     );
 
     server.wait_for_body(listen_addr, "/", "ok\n", Duration::from_secs(5));
@@ -237,10 +237,10 @@ impl TestServer {
     }
 }
 
-fn static_config(listen_addr: SocketAddr, server_extra: Option<&str>, body: &str) -> String {
+fn return_config(listen_addr: SocketAddr, server_extra: Option<&str>, body: &str) -> String {
     let extra = server_extra.map(|value| format!("\n        {value}")).unwrap_or_default();
     format!(
-        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},{}\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Static(\n                status: Some(200),\n                content_type: Some(\"text/plain; charset=utf-8\"),\n                body: {:?},\n            ),\n        ),\n    ],\n)\n",
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},{}\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Return(\n                status: 200,\n                location: \"\",\n                body: Some({:?}),\n            ),\n        ),\n    ],\n)\n",
         listen_addr.to_string(),
         extra,
         body,

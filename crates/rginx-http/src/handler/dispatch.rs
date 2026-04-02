@@ -291,9 +291,6 @@ async fn build_route_response(
     request_id: &str,
 ) -> HttpResponse {
     match &action {
-        RouteAction::Static(response) => {
-            text_response(response.status, &response.content_type, response.body.clone())
-        }
         RouteAction::Proxy(proxy) => {
             let downstream_proto = if active.config.tls_enabled() { "https" } else { "http" };
             crate::proxy::forward_request(
@@ -314,7 +311,6 @@ async fn build_route_response(
         RouteAction::Status => status_response(&active, metrics.active_connections()),
         RouteAction::Metrics => metrics_response(&metrics),
         RouteAction::Config => config_response(request, state, active).await,
-        RouteAction::File(target) => crate::file::serve_file(request, target).await,
         RouteAction::Return(action) => {
             let body = action.body.clone().unwrap_or_else(|| {
                 format!("{}\n", action.status.canonical_reason().unwrap_or("Redirect"))

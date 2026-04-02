@@ -109,31 +109,6 @@ fn validate_handler(
         }
     }
 
-    if let HandlerConfig::File { root, index, try_files, autoindex: _ } = handler {
-        if root.trim().is_empty() {
-            return Err(Error::Config(format!("{route_scope} file root must not be empty")));
-        }
-
-        if let Some(index) = index
-            && index.trim().is_empty()
-        {
-            return Err(Error::Config(format!("{route_scope} file index must not be empty")));
-        }
-
-        if let Some(try_files) = try_files {
-            if try_files.is_empty() {
-                return Err(Error::Config(format!("{route_scope} try_files must not be empty")));
-            }
-            for candidate in try_files {
-                if candidate.trim().is_empty() {
-                    return Err(Error::Config(format!(
-                        "{route_scope} try_files entries must not be empty"
-                    )));
-                }
-            }
-        }
-    }
-
     if let HandlerConfig::Return { status, location, .. } = handler {
         if *status < 100 || *status > 599 {
             return Err(Error::Config(format!(

@@ -2,7 +2,7 @@ use super::grpc_web::{
     GrpcWebEncoding, GrpcWebMode, GrpcWebResponseBody, GrpcWebTextEncodeBody,
     extract_grpc_initial_trailers,
 };
-use super::health::{ActivePeerBody, ActivePeerGuard};
+use super::health::{ActivePeerBody, ActivePeerGuard, PeerFailureStatus};
 use super::request_body::{PrepareRequestError, PreparedProxyRequest, can_retry_peer_request};
 use super::upgrade::proxy_upgraded_connection;
 use super::*;
@@ -168,8 +168,14 @@ pub async fn forward_request(
         .await
         {
             Ok(Ok(mut response)) => {
-                clients.record_peer_success(&target.upstream_name, &peer.url);
+                let recovered = clients.record_peer_success(&target.upstream_name, &peer.url);
                 metrics.record_upstream_request(&target.upstream_name, &peer.url, "success");
+                record_passive_recovery_transition(
+                    &metrics,
+                    &target.upstream_name,
+                    &peer.url,
+                    recovered,
+                );
                 if attempt_index > 0 {
                     tracing::info!(
                         request_id = %request_id,
@@ -223,8 +229,20 @@ pub async fn forward_request(
             }
             Ok(Err(error)) if can_retry_peer_request(&prepared_request, &peers, attempt_index) => {
                 let failure = clients.record_peer_failure(&target.upstream_name, &peer.url);
-                metrics.record_upstream_request(&target.upstream_name, &peer.url, "error");
                 let next_peer = &peers[attempt_index + 1];
+                record_passive_failure(
+                    &metrics,
+                    &target.upstream_name,
+                    &peer.url,
+                    "error",
+                    failure,
+                );
+                metrics.record_upstream_failover(
+                    &target.upstream_name,
+                    &peer.url,
+                    &next_peer.url,
+                    "error",
+                );
                 tracing::warn!(
                     request_id = %request_id,
                     upstream = %target.upstream_name,
@@ -239,7 +257,13 @@ pub async fn forward_request(
             }
             Ok(Err(error)) => {
                 let failure = clients.record_peer_failure(&target.upstream_name, &peer.url);
-                metrics.record_upstream_request(&target.upstream_name, &peer.url, "error");
+                record_passive_failure(
+                    &metrics,
+                    &target.upstream_name,
+                    &peer.url,
+                    "error",
+                    failure,
+                );
                 tracing::warn!(
                     request_id = %request_id,
                     upstream = %target.upstream_name,
@@ -256,8 +280,20 @@ pub async fn forward_request(
             }
             Err(error) if can_retry_peer_request(&prepared_request, &peers, attempt_index) => {
                 let failure = clients.record_peer_failure(&target.upstream_name, &peer.url);
-                metrics.record_upstream_request(&target.upstream_name, &peer.url, "timeout");
                 let next_peer = &peers[attempt_index + 1];
+                record_passive_failure(
+                    &metrics,
+                    &target.upstream_name,
+                    &peer.url,
+                    "timeout",
+                    failure,
+                );
+                metrics.record_upstream_failover(
+                    &target.upstream_name,
+                    &peer.url,
+                    &next_peer.url,
+                    "timeout",
+                );
                 tracing::warn!(
                     request_id = %request_id,
                     upstream = %target.upstream_name,
@@ -273,7 +309,13 @@ pub async fn forward_request(
             }
             Err(error) => {
                 let failure = clients.record_peer_failure(&target.upstream_name, &peer.url);
-                metrics.record_upstream_request(&target.upstream_name, &peer.url, "timeout");
+                record_passive_failure(
+                    &metrics,
+                    &target.upstream_name,
+                    &peer.url,
+                    "timeout",
+                    failure,
+                );
                 tracing::warn!(
                     request_id = %request_id,
                     upstream = %target.upstream_name,
@@ -296,6 +338,42 @@ pub async fn forward_request(
     }
 
     bad_gateway(&request_headers, format!("upstream `{}` is unavailable\n", target.upstream_name))
+}
+
+fn record_passive_failure(
+    metrics: &Metrics,
+    upstream_name: &str,
+    peer_url: &str,
+    reason: &str,
+    failure: PeerFailureStatus,
+) {
+    metrics.record_upstream_request(upstream_name, peer_url, reason);
+    if failure.entered_cooldown {
+        metrics.record_upstream_peer_transition(
+            upstream_name,
+            peer_url,
+            "passive",
+            "unhealthy",
+            reason,
+        );
+    }
+}
+
+fn record_passive_recovery_transition(
+    metrics: &Metrics,
+    upstream_name: &str,
+    peer_url: &str,
+    recovered: bool,
+) {
+    if recovered {
+        metrics.record_upstream_peer_transition(
+            upstream_name,
+            peer_url,
+            "passive",
+            "healthy",
+            "request_success",
+        );
+    }
 }
 
 pub(super) async fn wait_for_upstream_stage<T>(
@@ -555,4 +633,60 @@ fn build_downstream_response(
     };
 
     Response::from_parts(parts, body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn passive_failure_records_transition_once_when_peer_enters_cooldown() {
+        let metrics = Metrics::default();
+
+        record_passive_failure(
+            &metrics,
+            "backend",
+            "http://127.0.0.1:9000",
+            "timeout",
+            PeerFailureStatus { consecutive_failures: 2, entered_cooldown: true },
+        );
+        record_passive_failure(
+            &metrics,
+            "backend",
+            "http://127.0.0.1:9000",
+            "timeout",
+            PeerFailureStatus { consecutive_failures: 3, entered_cooldown: false },
+        );
+
+        let rendered = metrics.render_prometheus();
+
+        assert!(rendered.contains(
+            "rginx_upstream_requests_total{upstream=\"backend\",peer=\"http://127.0.0.1:9000\",result=\"timeout\"} 2"
+        ));
+        assert!(rendered.contains(
+            "rginx_upstream_peer_transitions_total{upstream=\"backend\",peer=\"http://127.0.0.1:9000\",source=\"passive\",state=\"unhealthy\",reason=\"timeout\"} 1"
+        ));
+    }
+
+    #[test]
+    fn passive_recovery_and_failover_metrics_are_recorded() {
+        let metrics = Metrics::default();
+
+        record_passive_recovery_transition(&metrics, "backend", "http://127.0.0.1:9001", true);
+        metrics.record_upstream_failover(
+            "backend",
+            "http://127.0.0.1:9000",
+            "http://127.0.0.1:9001",
+            "error",
+        );
+
+        let rendered = metrics.render_prometheus();
+
+        assert!(rendered.contains(
+            "rginx_upstream_failovers_total{upstream=\"backend\",from_peer=\"http://127.0.0.1:9000\",to_peer=\"http://127.0.0.1:9001\",reason=\"error\"} 1"
+        ));
+        assert!(rendered.contains(
+            "rginx_upstream_peer_transitions_total{upstream=\"backend\",peer=\"http://127.0.0.1:9001\",source=\"passive\",state=\"healthy\",reason=\"request_success\"} 1"
+        ));
+    }
 }

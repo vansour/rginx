@@ -104,7 +104,7 @@ fn parse_http_response(bytes: &[u8]) -> Result<ParsedResponse, String> {
 
 fn acl_config(listen_addr: SocketAddr) -> String {
     format!(
-        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/allow\"),\n            handler: Static(\n                status: Some(200),\n                content_type: Some(\"text/plain; charset=utf-8\"),\n                body: \"allowed\\n\",\n            ),\n            allow_cidrs: [\"127.0.0.1/32\", \"::1/128\"],\n        ),\n        LocationConfig(\n            matcher: Exact(\"/deny\"),\n            handler: Static(\n                status: Some(200),\n                content_type: Some(\"text/plain; charset=utf-8\"),\n                body: \"should not be returned\\n\",\n            ),\n            deny_cidrs: [\"127.0.0.1/32\", \"::1/128\"],\n        ),\n    ],\n)\n",
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/allow\"),\n            handler: Return(\n                status: 200,\n                location: \"\",\n                body: Some(\"allowed\\n\"),\n            ),\n            allow_cidrs: [\"127.0.0.1/32\", \"::1/128\"],\n        ),\n        LocationConfig(\n            matcher: Exact(\"/deny\"),\n            handler: Return(\n                status: 200,\n                location: \"\",\n                body: Some(\"should not be returned\\n\"),\n            ),\n            deny_cidrs: [\"127.0.0.1/32\", \"::1/128\"],\n        ),\n    ],\n)\n",
         listen_addr.to_string(),
         ready_route = READY_ROUTE_CONFIG,
     )
@@ -112,7 +112,7 @@ fn acl_config(listen_addr: SocketAddr) -> String {
 
 fn rate_limit_config(listen_addr: SocketAddr) -> String {
     format!(
-        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/limited\"),\n            handler: Static(\n                status: Some(200),\n                content_type: Some(\"text/plain; charset=utf-8\"),\n                body: \"limited ok\\n\",\n            ),\n            requests_per_sec: Some(1),\n            burst: Some(0),\n        ),\n    ],\n)\n",
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/limited\"),\n            handler: Return(\n                status: 200,\n                location: \"\",\n                body: Some(\"limited ok\\n\"),\n            ),\n            requests_per_sec: Some(1),\n            burst: Some(0),\n        ),\n    ],\n)\n",
         listen_addr.to_string(),
         ready_route = READY_ROUTE_CONFIG,
     )

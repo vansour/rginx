@@ -1,0 +1,907 @@
+// rginx.ron full reference configuration example
+// rginx.ron 顶层全量参考配置示例
+//
+// Goal / 目标:
+// - This file is the top-level active config example, equivalent to `/etc/rginx/rginx.ron`.
+// - 这个文件是顶层活跃配置示例，对应 `/etc/rginx/rginx.ron`。
+// - Show every currently supported top-level config section.
+// - 展示当前支持的所有顶层配置段。
+// - Keep the file readable as a reference manual.
+// - 让这个文件本身就能作为配置手册来读。
+// - Keep the active part valid for `rginx check --config example/rginx.ron`.
+// - 让当前启用的部分可以直接通过 `rginx check --config example/rginx.ron`。
+// - This is NOT a single-site `conf.d/*.ron` fragment.
+// - 这不是单独网站的 `conf.d/*.ron` 片段。
+//
+// Notes / 说明:
+// - Every `Option<T>` field is written explicitly as `Some(...)` or `None`.
+// - 所有 `Option<T>` 字段都显式写成 `Some(...)` 或 `None`。
+// - Fields or variants that need real local files are provided as commented templates.
+// - 需要依赖本地真实文件的字段或变体，会以“已注释模板”的形式给出。
+// - `include` and environment expansion are pre-processing features, not model fields.
+// - `include` 和环境变量展开属于预处理功能，不是配置结构体字段。
+
+Config(
+    // runtime
+    // runtime 运行时配置
+    runtime: RuntimeConfig(
+        // Graceful shutdown timeout in seconds.
+        // 平滑退出等待时间，单位秒。
+        shutdown_timeout_secs: 10,
+
+        // Tokio worker thread count.
+        // `None` means use Tokio default.
+        // tokio worker 线程数。
+        // `None` 表示使用 Tokio 默认值。
+        worker_threads: Some(4),
+
+        // Socket accept worker count.
+        // `None` means default to 1.
+        // accept worker 数量。
+        // `None` 表示使用默认值 1。
+        accept_workers: Some(2),
+    ),
+
+    // server
+    // server 主监听与默认虚拟主机配置
+    server: ServerConfig(
+        // Listening address.
+        // 监听地址。
+        listen: "0.0.0.0:80",
+
+        // Default vhost hostnames.
+        // Empty means this default vhost can act as the fallback host.
+        // 默认虚拟主机匹配的域名。
+        // 为空时，这个默认虚拟主机可作为兜底主机。
+        server_names: [
+            "example.com",
+            "www.example.com",
+        ],
+
+        // Trusted upstream proxies or load balancers.
+        // Each item can be a single IP or a CIDR.
+        // 可信上游代理或负载均衡器。
+        // 每一项可以是单个 IP，也可以是 CIDR。
+        trusted_proxies: [
+            "127.0.0.1/32",
+            "::1/128",
+            "10.0.0.0/8",
+            "192.168.0.0/16",
+        ],
+
+        // Whether HTTP/1.1 keep-alive is enabled for downstream clients.
+        // 是否对下游客户端启用 HTTP/1.1 keep-alive。
+        keep_alive: Some(true),
+
+        // Maximum number of request headers.
+        // 单个请求允许的最大请求头数量。
+        max_headers: Some(128),
+
+        // Maximum request body size in bytes.
+        // 请求体最大字节数。
+        max_request_body_bytes: Some(10485760),
+
+        // Maximum concurrent downstream connections.
+        // 下游最大并发连接数。
+        max_connections: Some(10000),
+
+        // Timeout for reading request headers from downstream.
+        // 读取下游请求头的超时时间。
+        header_read_timeout_secs: Some(10),
+
+        // Timeout for reading request body from downstream.
+        // 读取下游请求体的超时时间。
+        request_body_read_timeout_secs: Some(30),
+
+        // Timeout for writing the response back to downstream.
+        // 向下游写回响应的超时时间。
+        response_write_timeout_secs: Some(30),
+
+        // Access log template.
+        // Supported variables include:
+        // $request_id $remote_addr $peer_addr $method $host $path
+        // $request $status $body_bytes_sent $request_time_ms
+        // $client_ip_source $vhost $route $scheme $http_version
+        // $user_agent $referer $grpc_protocol $grpc_service
+        // $grpc_method $grpc_status $grpc_message
+        //
+        // access log 模板。
+        // 支持的变量包括：
+        // $request_id $remote_addr $peer_addr $method $host $path
+        // $request $status $body_bytes_sent $request_time_ms
+        // $client_ip_source $vhost $route $scheme $http_version
+        // $user_agent $referer $grpc_protocol $grpc_service
+        // $grpc_method $grpc_status $grpc_message
+        access_log_format: Some("reqid=$request_id remote=$remote_addr peer=$peer_addr host=$host method=$method path=$path status=$status bytes=$body_bytes_sent elapsed_ms=$request_time_ms vhost=$vhost route=$route scheme=$scheme proto=$http_version ua=$user_agent referer=$referer grpc_service=$grpc_service grpc_method=$grpc_method grpc_status=$grpc_status"),
+
+        // Bearer token used by the Config management handler.
+        // Must not be empty and must not contain leading/trailing spaces.
+        // `handler: Config` 路由使用的 Bearer Token。
+        // 不能为空，且不能带前后空白。
+        config_api_token: Some("replace-with-a-real-admin-token"),
+
+        // Server-side TLS for the default vhost.
+        // The active example keeps this disabled so the file can be checked without local certs.
+        // 默认虚拟主机的服务端 TLS。
+        // 当前示例默认关闭，以避免本地没有证书时 `rginx check` 失败。
+        tls: None,
+
+        // Enable this block when you really have certificate files.
+        // 当你确实已经有证书文件时，可以启用下面这个块。
+        //
+        // tls: Some(ServerTlsConfig(
+        //     // PEM certificate path.
+        //     // PEM 证书文件路径。
+        //     cert_path: "/etc/rginx/certs/default.crt",
+        //
+        //     // PEM private key path.
+        //     // PEM 私钥文件路径。
+        //     key_path: "/etc/rginx/certs/default.key",
+        // )),
+    ),
+
+    // upstreams
+    // upstreams 上游集群配置
+    upstreams: [
+        UpstreamConfig(
+            // Logical upstream name used by Proxy handlers.
+            // Proxy 处理器引用的逻辑 upstream 名称。
+            name: "backend_http",
+
+            // Peer list.
+            // url must include scheme and authority, and must not include path/query.
+            // 节点列表。
+            // url 必须带 scheme 和 authority，且不能带 path/query。
+            peers: [
+                UpstreamPeerConfig(
+                    url: "http://127.0.0.1:9000",
+
+                    // Weight used by RoundRobin and related selection logic.
+                    // RoundRobin 等选择逻辑使用的权重。
+                    weight: 3,
+
+                    // Whether this peer is backup-only.
+                    // 是否是仅在主节点不可用时才启用的备份节点。
+                    backup: false,
+                ),
+                UpstreamPeerConfig(
+                    url: "http://127.0.0.1:9001",
+                    weight: 1,
+                    backup: false,
+                ),
+                UpstreamPeerConfig(
+                    url: "http://127.0.0.1:9002",
+                    weight: 1,
+                    backup: true,
+                ),
+            ],
+
+            // TLS mode for upstream connections.
+            // For plain HTTP upstreams, keep it `None`.
+            // 上游 TLS 模式。
+            // 明文 HTTP 上游一般保持 `None`。
+            tls: None,
+
+            // Upstream protocol selection.
+            // Options:
+            // - Auto  : pick protocol automatically
+            // - Http1 : force HTTP/1.1
+            // - Http2 : force upstream HTTP/2; currently requires all peers to be `https://`
+            //
+            // 上游协议选择。
+            // 可选值：
+            // - Auto  : 自动选择
+            // - Http1 : 强制 HTTP/1.1
+            // - Http2 : 强制上游 HTTP/2；当前要求所有 peer 都是 `https://`
+            protocol: Auto,
+
+            // Load-balancing strategy.
+            // Options:
+            // - RoundRobin
+            // - IpHash
+            // - LeastConn
+            //
+            // 负载均衡策略。
+            // 可选值：
+            // - RoundRobin
+            // - IpHash
+            // - LeastConn
+            load_balance: RoundRobin,
+
+            // Override TLS SNI / hostname verification target.
+            // Only meaningful for TLS upstreams.
+            // 覆盖 TLS 的 SNI / 主机名校验目标。
+            // 仅在 TLS 上游时有意义。
+            server_name_override: None,
+
+            // Legacy coarse request timeout.
+            // If set, it acts as fallback for connect/read/write/idle when those are not set.
+            // 旧式整体请求超时。
+            // 如果设置了它，而 connect/read/write/idle 没单独设置，就会作为它们的回退值。
+            request_timeout_secs: None,
+
+            // Dial timeout to upstream.
+            // 连接上游的超时时间。
+            connect_timeout_secs: Some(3),
+
+            // Read timeout for upstream response body/frames.
+            // 读取上游响应体或帧的超时时间。
+            read_timeout_secs: Some(30),
+
+            // Write timeout for sending request body to upstream.
+            // 向上游发送请求体的写超时时间。
+            write_timeout_secs: Some(30),
+
+            // Idle timeout while proxying the upstream stream.
+            // 代理过程中上游连接空闲超时时间。
+            idle_timeout_secs: Some(60),
+
+            // Idle timeout for pooled upstream connections.
+            // `Some(0)` disables pooled idle timeout handling.
+            // 上游连接池中的空闲超时时间。
+            // `Some(0)` 可用于关闭该空闲超时。
+            pool_idle_timeout_secs: Some(90),
+
+            // Max idle pooled connections per host.
+            // 每个 host 允许保留的最大空闲连接数。
+            pool_max_idle_per_host: Some(64),
+
+            // TCP keepalive interval for upstream sockets.
+            // 上游 socket 的 TCP keepalive 间隔。
+            tcp_keepalive_secs: Some(30),
+
+            // Whether TCP_NODELAY is enabled for upstream sockets.
+            // 是否为上游 socket 启用 TCP_NODELAY。
+            tcp_nodelay: Some(true),
+
+            // HTTP/2 keep-alive ping interval.
+            // If you set timeout/while_idle, you should also set this.
+            // HTTP/2 keep-alive ping 间隔。
+            // 如果设置 timeout/while_idle，通常也要设置这个。
+            http2_keep_alive_interval_secs: None,
+
+            // HTTP/2 keep-alive timeout.
+            // HTTP/2 keep-alive 超时时间。
+            http2_keep_alive_timeout_secs: None,
+
+            // Whether HTTP/2 keep-alive pings run while idle.
+            // 是否在 HTTP/2 空闲时继续发送 keep-alive ping。
+            http2_keep_alive_while_idle: None,
+
+            // Maximum request body size that is considered replayable for retries.
+            // 可判定为“可重放”的请求体最大字节数，用于重试。
+            max_replayable_request_body_bytes: Some(262144),
+
+            // Passive health threshold: mark peer unhealthy after N failures.
+            // 被动健康检查阈值：连续失败 N 次后标记节点为不健康。
+            unhealthy_after_failures: Some(2),
+
+            // Cooldown before an unhealthy peer may be tried again.
+            // 不健康节点重新尝试前的冷却时间。
+            unhealthy_cooldown_secs: Some(15),
+
+            // Active HTTP health-check path.
+            // 主动 HTTP 健康检查路径。
+            health_check_path: Some("/healthz"),
+
+            // Active gRPC health-check service name.
+            // Keep `None` for plain HTTP health checks.
+            // 主动 gRPC 健康检查的 service 名称。
+            // 对于普通 HTTP 健康检查，保持 `None`。
+            health_check_grpc_service: None,
+
+            // Active health-check interval.
+            // 主动健康检查间隔。
+            health_check_interval_secs: Some(5),
+
+            // Active health-check timeout.
+            // 主动健康检查超时时间。
+            health_check_timeout_secs: Some(2),
+
+            // Number of successful probes required before recovery.
+            // 节点恢复前要求连续成功探测的次数。
+            healthy_successes_required: Some(2),
+        ),
+
+        UpstreamConfig(
+            // Demonstrates `IpHash` plus forced HTTP/1.1.
+            // 演示 `IpHash` 和强制 HTTP/1.1。
+            name: "sticky_http",
+            peers: [
+                UpstreamPeerConfig(
+                    url: "http://127.0.0.1:9100",
+                    weight: 1,
+                    backup: false,
+                ),
+                UpstreamPeerConfig(
+                    url: "http://127.0.0.1:9101",
+                    weight: 1,
+                    backup: false,
+                ),
+            ],
+            tls: None,
+            protocol: Http1,
+            load_balance: IpHash,
+            server_name_override: None,
+            request_timeout_secs: Some(20),
+            connect_timeout_secs: None,
+            read_timeout_secs: None,
+            write_timeout_secs: None,
+            idle_timeout_secs: None,
+            pool_idle_timeout_secs: Some(60),
+            pool_max_idle_per_host: Some(32),
+            tcp_keepalive_secs: Some(30),
+            tcp_nodelay: Some(true),
+            http2_keep_alive_interval_secs: None,
+            http2_keep_alive_timeout_secs: None,
+            http2_keep_alive_while_idle: None,
+            max_replayable_request_body_bytes: Some(131072),
+            unhealthy_after_failures: Some(3),
+            unhealthy_cooldown_secs: Some(30),
+            health_check_path: Some("/ready"),
+            health_check_grpc_service: None,
+            health_check_interval_secs: Some(10),
+            health_check_timeout_secs: Some(2),
+            healthy_successes_required: Some(1),
+        ),
+
+        UpstreamConfig(
+            // Demonstrates HTTPS + NativeRoots + forced HTTP/2 + LeastConn.
+            // 演示 HTTPS + NativeRoots + 强制 HTTP/2 + LeastConn。
+            name: "grpc_secure",
+            peers: [
+                UpstreamPeerConfig(
+                    url: "https://grpc1.example.internal:9443",
+                    weight: 1,
+                    backup: false,
+                ),
+                UpstreamPeerConfig(
+                    url: "https://grpc2.example.internal:9443",
+                    weight: 1,
+                    backup: false,
+                ),
+            ],
+            tls: Some(NativeRoots),
+            protocol: Http2,
+            load_balance: LeastConn,
+            server_name_override: Some("grpc.example.internal"),
+            request_timeout_secs: Some(30),
+            connect_timeout_secs: Some(5),
+            read_timeout_secs: Some(30),
+            write_timeout_secs: Some(30),
+            idle_timeout_secs: Some(60),
+            pool_idle_timeout_secs: Some(120),
+            pool_max_idle_per_host: Some(128),
+            tcp_keepalive_secs: Some(30),
+            tcp_nodelay: Some(true),
+            http2_keep_alive_interval_secs: Some(15),
+            http2_keep_alive_timeout_secs: Some(10),
+            http2_keep_alive_while_idle: Some(true),
+            max_replayable_request_body_bytes: Some(65536),
+            unhealthy_after_failures: Some(2),
+            unhealthy_cooldown_secs: Some(10),
+
+            // For gRPC health checking, either:
+            // - leave `health_check_path: None` and set only `health_check_grpc_service`,
+            //   then rginx will use the default `/grpc.health.v1.Health/Check`
+            // - or explicitly set the same default path shown below
+            //
+            // 对于 gRPC 健康检查，可以：
+            // - 保持 `health_check_path: None`，只设置 `health_check_grpc_service`，
+            //   此时 rginx 会自动使用默认路径 `/grpc.health.v1.Health/Check`
+            // - 或像下面这样显式写出同一个默认路径
+            health_check_path: Some("/grpc.health.v1.Health/Check"),
+            health_check_grpc_service: Some("grpc.health.v1.Health"),
+            health_check_interval_secs: Some(5),
+            health_check_timeout_secs: Some(3),
+            healthy_successes_required: Some(2),
+        ),
+
+        UpstreamConfig(
+            // Demonstrates HTTPS + insecure TLS mode.
+            // Use only for local development or controlled environments.
+            // 演示 HTTPS + Insecure TLS 模式。
+            // 仅建议用于本地开发或受控环境。
+            name: "dev_insecure_https",
+            peers: [
+                UpstreamPeerConfig(
+                    url: "https://localhost:9443",
+                    weight: 1,
+                    backup: false,
+                ),
+            ],
+            tls: Some(Insecure),
+            protocol: Auto,
+            load_balance: RoundRobin,
+            server_name_override: None,
+            request_timeout_secs: Some(15),
+            connect_timeout_secs: Some(3),
+            read_timeout_secs: Some(15),
+            write_timeout_secs: Some(15),
+            idle_timeout_secs: Some(30),
+            pool_idle_timeout_secs: Some(30),
+            pool_max_idle_per_host: Some(8),
+            tcp_keepalive_secs: Some(15),
+            tcp_nodelay: Some(true),
+            http2_keep_alive_interval_secs: None,
+            http2_keep_alive_timeout_secs: None,
+            http2_keep_alive_while_idle: None,
+            max_replayable_request_body_bytes: Some(65536),
+            unhealthy_after_failures: Some(1),
+            unhealthy_cooldown_secs: Some(5),
+            health_check_path: None,
+            health_check_grpc_service: None,
+            health_check_interval_secs: None,
+            health_check_timeout_secs: None,
+            healthy_successes_required: None,
+        ),
+
+        // Full Custom CA template.
+        // Commented out because it requires a real CA file on disk.
+        // 完整的 Custom CA 模板。
+        // 由于需要磁盘上真实存在的 CA 文件，所以默认注释掉。
+        //
+        // UpstreamConfig(
+        //     name: "secure_custom_ca",
+        //     peers: [
+        //         UpstreamPeerConfig(
+        //             url: "https://internal.example.com:8443",
+        //             weight: 1,
+        //             backup: false,
+        //         ),
+        //     ],
+        //     tls: Some(CustomCa(
+        //         // Path to the CA PEM file used to trust the upstream.
+        //         // 用于信任该上游的 CA PEM 文件路径。
+        //         ca_cert_path: "/etc/rginx/certs/internal-ca.pem",
+        //     )),
+        //     protocol: Http2,
+        //     load_balance: RoundRobin,
+        //     server_name_override: Some("internal.example.com"),
+        //     request_timeout_secs: Some(30),
+        //     connect_timeout_secs: Some(5),
+        //     read_timeout_secs: Some(30),
+        //     write_timeout_secs: Some(30),
+        //     idle_timeout_secs: Some(60),
+        //     pool_idle_timeout_secs: Some(120),
+        //     pool_max_idle_per_host: Some(64),
+        //     tcp_keepalive_secs: Some(30),
+        //     tcp_nodelay: Some(true),
+        //     http2_keep_alive_interval_secs: Some(15),
+        //     http2_keep_alive_timeout_secs: Some(10),
+        //     http2_keep_alive_while_idle: Some(true),
+        //     max_replayable_request_body_bytes: Some(65536),
+        //     unhealthy_after_failures: Some(2),
+        //     unhealthy_cooldown_secs: Some(10),
+        //     health_check_path: Some("/grpc.health.v1.Health/Check"),
+        //     health_check_grpc_service: Some("grpc.health.v1.Health"),
+        //     health_check_interval_secs: Some(5),
+        //     health_check_timeout_secs: Some(3),
+        //     healthy_successes_required: Some(2),
+        // ),
+    ],
+
+    // locations
+    // locations 默认虚拟主机路由
+    locations: [
+        LocationConfig(
+            // Exact path match.
+            // 精确路径匹配。
+            matcher: Exact("/"),
+
+            // Return a fixed response.
+            // 返回固定响应。
+            handler: Return(
+                // HTTP status code.
+                // HTTP 状态码。
+                status: 200,
+
+                // Redirect target.
+                // For non-redirect responses keep it as an empty string.
+                // 重定向目标。
+                // 非重定向响应时保持空字符串即可。
+                location: "",
+
+                // Optional response body.
+                // 可选响应体。
+                body: Some("rginx full example root\n"),
+            ),
+
+            // Optional gRPC route narrowing by service name.
+            // 可选的 gRPC service 级别路由收窄。
+            grpc_service: None,
+
+            // Optional gRPC route narrowing by method name.
+            // 可选的 gRPC method 级别路由收窄。
+            grpc_method: None,
+
+            // Allow list CIDRs.
+            // Empty means no allow-list restriction.
+            // 允许列表 CIDR。
+            // 为空表示不使用 allow-list 限制。
+            allow_cidrs: [],
+
+            // Deny list CIDRs.
+            // Empty means no deny-list restriction.
+            // 拒绝列表 CIDR。
+            // 为空表示不使用 deny-list 限制。
+            deny_cidrs: [],
+
+            // Route-level requests per second limit.
+            // `None` means disabled.
+            // 路由级每秒请求数限制。
+            // `None` 表示关闭。
+            requests_per_sec: None,
+
+            // Burst capacity on top of `requests_per_sec`.
+            // Requires `requests_per_sec`.
+            // 在 `requests_per_sec` 之上的突发容量。
+            // 依赖 `requests_per_sec` 一起使用。
+            burst: None,
+        ),
+
+        LocationConfig(
+            matcher: Exact("/redirect"),
+            handler: Return(
+                status: 302,
+                location: "https://www.example.com/new-location",
+                body: None,
+            ),
+            grpc_service: None,
+            grpc_method: None,
+            allow_cidrs: [],
+            deny_cidrs: [],
+            requests_per_sec: None,
+            burst: None,
+        ),
+
+        LocationConfig(
+            matcher: Exact("/status"),
+            handler: Status,
+            grpc_service: None,
+            grpc_method: None,
+            allow_cidrs: [
+                "127.0.0.1/32",
+                "::1/128",
+                "10.0.0.0/8",
+            ],
+            deny_cidrs: [],
+            requests_per_sec: None,
+            burst: None,
+        ),
+
+        LocationConfig(
+            matcher: Exact("/metrics"),
+            handler: Metrics,
+            grpc_service: None,
+            grpc_method: None,
+            allow_cidrs: [
+                "127.0.0.1/32",
+                "::1/128",
+                "10.0.0.0/8",
+            ],
+            deny_cidrs: [],
+            requests_per_sec: None,
+            burst: None,
+        ),
+
+        LocationConfig(
+            // Management API route.
+            // Config handler requires:
+            // - Exact(...) matcher
+            // - non-empty allow_cidrs
+            // - server.config_api_token
+            //
+            // 管理 API 路由。
+            // Config 处理器要求：
+            // - 必须是 Exact(...)
+            // - allow_cidrs 不能为空
+            // - 必须设置 server.config_api_token
+            matcher: Exact("/-/config"),
+            handler: Config,
+            grpc_service: None,
+            grpc_method: None,
+            allow_cidrs: [
+                "127.0.0.1/32",
+                "::1/128",
+                "10.0.10.0/24",
+            ],
+            deny_cidrs: [],
+            requests_per_sec: Some(5),
+            burst: Some(5),
+        ),
+
+        LocationConfig(
+            // Proxy example using header overrides and prefix stripping.
+            // 带请求头覆盖和前缀剥离的代理示例。
+            matcher: Prefix("/api"),
+            handler: Proxy(
+                // Target upstream name.
+                // 目标 upstream 名称。
+                upstream: "backend_http",
+
+                // Preserve downstream Host header when proxying.
+                // 转发时是否保留下游 Host 头。
+                preserve_host: Some(true),
+
+                // Strip this prefix from the downstream URI before forwarding.
+                // Must start with `/`.
+                // 转发前从下游 URI 中剥离这个前缀。
+                // 必须以 `/` 开头。
+                strip_prefix: Some("/api"),
+
+                // Extra headers to set or overwrite on the upstream request.
+                // Additional or replacement request headers sent upstream.
+                // 发送给上游时要额外设置或覆盖的请求头。
+                proxy_set_headers: {
+                    "x-request-id": "$request_id",
+                    "x-forwarded-proto": "$scheme",
+                    "x-forwarded-host": "$host",
+                    "x-rginx-route": "default-api",
+                },
+            ),
+            grpc_service: None,
+            grpc_method: None,
+            allow_cidrs: [],
+            deny_cidrs: [
+                "203.0.113.0/24",
+            ],
+            requests_per_sec: Some(100),
+            burst: Some(50),
+        ),
+
+        LocationConfig(
+            matcher: Prefix("/sticky"),
+            handler: Proxy(
+                upstream: "sticky_http",
+                preserve_host: Some(false),
+                strip_prefix: Some("/sticky"),
+                proxy_set_headers: {
+                    "x-rginx-route": "sticky-http",
+                },
+            ),
+            grpc_service: None,
+            grpc_method: None,
+            allow_cidrs: [],
+            deny_cidrs: [],
+            requests_per_sec: Some(30),
+            burst: Some(10),
+        ),
+
+        LocationConfig(
+            // gRPC-aware route narrowing.
+            // This route only matches requests narrowed to the given gRPC service/method.
+            // 支持 gRPC service/method 级别收窄的路由。
+            // 只有符合指定 gRPC service/method 的请求才会命中。
+            matcher: Prefix("/grpc"),
+            handler: Proxy(
+                upstream: "grpc_secure",
+                preserve_host: Some(false),
+                strip_prefix: None,
+                proxy_set_headers: {
+                    "x-rginx-route": "grpc-secure",
+                },
+            ),
+            grpc_service: Some("com.example.user.UserService"),
+            grpc_method: Some("GetUser"),
+            allow_cidrs: [],
+            deny_cidrs: [],
+            requests_per_sec: Some(200),
+            burst: Some(100),
+        ),
+
+        LocationConfig(
+            matcher: Prefix("/dev-https"),
+            handler: Proxy(
+                upstream: "dev_insecure_https",
+                preserve_host: Some(false),
+                strip_prefix: Some("/dev-https"),
+                proxy_set_headers: {
+                    "x-rginx-route": "dev-insecure-https",
+                },
+            ),
+            grpc_service: None,
+            grpc_method: None,
+            allow_cidrs: [
+                "127.0.0.1/32",
+                "::1/128",
+            ],
+            deny_cidrs: [],
+            requests_per_sec: None,
+            burst: None,
+        ),
+    ],
+
+    // servers
+    // servers 额外虚拟主机
+    //
+    // In real deployment, you can either:
+    // - keep these vhosts inline in `rginx.ron`, or
+    // - move them into `/etc/rginx/conf.d/*.ron` and load them via include
+    //
+    // 在实际部署里，你可以：
+    // - 直接把这些虚拟主机写在 `rginx.ron` 里，或者
+    // - 把它们拆到 `/etc/rginx/conf.d/*.ron` 里，再通过 include 加载
+    //
+    // A dedicated single-site fragment example is provided at:
+    // 单独网站片段示例见：
+    // `example/conf.d/default.ron`
+    servers: [
+        VirtualHostConfig(
+            // Hostnames for this virtual host.
+            // Supports exact names and wildcard names like `*.example.com`.
+            // 这个虚拟主机对应的域名。
+            // 支持精确域名和 `*.example.com` 这类通配域名。
+            server_names: [
+                "api.example.com",
+                "*.api.example.com",
+            ],
+
+            locations: [
+                LocationConfig(
+                    matcher: Exact("/"),
+                    handler: Return(
+                        status: 200,
+                        location: "",
+                        body: Some("api vhost root\n"),
+                    ),
+                    grpc_service: None,
+                    grpc_method: None,
+                    allow_cidrs: [],
+                    deny_cidrs: [],
+                    requests_per_sec: None,
+                    burst: None,
+                ),
+                LocationConfig(
+                    matcher: Prefix("/v1"),
+                    handler: Proxy(
+                        upstream: "backend_http",
+                        preserve_host: Some(true),
+                        strip_prefix: None,
+                        proxy_set_headers: {
+                            "x-rginx-vhost": "api.example.com",
+                        },
+                    ),
+                    grpc_service: None,
+                    grpc_method: None,
+                    allow_cidrs: [],
+                    deny_cidrs: [],
+                    requests_per_sec: Some(150),
+                    burst: Some(50),
+                ),
+            ],
+
+            // Per-vhost TLS.
+            // Kept disabled here so the example stays checkable without local cert files.
+            // 每个虚拟主机自己的 TLS。
+            // 这里默认关闭，以保证示例在没有本地证书文件时仍可校验通过。
+            tls: None,
+
+            // Enable when this vhost should terminate TLS with its own certificate.
+            // 如果这个虚拟主机需要使用自己的证书终止 TLS，可以启用下面这个块。
+            //
+            // tls: Some(ServerTlsConfig(
+            //     cert_path: "/etc/rginx/certs/api.example.com.crt",
+            //     key_path: "/etc/rginx/certs/api.example.com.key",
+            // )),
+        ),
+
+        VirtualHostConfig(
+            server_names: [
+                "admin.example.com",
+            ],
+            locations: [
+                LocationConfig(
+                    matcher: Exact("/"),
+                    handler: Return(
+                        status: 200,
+                        location: "",
+                        body: Some("admin vhost root\n"),
+                    ),
+                    grpc_service: None,
+                    grpc_method: None,
+                    allow_cidrs: [
+                        "127.0.0.1/32",
+                        "::1/128",
+                        "10.0.10.0/24",
+                    ],
+                    deny_cidrs: [],
+                    requests_per_sec: None,
+                    burst: None,
+                ),
+                LocationConfig(
+                    matcher: Exact("/status"),
+                    handler: Status,
+                    grpc_service: None,
+                    grpc_method: None,
+                    allow_cidrs: [
+                        "127.0.0.1/32",
+                        "::1/128",
+                        "10.0.10.0/24",
+                    ],
+                    deny_cidrs: [],
+                    requests_per_sec: None,
+                    burst: None,
+                ),
+                LocationConfig(
+                    matcher: Exact("/metrics"),
+                    handler: Metrics,
+                    grpc_service: None,
+                    grpc_method: None,
+                    allow_cidrs: [
+                        "127.0.0.1/32",
+                        "::1/128",
+                        "10.0.10.0/24",
+                    ],
+                    deny_cidrs: [],
+                    requests_per_sec: None,
+                    burst: None,
+                ),
+            ],
+            tls: None,
+        ),
+    ],
+)
+
+// -------------------------------------------------------------------
+// Preprocessor reference / 预处理能力速查
+// -------------------------------------------------------------------
+//
+// 1. Relative include / 相对 include
+//
+// // @include "conf.d/*.ron"
+//
+// Meaning / 含义:
+// - Include is resolved relative to the file that contains the directive.
+// - include 路径相对于“写这条指令的配置文件”所在目录解析。
+// - `conf.d/*.ron` is the only supported glob shape today.
+// - 当前只支持 `conf.d/*.ron` 这种 glob 形式。
+// - Included files are expanded in lexicographic filename order.
+// - 被包含文件会按文件名字典序展开。
+//
+// 2. Environment expansion / 环境变量展开
+//
+// listen: "${RGINX_LISTEN:-0.0.0.0:80}",
+//
+// Meaning / 含义:
+// - `${VAR}`              : required environment variable
+// - `${VAR}`              : 必填环境变量
+// - `${VAR:-default}`     : use default when missing
+// - `${VAR:-default}`     : 缺失时使用默认值
+// - `$$`                  : literal dollar sign
+// - `$$`                  : 字面量美元符号
+//
+// 3. Upstream TLS variants / 上游 TLS 变体
+//
+// Active examples in this file / 本文件中已启用的示例：
+// - None
+// - Some(NativeRoots)
+// - Some(Insecure)
+//
+// Commented template in this file / 本文件中已提供注释模板：
+// - Some(CustomCa(ca_cert_path: "..."))
+//
+// 4. Handler variants / handler 变体
+//
+// Active examples in this file / 本文件中已启用的示例：
+// - Proxy(...)
+// - Return(...)
+// - Status
+// - Metrics
+// - Config
+//
+// 5. Matcher variants / matcher 变体
+//
+// Active examples in this file / 本文件中已启用的示例：
+// - Exact("...")
+// - Prefix("...")
+//
+// 6. Important distinction / 关键区分
+//
+// `example/rginx.ron`
+// - top-level config example
+// - 顶层 `rginx.ron` 示例
+//
+// `example/conf.d/default.ron`
+// - single-site fragment example
+// - 单独网站 `conf.d/default.ron` 片段示例

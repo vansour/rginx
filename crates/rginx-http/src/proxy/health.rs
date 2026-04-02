@@ -29,6 +29,14 @@ pub async fn probe_upstream_peer(
         Err(error) => {
             let transitioned = clients.record_active_peer_failure(&upstream.name, &peer.url);
             metrics.record_active_health_check(&upstream.name, &peer.url, "client_unavailable");
+            record_active_transition(
+                &metrics,
+                &upstream.name,
+                &peer.url,
+                transitioned,
+                "unhealthy",
+                "client_unavailable",
+            );
             let level = if transitioned { "unhealthy" } else { "still unhealthy" };
             tracing::warn!(
                 upstream = %upstream.name,
@@ -46,6 +54,14 @@ pub async fn probe_upstream_peer(
         Err(error) => {
             let transitioned = clients.record_active_peer_failure(&upstream.name, &peer.url);
             metrics.record_active_health_check(&upstream.name, &peer.url, "request_build_error");
+            record_active_transition(
+                &metrics,
+                &upstream.name,
+                &peer.url,
+                transitioned,
+                "unhealthy",
+                "request_build_error",
+            );
             let level = if transitioned { "unhealthy" } else { "still unhealthy" };
             tracing::warn!(
                 upstream = %upstream.name,
@@ -71,6 +87,14 @@ pub async fn probe_upstream_peer(
                         &peer.url,
                         check.healthy_successes_required,
                     );
+                    record_active_transition(
+                        &metrics,
+                        &upstream.name,
+                        &peer.url,
+                        status.recovered,
+                        "healthy",
+                        "healthy_threshold_met",
+                    );
                     if status.recovered {
                         tracing::info!(
                             upstream = %upstream.name,
@@ -94,6 +118,14 @@ pub async fn probe_upstream_peer(
                         &peer.url,
                         "unhealthy_status",
                     );
+                    record_active_transition(
+                        &metrics,
+                        &upstream.name,
+                        &peer.url,
+                        transitioned,
+                        "unhealthy",
+                        "unhealthy_status",
+                    );
                     tracing::warn!(
                         upstream = %upstream.name,
                         peer = %peer.url,
@@ -110,6 +142,14 @@ pub async fn probe_upstream_peer(
                     let transitioned =
                         clients.record_active_peer_failure(&upstream.name, &peer.url);
                     metrics.record_active_health_check(&upstream.name, &peer.url, "request_error");
+                    record_active_transition(
+                        &metrics,
+                        &upstream.name,
+                        &peer.url,
+                        transitioned,
+                        "unhealthy",
+                        "request_error",
+                    );
                     tracing::warn!(
                         upstream = %upstream.name,
                         peer = %peer.url,
@@ -124,6 +164,14 @@ pub async fn probe_upstream_peer(
                     let transitioned =
                         clients.record_active_peer_failure(&upstream.name, &peer.url);
                     metrics.record_active_health_check(&upstream.name, &peer.url, "timeout");
+                    record_active_transition(
+                        &metrics,
+                        &upstream.name,
+                        &peer.url,
+                        transitioned,
+                        "unhealthy",
+                        "timeout",
+                    );
                     tracing::warn!(
                         upstream = %upstream.name,
                         peer = %peer.url,
@@ -143,6 +191,14 @@ pub async fn probe_upstream_peer(
                 &peer.url,
                 check.healthy_successes_required,
             );
+            record_active_transition(
+                &metrics,
+                &upstream.name,
+                &peer.url,
+                status.recovered,
+                "healthy",
+                "healthy_threshold_met",
+            );
             if status.recovered {
                 tracing::info!(
                     upstream = %upstream.name,
@@ -156,6 +212,14 @@ pub async fn probe_upstream_peer(
         Ok(Ok(response)) => {
             let transitioned = clients.record_active_peer_failure(&upstream.name, &peer.url);
             metrics.record_active_health_check(&upstream.name, &peer.url, "unhealthy_status");
+            record_active_transition(
+                &metrics,
+                &upstream.name,
+                &peer.url,
+                transitioned,
+                "unhealthy",
+                "unhealthy_status",
+            );
             tracing::warn!(
                 upstream = %upstream.name,
                 peer = %peer.url,
@@ -168,6 +232,14 @@ pub async fn probe_upstream_peer(
         Ok(Err(error)) => {
             let transitioned = clients.record_active_peer_failure(&upstream.name, &peer.url);
             metrics.record_active_health_check(&upstream.name, &peer.url, "request_error");
+            record_active_transition(
+                &metrics,
+                &upstream.name,
+                &peer.url,
+                transitioned,
+                "unhealthy",
+                "request_error",
+            );
             tracing::warn!(
                 upstream = %upstream.name,
                 peer = %peer.url,
@@ -180,6 +252,14 @@ pub async fn probe_upstream_peer(
         Err(_) => {
             let transitioned = clients.record_active_peer_failure(&upstream.name, &peer.url);
             metrics.record_active_health_check(&upstream.name, &peer.url, "timeout");
+            record_active_transition(
+                &metrics,
+                &upstream.name,
+                &peer.url,
+                transitioned,
+                "unhealthy",
+                "timeout",
+            );
             tracing::warn!(
                 upstream = %upstream.name,
                 peer = %peer.url,
@@ -189,6 +269,19 @@ pub async fn probe_upstream_peer(
                 "active health check timed out"
             );
         }
+    }
+}
+
+fn record_active_transition(
+    metrics: &Metrics,
+    upstream_name: &str,
+    peer_url: &str,
+    transitioned: bool,
+    state: &str,
+    reason: &str,
+) {
+    if transitioned {
+        metrics.record_upstream_peer_transition(upstream_name, peer_url, "active", state, reason);
     }
 }
 

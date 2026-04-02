@@ -95,7 +95,7 @@ fn route_matches(route: &Route, context: &RouteMatchContext<'_>) -> bool {
 mod tests {
     use http::StatusCode;
     use rginx_core::{
-        GrpcRouteMatch, Route, RouteAccessControl, RouteAction, RouteMatcher, StaticResponse,
+        GrpcRouteMatch, ReturnAction, Route, RouteAccessControl, RouteAction, RouteMatcher,
         VirtualHost,
     };
 
@@ -109,10 +109,10 @@ mod tests {
             id: format!("test|prefix:{path}"),
             matcher: RouteMatcher::Prefix(path.to_string()),
             grpc_match: None,
-            action: RouteAction::Static(StaticResponse {
+            action: RouteAction::Return(ReturnAction {
                 status: StatusCode::OK,
-                content_type: "text/plain".to_string(),
-                body: body.to_string(),
+                location: String::new(),
+                body: Some(body.to_string()),
             }),
             access_control: RouteAccessControl::default(),
             rate_limit: None,
@@ -139,10 +139,10 @@ mod tests {
                 id: "test|exact:/api".to_string(),
                 matcher: RouteMatcher::Exact("/api".to_string()),
                 grpc_match: None,
-                action: RouteAction::Static(StaticResponse {
+                action: RouteAction::Return(ReturnAction {
                     status: StatusCode::OK,
-                    content_type: "text/plain".to_string(),
-                    body: "exact".to_string(),
+                    location: String::new(),
+                    body: Some("exact".to_string()),
                 }),
                 access_control: RouteAccessControl::default(),
                 rate_limit: None,
@@ -151,10 +151,10 @@ mod tests {
                 id: "test|prefix:/".to_string(),
                 matcher: RouteMatcher::Prefix("/".to_string()),
                 grpc_match: None,
-                action: RouteAction::Static(StaticResponse {
+                action: RouteAction::Return(ReturnAction {
                     status: StatusCode::OK,
-                    content_type: "text/plain".to_string(),
-                    body: "prefix".to_string(),
+                    location: String::new(),
+                    body: Some("prefix".to_string()),
                 }),
                 access_control: RouteAccessControl::default(),
                 rate_limit: None,
@@ -171,10 +171,10 @@ mod tests {
             id: "test|prefix:/api".to_string(),
             matcher: RouteMatcher::Prefix("/api".to_string()),
             grpc_match: None,
-            action: RouteAction::Static(StaticResponse {
+            action: RouteAction::Return(ReturnAction {
                 status: StatusCode::OK,
-                content_type: "text/plain".to_string(),
-                body: "prefix".to_string(),
+                location: String::new(),
+                body: Some("prefix".to_string()),
             }),
             access_control: RouteAccessControl::default(),
             rate_limit: None,
@@ -228,10 +228,10 @@ mod tests {
         assert!(result.is_some());
         let (vhost, route) = result.unwrap();
         assert_eq!(vhost.server_names, vec!["api.example.com"]);
-        if let RouteAction::Static(resp) = &route.action {
-            assert_eq!(resp.body, "users");
+        if let RouteAction::Return(resp) = &route.action {
+            assert_eq!(resp.body.as_deref(), Some("users"));
         } else {
-            panic!("expected static response");
+            panic!("expected return response");
         }
 
         let result = select_route_by_host(&default, &vhosts, "unknown.example.com", "/");
@@ -250,10 +250,10 @@ mod tests {
                     service: Some("grpc.health.v1.Health".to_string()),
                     method: Some("Check".to_string()),
                 }),
-                action: RouteAction::Static(StaticResponse {
+                action: RouteAction::Return(ReturnAction {
                     status: StatusCode::OK,
-                    content_type: "text/plain".to_string(),
-                    body: "grpc".to_string(),
+                    location: String::new(),
+                    body: Some("grpc".to_string()),
                 }),
                 access_control: RouteAccessControl::default(),
                 rate_limit: None,
@@ -262,10 +262,10 @@ mod tests {
                 id: "test|prefix:/".to_string(),
                 matcher: RouteMatcher::Prefix("/".to_string()),
                 grpc_match: None,
-                action: RouteAction::Static(StaticResponse {
+                action: RouteAction::Return(ReturnAction {
                     status: StatusCode::OK,
-                    content_type: "text/plain".to_string(),
-                    body: "generic".to_string(),
+                    location: String::new(),
+                    body: Some("generic".to_string()),
                 }),
                 access_control: RouteAccessControl::default(),
                 rate_limit: None,
@@ -289,10 +289,10 @@ mod tests {
                 service: Some("grpc.health.v1.Health".to_string()),
                 method: None,
             }),
-            action: RouteAction::Static(StaticResponse {
+            action: RouteAction::Return(ReturnAction {
                 status: StatusCode::OK,
-                content_type: "text/plain".to_string(),
-                body: "grpc".to_string(),
+                location: String::new(),
+                body: Some("grpc".to_string()),
             }),
             access_control: RouteAccessControl::default(),
             rate_limit: None,
@@ -321,10 +321,10 @@ mod tests {
                         service: Some("grpc.health.v1.Health".to_string()),
                         method: None,
                     }),
-                    action: RouteAction::Static(StaticResponse {
+                    action: RouteAction::Return(ReturnAction {
                         status: StatusCode::OK,
-                        content_type: "text/plain".to_string(),
-                        body: "grpc".to_string(),
+                        location: String::new(),
+                        body: Some("grpc".to_string()),
                     }),
                     access_control: RouteAccessControl::default(),
                     rate_limit: None,

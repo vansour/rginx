@@ -283,7 +283,7 @@ pub(crate) fn text_response(
         .header("content-type", content_type)
         .header("content-length", body.len().to_string())
         .body(full_body(body))
-        .expect("response builder should not fail for static responses")
+        .expect("response builder should not fail for text responses")
 }
 
 fn json_response(status: StatusCode, payload: &impl Serialize) -> HttpResponse {

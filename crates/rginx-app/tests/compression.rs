@@ -1,8 +1,6 @@
 use std::collections::HashMap;
-use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::path::Path;
 use std::time::Duration;
 
 use brotli::Decompressor;
@@ -13,10 +11,10 @@ mod support;
 use support::{READY_ROUTE_CONFIG, ServerHarness, reserve_loopback_addr};
 
 #[test]
-fn gzips_large_static_text_responses_when_client_accepts_gzip() {
+fn gzips_large_return_text_responses_when_client_accepts_gzip() {
     let listen_addr = reserve_loopback_addr();
-    let mut server = ServerHarness::spawn("rginx-compression-static", |_| {
-        static_config(listen_addr, &"hello gzip world\n".repeat(32))
+    let mut server = ServerHarness::spawn("rginx-compression-return", |_| {
+        return_config(listen_addr, &"hello gzip world\n".repeat(32))
     });
     server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
 
@@ -37,10 +35,10 @@ fn gzips_large_static_text_responses_when_client_accepts_gzip() {
 }
 
 #[test]
-fn brotlis_large_static_text_responses_when_client_accepts_brotli() {
+fn brotlis_large_return_text_responses_when_client_accepts_brotli() {
     let listen_addr = reserve_loopback_addr();
-    let mut server = ServerHarness::spawn("rginx-compression-static-br", |_| {
-        static_config(listen_addr, &"hello brotli world\n".repeat(32))
+    let mut server = ServerHarness::spawn("rginx-compression-return-br", |_| {
+        return_config(listen_addr, &"hello brotli world\n".repeat(32))
     });
     server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
 
@@ -63,8 +61,8 @@ fn brotlis_large_static_text_responses_when_client_accepts_brotli() {
 #[test]
 fn falls_back_to_gzip_when_client_prefers_it_over_brotli() {
     let listen_addr = reserve_loopback_addr();
-    let mut server = ServerHarness::spawn("rginx-compression-static-gzip-fallback", |_| {
-        static_config(listen_addr, &"hello gzip fallback\n".repeat(32))
+    let mut server = ServerHarness::spawn("rginx-compression-return-gzip-fallback", |_| {
+        return_config(listen_addr, &"hello gzip fallback\n".repeat(32))
     });
     server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
 
@@ -79,34 +77,6 @@ fn falls_back_to_gzip_when_client_prefers_it_over_brotli() {
     assert_eq!(response.status, 200);
     assert_eq!(response.header("content-encoding"), Some("gzip"));
     assert_eq!(decode_gzip(&response.body), "hello gzip fallback\n".repeat(32).into_bytes());
-
-    server.shutdown_and_wait(Duration::from_secs(5));
-}
-
-#[test]
-fn skips_gzip_for_range_file_responses() {
-    let listen_addr = reserve_loopback_addr();
-    let mut server = ServerHarness::spawn("rginx-compression-file", |temp_dir| {
-        let root = temp_dir.join("public");
-        fs::create_dir_all(&root).expect("file root should be created");
-        fs::write(root.join("hello.txt"), b"0123456789abcdef0123456789abcdef")
-            .expect("test file should be written");
-        file_config(listen_addr, &root)
-    });
-    server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
-
-    let response = send_http_request(
-        listen_addr,
-        &format!(
-            "GET /hello.txt HTTP/1.1\r\nHost: {listen_addr}\r\nAccept-Encoding: gzip\r\nRange: bytes=2-5\r\nConnection: close\r\n\r\n"
-        ),
-    )
-    .expect("range request should succeed");
-
-    assert_eq!(response.status, 206);
-    assert_eq!(response.body, b"2345");
-    assert_eq!(response.header("content-encoding"), None);
-    assert_eq!(response.header("content-range"), Some("bytes 2-5/32"));
 
     server.shutdown_and_wait(Duration::from_secs(5));
 }
@@ -185,20 +155,11 @@ fn decode_brotli(bytes: &[u8]) -> Vec<u8> {
     decoded
 }
 
-fn static_config(listen_addr: SocketAddr, body: &str) -> String {
+fn return_config(listen_addr: SocketAddr, body: &str) -> String {
     format!(
-        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Static(\n                status: Some(200),\n                content_type: Some(\"text/plain; charset=utf-8\"),\n                body: {:?},\n            ),\n        ),\n    ],\n)\n",
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Return(\n                status: 200,\n                location: \"\",\n                body: Some({:?}),\n            ),\n        ),\n    ],\n)\n",
         listen_addr.to_string(),
         body,
-        ready_route = READY_ROUTE_CONFIG,
-    )
-}
-
-fn file_config(listen_addr: SocketAddr, root: &Path) -> String {
-    format!(
-        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Prefix(\"/\"),\n            handler: File(\n                root: {:?},\n                index: None,\n                try_files: Some([\"$uri\"]),\n            ),\n        ),\n    ],\n)\n",
-        listen_addr.to_string(),
-        root,
         ready_route = READY_ROUTE_CONFIG,
     )
 }
