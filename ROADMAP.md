@@ -1,13 +1,10 @@
 # rginx 路线图、边界与实现进度
 
-这份文档不是“想做什么就写什么”的愿望清单，而是当前 `rginx` 的能力矩阵、明确限制、工程演进观察，以及下一阶段的建议工作顺序。
+这份文档不是愿望清单，而是当前 `rginx` 的能力矩阵、明确限制、工程演进观察，以及围绕“纯 Rust 反向代理”目标的阶段性改造计划。
 
-如果你只想快速判断“这个能力现在能不能放心写进对外承诺”，请先看：
+如果你只想判断“这个能力现在能不能写进对外承诺”，先看本文的“能力矩阵”和“当前明确限制与非目标”。
 
-- [wiki/Capability-Matrix.md](wiki/Capability-Matrix.md)
-- [wiki/Release-Gate.md](wiki/Release-Gate.md)
-
-如果你想判断“项目下一步最自然该做什么”，继续读本文即可。
+如果你想判断“项目下一步应该按什么顺序改”，看本文的“纯反向代理化分阶段计划”。
 
 ## 如何阅读这份文档
 
@@ -16,7 +13,7 @@
 - `✅ 已支持`
   - 代码已实现。
   - 仓库内有测试覆盖。
-  - README / wiki 可以对外说明。
+  - README / ROADMAP 可以对外说明。
 - `🚧 进行中`
   - 已有清晰实现基础，或已经完成一部分内部重构，但仍有明显补齐项。
 - `📋 计划中`
@@ -30,23 +27,36 @@
 - 已经覆盖所有极端边界输入。
 - 已在超大规模生产环境下完成长期验证。
 
-`rginx` 当前的产品目标很明确：
+`rginx` 的目标已经进一步收口：
 
 - 面向中小规模部署的 Rust 入口反向代理。
-- 先把 TLS 终止、Host/Path 路由、反向代理、基础静态文件、基础流量治理、健康检查、热重载和可观测性做扎实。
-- 不追求在当前阶段成为其他入口代理的 drop-in replacement。
+- 后续能力投资聚焦 TLS 终止、Host/Path 路由、上游代理、健康检查、热重载、流量治理和可观测性。
+- 不再把“本地文件映射 / 静态站点服务”当成主产品方向。
+- 不追求在当前阶段成为其他成熟入口代理的 drop-in replacement。
 
 ## 当前版本线
 
 当前正式发布线收口为 `v0.1.1`。
 
-当前正在准备下一条预发布标签 `v0.1.2-rc.1`，主要用于验证最近补上的 active health、dynamic config / reload 边界，以及 gRPC / grpc-web observability 集成覆盖。
+当前代码基线已经完成“本地内容服务 -> 纯反向代理”的第一轮收口。后续版本线会继续围绕 proxy path 做协议、调度、健康检查和运维能力补强。
 
-这条版本线的工程重点不是继续无边界堆功能，而是：
+这条版本线接下来的工程重点是：
 
-1. 保持现有稳定能力与代码结构一致。
-2. 降低文档、测试与实现之间的漂移。
-3. 优先补真正影响上线可信度的协议和运维缺口。
+1. 把产品边界从“入口代理 + 本地内容服务”收口为“入口反向代理”。
+2. 消除配置模型、运行时分支、测试和文档里的历史包袱。
+3. 把释放出来的复杂度预算转投到真正影响上线可信度的代理能力。
+
+## 新产品边界
+
+目标态 `rginx` 应当满足下面这些约束：
+
+- 保留 `Proxy` 作为主路径能力。
+- 保留 `Return`、`Status`、`Metrics`、`Config` 这类运维和控制面 handler。
+- 移除 `Static` 和 `File` 这两类依赖本地文件系统或内嵌响应体的内容服务主路径。
+- 配置、校验、编译、运行时、测试和示例都不再围绕本地文件服务设计。
+- 后续主要投入 upstream 选择、重试、主动健康检查、gRPC / grpc-web、HTTP/2、Upgrade、TLS 和 observability。
+
+下面的“能力矩阵”描述的是当前代码现状。
 
 ## 能力矩阵
 
@@ -100,28 +110,24 @@
 | 正则路由 | ❌ | 当前不支持。 |
 | gRPC `service` 细分匹配 | ✅ | `grpc_service`。 |
 | gRPC `method` 细分匹配 | ✅ | `grpc_method`。 |
-| `Static` handler | ✅ | 支持状态码、内容类型和 body。 |
+| `Static` handler | ❌ | 已移除，不再支持。 |
 | `Proxy` handler | ✅ | 支持上游代理、header 改写、failover 等。 |
-| `File` handler | ✅ | 支持文件、目录与 `try_files`。 |
+| `File` handler | ❌ | 已移除，不再支持。 |
 | `Return` handler | ✅ | 支持状态码、Location 和可选响应体。 |
 | `Status` handler | ✅ | 返回运行时 JSON 状态。 |
 | `Metrics` handler | ✅ | 返回 Prometheus 文本格式指标。 |
 | `Config` handler | ✅ | 受限的动态配置管理入口。 |
 | 管理 handler 路由约束 | ✅ | `Config` handler 要求 `Exact(...)` 且必须配置非空 `allow_cidrs`。 |
 
-### 4. 静态文件与内容服务
+### 4. 本地内容服务
 
 | 能力项 | 状态 | 说明 / 边界 |
 | :--- | :--- | :--- |
-| `root` | ✅ | 基础文件根目录。 |
-| `index` | ✅ | 目录请求默认索引文件。 |
-| `try_files` | ✅ | 顺序回退。 |
-| `autoindex` | ✅ | 可选基础目录列表 HTML。 |
-| `HEAD` | ✅ | 文件和目录列表都支持。 |
-| 单段 `Range` | ✅ | 支持 `206 Partial Content`。 |
-| 多段 `Range` | ❌ | 当前不支持 multipart ranges。 |
-| 路径遍历保护 | ✅ | 会做路径安全校验与子路径约束。 |
-| MIME 猜测 | ✅ | 内建基础类型映射。 |
+| 本地文件映射 | ❌ | 已移除，不再作为产品能力。 |
+| `try_files` | ❌ | 已移除。 |
+| `autoindex` | ❌ | 已移除。 |
+| 本地 `Range` 响应 | ❌ | 已移除。 |
+| 本地目录列表 | ❌ | 已移除。 |
 
 ### 5. 上游、代理与负载均衡
 
@@ -190,7 +196,7 @@
 | 自定义 access log 模板 | ✅ | `server.access_log_format`。 |
 | `X-Request-ID` 透传或生成 | ✅ | 已贯通请求链路、响应和 access log。 |
 | `/status` JSON | ✅ | 含 revision、route、upstream、peer health 等摘要。 |
-| `/metrics` Prometheus | ✅ | HTTP、gRPC、reload、health check、upstream 等基础指标齐全。 |
+| `/metrics` Prometheus | ✅ | HTTP、gRPC、reload、health check、upstream、failover、peer transition 等指标已覆盖。 |
 | 配置重载指标 | ✅ | success / failure 计数。 |
 | `Ctrl-C` / `SIGTERM` 平滑退出 | ✅ | 支持。 |
 | `SIGHUP` 热重载 | ✅ | 支持。 |
@@ -265,90 +271,177 @@
 - 配置校验：`runtime / server / upstream / route / vhost`
 - 核心模型：`route / access_log / upstream`
 
-## 建议的下一阶段路线
+## 纯反向代理化分阶段计划
 
-下面的阶段不是对外版本承诺，而是按当前代码形态最自然、最值得投入的建议顺序。
+下面的阶段不是对外版本承诺，而是按当前代码形态最自然、风险最低的收口顺序。
 
-### Phase A：发布线硬化与文档收口
+### Phase 1：产品边界冻结
 
-状态：`🚧`
-
-目标：
-
-- 保证 README、ROADMAP、wiki、测试和代码行为不再明显漂移。
-- 继续把集成测试脚手架统一化，降低 flaky 行为。
-
-建议工作：
-
-- 维护一份更稳定的能力矩阵和限制说明。
-- 给动态配置、reload、gRPC、TLS、active health check 补更多端到端用例。
-- 让新特性默认同时带上 README / ROADMAP / wiki 更新。
-
-完成标志：
-
-- 常见能力都能在 README、ROADMAP、wiki 中找到一致表述。
-- 工作区回归保持稳定，没有明显测试竞态热点。
-
-### Phase B：更完整的 gRPC / grpc-web 语义
-
-状态：`📋`
-
-为什么优先：
-
-- 这是当前协议面最复杂、最容易在真实生产流量里遇到边界行为的部分。
-- 现有代码已经有不错的基础：deadline、trailers、grpc-web、错误映射、取消记账都已具备。
-
-建议工作：
-
-- 更主动的 downstream cancellation 与 upstream 交互协同。
-- 更细粒度的 gRPC / grpc-web 错误分类与 observability。
-- 继续增加协议级端到端测试覆盖，特别是 body streaming、trailers、timeout 和 early cancel 组合。
-
-完成标志：
-
-- gRPC 行为在“正常返回 / trailer / timeout / cancel / local error”五类路径下都更可解释、更稳定。
-
-### Phase C：更灵活的入口匹配与协议覆盖
-
-状态：`📋`
-
-建议工作：
-
-- 正则路由。
-- 是否要引入明文 `h2c` 的评估与最小实现。
-- 是否要引入 Proxy Protocol 的评估与最小实现。
-
-排序建议：
-
-1. 如果部署现实里前面经常接 LB / CDN，再考虑 Proxy Protocol。
-2. 如果 gRPC 与 mesh 场景变多，再评估 `h2c`。
-3. 正则路由要做，但应晚于前两个“更靠近生产风险”的能力。
-
-### Phase D：配置管理与运维增强
-
-状态：`📋`
-
-建议工作：
-
-- 更丰富的 `/status` 和管理接口字段。
-- 动态配置 API 的 patch / staged update 能力评估。
-- 更清晰的运维隔离建议与示例。
-- 安装、卸载、发布与服务托管文档进一步收口。
-
-### Phase E：继续按子领域细化内部模块
-
-状态：`📋`
+状态：`✅`
 
 目标：
 
-- 进一步降低大文件维护成本。
-- 让后续功能改动的落点更稳定。
+- 先把“什么保留、什么删除”定死，避免后面一边删静态文件能力，一边又继续往里面加功能。
+- 让文档和示例先反映新方向，避免继续误导后续实现。
 
-建议原则：
+主要动作：
 
-- 只按清晰子领域拆，不做表面文件切碎。
-- 拆分时同步保留集成测试与文档更新。
-- 避免再次制造“README 说的是一套，代码目录已经变另一套”的文档滞后。
+- 在 README、ROADMAP、安装示例和默认配置说明里，把产品定位统一成“反向代理”。
+- 明确 `Static` / `File` 进入废弃移除路径，不再作为推荐能力写进对外描述。
+- 列出保留的 handler：`Proxy`、`Return`、`Status`、`Metrics`、`Config`。
+
+涉及模块：
+
+- [`README.md`](README.md)
+- [`ROADMAP.md`](ROADMAP.md)
+- [`configs/rginx.ron`](configs/rginx.ron)
+- [`configs/`](configs)
+
+完成标志：
+
+- 仓库内公开文档不再把本地文件服务当成主产品能力。
+- 新默认示例配置以 upstream proxy 为中心，而不是静态返回或本地文件映射。
+
+### Phase 2：配置模型收口
+
+状态：`✅`
+
+目标：
+
+- 先从配置层删除无效产品方向，避免 runtime 继续背着历史分支。
+- 把“静态内容服务”从 schema、校验和编译链路里整体移除。
+
+主要动作：
+
+- 删除 `HandlerConfig::Static`、`HandlerConfig::File`。
+- 删除对应的 route validation 和 route compile 分支。
+- 收紧配置错误信息，让新版本明确提示这些 handler 已不再支持。
+
+涉及模块：
+
+- [`crates/rginx-config/src/model.rs`](crates/rginx-config/src/model.rs)
+- [`crates/rginx-config/src/validate/route.rs`](crates/rginx-config/src/validate/route.rs)
+- [`crates/rginx-config/src/compile/route.rs`](crates/rginx-config/src/compile/route.rs)
+- [`crates/rginx-core/src/config.rs`](crates/rginx-core/src/config.rs)
+
+完成标志：
+
+- 配置文件里无法再声明 `Static` / `File`。
+- 编译后的运行时快照不再携带本地文件服务相关模型。
+
+### Phase 3：HTTP 运行时裁剪
+
+状态：`✅`
+
+目标：
+
+- 删除运行时里不再需要的分支和文件系统耦合，把请求主路径收紧到真正的代理和管理逻辑。
+
+主要动作：
+
+- 从 dispatch 分发逻辑里移除 `Static` / `File` 分支。
+- 删除本地文件处理模块及其对 MIME、Range、目录列表等逻辑的依赖。
+- 清理 `lib.rs` 与模块导出，确保 `rginx-http` 的职责围绕 server / handler / proxy。
+
+涉及模块：
+
+- [`crates/rginx-http/src/handler/dispatch.rs`](crates/rginx-http/src/handler/dispatch.rs)
+- [`crates/rginx-http/src/lib.rs`](crates/rginx-http/src/lib.rs)
+
+完成标志：
+
+- HTTP 请求处理主路径里不再存在本地文件或静态 body handler 分支。
+- `rginx-http` 不再包含为文件服务存在的大块专用代码。
+
+### Phase 4：测试与示例回收
+
+状态：`✅`
+
+目标：
+
+- 删除已经不符合产品边界的测试资产，避免未来维护成本继续花在非目标能力上。
+- 把测试预算转到 proxy、failover、health、reload 和协议兼容路径。
+
+主要动作：
+
+- 删除或改写覆盖 `Static` / `File` 的集成测试。
+- 更新默认配置和示例配置，使其体现反向代理、管理接口、健康检查和负载均衡。
+- 清理 README 中关于 `root`、`index`、`try_files`、`Range` 等说明。
+
+涉及模块：
+
+- [`crates/rginx-app/tests/phase1.rs`](crates/rginx-app/tests/phase1.rs)
+- [`crates/rginx-app/tests/compression.rs`](crates/rginx-app/tests/compression.rs)
+- [`crates/rginx-app/tests/`](crates/rginx-app/tests)
+- [`README.md`](README.md)
+- [`configs/`](configs)
+
+完成标志：
+
+- 工作区测试不再依赖本地文件服务能力。
+- README、示例配置、集成测试三者对外口径一致。
+
+### Phase 5：代理能力补强
+
+状态：`✅`
+
+目标：
+
+- 把前面收回来的复杂度预算投入真正有价值的代理能力。
+- 让 `rginx` 在“做反向代理”这件事上明显更强，而不是功能更杂。
+
+主要动作：
+
+- 加强 upstream retry / failover / health / load balancing 语义和观测。
+- 新增 failover 计数与 peer health transition 指标，让主动/被动健康状态变化可直接从 Prometheus 观察。
+- 收紧被动健康状态机语义，避免重复上报“已不健康 peer 再次失败”的转坏事件。
+
+涉及模块：
+
+- [`crates/rginx-http/src/proxy/forward.rs`](crates/rginx-http/src/proxy/forward.rs)
+- [`crates/rginx-http/src/proxy/clients.rs`](crates/rginx-http/src/proxy/clients.rs)
+- [`crates/rginx-http/src/proxy/health.rs`](crates/rginx-http/src/proxy/health.rs)
+- [`crates/rginx-http/src/proxy/health/registry.rs`](crates/rginx-http/src/proxy/health/registry.rs)
+- [`crates/rginx-http/src/compression.rs`](crates/rginx-http/src/compression.rs)
+- [`crates/rginx-app/tests/grpc_proxy.rs`](crates/rginx-app/tests/grpc_proxy.rs)
+- [`crates/rginx-app/tests/http2.rs`](crates/rginx-app/tests/http2.rs)
+- [`crates/rginx-app/tests/upstream_http2.rs`](crates/rginx-app/tests/upstream_http2.rs)
+- [`crates/rginx-app/tests/failover.rs`](crates/rginx-app/tests/failover.rs)
+- [`crates/rginx-app/tests/backup.rs`](crates/rginx-app/tests/backup.rs)
+- [`crates/rginx-app/tests/ip_hash.rs`](crates/rginx-app/tests/ip_hash.rs)
+- [`crates/rginx-app/tests/least_conn.rs`](crates/rginx-app/tests/least_conn.rs)
+- [`crates/rginx-app/tests/active_health.rs`](crates/rginx-app/tests/active_health.rs)
+- [`crates/rginx-app/tests/reload.rs`](crates/rginx-app/tests/reload.rs)
+- [`crates/rginx-app/tests/dynamic_config_api.rs`](crates/rginx-app/tests/dynamic_config_api.rs)
+
+完成标志：
+
+- 主要测试资产集中在代理路径而不是文件服务。
+- 新增复杂度优先落在协议、调度、健康检查和可观测性，而不是内容分发分支。
+- `/metrics` 可区分 upstream failover、主动健康转坏/恢复、被动健康转坏/恢复。
+
+### Phase 6：模块进一步按代理领域细化
+
+状态：`✅`
+
+目标：
+
+- 在产品边界已经收紧后，再继续拆大文件，避免一边删能力一边重构两次。
+
+主要动作：
+
+- 按 proxy domain 继续整理核心配置和校验模块。
+- 让后续增量需求更容易落在明确的子领域文件，而不是再次回到巨型入口文件。
+
+涉及模块：
+
+- [`crates/rginx-core/src/config.rs`](crates/rginx-core/src/config.rs)
+- [`crates/rginx-config/src/validate.rs`](crates/rginx-config/src/validate.rs)
+
+完成标志：
+
+- 大文件体量下降，但职责边界仍然清晰。
+- 后续 proxy feature 的改动落点比现在更稳定。
 
 ## 不建议优先投入的方向
 
@@ -371,14 +464,10 @@
 1. 补或更新单元测试 / 集成测试。
 2. 更新 README 的能力描述或示例。
 3. 更新本文件里的能力矩阵、限制或阶段规划。
-4. 更新对应 wiki 页面。
 
-如果四者不同步，后续维护成本会上升得非常快。
+如果三者不同步，后续维护成本会上升得非常快。
 
 ## 参考
 
 - 顶层说明：[README.md](README.md)
-- 稳定承诺与发布闸门：[wiki/Release-Gate.md](wiki/Release-Gate.md)
-- 架构总览：[wiki/Architecture.md](wiki/Architecture.md)
-- 开发说明：[wiki/Development.md](wiki/Development.md)
-- wiki 摘要版路线图：[wiki/Roadmap-and-Gaps.md](wiki/Roadmap-and-Gaps.md)
+- 默认配置示例：[configs/rginx.ron](configs/rginx.ron)

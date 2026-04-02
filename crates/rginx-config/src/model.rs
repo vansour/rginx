@@ -172,11 +172,6 @@ pub enum MatcherConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub enum HandlerConfig {
-    Static {
-        status: Option<u16>,
-        content_type: Option<String>,
-        body: String,
-    },
     Proxy {
         upstream: String,
         #[serde(default)]
@@ -185,15 +180,6 @@ pub enum HandlerConfig {
         strip_prefix: Option<String>,
         #[serde(default)]
         proxy_set_headers: HashMap<String, String>,
-    },
-    File {
-        root: String,
-        #[serde(default)]
-        index: Option<String>,
-        #[serde(default)]
-        try_files: Option<Vec<String>>,
-        #[serde(default)]
-        autoindex: Option<bool>,
     },
     Return {
         status: u16,

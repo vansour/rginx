@@ -1445,6 +1445,48 @@ mod tests {
     }
 
     #[test]
+    fn repeated_failures_during_cooldown_do_not_report_duplicate_transition() {
+        let snapshot = snapshot_with_upstream_policy(
+            "backend",
+            vec![peer("http://127.0.0.1:9000")],
+            1,
+            Duration::from_secs(30),
+        );
+        let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+
+        let first_failure = clients.record_peer_failure("backend", "http://127.0.0.1:9000");
+        assert!(first_failure.entered_cooldown);
+
+        let second_failure = clients.record_peer_failure("backend", "http://127.0.0.1:9000");
+        assert!(!second_failure.entered_cooldown);
+    }
+
+    #[tokio::test]
+    async fn successful_request_after_cooldown_reports_passive_recovery() {
+        let snapshot = snapshot_with_upstream_policy(
+            "backend",
+            vec![peer("http://127.0.0.1:9000")],
+            1,
+            Duration::from_millis(20),
+        );
+        let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+
+        let failure = clients.record_peer_failure("backend", "http://127.0.0.1:9000");
+        assert!(failure.entered_cooldown);
+
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        assert_eq!(
+            clients
+                .select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 1)
+                .peers
+                .len(),
+            1
+        );
+        assert!(clients.record_peer_success("backend", "http://127.0.0.1:9000"));
+    }
+
+    #[test]
     fn successful_request_resets_peer_failure_count() {
         let snapshot = snapshot_with_upstream_policy(
             "backend",
@@ -1457,7 +1499,7 @@ mod tests {
         let failure = clients.record_peer_failure("backend", "http://127.0.0.1:9000");
         assert_eq!(failure.consecutive_failures, 1);
 
-        clients.record_peer_success("backend", "http://127.0.0.1:9000");
+        assert!(!clients.record_peer_success("backend", "http://127.0.0.1:9000"));
 
         let after_reset = clients.record_peer_failure("backend", "http://127.0.0.1:9000");
         assert_eq!(after_reset.consecutive_failures, 1);
@@ -1626,6 +1668,14 @@ mod tests {
         );
         let rendered = metrics.render_prometheus();
         assert!(rendered.contains("rginx_active_health_checks_total"));
+        assert!(rendered.contains(&format!(
+            "rginx_upstream_peer_transitions_total{{upstream=\"backend\",peer=\"{}\",source=\"active\",state=\"unhealthy\",reason=\"unhealthy_status\"}} 1",
+            peer_url
+        )));
+        assert!(rendered.contains(&format!(
+            "rginx_upstream_peer_transitions_total{{upstream=\"backend\",peer=\"{}\",source=\"active\",state=\"healthy\",reason=\"healthy_threshold_met\"}} 1",
+            peer_url
+        )));
     }
 
     fn upstream_settings(protocol: UpstreamProtocol) -> UpstreamSettings {

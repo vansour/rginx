@@ -1,0 +1,24 @@
+VirtualHostConfig(
+    server_names: ["app.example.com"],
+    locations: [
+        LocationConfig(
+            matcher: Exact("/"),
+            handler: Return(
+                status: 200,
+                location: "",
+                body: Some("app.example.com root\n"),
+            ),
+        ),
+        LocationConfig(
+            matcher: Prefix("/v1"),
+            handler: Proxy(
+                upstream: "backend",
+            ),
+        ),
+        LocationConfig(
+            matcher: Exact("/status"),
+            handler: Status,
+            allow_cidrs: ["127.0.0.1/32", "::1/128"],
+        ),
+    ],
+),

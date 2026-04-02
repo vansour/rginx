@@ -5,10 +5,9 @@ pub mod service;
 pub mod types;
 
 pub use config::{
-    AccessLogFormat, AccessLogValues, ActiveHealthCheck, ConfigSnapshot, FileTarget,
-    GrpcRouteMatch, ProxyTarget, ReturnAction, Route, RouteAccessControl, RouteAction,
-    RouteMatcher, RouteRateLimit, RuntimeSettings, Server, ServerTls, StaticResponse, Upstream,
-    UpstreamLoadBalance, UpstreamPeer, UpstreamProtocol, UpstreamSettings, UpstreamTls,
-    VirtualHost,
+    AccessLogFormat, AccessLogValues, ActiveHealthCheck, ConfigSnapshot, GrpcRouteMatch,
+    ProxyTarget, ReturnAction, Route, RouteAccessControl, RouteAction, RouteMatcher,
+    RouteRateLimit, RuntimeSettings, Server, ServerTls, Upstream, UpstreamLoadBalance,
+    UpstreamPeer, UpstreamProtocol, UpstreamSettings, UpstreamTls, VirtualHost,
 };
 pub use error::{Error, Result};

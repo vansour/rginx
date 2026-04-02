@@ -1,6 +1,5 @@
 mod client_ip;
 mod compression;
-mod file;
 pub mod handler;
 pub mod metrics;
 pub mod proxy;

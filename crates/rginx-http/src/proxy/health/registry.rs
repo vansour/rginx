@@ -26,6 +26,7 @@ pub(crate) struct PeerFailureStatus {
 struct PassiveHealthState {
     consecutive_failures: u32,
     unhealthy_until: Option<Instant>,
+    pending_recovery: bool,
 }
 
 #[derive(Debug, Default)]
@@ -252,10 +253,12 @@ impl PeerHealthRegistry {
         SelectedPeers { peers: selected, skipped_unhealthy }
     }
 
-    pub(crate) fn record_success(&self, upstream_name: &str, peer_url: &str) {
+    pub(crate) fn record_success(&self, upstream_name: &str, peer_url: &str) -> bool {
         if let Some(health) = self.get(upstream_name, peer_url) {
-            health.record_success();
+            return health.record_success();
         }
+
+        false
     }
 
     pub(crate) fn record_failure(&self, upstream_name: &str, peer_url: &str) -> PeerFailureStatus {
@@ -338,32 +341,37 @@ impl PeerHealthRegistry {
 
 impl PeerHealth {
     fn is_available(&self) -> bool {
-        let mut state = lock_peer_health(&self.state);
-        match state.passive.unhealthy_until {
-            Some(until) if until > Instant::now() => false,
-            Some(_) => {
-                state.passive = PassiveHealthState::default();
-                !state.active.unhealthy
-            }
-            None => !state.active.unhealthy,
-        }
+        let state = lock_peer_health(&self.state);
+        let passive_available =
+            state.passive.unhealthy_until.is_none_or(|until| until <= Instant::now());
+        passive_available && !state.active.unhealthy
     }
 
-    fn record_success(&self) {
-        lock_peer_health(&self.state).passive = PassiveHealthState::default();
+    fn record_success(&self) -> bool {
+        let mut state = lock_peer_health(&self.state);
+        let recovered = state.passive.pending_recovery;
+        state.passive = PassiveHealthState::default();
+        recovered
     }
 
     fn record_failure(&self, policy: PeerHealthPolicy) -> PeerFailureStatus {
         let mut state = lock_peer_health(&self.state);
-        if state.passive.unhealthy_until.is_some_and(|until| until <= Instant::now()) {
-            state.passive = PassiveHealthState::default();
+        let now = Instant::now();
+
+        if state.passive.unhealthy_until.is_some_and(|until| until <= now) {
+            state.passive.unhealthy_until = None;
+            state.passive.consecutive_failures = 0;
         }
 
+        let already_in_cooldown = state.passive.unhealthy_until.is_some_and(|until| until > now);
         state.passive.consecutive_failures += 1;
-        let entered_cooldown =
-            state.passive.consecutive_failures >= policy.unhealthy_after_failures;
+        let entered_cooldown = !already_in_cooldown
+            && state.passive.consecutive_failures >= policy.unhealthy_after_failures;
         if entered_cooldown {
-            state.passive.unhealthy_until = Some(Instant::now() + policy.cooldown);
+            state.passive.unhealthy_until = Some(now + policy.cooldown);
+            state.passive.pending_recovery = true;
+        } else if already_in_cooldown {
+            state.passive.unhealthy_until = Some(now + policy.cooldown);
         }
 
         PeerFailureStatus {
@@ -410,12 +418,8 @@ impl PeerHealth {
     }
 
     fn snapshot(&self, url: &str, weight: u32, backup: bool) -> PeerStatusSnapshot {
-        let mut state = lock_peer_health(&self.state);
+        let state = lock_peer_health(&self.state);
         let now = Instant::now();
-
-        if state.passive.unhealthy_until.is_some_and(|until| until <= now) {
-            state.passive = PassiveHealthState::default();
-        }
 
         let passive_cooldown_remaining_ms = state
             .passive

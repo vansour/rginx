@@ -43,7 +43,7 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
     let default_vhost = VirtualHost {
         id: DEFAULT_VHOST_ID.to_string(),
         server_names: compiled_server.server_names,
-        routes: route::compile_routes(locations, &upstreams, base_dir, DEFAULT_VHOST_ID)?,
+        routes: route::compile_routes(locations, &upstreams, DEFAULT_VHOST_ID)?,
         tls: compiled_server.server_tls.clone(),
     };
 
@@ -288,104 +288,6 @@ mod tests {
             .expect("gRPC active health-check config should compile");
         assert_eq!(active_health.path, super::DEFAULT_GRPC_HEALTH_CHECK_PATH);
         assert_eq!(active_health.grpc_service.as_deref(), Some("grpc.health.v1.Health"));
-    }
-
-    #[test]
-    fn compile_propagates_file_autoindex_setting() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system time should be after unix epoch")
-            .as_nanos();
-        let base_dir =
-            std::env::temp_dir().join(format!("rginx-file-autoindex-config-test-{unique}"));
-        fs::create_dir_all(&base_dir).expect("temp base dir should be created");
-
-        let config = Config {
-            runtime: RuntimeConfig {
-                shutdown_timeout_secs: 10,
-                worker_threads: None,
-                accept_workers: None,
-            },
-            server: ServerConfig {
-                listen: "127.0.0.1:8080".to_string(),
-                server_names: Vec::new(),
-                trusted_proxies: Vec::new(),
-                keep_alive: None,
-                max_headers: None,
-                max_request_body_bytes: None,
-                max_connections: None,
-                header_read_timeout_secs: None,
-                request_body_read_timeout_secs: None,
-                response_write_timeout_secs: None,
-                access_log_format: None,
-                config_api_token: Some("dev-config-token".to_string()),
-                tls: None,
-            },
-            upstreams: Vec::new(),
-            locations: vec![
-                LocationConfig {
-                    matcher: MatcherConfig::Exact("/on".to_string()),
-                    handler: HandlerConfig::File {
-                        root: "public".to_string(),
-                        index: None,
-                        try_files: None,
-                        autoindex: Some(true),
-                    },
-                    grpc_service: None,
-                    grpc_method: None,
-                    allow_cidrs: Vec::new(),
-                    deny_cidrs: Vec::new(),
-                    requests_per_sec: None,
-                    burst: None,
-                },
-                LocationConfig {
-                    matcher: MatcherConfig::Exact("/off".to_string()),
-                    handler: HandlerConfig::File {
-                        root: "assets".to_string(),
-                        index: None,
-                        try_files: None,
-                        autoindex: None,
-                    },
-                    grpc_service: None,
-                    grpc_method: None,
-                    allow_cidrs: Vec::new(),
-                    deny_cidrs: Vec::new(),
-                    requests_per_sec: None,
-                    burst: None,
-                },
-            ],
-            servers: Vec::new(),
-        };
-
-        let snapshot = compile_with_base(config, &base_dir).expect("file routes should compile");
-        let enabled_route = snapshot
-            .default_vhost
-            .routes
-            .iter()
-            .find(|route| route.id.contains("exact:/on"))
-            .expect("enabled file route should exist");
-        let disabled_route = snapshot
-            .default_vhost
-            .routes
-            .iter()
-            .find(|route| route.id.contains("exact:/off"))
-            .expect("disabled file route should exist");
-
-        let enabled_target = match &enabled_route.action {
-            rginx_core::RouteAction::File(target) => target,
-            _ => panic!("expected file route"),
-        };
-        let disabled_target = match &disabled_route.action {
-            rginx_core::RouteAction::File(target) => target,
-            _ => panic!("expected file route"),
-        };
-
-        assert_eq!(enabled_target.root, base_dir.join("public"));
-        assert!(enabled_target.autoindex);
-        assert_eq!(disabled_target.root, base_dir.join("assets"));
-        assert!(!disabled_target.autoindex);
-
-        fs::remove_dir_all(&base_dir).expect("temp base dir should be removed");
     }
 
     #[test]
@@ -1447,10 +1349,10 @@ mod tests {
             upstreams: Vec::new(),
             locations: vec![LocationConfig {
                 matcher: MatcherConfig::Prefix("/api".to_string()),
-                handler: HandlerConfig::Static {
-                    status: Some(200),
-                    content_type: Some("text/plain; charset=utf-8".to_string()),
-                    body: "ok\n".to_string(),
+                handler: HandlerConfig::Return {
+                    status: 200,
+                    location: String::new(),
+                    body: Some("ok\n".to_string()),
                 },
                 grpc_service: None,
 
@@ -1575,10 +1477,10 @@ mod tests {
             upstreams: Vec::new(),
             locations: vec![LocationConfig {
                 matcher: MatcherConfig::Exact("/".to_string()),
-                handler: HandlerConfig::Static {
-                    status: Some(200),
-                    content_type: Some("text/plain; charset=utf-8".to_string()),
-                    body: "ok\n".to_string(),
+                handler: HandlerConfig::Return {
+                    status: 200,
+                    location: String::new(),
+                    body: Some("ok\n".to_string()),
                 },
                 grpc_service: None,
 
@@ -1628,10 +1530,10 @@ mod tests {
             upstreams: Vec::new(),
             locations: vec![LocationConfig {
                 matcher: MatcherConfig::Exact("/".to_string()),
-                handler: HandlerConfig::Static {
-                    status: Some(200),
-                    content_type: Some("text/plain; charset=utf-8".to_string()),
-                    body: "ok\n".to_string(),
+                handler: HandlerConfig::Return {
+                    status: 200,
+                    location: String::new(),
+                    body: Some("ok\n".to_string()),
                 },
                 grpc_service: None,
 
@@ -1677,10 +1579,10 @@ mod tests {
             upstreams: Vec::new(),
             locations: vec![LocationConfig {
                 matcher: MatcherConfig::Exact("/".to_string()),
-                handler: HandlerConfig::Static {
-                    status: Some(200),
-                    content_type: Some("text/plain; charset=utf-8".to_string()),
-                    body: "ok\n".to_string(),
+                handler: HandlerConfig::Return {
+                    status: 200,
+                    location: String::new(),
+                    body: Some("ok\n".to_string()),
                 },
                 grpc_service: None,
 
@@ -1736,10 +1638,10 @@ mod tests {
             locations: vec![
                 LocationConfig {
                     matcher: MatcherConfig::Prefix("/".to_string()),
-                    handler: HandlerConfig::Static {
-                        status: Some(200),
-                        content_type: Some("text/plain; charset=utf-8".to_string()),
-                        body: "fallback\n".to_string(),
+                    handler: HandlerConfig::Return {
+                        status: 200,
+                        location: String::new(),
+                        body: Some("fallback\n".to_string()),
                     },
                     grpc_service: None,
                     grpc_method: None,
@@ -1750,10 +1652,10 @@ mod tests {
                 },
                 LocationConfig {
                     matcher: MatcherConfig::Prefix("/".to_string()),
-                    handler: HandlerConfig::Static {
-                        status: Some(200),
-                        content_type: Some("text/plain; charset=utf-8".to_string()),
-                        body: "grpc\n".to_string(),
+                    handler: HandlerConfig::Return {
+                        status: 200,
+                        location: String::new(),
+                        body: Some("grpc\n".to_string()),
                     },
                     grpc_service: Some("grpc.health.v1.Health".to_string()),
                     grpc_method: Some("Check".to_string()),
@@ -1807,10 +1709,10 @@ mod tests {
             upstreams: Vec::new(),
             locations: vec![LocationConfig {
                 matcher: MatcherConfig::Exact("/".to_string()),
-                handler: HandlerConfig::Static {
-                    status: Some(200),
-                    content_type: Some("text/plain; charset=utf-8".to_string()),
-                    body: "ok\n".to_string(),
+                handler: HandlerConfig::Return {
+                    status: 200,
+                    location: String::new(),
+                    body: Some("ok\n".to_string()),
                 },
                 grpc_service: None,
 

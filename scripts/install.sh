@@ -261,8 +261,7 @@ SBIN_DIR="/usr/sbin"
 SHARE_DIR="/usr/share/rginx"
 DOC_DIR="/usr/share/doc/rginx"
 CONF_D_DIR="${CONFIG_DIR}/conf.d"
-EXAMPLES_DIR="${CONFIG_DIR}/examples"
-ACTIVE_CONFIG="${CONFIG_DIR}/rginx.conf"
+ACTIVE_CONFIG="${CONFIG_DIR}/rginx.ron"
 
 resolve_mode
 
@@ -287,8 +286,6 @@ prepare_privileges
 log "resolved install mode: ${MODE}"
 log "installing to prefix ${PREFIX}"
 run_root install -d "${SBIN_DIR}" "${CONFIG_DIR}" "${CONF_D_DIR}" "${SHARE_DIR}" "${DOC_DIR}"
-run_root rm -rf "${EXAMPLES_DIR}"
-run_root install -d "${EXAMPLES_DIR}"
 
 run_root install -m 755 "${STAGED_BIN}" "${SBIN_DIR}/rginx"
 run_root install -m 755 "${STAGED_UNINSTALL}" "${SBIN_DIR}/rginx-uninstall"
@@ -301,8 +298,6 @@ for doc in README.md CHANGELOG.md LICENSE LICENSE-APACHE LICENSE-MIT; do
     fi
 done
 
-run_root cp -R "${STAGED_ROOT}/configs/." "${EXAMPLES_DIR}/"
-
 if [[ ! -f "${ACTIVE_CONFIG}" || "${FORCE}" -eq 1 ]]; then
     run_root install -m 644 "${STAGED_ROOT}/configs/rginx.ron" "${ACTIVE_CONFIG}"
     ACTIVE_CONFIG_RESULT="installed"
@@ -310,9 +305,25 @@ else
     ACTIVE_CONFIG_RESULT="preserved"
 fi
 
+CONF_D_INSTALLED=0
+CONF_D_PRESERVED=0
+
+if [[ -d "${STAGED_ROOT}/configs/conf.d" ]]; then
+    for fragment in "${STAGED_ROOT}"/configs/conf.d/*.ron; do
+        [[ -e "${fragment}" ]] || continue
+
+        target="${CONF_D_DIR}/$(basename "${fragment}")"
+        if [[ ! -f "${target}" || "${FORCE}" -eq 1 ]]; then
+            run_root install -m 644 "${fragment}" "${target}"
+            CONF_D_INSTALLED=$((CONF_D_INSTALLED + 1))
+        else
+            CONF_D_PRESERVED=$((CONF_D_PRESERVED + 1))
+        fi
+    done
+fi
+
 log "binary: ${SBIN_DIR}/rginx"
 log "uninstall: ${SBIN_DIR}/rginx-uninstall"
 log "active config (${ACTIVE_CONFIG_RESULT}): ${ACTIVE_CONFIG}"
-log "conf.d dir: ${CONF_D_DIR}"
-log "example configs: ${EXAMPLES_DIR}"
+log "conf.d dir: ${CONF_D_DIR} (installed ${CONF_D_INSTALLED}, preserved ${CONF_D_PRESERVED})"
 log "default config search will now pick ${ACTIVE_CONFIG} when running ${SBIN_DIR}/rginx"

@@ -391,7 +391,7 @@ fn dynamic_config_source(listen_addr: SocketAddr, app_body: &str) -> String {
 
 fn dynamic_config_source_with_listen(listen: &str, app_body: &str) -> String {
     format!(
-        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n        config_api_token: Some({:?}),\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/app\"),\n            handler: Static(\n                status: Some(200),\n                content_type: Some(\"text/plain; charset=utf-8\"),\n                body: {:?},\n            ),\n        ),\n        LocationConfig(\n            matcher: Exact(\"/-/config\"),\n            handler: Config,\n            allow_cidrs: [\"127.0.0.1/32\", \"::1/128\"],\n        ),\n    ],\n)\n",
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n        config_api_token: Some({:?}),\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/app\"),\n            handler: Return(\n                status: 200,\n                location: \"\",\n                body: Some({:?}),\n            ),\n        ),\n        LocationConfig(\n            matcher: Exact(\"/-/config\"),\n            handler: Config,\n            allow_cidrs: [\"127.0.0.1/32\", \"::1/128\"],\n        ),\n    ],\n)\n",
         listen,
         CONFIG_API_TOKEN,
         app_body,

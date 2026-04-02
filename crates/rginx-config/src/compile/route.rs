@@ -1,12 +1,11 @@
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::Arc;
 
 use http::StatusCode;
 use ipnet::IpNet;
 use rginx_core::{
-    Error, FileTarget, GrpcRouteMatch, ProxyTarget, Result, ReturnAction, Route,
-    RouteAccessControl, RouteAction, RouteMatcher, RouteRateLimit, StaticResponse, Upstream,
+    Error, GrpcRouteMatch, ProxyTarget, Result, ReturnAction, Route, RouteAccessControl,
+    RouteAction, RouteMatcher, RouteRateLimit, Upstream,
 };
 
 use crate::model::{HandlerConfig, LocationConfig, MatcherConfig};
@@ -14,15 +13,12 @@ use crate::model::{HandlerConfig, LocationConfig, MatcherConfig};
 pub(super) fn compile_routes(
     locations: Vec<LocationConfig>,
     upstreams: &HashMap<String, Arc<Upstream>>,
-    base_dir: &Path,
     vhost_id: &str,
 ) -> Result<Vec<Route>> {
     let mut routes = locations
         .into_iter()
         .enumerate()
-        .map(|(route_index, location)| {
-            compile_route(location, route_index, upstreams, base_dir, vhost_id)
-        })
+        .map(|(route_index, location)| compile_route(location, route_index, upstreams, vhost_id))
         .collect::<Result<Vec<_>>>()?;
 
     routes.sort_by_key(|route| std::cmp::Reverse(route.priority()));
@@ -34,7 +30,6 @@ fn compile_route(
     location: LocationConfig,
     route_index: usize,
     upstreams: &HashMap<String, Arc<Upstream>>,
-    base_dir: &Path,
     vhost_id: &str,
 ) -> Result<Route> {
     let LocationConfig {
@@ -68,7 +63,7 @@ fn compile_route(
     };
     let access_control = compile_route_access_control(&matcher, allow_cidrs, deny_cidrs)?;
     let rate_limit = compile_route_rate_limit(&matcher, requests_per_sec, burst)?;
-    let action = compile_route_action(handler, upstreams, base_dir)?;
+    let action = compile_route_action(handler, upstreams)?;
 
     Ok(Route { id: route_id, matcher, grpc_match, action, access_control, rate_limit })
 }
@@ -76,17 +71,8 @@ fn compile_route(
 fn compile_route_action(
     handler: HandlerConfig,
     upstreams: &HashMap<String, Arc<Upstream>>,
-    base_dir: &Path,
 ) -> Result<RouteAction> {
     match handler {
-        HandlerConfig::Static { status, content_type, body } => {
-            Ok(RouteAction::Static(StaticResponse {
-                status: StatusCode::from_u16(status.unwrap_or(200))?,
-                content_type: content_type
-                    .unwrap_or_else(|| "text/plain; charset=utf-8".to_string()),
-                body,
-            }))
-        }
         HandlerConfig::Proxy { upstream, preserve_host, strip_prefix, proxy_set_headers } => {
             let compiled = upstreams.get(&upstream).cloned().ok_or_else(|| {
                 Error::Config(format!("proxy upstream `{upstream}` is not defined"))
@@ -111,14 +97,6 @@ fn compile_route_action(
                 preserve_host: preserve_host.unwrap_or(false),
                 strip_prefix: strip_prefix.and_then(|s| if s.is_empty() { None } else { Some(s) }),
                 proxy_set_headers,
-            }))
-        }
-        HandlerConfig::File { root, index, try_files, autoindex } => {
-            Ok(RouteAction::File(FileTarget {
-                root: super::resolve_path(base_dir, root),
-                index: index.and_then(|s| if s.trim().is_empty() { None } else { Some(s) }),
-                try_files: try_files.unwrap_or_default(),
-                autoindex: autoindex.unwrap_or(false),
             }))
         }
         HandlerConfig::Return { status, location, body } => Ok(RouteAction::Return(ReturnAction {

@@ -81,8 +81,8 @@ impl ProxyClients {
         self.health.select_peers(upstream, client_ip, limit)
     }
 
-    pub(super) fn record_peer_success(&self, upstream_name: &str, peer_url: &str) {
-        self.health.record_success(upstream_name, peer_url);
+    pub(super) fn record_peer_success(&self, upstream_name: &str, peer_url: &str) -> bool {
+        self.health.record_success(upstream_name, peer_url)
     }
 
     pub(super) fn record_peer_failure(

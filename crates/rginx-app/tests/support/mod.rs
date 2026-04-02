@@ -15,7 +15,7 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, ClientConnection, DigitallySignedStruct, SignatureScheme, StreamOwned};
 
-pub const READY_ROUTE_CONFIG: &str = "        LocationConfig(\n            matcher: Exact(\"/-/ready\"),\n            handler: Static(\n                body: \"ready\\n\",\n            ),\n        ),\n";
+pub const READY_ROUTE_CONFIG: &str = "        LocationConfig(\n            matcher: Exact(\"/-/ready\"),\n            handler: Return(\n                status: 200,\n                location: \"\",\n                body: Some(\"ready\\n\"),\n            ),\n        ),\n";
 
 const READY_PATH: &str = "/-/ready";
 const READY_BODY: &str = "ready\n";

@@ -11,7 +11,7 @@ use support::{READY_ROUTE_CONFIG, ServerHarness, reserve_loopback_addr};
 #[test]
 fn serves_requests_with_configured_runtime_and_accept_workers() {
     let listen_addr = reserve_loopback_addr();
-    let mut server = ServerHarness::spawn("rginx-workers-test", |_| static_config(listen_addr));
+    let mut server = ServerHarness::spawn("rginx-workers-test", |_| return_config(listen_addr));
     server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
 
     let barrier = Arc::new(Barrier::new(9));
@@ -90,9 +90,9 @@ fn parse_http_response(bytes: &[u8]) -> Result<ParsedResponse, String> {
     Ok(ParsedResponse { status, body: bytes[head_end + 4..].to_vec() })
 }
 
-fn static_config(listen_addr: SocketAddr) -> String {
+fn return_config(listen_addr: SocketAddr) -> String {
     format!(
-        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n        worker_threads: Some(2),\n        accept_workers: Some(2),\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Static(\n                status: Some(200),\n                content_type: Some(\"text/plain; charset=utf-8\"),\n                body: \"workers ok\\n\",\n            ),\n        ),\n    ],\n)\n",
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n        worker_threads: Some(2),\n        accept_workers: Some(2),\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Return(\n                status: 200,\n                location: \"\",\n                body: Some(\"workers ok\\n\"),\n            ),\n        ),\n    ],\n)\n",
         listen_addr.to_string(),
         ready_route = READY_ROUTE_CONFIG
     )

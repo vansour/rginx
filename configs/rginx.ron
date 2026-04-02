@@ -3,7 +3,7 @@ Config(
         shutdown_timeout_secs: 10,
     ),
     server: ServerConfig(
-        listen: "127.0.0.1:8080",
+        listen: "0.0.0.0:80",
     ),
     upstreams: [
         UpstreamConfig(
@@ -26,18 +26,16 @@ Config(
     locations: [
         LocationConfig(
             matcher: Exact("/"),
-            handler: Static(
-                status: Some(200),
-                content_type: Some("text/plain; charset=utf-8"),
-                body: "rginx is running.\n",
+            handler: Proxy(
+                upstream: "backend",
             ),
         ),
         LocationConfig(
             matcher: Exact("/healthz"),
-            handler: Static(
-                status: Some(200),
-                content_type: Some("text/plain; charset=utf-8"),
-                body: "ok\n",
+            handler: Return(
+                status: 200,
+                location: "",
+                body: Some("ok\n"),
             ),
         ),
         LocationConfig(
@@ -58,5 +56,8 @@ Config(
             requests_per_sec: Some(20),
             burst: Some(10),
         ),
+    ],
+    servers: [
+        // @include "conf.d/*.ron"
     ],
 )

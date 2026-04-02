@@ -16,6 +16,8 @@ struct MetricsInner {
     http_rate_limited_total: Mutex<BTreeMap<RouteKey, u64>>,
     http_request_duration_ms: Mutex<BTreeMap<RouteKey, Histogram>>,
     upstream_requests_total: Mutex<BTreeMap<UpstreamRequestKey, u64>>,
+    upstream_failovers_total: Mutex<BTreeMap<UpstreamFailoverKey, u64>>,
+    upstream_peer_transitions_total: Mutex<BTreeMap<UpstreamPeerTransitionKey, u64>>,
     active_health_checks_total: Mutex<BTreeMap<ActiveHealthCheckKey, u64>>,
     config_reloads_total: Mutex<BTreeMap<ConfigReloadKey, u64>>,
 }
@@ -53,6 +55,23 @@ struct UpstreamRequestKey {
     upstream: String,
     peer: String,
     result: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct UpstreamFailoverKey {
+    upstream: String,
+    from_peer: String,
+    to_peer: String,
+    reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct UpstreamPeerTransitionKey {
+    upstream: String,
+    peer: String,
+    source: String,
+    state: String,
+    reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -167,6 +186,44 @@ impl Metrics {
                 upstream: upstream.to_string(),
                 peer: peer.to_string(),
                 result: result.to_string(),
+            },
+        );
+    }
+
+    pub fn record_upstream_failover(
+        &self,
+        upstream: &str,
+        from_peer: &str,
+        to_peer: &str,
+        reason: &str,
+    ) {
+        increment_counter(
+            &self.inner.upstream_failovers_total,
+            UpstreamFailoverKey {
+                upstream: upstream.to_string(),
+                from_peer: from_peer.to_string(),
+                to_peer: to_peer.to_string(),
+                reason: reason.to_string(),
+            },
+        );
+    }
+
+    pub fn record_upstream_peer_transition(
+        &self,
+        upstream: &str,
+        peer: &str,
+        source: &str,
+        state: &str,
+        reason: &str,
+    ) {
+        increment_counter(
+            &self.inner.upstream_peer_transitions_total,
+            UpstreamPeerTransitionKey {
+                upstream: upstream.to_string(),
+                peer: peer.to_string(),
+                source: source.to_string(),
+                state: state.to_string(),
+                reason: reason.to_string(),
             },
         );
     }
@@ -313,6 +370,41 @@ impl Metrics {
 
         render_counter_family(
             &mut output,
+            "rginx_upstream_failovers_total",
+            "Total upstream failover retries between peers by reason.",
+            &*lock_map(&self.inner.upstream_failovers_total),
+            |key, value, out| {
+                out.push_str(&format!(
+                    "rginx_upstream_failovers_total{{upstream=\"{}\",from_peer=\"{}\",to_peer=\"{}\",reason=\"{}\"}} {}\n",
+                    escape_label_value(&key.upstream),
+                    escape_label_value(&key.from_peer),
+                    escape_label_value(&key.to_peer),
+                    escape_label_value(&key.reason),
+                    value
+                ));
+            },
+        );
+
+        render_counter_family(
+            &mut output,
+            "rginx_upstream_peer_transitions_total",
+            "Total upstream peer health state transitions by source, state, and reason.",
+            &*lock_map(&self.inner.upstream_peer_transitions_total),
+            |key, value, out| {
+                out.push_str(&format!(
+                    "rginx_upstream_peer_transitions_total{{upstream=\"{}\",peer=\"{}\",source=\"{}\",state=\"{}\",reason=\"{}\"}} {}\n",
+                    escape_label_value(&key.upstream),
+                    escape_label_value(&key.peer),
+                    escape_label_value(&key.source),
+                    escape_label_value(&key.state),
+                    escape_label_value(&key.reason),
+                    value
+                ));
+            },
+        );
+
+        render_counter_family(
+            &mut output,
             "rginx_active_health_checks_total",
             "Total active health check probes by peer and result.",
             &*lock_map(&self.inner.active_health_checks_total),
@@ -399,6 +491,19 @@ mod tests {
         );
         metrics.record_rate_limited("server/routes[1]|prefix:/api");
         metrics.record_upstream_request("backend", "http://127.0.0.1:9000", "success");
+        metrics.record_upstream_failover(
+            "backend",
+            "http://127.0.0.1:9000",
+            "http://127.0.0.1:9001",
+            "timeout",
+        );
+        metrics.record_upstream_peer_transition(
+            "backend",
+            "http://127.0.0.1:9000",
+            "passive",
+            "unhealthy",
+            "timeout",
+        );
         metrics.record_active_health_check("backend", "http://127.0.0.1:9000", "healthy");
         metrics.record_config_reload("success");
 
@@ -424,6 +529,12 @@ mod tests {
         ));
         assert!(rendered.contains(
             "rginx_upstream_requests_total{upstream=\"backend\",peer=\"http://127.0.0.1:9000\",result=\"success\"} 1"
+        ));
+        assert!(rendered.contains(
+            "rginx_upstream_failovers_total{upstream=\"backend\",from_peer=\"http://127.0.0.1:9000\",to_peer=\"http://127.0.0.1:9001\",reason=\"timeout\"} 1"
+        ));
+        assert!(rendered.contains(
+            "rginx_upstream_peer_transitions_total{upstream=\"backend\",peer=\"http://127.0.0.1:9000\",source=\"passive\",state=\"unhealthy\",reason=\"timeout\"} 1"
         ));
         assert!(rendered.contains(
             "rginx_active_health_checks_total{upstream=\"backend\",peer=\"http://127.0.0.1:9000\",result=\"healthy\"} 1"

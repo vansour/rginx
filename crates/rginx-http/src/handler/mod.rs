@@ -61,10 +61,10 @@ mod tests {
     use http_body_util::BodyExt;
     use hyper::body::{Frame, SizeHint};
     use rginx_core::{
-        AccessLogFormat, ActiveHealthCheck, ConfigSnapshot, GrpcRouteMatch, Route,
+        AccessLogFormat, ActiveHealthCheck, ConfigSnapshot, GrpcRouteMatch, ReturnAction, Route,
         RouteAccessControl, RouteAction, RouteMatcher, RouteRateLimit, RuntimeSettings, Server,
-        StaticResponse, Upstream, UpstreamLoadBalance, UpstreamPeer, UpstreamProtocol,
-        UpstreamSettings, UpstreamTls, VirtualHost,
+        Upstream, UpstreamLoadBalance, UpstreamPeer, UpstreamProtocol, UpstreamSettings,
+        UpstreamTls, VirtualHost,
     };
     use serde_json::Value;
 
@@ -262,10 +262,10 @@ mod tests {
             id: "server/routes[0]|exact:/metrics".to_string(),
             matcher: RouteMatcher::Exact("/metrics".to_string()),
             grpc_match: None,
-            action: RouteAction::Static(StaticResponse {
+            action: RouteAction::Return(ReturnAction {
                 status: StatusCode::OK,
-                content_type: "text/plain; charset=utf-8".to_string(),
-                body: "ok\n".to_string(),
+                location: String::new(),
+                body: Some("ok\n".to_string()),
             }),
             access_control: RouteAccessControl::new(
                 vec!["127.0.0.1/32".parse().unwrap(), "::1/128".parse().unwrap()],
@@ -319,10 +319,10 @@ mod tests {
                     id: "server/routes[0]|exact:/api".to_string(),
                     matcher: RouteMatcher::Exact("/api".to_string()),
                     grpc_match: None,
-                    action: RouteAction::Static(StaticResponse {
+                    action: RouteAction::Return(ReturnAction {
                         status: StatusCode::OK,
-                        content_type: "text/plain; charset=utf-8".to_string(),
-                        body: "ok\n".to_string(),
+                        location: String::new(),
+                        body: Some("ok\n".to_string()),
                     }),
                     access_control: RouteAccessControl::default(),
                     rate_limit: Some(RouteRateLimit::new(1, 0)),
@@ -465,10 +465,10 @@ mod tests {
                             service: Some("grpc.health.v1.Health".to_string()),
                             method: Some("Check".to_string()),
                         }),
-                        action: RouteAction::Static(StaticResponse {
+                        action: RouteAction::Return(ReturnAction {
                             status: StatusCode::OK,
-                            content_type: "text/plain; charset=utf-8".to_string(),
-                            body: "grpc\n".to_string(),
+                            location: String::new(),
+                            body: Some("grpc\n".to_string()),
                         }),
                         access_control: RouteAccessControl::default(),
                         rate_limit: None,
@@ -505,10 +505,10 @@ mod tests {
                         service: Some("grpc.health.v1.Health".to_string()),
                         method: None,
                     }),
-                    action: RouteAction::Static(StaticResponse {
+                    action: RouteAction::Return(ReturnAction {
                         status: StatusCode::OK,
-                        content_type: "text/plain; charset=utf-8".to_string(),
-                        body: "grpc\n".to_string(),
+                        location: String::new(),
+                        body: Some("grpc\n".to_string()),
                     }),
                     access_control: RouteAccessControl::default(),
                     rate_limit: None,
@@ -849,10 +849,10 @@ mod tests {
             id: "server/routes[0]|exact:/metrics".to_string(),
             matcher: RouteMatcher::Exact("/metrics".to_string()),
             grpc_match: None,
-            action: RouteAction::Static(StaticResponse {
+            action: RouteAction::Return(ReturnAction {
                 status: StatusCode::OK,
-                content_type: "text/plain; charset=utf-8".to_string(),
-                body: "ok\n".to_string(),
+                location: String::new(),
+                body: Some("ok\n".to_string()),
             }),
             access_control: RouteAccessControl::new(
                 vec!["127.0.0.1/32".parse().unwrap(), "::1/128".parse().unwrap()],
@@ -1022,10 +1022,10 @@ mod tests {
             id: id.to_string(),
             matcher,
             grpc_match: None,
-            action: RouteAction::Static(StaticResponse {
+            action: RouteAction::Return(ReturnAction {
                 status: StatusCode::OK,
-                content_type: "text/plain; charset=utf-8".to_string(),
-                body: "ok\n".to_string(),
+                location: String::new(),
+                body: Some("ok\n".to_string()),
             }),
             access_control: RouteAccessControl::default(),
             rate_limit: None,
