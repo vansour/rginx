@@ -162,9 +162,7 @@ fn upgraded_tunnels_still_count_towards_max_connections() {
     let response = read_http_head(&mut upgraded);
     assert!(response.starts_with("HTTP/1.1 101"), "unexpected upgrade response line: {response:?}");
 
-    upgraded
-        .write_all(b"ping")
-        .expect("client should write tunneled payload");
+    upgraded.write_all(b"ping").expect("client should write tunneled payload");
     upgraded.flush().expect("client tunneled payload should flush");
 
     thread::sleep(Duration::from_millis(150));
