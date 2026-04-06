@@ -51,9 +51,9 @@
 目标态 `rginx` 应当满足下面这些约束：
 
 - 保留 `Proxy` 作为主路径能力。
-- 保留 `Return`、`Status`、`Metrics`、`Config` 这类运维和控制面 handler。
-- 移除 `Static` 和 `File` 这两类依赖本地文件系统或内嵌响应体的内容服务主路径。
-- 配置、校验、编译、运行时、测试和示例都不再围绕本地文件服务设计。
+- 保留 `Return` 这类运维 handler。
+- 移除 `Static`、`File`、`Status`、`Metrics`、`Config` 这类内容服务和控制面 handler。
+- 配置、校验、编译、运行时、测试和示例都不再围绕管理接口设计。
 - 后续主要投入 upstream 选择、重试、主动健康检查、gRPC / grpc-web、HTTP/2、Upgrade、TLS 和 observability。
 
 下面的“能力矩阵”描述的是当前代码现状。
@@ -69,11 +69,8 @@
 | 相对 `include` | ✅ | 支持 `// @include "relative/path.ron"` 文本级拼接。 |
 | 字符串环境变量展开 | ✅ | 支持 `${VAR}` 与 `${VAR:-default}`。 |
 | `rginx check` | ✅ | 会走完整加载、校验和编译链路。 |
-| 配置语义校验 | ✅ | 字段合法性、跨字段约束、管理路由约束、gRPC 路由约束都已前置。 |
+| 配置语义校验 | ✅ | 字段合法性、跨字段约束、gRPC 路由约束都已前置。 |
 | 编译为运行时快照 | ✅ | 启动与重载都统一编译为 `ConfigSnapshot`。 |
-| 动态配置 API | ✅ | `Config` handler 可读取当前生效配置，并通过 HTTP `PUT` 应用完整文档替换。 |
-| 动态配置持久化 | ✅ | 动态配置更新会原子写回活跃配置文件。 |
-| 动态配置 partial patch | ❌ | 当前只支持完整文档替换。 |
 | 热重载 | ✅ | `SIGHUP` 支持无中断切换新快照。 |
 | 热重载切换 `listen` | ❌ | 改监听地址必须重启。 |
 | 热重载切换 `runtime.worker_threads` | ❌ | 变更 tokio worker 数必须重启。 |
@@ -114,10 +111,9 @@
 | `Proxy` handler | ✅ | 支持上游代理、header 改写、failover 等。 |
 | `File` handler | ❌ | 已移除，不再支持。 |
 | `Return` handler | ✅ | 支持状态码、Location 和可选响应体。 |
-| `Status` handler | ✅ | 返回运行时 JSON 状态。 |
-| `Metrics` handler | ✅ | 返回 Prometheus 文本格式指标。 |
-| `Config` handler | ✅ | 受限的动态配置管理入口。 |
-| 管理 handler 路由约束 | ✅ | `Config` handler 要求 `Exact(...)` 且必须配置非空 `allow_cidrs`。 |
+| `Status` handler | ❌ | 已移除，转为本地运维命令。 |
+| `Metrics` handler | ❌ | 已移除，转为日志输出。 |
+| `Config` handler | ❌ | 已移除，改为文件配置 + reload 模式。 |
 
 ### 4. 本地内容服务
 
@@ -195,13 +191,13 @@
 | 默认 access log | ✅ | tracing 结构化输出。 |
 | 自定义 access log 模板 | ✅ | `server.access_log_format`。 |
 | `X-Request-ID` 透传或生成 | ✅ | 已贯通请求链路、响应和 access log。 |
-| `/status` JSON | ✅ | 含 revision、route、upstream、peer health 等摘要。 |
-| `/metrics` Prometheus | ✅ | HTTP、gRPC、reload、health check、upstream、failover、peer transition 等指标已覆盖。 |
-| 配置重载指标 | ✅ | success / failure 计数。 |
 | `Ctrl-C` / `SIGTERM` 平滑退出 | ✅ | 支持。 |
 | `SIGHUP` 热重载 | ✅ | 支持。 |
 | 安装 / 卸载脚本 | ✅ | 仓库内已提供。 |
 | Release workflow | ✅ | 已有准备脚本和 release 文档。 |
+| `rginx status` 本地命令 | ❌ | 未实现。 |
+| `/status` JSON | ❌ | 已移除。 |
+| `/metrics` Prometheus | ❌ | 已移除，指标仅通过 access log 观察。 |
 | 内建 systemd / service unit | ❌ | 当前不内置。 |
 | OpenTelemetry | ❌ | 当前不支持。 |
 
@@ -211,7 +207,7 @@
 | :--- | :--- | :--- |
 | crate 分层 | ✅ | `app / config / core / http / runtime / observability` 职责明确。 |
 | 配置加载 / 校验 / 编译分层 | ✅ | 已拆清。 |
-| `handler/` 目录化 | ✅ | 已从单大文件拆成 `dispatch / admin / grpc / access_log`。 |
+| `handler/` 目录化 | ✅ | 已从单大文件拆成 `dispatch / response / grpc / access_log`。 |
 | `proxy/` 目录化 | ✅ | 已从单大文件拆成 `clients / forward / health / grpc_web / request_body / upgrade`。 |
 | 集成测试共享 harness | ✅ | `tests/support/mod.rs` 已统一 child 管理、日志和 ready probe。 |
 | 全工作区回归 | ✅ | 当前可通过 `cargo test --workspace`。 |
@@ -244,7 +240,7 @@
 ### 运维与发布边界
 
 - 默认假设前面如果存在 LB / CDN / 其他代理，部署者会正确配置 `trusted_proxies`。
-- 默认假设 `/status`、`/metrics` 和任何 `Config` 管理路由都放在受控网络里。
+- 默认假设运维观察通过 access log、本机日志和外部 supervisor 完成，而不是通过 HTTP 管理路由。
 - 默认假设进程生命周期由外部 supervisor 管理，而不是由 `rginx` 自己充当完整服务管理器。
 
 ## 工程演进观察
@@ -288,7 +284,20 @@
 
 - 在 README、ROADMAP、安装示例和默认配置说明里，把产品定位统一成“反向代理”。
 - 明确 `Static` / `File` 进入废弃移除路径，不再作为推荐能力写进对外描述。
-- 列出保留的 handler：`Proxy`、`Return`、`Status`、`Metrics`、`Config`。
+- 列出保留的 handler：`Proxy`、`Return`。
+
+---
+
+### Phase 1.1：HTTP 管理面冻结
+
+状态：`🚧`
+
+目标：
+
+- 明确 `Status` / `Metrics` / `Config` 进入废弃移除路径。
+- 运维方式收口为：修改配置文件、执行 `check`、发送 reload 信号、查看本地日志。
+
+详见本节上下文与当前能力矩阵。
 
 涉及模块：
 
@@ -393,7 +402,7 @@
 主要动作：
 
 - 加强 upstream retry / failover / health / load balancing 语义和观测。
-- 新增 failover 计数与 peer health transition 指标，让主动/被动健康状态变化可直接从 Prometheus 观察。
+- 加强 failover 与 peer health transition 的日志和测试覆盖，让主动/被动健康状态变化可被稳定观察。
 - 收紧被动健康状态机语义，避免重复上报“已不健康 peer 再次失败”的转坏事件。
 
 涉及模块：
@@ -412,13 +421,12 @@
 - [`crates/rginx-app/tests/least_conn.rs`](crates/rginx-app/tests/least_conn.rs)
 - [`crates/rginx-app/tests/active_health.rs`](crates/rginx-app/tests/active_health.rs)
 - [`crates/rginx-app/tests/reload.rs`](crates/rginx-app/tests/reload.rs)
-- [`crates/rginx-app/tests/dynamic_config_api.rs`](crates/rginx-app/tests/dynamic_config_api.rs)
 
 完成标志：
 
 - 主要测试资产集中在代理路径而不是文件服务。
 - 新增复杂度优先落在协议、调度、健康检查和可观测性，而不是内容分发分支。
-- `/metrics` 可区分 upstream failover、主动健康转坏/恢复、被动健康转坏/恢复。
+- upstream failover、主动健康转坏/恢复、被动健康转坏/恢复都已有测试覆盖与日志信号。
 
 ### Phase 6：模块进一步按代理领域细化
 

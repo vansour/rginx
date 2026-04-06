@@ -1,5 +1,5 @@
 use super::access_log::{OwnedAccessLogContext, log_access_event};
-use super::admin::full_body;
+use super::response::full_body;
 use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -195,19 +195,14 @@ impl GrpcObservability {
 }
 
 struct GrpcResponseFinalizer {
-    metrics: Metrics,
     format: Option<AccessLogFormat>,
     context: OwnedAccessLogContext,
     finalized: bool,
 }
 
 impl GrpcResponseFinalizer {
-    fn new(
-        metrics: Metrics,
-        format: Option<AccessLogFormat>,
-        context: OwnedAccessLogContext,
-    ) -> Self {
-        Self { metrics, format, context, finalized: false }
+    fn new(format: Option<AccessLogFormat>, context: OwnedAccessLogContext) -> Self {
+        Self { format, context, finalized: false }
     }
 
     fn finalize(&mut self, grpc: &GrpcObservability) {
@@ -215,16 +210,6 @@ impl GrpcResponseFinalizer {
             return;
         }
         self.finalized = true;
-
-        if let Some(status) = grpc.status.as_deref() {
-            self.metrics.record_grpc_response(
-                &self.context.route,
-                &grpc.protocol,
-                &grpc.service,
-                &grpc.method,
-                status,
-            );
-        }
 
         log_access_event(self.format.as_ref(), self.context.as_borrowed(Some(grpc)));
     }
@@ -325,15 +310,13 @@ impl hyper::body::Body for GrpcAccessLogBody {
 
 pub(super) fn wrap_grpc_observability_response(
     response: HttpResponse,
-    metrics: Metrics,
     format: Option<AccessLogFormat>,
     context: OwnedAccessLogContext,
     grpc: GrpcObservability,
 ) -> HttpResponse {
     let (parts, body) = response.into_parts();
-    let body =
-        GrpcAccessLogBody::new(body, GrpcResponseFinalizer::new(metrics, format, context), grpc)
-            .boxed_unsync();
+    let body = GrpcAccessLogBody::new(body, GrpcResponseFinalizer::new(format, context), grpc)
+        .boxed_unsync();
     Response::from_parts(parts, body)
 }
 

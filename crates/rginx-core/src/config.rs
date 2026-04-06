@@ -87,7 +87,6 @@ pub struct Server {
     pub request_body_read_timeout: Option<Duration>,
     pub response_write_timeout: Option<Duration>,
     pub access_log_format: Option<AccessLogFormat>,
-    pub config_api_token: Option<String>,
     pub tls: Option<ServerTls>,
 }
 

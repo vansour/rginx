@@ -12,7 +12,6 @@ use crate::state::RuntimeState;
 
 pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
     let state = RuntimeState::new(config_path, config)?;
-    let metrics = state.http.metrics();
     let current_config = state.current_config().await;
     let listeners = bind_server_listeners(
         current_config.server.listen_addr,
@@ -44,7 +43,6 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
         tracing::info!("reload signal received");
         match reload::reload(&state).await {
             Ok(config) => {
-                metrics.record_config_reload("success");
                 tracing::info!(
                     listen = %config.server.listen_addr,
                     vhosts = config.total_vhost_count(),
@@ -54,7 +52,6 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
                 );
             }
             Err(error) => {
-                metrics.record_config_reload("failure");
                 tracing::warn!(%error, "configuration reload failed");
             }
         }

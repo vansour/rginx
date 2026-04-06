@@ -38,7 +38,6 @@ use crate::client_ip::ClientAddress;
 use crate::handler::{
     BoxError, GrpcStatusCode, HttpBody, HttpResponse, full_body, grpc_error_response,
 };
-use crate::metrics::Metrics;
 use crate::state::SharedState;
 use crate::timeout::{GrpcDeadlineBody, IdleTimeoutBody};
 
@@ -58,7 +57,6 @@ const MAX_GRPC_TIMEOUT_DIGITS: usize = 8;
 
 pub use clients::{ProxyClient, ProxyClients};
 pub use forward::{DownstreamRequestOptions, forward_request};
-pub(crate) use health::PeerStatusSnapshot;
 pub use health::probe_upstream_peer;
 
 use grpc_web::GrpcWebMode;
@@ -310,7 +308,6 @@ mod tests {
         build_proxy_uri, probe_upstream_peer, sanitize_request_headers, upstream_request_version,
     };
     use crate::client_ip::{ClientAddress, ClientIpSource};
-    use crate::metrics::Metrics;
 
     #[test]
     fn proxy_uri_keeps_path_and_query() {
@@ -793,7 +790,6 @@ mod tests {
                 request_body_read_timeout: None,
                 response_write_timeout: None,
                 access_log_format: None,
-                config_api_token: None,
                 tls: None,
             },
             default_vhost: rginx_core::VirtualHost {
@@ -877,7 +873,6 @@ mod tests {
                 request_body_read_timeout: None,
                 response_write_timeout: None,
                 access_log_format: None,
-                config_api_token: None,
                 tls: None,
             },
             default_vhost: rginx_core::VirtualHost {
@@ -948,7 +943,6 @@ mod tests {
                 request_body_read_timeout: None,
                 response_write_timeout: None,
                 access_log_format: None,
-                config_api_token: None,
                 tls: None,
             },
             default_vhost: rginx_core::VirtualHost {
@@ -1546,7 +1540,6 @@ mod tests {
                 request_body_read_timeout: None,
                 response_write_timeout: None,
                 access_log_format: None,
-                config_api_token: None,
                 tls: None,
             },
             default_vhost: rginx_core::VirtualHost {
@@ -1647,35 +1640,24 @@ mod tests {
         let peer_url = format!("http://{listen_addr}");
         let snapshot = snapshot_with_active_health("backend", vec![peer(&peer_url)], "/healthz", 2);
         let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
-        let metrics = Metrics::default();
         let upstream = snapshot.upstreams["backend"].clone();
         let peer = upstream.peers[0].clone();
 
-        probe_upstream_peer(clients.clone(), metrics.clone(), upstream.clone(), peer.clone()).await;
+        probe_upstream_peer(clients.clone(), upstream.clone(), peer.clone()).await;
         assert!(
             clients.select_peers(upstream.as_ref(), client_ip("198.51.100.10"), 1).peers.is_empty()
         );
 
-        probe_upstream_peer(clients.clone(), metrics.clone(), upstream.clone(), peer.clone()).await;
+        probe_upstream_peer(clients.clone(), upstream.clone(), peer.clone()).await;
         assert!(
             clients.select_peers(upstream.as_ref(), client_ip("198.51.100.10"), 1).peers.is_empty()
         );
 
-        probe_upstream_peer(clients.clone(), metrics.clone(), upstream.clone(), peer).await;
+        probe_upstream_peer(clients.clone(), upstream.clone(), peer).await;
         assert_eq!(
             clients.select_peers(upstream.as_ref(), client_ip("198.51.100.10"), 1).peers.len(),
             1
         );
-        let rendered = metrics.render_prometheus();
-        assert!(rendered.contains("rginx_active_health_checks_total"));
-        assert!(rendered.contains(&format!(
-            "rginx_upstream_peer_transitions_total{{upstream=\"backend\",peer=\"{}\",source=\"active\",state=\"unhealthy\",reason=\"unhealthy_status\"}} 1",
-            peer_url
-        )));
-        assert!(rendered.contains(&format!(
-            "rginx_upstream_peer_transitions_total{{upstream=\"backend\",peer=\"{}\",source=\"active\",state=\"healthy\",reason=\"healthy_threshold_met\"}} 1",
-            peer_url
-        )));
     }
 
     fn upstream_settings(protocol: UpstreamProtocol) -> UpstreamSettings {
@@ -1738,7 +1720,6 @@ mod tests {
                 request_body_read_timeout: None,
                 response_write_timeout: None,
                 access_log_format: None,
-                config_api_token: None,
                 tls: None,
             },
             default_vhost: rginx_core::VirtualHost {
@@ -1786,7 +1767,6 @@ mod tests {
                 request_body_read_timeout: None,
                 response_write_timeout: None,
                 access_log_format: None,
-                config_api_token: None,
                 tls: None,
             },
             default_vhost: rginx_core::VirtualHost {
@@ -1839,7 +1819,6 @@ mod tests {
                 request_body_read_timeout: None,
                 response_write_timeout: None,
                 access_log_format: None,
-                config_api_token: None,
                 tls: None,
             },
             default_vhost: rginx_core::VirtualHost {

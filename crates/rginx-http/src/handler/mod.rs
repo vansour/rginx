@@ -1,30 +1,23 @@
-use std::convert::Infallible;
 use std::error::Error as StdError;
 use std::net::SocketAddr;
-use std::path::Path;
 use std::time::Instant;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use bytes::{Bytes, BytesMut};
-use http::{
-    HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri, Version,
-    header::{CONTENT_LENGTH, CONTENT_TYPE, HOST, REFERER, USER_AGENT},
+use http::header::{
+    CONTENT_LENGTH, CONTENT_TYPE, HOST, HeaderMap, HeaderName, HeaderValue, REFERER, USER_AGENT,
 };
+use http::{Method, StatusCode, Uri, Version};
 use http_body_util::BodyExt;
-use http_body_util::Full;
 use http_body_util::combinators::UnsyncBoxBody;
 use hyper::body::{Frame, Incoming, SizeHint};
 use hyper::{Request, Response};
 use rginx_core::{
-    AccessLogFormat, AccessLogValues, ActiveHealthCheck, ConfigSnapshot, Error, Route, RouteAction,
-    VirtualHost,
+    AccessLogFormat, AccessLogValues, ConfigSnapshot, Route, RouteAction, VirtualHost,
 };
-use serde::Serialize;
 
 use crate::client_ip::{ClientAddress, resolve_client_address};
-use crate::metrics::Metrics;
-use crate::proxy::PeerStatusSnapshot;
 use crate::router;
 use crate::state::{ActiveState, SharedState};
 
@@ -32,235 +25,43 @@ pub(crate) type BoxError = Box<dyn StdError + Send + Sync>;
 pub(crate) type HttpBody = UnsyncBoxBody<Bytes, BoxError>;
 pub(crate) type HttpResponse = Response<HttpBody>;
 
-const MAX_CONFIG_API_BODY_BYTES: usize = 1024 * 1024;
-const CONFIG_API_ALLOW: &str = "GET, HEAD, PUT";
-
 mod access_log;
-mod admin;
 mod dispatch;
 mod grpc;
+mod response;
 
-pub(crate) use admin::{full_body, text_response};
 pub use dispatch::handle;
 pub(crate) use grpc::{GrpcStatusCode, grpc_error_response};
+pub(crate) use response::{full_body, text_response};
 
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::pin::Pin;
-    use std::sync::Arc;
-    use std::task::{Context, Poll};
     use std::time::Duration;
 
     use base64::Engine as _;
-    use bytes::{Bytes, BytesMut};
-    use http::{
-        HeaderMap, HeaderValue, Response, StatusCode,
-        header::{CONTENT_TYPE, HOST},
-    };
+    use bytes::BytesMut;
+    use http::{HeaderMap, HeaderValue, StatusCode, header::HOST};
     use http_body_util::BodyExt;
-    use hyper::body::{Frame, SizeHint};
     use rginx_core::{
-        AccessLogFormat, ActiveHealthCheck, ConfigSnapshot, GrpcRouteMatch, ReturnAction, Route,
-        RouteAccessControl, RouteAction, RouteMatcher, RouteRateLimit, RuntimeSettings, Server,
-        Upstream, UpstreamLoadBalance, UpstreamPeer, UpstreamProtocol, UpstreamSettings,
-        UpstreamTls, VirtualHost,
+        AccessLogFormat, ConfigSnapshot, GrpcRouteMatch, ReturnAction, Route, RouteAccessControl,
+        RouteAction, RouteMatcher, RuntimeSettings, Server, VirtualHost,
     };
-    use serde_json::Value;
 
-    use super::access_log::{AccessLogContext, OwnedAccessLogContext, render_access_log_line};
-    use super::admin::{metrics_response, status_response};
-    use super::dispatch::{
-        authorize_route, enforce_rate_limit, response_body_bytes_sent, select_route_for_request,
-    };
+    use super::access_log::{AccessLogContext, render_access_log_line};
+    use super::dispatch::{authorize_route, response_body_bytes_sent, select_route_for_request};
     use super::grpc::{
         GrpcObservability, GrpcWebObservabilityParser, decode_grpc_web_text_observability_final,
-        grpc_observability, grpc_request_metadata, wrap_grpc_observability_response,
+        grpc_observability, grpc_request_metadata,
     };
-    use super::{BoxError, GrpcStatusCode, HttpBody, grpc_error_response, text_response};
+    use super::{GrpcStatusCode, grpc_error_response, text_response};
     use crate::client_ip::{ClientAddress, ClientIpSource};
-    use crate::metrics::Metrics;
-    use crate::proxy::ProxyClients;
-    use crate::state::{ActiveState, SharedState};
-
-    #[tokio::test]
-    async fn status_response_includes_revision_and_peer_health() {
-        let upstream = Arc::new(Upstream::new(
-            "backend".to_string(),
-            vec![peer("http://127.0.0.1:9000")],
-            UpstreamTls::NativeRoots,
-            UpstreamSettings {
-                load_balance: UpstreamLoadBalance::IpHash,
-                connect_timeout: Duration::from_secs(3),
-                request_timeout: Duration::from_secs(4),
-                write_timeout: Duration::from_secs(5),
-                idle_timeout: Duration::from_secs(6),
-                pool_idle_timeout: Some(Duration::from_secs(7)),
-                pool_max_idle_per_host: 8,
-                tcp_keepalive: Some(Duration::from_secs(9)),
-                tcp_nodelay: true,
-                http2_keep_alive_interval: Some(Duration::from_secs(10)),
-                http2_keep_alive_timeout: Duration::from_secs(11),
-                http2_keep_alive_while_idle: true,
-                active_health_check: Some(ActiveHealthCheck {
-                    path: "/healthz".to_string(),
-                    grpc_service: Some("grpc.health.v1.Health".to_string()),
-                    interval: Duration::from_secs(5),
-                    timeout: Duration::from_secs(2),
-                    healthy_successes_required: 2,
-                }),
-                ..upstream_settings()
-            },
-        ));
-        let config = Arc::new(ConfigSnapshot {
-            runtime: RuntimeSettings {
-                shutdown_timeout: Duration::from_secs(1),
-                worker_threads: None,
-                accept_workers: 1,
-            },
-            server: Server {
-                listen_addr: "127.0.0.1:8080".parse().unwrap(),
-                trusted_proxies: Vec::new(),
-                keep_alive: true,
-                max_headers: None,
-                max_request_body_bytes: None,
-                max_connections: None,
-                header_read_timeout: None,
-                request_body_read_timeout: None,
-                response_write_timeout: None,
-                access_log_format: None,
-                config_api_token: None,
-                tls: None,
-            },
-            default_vhost: VirtualHost {
-                id: "server".to_string(),
-                server_names: Vec::new(),
-                routes: Vec::new(),
-                tls: None,
-            },
-            vhosts: Vec::new(),
-            upstreams: HashMap::from([("backend".to_string(), upstream)]),
-        });
-        let clients = ProxyClients::from_config(config.as_ref()).expect("clients should build");
-        clients.record_active_peer_failure("backend", "http://127.0.0.1:9000");
-
-        let response = status_response(&ActiveState { revision: 3, config, clients }, 12);
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response.headers().get("content-type").and_then(|value| value.to_str().ok()),
-            Some("application/json; charset=utf-8")
-        );
-
-        let body =
-            response.into_body().collect().await.expect("status body should collect").to_bytes();
-        let json: Value =
-            serde_json::from_slice(&body).expect("status payload should be valid JSON");
-
-        assert_eq!(json["revision"], 3);
-        assert_eq!(json["listen"], "127.0.0.1:8080");
-        assert_eq!(json["tls_enabled"], false);
-        assert_eq!(json["keep_alive"], true);
-        assert_eq!(json["max_connections"], Value::Null);
-        assert_eq!(json["trusted_proxy_count"], 0);
-        assert_eq!(json["active_connections"], 12);
-        assert_eq!(json["vhost_count"], 1);
-        assert_eq!(json["route_count"], 0);
-        assert_eq!(json["upstream_count"], 1);
-        assert_eq!(json["upstreams"][0]["name"], "backend");
-        assert_eq!(json["upstreams"][0]["protocol"], "auto");
-        assert_eq!(json["upstreams"][0]["load_balance"], "ip_hash");
-        assert_eq!(json["upstreams"][0]["peer_count"], 1);
-        assert_eq!(json["upstreams"][0]["healthy_peer_count"], 0);
-        assert_eq!(json["upstreams"][0]["backup_peer_count"], 0);
-        assert_eq!(json["upstreams"][0]["active_requests"], 0);
-        assert_eq!(json["upstreams"][0]["request_timeout_ms"], 4_000);
-        assert_eq!(json["upstreams"][0]["read_timeout_ms"], 4_000);
-        assert_eq!(json["upstreams"][0]["connect_timeout_ms"], 3_000);
-        assert_eq!(json["upstreams"][0]["write_timeout_ms"], 5_000);
-        assert_eq!(json["upstreams"][0]["idle_timeout_ms"], 6_000);
-        assert_eq!(json["upstreams"][0]["pool_idle_timeout_ms"], 7_000);
-        assert_eq!(json["upstreams"][0]["pool_max_idle_per_host"], 8);
-        assert_eq!(json["upstreams"][0]["tcp_keepalive_ms"], 9_000);
-        assert_eq!(json["upstreams"][0]["tcp_nodelay"], true);
-        assert_eq!(json["upstreams"][0]["http2_keep_alive_interval_ms"], 10_000);
-        assert_eq!(json["upstreams"][0]["http2_keep_alive_timeout_ms"], 11_000);
-        assert_eq!(json["upstreams"][0]["http2_keep_alive_while_idle"], true);
-        assert_eq!(json["upstreams"][0]["active_health_check"]["path"], "/healthz");
-        assert_eq!(
-            json["upstreams"][0]["active_health_check"]["grpc_service"],
-            "grpc.health.v1.Health"
-        );
-        assert_eq!(json["upstreams"][0]["peers"][0]["url"], "http://127.0.0.1:9000");
-        assert_eq!(json["upstreams"][0]["peers"][0]["weight"], 1);
-        assert_eq!(json["upstreams"][0]["peers"][0]["backup"], false);
-        assert_eq!(json["upstreams"][0]["peers"][0]["active_requests"], 0);
-        assert_eq!(json["upstreams"][0]["peers"][0]["healthy"], false);
-        assert_eq!(json["upstreams"][0]["peers"][0]["active_unhealthy"], true);
-    }
-
-    #[tokio::test]
-    async fn status_response_counts_routes_across_all_vhosts() {
-        let mut config = test_config(
-            test_vhost(
-                "server",
-                vec!["default.example.com"],
-                vec![test_route("server/routes[0]|exact:/", RouteMatcher::Exact("/".to_string()))],
-            ),
-            vec![test_vhost(
-                "servers[0]",
-                vec!["api.example.com"],
-                vec![
-                    test_route(
-                        "servers[0]/routes[0]|exact:/users",
-                        RouteMatcher::Exact("/users".to_string()),
-                    ),
-                    test_route(
-                        "servers[0]/routes[1]|exact:/status",
-                        RouteMatcher::Exact("/status".to_string()),
-                    ),
-                ],
-            )],
-        );
-        config.server.keep_alive = false;
-        config.server.max_connections = Some(256);
-        config.server.trusted_proxies = vec!["10.0.0.0/8".parse().unwrap()];
-        let config = Arc::new(config);
-        let clients = ProxyClients::from_config(config.as_ref()).expect("clients should build");
-
-        let response = status_response(&ActiveState { revision: 7, config, clients }, 4);
-        let body =
-            response.into_body().collect().await.expect("status body should collect").to_bytes();
-        let json: Value =
-            serde_json::from_slice(&body).expect("status payload should be valid JSON");
-
-        assert_eq!(json["revision"], 7);
-        assert_eq!(json["keep_alive"], false);
-        assert_eq!(json["max_connections"], 256);
-        assert_eq!(json["trusted_proxy_count"], 1);
-        assert_eq!(json["active_connections"], 4);
-        assert_eq!(json["vhost_count"], 2);
-        assert_eq!(json["route_count"], 3);
-        assert_eq!(json["upstream_count"], 0);
-    }
-
-    #[test]
-    fn metrics_response_uses_prometheus_content_type() {
-        let metrics = Metrics::default();
-        metrics.observe_http_request("server/routes[0]|exact:/metrics", 200, 1);
-
-        let response = metrics_response(&metrics);
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response.headers().get("content-type").and_then(|value| value.to_str().ok()),
-            Some("text/plain; version=0.0.4; charset=utf-8")
-        );
-    }
 
     #[test]
     fn authorize_route_rejects_disallowed_remote_addr() {
         let route = Route {
-            id: "server/routes[0]|exact:/metrics".to_string(),
-            matcher: RouteMatcher::Exact("/metrics".to_string()),
+            id: "server/routes[0]|exact:/protected".to_string(),
+            matcher: RouteMatcher::Exact("/protected".to_string()),
             grpc_match: None,
             action: RouteAction::Return(ReturnAction {
                 status: StatusCode::OK,
@@ -291,89 +92,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enforce_rate_limit_rejects_requests_after_burst() {
-        let config = ConfigSnapshot {
-            runtime: RuntimeSettings {
-                shutdown_timeout: Duration::from_secs(1),
-                worker_threads: None,
-                accept_workers: 1,
-            },
-            server: Server {
-                listen_addr: "127.0.0.1:8080".parse().unwrap(),
-                trusted_proxies: Vec::new(),
-                keep_alive: true,
-                max_headers: None,
-                max_request_body_bytes: None,
-                max_connections: None,
-                header_read_timeout: None,
-                request_body_read_timeout: None,
-                response_write_timeout: None,
-                access_log_format: None,
-                config_api_token: None,
-                tls: None,
-            },
-            default_vhost: VirtualHost {
-                id: "server".to_string(),
-                server_names: Vec::new(),
-                routes: vec![Route {
-                    id: "server/routes[0]|exact:/api".to_string(),
-                    matcher: RouteMatcher::Exact("/api".to_string()),
-                    grpc_match: None,
-                    action: RouteAction::Return(ReturnAction {
-                        status: StatusCode::OK,
-                        location: String::new(),
-                        body: Some("ok\n".to_string()),
-                    }),
-                    access_control: RouteAccessControl::default(),
-                    rate_limit: Some(RouteRateLimit::new(1, 0)),
-                }],
-                tls: None,
-            },
-            vhosts: Vec::new(),
-            upstreams: HashMap::new(),
-        };
-        let state = SharedState::from_config(config).expect("shared state should build");
-        let metrics = state.metrics();
-        let route = state.snapshot().await.config.default_vhost.routes[0].clone();
-        let client_address = ClientAddress {
-            peer_addr: "192.0.2.10:4567".parse().unwrap(),
-            client_ip: "192.0.2.10".parse().unwrap(),
-            forwarded_for: "192.0.2.10".to_string(),
-            source: ClientIpSource::SocketPeer,
-        };
-
-        assert!(
-            enforce_rate_limit(
-                &HeaderMap::new(),
-                &state,
-                &route,
-                &route.id,
-                &client_address,
-                &metrics,
-            )
-            .is_none()
-        );
-
-        let response = enforce_rate_limit(
-            &HeaderMap::new(),
-            &state,
-            &route,
-            &route.id,
-            &client_address,
-            &metrics,
-        )
-        .expect("second request should be rate limited");
-        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-
-        let rendered = metrics.render_prometheus();
-        assert!(
-            rendered
-                .contains("rginx_http_rate_limited_total{route=\"server/routes[0]|exact:/api\"} 1")
-        );
-    }
-
-    #[test]
-    fn select_route_for_request_uses_host_specific_vhost_routes() {
+    async fn select_route_for_request_uses_host_specific_vhost_routes() {
         let config = test_config(
             test_vhost(
                 "server",
@@ -722,70 +441,6 @@ mod tests {
         assert_eq!(tail, bytes::Bytes::from_static(b"D"));
     }
 
-    #[test]
-    fn grpc_observability_records_cancelled_when_downstream_drops_body_early() {
-        let metrics = Metrics::default();
-        let response = Response::builder()
-            .status(StatusCode::OK)
-            .header(CONTENT_TYPE, "application/grpc")
-            .body(pending_body())
-            .expect("response should build");
-        let grpc = GrpcObservability {
-            protocol: "grpc".to_string(),
-            service: "grpc.health.v1.Health".to_string(),
-            method: "Check".to_string(),
-            status: None,
-            message: None,
-        };
-
-        let response = wrap_grpc_observability_response(
-            response,
-            metrics.clone(),
-            None,
-            test_owned_access_log_context(),
-            grpc,
-        );
-        drop(response);
-
-        let rendered = metrics.render_prometheus();
-        assert!(rendered.contains(
-            "rginx_grpc_responses_total{route=\"server/routes[0]|exact:/grpc.health.v1.Health/Check\",protocol=\"grpc\",service=\"grpc.health.v1.Health\",method=\"Check\",grpc_status=\"1\"} 1"
-        ));
-    }
-
-    #[test]
-    fn grpc_observability_preserves_existing_status_when_downstream_drops_after_headers() {
-        let metrics = Metrics::default();
-        let response = Response::builder()
-            .status(StatusCode::OK)
-            .header(CONTENT_TYPE, "application/grpc")
-            .header("grpc-status", "0")
-            .body(pending_body())
-            .expect("response should build");
-        let grpc = GrpcObservability {
-            protocol: "grpc".to_string(),
-            service: "grpc.health.v1.Health".to_string(),
-            method: "Check".to_string(),
-            status: Some("0".to_string()),
-            message: Some("ok".to_string()),
-        };
-
-        let response = wrap_grpc_observability_response(
-            response,
-            metrics.clone(),
-            None,
-            test_owned_access_log_context(),
-            grpc,
-        );
-        drop(response);
-
-        let rendered = metrics.render_prometheus();
-        assert!(rendered.contains(
-            "rginx_grpc_responses_total{route=\"server/routes[0]|exact:/grpc.health.v1.Health/Check\",protocol=\"grpc\",service=\"grpc.health.v1.Health\",method=\"Check\",grpc_status=\"0\"} 1"
-        ));
-        assert!(!rendered.contains("grpc_status=\"1\""));
-    }
-
     #[tokio::test]
     async fn grpc_error_response_builds_trailers_only_http2_error() {
         let mut headers = HeaderMap::new();
@@ -846,8 +501,8 @@ mod tests {
     #[test]
     fn authorize_route_returns_grpc_permission_denied_for_grpc_requests() {
         let route = Route {
-            id: "server/routes[0]|exact:/metrics".to_string(),
-            matcher: RouteMatcher::Exact("/metrics".to_string()),
+            id: "server/routes[0]|exact:/protected".to_string(),
+            matcher: RouteMatcher::Exact("/protected".to_string()),
             grpc_match: None,
             action: RouteAction::Return(ReturnAction {
                 status: StatusCode::OK,
@@ -897,90 +552,6 @@ mod tests {
         body
     }
 
-    fn pending_body() -> HttpBody {
-        PendingBody.boxed_unsync()
-    }
-
-    fn test_owned_access_log_context() -> OwnedAccessLogContext {
-        OwnedAccessLogContext {
-            request_id: "req-cancel-1".to_string(),
-            method: "POST".to_string(),
-            host: "grpc.example.com".to_string(),
-            path: "/grpc.health.v1.Health/Check".to_string(),
-            request_version: http::Version::HTTP_2,
-            user_agent: None,
-            referer: None,
-            client_address: ClientAddress {
-                peer_addr: "192.0.2.10:4567".parse().unwrap(),
-                client_ip: "192.0.2.10".parse().unwrap(),
-                forwarded_for: "192.0.2.10".to_string(),
-                source: ClientIpSource::SocketPeer,
-            },
-            vhost: "server".to_string(),
-            route: "server/routes[0]|exact:/grpc.health.v1.Health/Check".to_string(),
-            status: 200,
-            elapsed_ms: 1,
-            downstream_scheme: "https".to_string(),
-            body_bytes_sent: None,
-        }
-    }
-
-    struct PendingBody;
-
-    impl hyper::body::Body for PendingBody {
-        type Data = Bytes;
-        type Error = BoxError;
-
-        fn poll_frame(
-            self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-        ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-            Poll::Pending
-        }
-
-        fn is_end_stream(&self) -> bool {
-            false
-        }
-
-        fn size_hint(&self) -> SizeHint {
-            SizeHint::new()
-        }
-    }
-
-    fn peer(url: &str) -> UpstreamPeer {
-        let uri: http::Uri = url.parse().expect("peer URL should parse");
-        UpstreamPeer {
-            url: url.to_string(),
-            scheme: uri.scheme_str().expect("peer should have scheme").to_string(),
-            authority: uri.authority().expect("peer should have authority").to_string(),
-            weight: 1,
-            backup: false,
-        }
-    }
-
-    fn upstream_settings() -> UpstreamSettings {
-        UpstreamSettings {
-            protocol: UpstreamProtocol::Auto,
-            load_balance: UpstreamLoadBalance::RoundRobin,
-            server_name_override: None,
-            request_timeout: Duration::from_secs(30),
-            connect_timeout: Duration::from_secs(30),
-            write_timeout: Duration::from_secs(30),
-            idle_timeout: Duration::from_secs(30),
-            pool_idle_timeout: Some(Duration::from_secs(90)),
-            pool_max_idle_per_host: usize::MAX,
-            tcp_keepalive: None,
-            tcp_nodelay: false,
-            http2_keep_alive_interval: None,
-            http2_keep_alive_timeout: Duration::from_secs(20),
-            http2_keep_alive_while_idle: false,
-            max_replayable_request_body_bytes: 64 * 1024,
-            unhealthy_after_failures: 2,
-            unhealthy_cooldown: Duration::from_secs(10),
-            active_health_check: None,
-        }
-    }
-
     fn test_config(default_vhost: VirtualHost, vhosts: Vec<VirtualHost>) -> ConfigSnapshot {
         ConfigSnapshot {
             runtime: RuntimeSettings {
@@ -999,7 +570,6 @@ mod tests {
                 request_body_read_timeout: None,
                 response_write_timeout: None,
                 access_log_format: None,
-                config_api_token: None,
                 tls: None,
             },
             default_vhost,

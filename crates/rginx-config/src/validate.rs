@@ -20,21 +20,11 @@ pub fn validate(config: &Config) -> Result<()> {
     }
     server::validate_server(&config.server)?;
     let upstream_names = upstream::validate_upstreams(&config.upstreams)?;
-    route::validate_locations(
-        None,
-        &config.locations,
-        &upstream_names,
-        config.server.config_api_token.as_deref(),
-    )?;
+    route::validate_locations(None, &config.locations, &upstream_names)?;
 
     let mut all_server_names = HashSet::new();
     server::validate_server_names("server", &config.server.server_names, &mut all_server_names)?;
-    vhost::validate_virtual_hosts(
-        &config.servers,
-        &upstream_names,
-        &mut all_server_names,
-        config.server.config_api_token.as_deref(),
-    )?;
+    vhost::validate_virtual_hosts(&config.servers, &upstream_names, &mut all_server_names)?;
 
     Ok(())
 }

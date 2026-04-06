@@ -1,16 +1,13 @@
-use std::fs;
 use std::future::Future;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use rginx_core::{ConfigSnapshot, Error, Result};
 use tokio::sync::{RwLock, watch};
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 
-use crate::metrics::Metrics;
 use crate::proxy::ProxyClients;
 use crate::rate_limit::RateLimiters;
 use crate::tls::build_tls_acceptor;
@@ -32,34 +29,37 @@ struct PreparedState {
 pub struct SharedState {
     inner: Arc<RwLock<ActiveState>>,
     revisions: watch::Sender<u64>,
-    metrics: Metrics,
     rate_limiters: RateLimiters,
     tls_acceptor: Arc<RwLock<Option<TlsAcceptor>>>,
     background_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    active_connections: Arc<AtomicUsize>,
     request_ids: Arc<AtomicU64>,
     config_path: Option<Arc<PathBuf>>,
-    config_source: Arc<RwLock<Option<String>>>,
+}
+
+pub struct ActiveConnectionGuard {
+    active_connections: Arc<AtomicUsize>,
+}
+
+impl Drop for ActiveConnectionGuard {
+    fn drop(&mut self) {
+        self.active_connections.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 impl SharedState {
     pub fn from_config(config: ConfigSnapshot) -> Result<Self> {
-        Self::from_parts(config, None, None)
+        Self::from_parts(config, None)
     }
 
     pub fn from_config_path(config_path: PathBuf, config: ConfigSnapshot) -> Result<Self> {
-        let config_source = fs::read_to_string(&config_path)?;
-        Self::from_parts(config, Some(config_path), Some(config_source))
+        Self::from_parts(config, Some(config_path))
     }
 
-    fn from_parts(
-        config: ConfigSnapshot,
-        config_path: Option<PathBuf>,
-        config_source: Option<String>,
-    ) -> Result<Self> {
+    fn from_parts(config: ConfigSnapshot, config_path: Option<PathBuf>) -> Result<Self> {
         let prepared = prepare_state(config)?;
         let revision = 0u64;
         let (revisions, _rx) = watch::channel(revision);
-        let metrics = Metrics::default();
         let rate_limiters = RateLimiters::default();
 
         Ok(Self {
@@ -69,13 +69,12 @@ impl SharedState {
                 clients: prepared.clients,
             })),
             revisions,
-            metrics,
             rate_limiters,
             tls_acceptor: Arc::new(RwLock::new(prepared.tls_acceptor)),
             background_tasks: Arc::new(Mutex::new(Vec::new())),
+            active_connections: Arc::new(AtomicUsize::new(0)),
             request_ids: Arc::new(AtomicU64::new(1)),
             config_path: config_path.map(Arc::new),
-            config_source: Arc::new(RwLock::new(config_source)),
         })
     }
 
@@ -87,24 +86,39 @@ impl SharedState {
         self.inner.read().await.config.clone()
     }
 
-    pub async fn active_config_source(&self) -> Option<String> {
-        self.config_source.read().await.clone()
-    }
-
-    pub fn persistent_config_path(&self) -> Option<PathBuf> {
-        self.config_path.as_deref().cloned()
+    pub fn config_path(&self) -> Option<&PathBuf> {
+        self.config_path.as_deref()
     }
 
     pub fn subscribe_updates(&self) -> watch::Receiver<u64> {
         self.revisions.subscribe()
     }
 
-    pub fn metrics(&self) -> Metrics {
-        self.metrics.clone()
-    }
-
     pub fn rate_limiters(&self) -> RateLimiters {
         self.rate_limiters.clone()
+    }
+
+    pub fn active_connection_count(&self) -> usize {
+        self.active_connections.load(Ordering::Acquire)
+    }
+
+    pub fn try_acquire_connection(&self, limit: Option<usize>) -> Option<ActiveConnectionGuard> {
+        loop {
+            let current = self.active_connections.load(Ordering::Acquire);
+            if limit.is_some_and(|limit| current >= limit) {
+                return None;
+            }
+
+            if self
+                .active_connections
+                .compare_exchange_weak(current, current + 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return Some(ActiveConnectionGuard {
+                    active_connections: self.active_connections.clone(),
+                });
+            }
+        }
     }
 
     pub async fn tls_acceptor(&self) -> Option<TlsAcceptor> {
@@ -113,29 +127,7 @@ impl SharedState {
 
     pub async fn replace(&self, config: ConfigSnapshot) -> Result<Arc<ConfigSnapshot>> {
         let prepared = self.prepare_replacement(config).await?;
-        Ok(self.commit_prepared(prepared, None).await)
-    }
-
-    pub async fn replace_with_source(
-        &self,
-        config: ConfigSnapshot,
-        config_source: String,
-    ) -> Result<Arc<ConfigSnapshot>> {
-        let prepared = self.prepare_replacement(config).await?;
-        Ok(self.commit_prepared(prepared, Some(config_source)).await)
-    }
-
-    pub async fn apply_config_source(&self, config_source: String) -> Result<Arc<ConfigSnapshot>> {
-        let config_path = self.persistent_config_path().ok_or_else(|| {
-            Error::Server(
-                "dynamic config API is unavailable without a runtime-backed config path"
-                    .to_string(),
-            )
-        })?;
-        let next = rginx_config::load_and_compile_from_str(&config_source, &config_path)?;
-        let prepared = self.prepare_replacement(next).await?;
-        write_config_atomically(&config_path, &config_source).await?;
-        Ok(self.commit_prepared(prepared, Some(config_source)).await)
+        Ok(self.commit_prepared(prepared).await)
     }
 
     async fn prepare_replacement(&self, config: ConfigSnapshot) -> Result<PreparedState> {
@@ -144,11 +136,7 @@ impl SharedState {
         prepare_state(config)
     }
 
-    async fn commit_prepared(
-        &self,
-        prepared: PreparedState,
-        config_source: Option<String>,
-    ) -> Arc<ConfigSnapshot> {
+    async fn commit_prepared(&self, prepared: PreparedState) -> Arc<ConfigSnapshot> {
         let next_revision = {
             let mut state = self.inner.write().await;
             let next_revision = state.revision + 1;
@@ -159,9 +147,6 @@ impl SharedState {
         };
 
         *self.tls_acceptor.write().await = prepared.tls_acceptor;
-        if let Some(config_source) = config_source {
-            *self.config_source.write().await = Some(config_source);
-        }
         let _ = self.revisions.send(next_revision);
 
         prepared.config
@@ -244,30 +229,6 @@ pub fn validate_config_transition(current: &ConfigSnapshot, next: &ConfigSnapsho
     Ok(())
 }
 
-async fn write_config_atomically(path: &Path, config_source: &str) -> Result<()> {
-    let temp_path = temp_config_path(path);
-    tokio::fs::write(&temp_path, config_source).await?;
-
-    match tokio::fs::rename(&temp_path, path).await {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            let _ = tokio::fs::remove_file(&temp_path).await;
-            Err(error.into())
-        }
-    }
-}
-
-fn temp_config_path(path: &Path) -> PathBuf {
-    let file_name = path.file_name().and_then(|value| value.to_str()).unwrap_or("rginx.ron");
-    let suffix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time should be after unix epoch")
-        .as_nanos();
-    let temp_name = format!(".{file_name}.tmp-{suffix}");
-
-    path.parent().unwrap_or_else(|| Path::new(".")).join(temp_name)
-}
-
 fn take_background_tasks(
     background_tasks: &Arc<Mutex<Vec<JoinHandle<()>>>>,
 ) -> Vec<JoinHandle<()>> {
@@ -302,7 +263,6 @@ mod tests {
                 request_body_read_timeout: None,
                 response_write_timeout: None,
                 access_log_format: None,
-                config_api_token: None,
                 tls: None,
             },
             default_vhost: VirtualHost {

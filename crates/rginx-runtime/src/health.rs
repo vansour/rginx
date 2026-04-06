@@ -26,7 +26,6 @@ struct ProbeTarget {
 
 pub async fn run(state: SharedState, mut shutdown: watch::Receiver<bool>) {
     let mut config_updates = state.subscribe_updates();
-    let metrics = state.metrics();
     let mut next_due = HashMap::<ProbeKey, Instant>::new();
 
     loop {
@@ -54,10 +53,8 @@ pub async fn run(state: SharedState, mut shutdown: watch::Receiver<bool>) {
 
             for target in due_targets {
                 next_due.insert(target.key.clone(), now + target.health_check.interval);
-                let metrics = metrics.clone();
                 probes.spawn(async move {
-                    probe_upstream_peer(target.clients, metrics, target.upstream, target.peer)
-                        .await;
+                    probe_upstream_peer(target.clients, target.upstream, target.peer).await;
                 });
             }
 
@@ -191,7 +188,6 @@ mod tests {
                 request_body_read_timeout: None,
                 response_write_timeout: None,
                 access_log_format: None,
-                config_api_token: None,
                 tls: None,
             },
             default_vhost: VirtualHost {

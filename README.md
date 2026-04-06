@@ -2,7 +2,7 @@
 
 `rginx` 的产品定义是：一个面向中小规模部署的 Rust 入口反向代理，稳定支持 TLS 终止、Host/Path 路由、上游代理、基础流量治理、健康检查、热重载和可观测性。
 
-当前正式发布线收口为 `v0.1.1`。当前正在准备下一条预发布标签 `v0.1.2-rc.2`，用于验证最近一轮测试、文档和发布流程补强。
+当前正式发布线收口为 `v0.1.1`。当前正在准备下一条预发布标签 `v0.1.2-rc.3`，用于验证最近一轮测试、文档和发布流程补强。
 
 当前明确限制、演进方向和发布前收口项见：
 
@@ -19,7 +19,7 @@
 - 基于 RON 配置文件启动反向代理
 - 单进程多 worker 运行时，支持可配置的 tokio worker 线程数与 accept worker 数
 - `Exact("/foo")` / `Prefix("/api")` 两种路由匹配，并支持按 `grpc_service` / `grpc_method` 细分 gRPC 路由
-- `Proxy` / `Return` / `Status` / `Metrics` / `Config` 五种处理器
+- `Proxy` / `Return` 两种处理器
 - 多上游节点轮询、加权与主备转发
 - 支持 `round_robin`、`ip_hash`、`least_conn` 三种 upstream 选择策略，以及 peer `weight` / `backup`
 - 幂等或可重放请求的上游重试
@@ -36,15 +36,12 @@
 - 支持 `trusted_proxies`，可从 `X-Forwarded-For` 解析真实客户端 IP
 - 自动透传或生成 `X-Request-ID`
 - 支持 `server.access_log_format` 自定义 access log 模板
-- 基础动态配置 API：显式配置 `Config` 管理路由后，可读取当前生效配置并通过 HTTP `PUT` 应用完整 RON 配置
 - 配置支持相对 `include` 和字符串环境变量展开
 - 入站 TLS 终止：`server.tls`
 - 出站 TLS 模式：
   - `NativeRoots`
   - `CustomCa`
   - `Insecure`
-- `/status` JSON 状态接口
-- `/metrics` Prometheus 指标接口
 - `Ctrl-C` / `SIGTERM` 平滑退出
 - `SIGHUP` 热重载配置
 - `rginx check` 配置检查
@@ -64,7 +61,7 @@
 
 当前请求主路径大致是：
 
-`CLI -> load_and_compile -> ConfigSnapshot -> SharedState -> server accept loop -> handler::dispatch -> route action -> access log / metrics`
+`CLI -> load_and_compile -> ConfigSnapshot -> SharedState -> server accept loop -> handler::dispatch -> route action -> access log`
 
 ## 文档导航
 
@@ -99,7 +96,7 @@
 curl -fsSL https://raw.githubusercontent.com/vansour/rginx/main/scripts/install.sh | bash -s -- --mode release --version <tag>
 ```
 
-其中 `latest` 只会解析最新稳定版；如果你要安装预发布版，请显式传入具体 tag，例如 `v0.1.2-rc.2`。
+其中 `latest` 只会解析最新稳定版；如果你要安装预发布版，请显式传入具体 tag，例如 `v0.1.2-rc.3`。
 
 安装脚本默认会：
 
@@ -327,7 +324,7 @@ servers: [
 - `protocol: Http2` 会要求 upstream 使用 HTTP/2；当前只支持 `https://` peer，经 TLS/ALPN 建链，明文 `h2c` upstream 仍未支持
 - 基础 gRPC 代理依赖 HTTP/2 upstream；当前支持 `application/grpc` 透传，以及基础 `application/grpc-web(+proto)` / `application/grpc-web-text(+proto)` 转发；grpc-web request trailer frame 也会转换为 upstream HTTP/2 request trailers
 - 对 gRPC / grpc-web 请求，若下游带了 `grpc-timeout`，代理会取它与 upstream `request_timeout` 的较小值，作为整个 upstream 交互的 deadline；它同时约束等待响应头和后续响应 body 流；非法 `grpc-timeout` 会返回 `grpc-status = 3`
-- 若下游在 gRPC / grpc-web 响应流结束前提前取消读取，代理会结束对应的响应转发链路；如果此时尚未观察到最终 `grpc-status`，access log 与 `rginx_grpc_responses_total` 会补记为 `grpc-status = 1`
+- 若下游在 gRPC / grpc-web 响应流结束前提前取消读取，代理会结束对应的响应转发链路；如果此时尚未观察到最终 `grpc-status`，access log 会补记为 `grpc-status = 1`
 - 当 gRPC / grpc-web 请求在代理本地失败时，例如未命中路由、ACL 拒绝、限流、upstream 不可用或超时，会尽量返回对应的 `grpc-status` / `grpc-message`，而不是只返回裸 HTTP 文本错误
 - `load_balance: RoundRobin` 会按 peer `weight` 做加权轮询
 - `load_balance: IpHash` 会基于解析后的客户端 IP 固定主 peer，不同 peer 的命中比例会按 `weight` 倾斜；当主 peer 不健康时会按加权顺序回退
@@ -346,7 +343,7 @@ servers: [
 每个路由可配置：
 
 - `matcher`: `Exact("/foo")` 或 `Prefix("/api")`
-- `handler`: `Proxy` / `Return` / `Status` / `Metrics` / `Config`
+- `handler`: `Proxy` / `Return`
 - `grpc_service`: 可选。只在 gRPC / grpc-web 请求且 service 匹配时命中
 - `grpc_method`: 可选。只在 gRPC / grpc-web 请求且 method 匹配时命中
 - `allow_cidrs`
@@ -359,7 +356,6 @@ servers: [
 - `burst` 只有在设置了 `requests_per_sec` 时才有意义
 - 如果配置了 `grpc_service` / `grpc_method`，路由仍然会先经过普通路径 matcher，再在命中后继续校验 gRPC `service` / `method`
 - 同一路径 matcher 下，带更多 gRPC 约束的路由优先级更高；剩余冲突按配置声明顺序处理
-- `Config` 管理路由必须使用 `Exact(...)`，并且必须显式配置非空 `allow_cidrs`
 
 ## 示例
 
@@ -403,97 +399,7 @@ Config(
 )
 ```
 
-### 2. 状态页、指标与 ACL
-
-```ron
-locations: [
-    LocationConfig(
-        matcher: Exact("/status"),
-        handler: Status,
-        allow_cidrs: ["127.0.0.1/32", "::1/128"],
-    ),
-    LocationConfig(
-        matcher: Exact("/metrics"),
-        handler: Metrics,
-        allow_cidrs: ["127.0.0.1/32", "::1/128"],
-    ),
-]
-```
-
-`/status` 会返回 JSON，包含：
-
-- 当前配置修订号 `revision`
-- 监听地址 `listen`
-- 是否启用了下游 TLS 的 `tls_enabled`
-- HTTP/1 keepalive 开关 `keep_alive`
-- 当前连接上限 `max_connections`
-- 受信代理条目数 `trusted_proxy_count`
-- 当前活跃客户端连接数 `active_connections`
-- 虚拟主机数 `vhost_count`
-- 路由总数 `route_count`
-- 上游数 `upstream_count`
-- 每个上游的 peer 总数、健康 peer 数、backup peer 数、当前 peer 活跃请求汇总，以及负载均衡策略、连接/读写/空闲超时、连接池参数、TCP/HTTP2 keepalive 参数、主动健康检查参数、每个 peer 的 `weight` / `backup`、健康状态与当前活跃请求数
-
-其中 `route_count` 是默认虚拟主机和所有额外虚拟主机路由数的总和。
-
-`/metrics` 会暴露 Prometheus 文本格式指标，包含：
-
-- `rginx_active_connections`
-- `rginx_http_requests_total`
-- `rginx_grpc_requests_total`
-- `rginx_grpc_responses_total`
-- `rginx_http_rate_limited_total`
-- `rginx_http_request_duration_ms`
-- `rginx_upstream_requests_total`
-- `rginx_active_health_checks_total`
-- `rginx_config_reloads_total`
-
-### 2.1 动态配置 API
-
-如果你希望通过 HTTP 管理运行中配置，可以显式配置一个 `Config` 路由：
-
-```ron
-server: ServerConfig(
-    listen: "0.0.0.0:80",
-    config_api_token: Some("change-me-admin-token"),
-),
-locations: [
-LocationConfig(
-    matcher: Exact("/-/config"),
-    handler: Config,
-    allow_cidrs: ["127.0.0.1/32", "::1/128"],
-)
-]
-```
-
-读取当前生效配置：
-
-```bash
-curl \
-  -H 'Authorization: Bearer change-me-admin-token' \
-  http://127.0.0.1/-/config
-```
-
-用完整 RON 文档替换运行中配置：
-
-```bash
-curl -X PUT \
-  -H 'Authorization: Bearer change-me-admin-token' \
-  -H 'Content-Type: application/ron; charset=utf-8' \
-  --data-binary @configs/rginx.ron \
-  http://127.0.0.1/-/config
-```
-
-边界说明：
-
-- `Config` 路由要求 `server.config_api_token`，并通过 `Authorization: Bearer <token>` 访问
-- `PUT` body 必须是非空、有效 UTF-8 的完整 RON 文档
-- `PUT` body 当前限制为 1 MiB；超限会返回 `413 Payload Too Large`
-- 当前只支持完整文档替换，不支持 partial patch
-- 仍然不能在线变更 `listen`、`runtime.worker_threads`、`runtime.accept_workers`
-- 新配置会先通过 validate + compile，再落盘并切换到新的运行时快照
-
-### 3. 路由限流
+### 2. 路由限流
 
 ```ron
 LocationConfig(
@@ -938,7 +844,7 @@ Release Notes 分类规则来自：
 建议的本地发版前检查：
 
 ```bash
-./scripts/prepare-release.sh --tag v0.1.2-rc.2
+./scripts/prepare-release.sh --tag v0.1.2-rc.3
 ```
 
 建议流程：
@@ -1023,8 +929,6 @@ rginx -s stop
 - TLS 终止
 - 上游 HTTPS
 - Host/Path 路由
-- 状态与管理响应
-- 状态与指标
 - ACL 与限流
 - 健康检查
 - 平滑退出与热重载

@@ -15,10 +15,5 @@ VirtualHostConfig(
                 upstream: "backend",
             ),
         ),
-        LocationConfig(
-            matcher: Exact("/status"),
-            handler: Status,
-            allow_cidrs: ["127.0.0.1/32", "::1/128"],
-        ),
     ],
 ),

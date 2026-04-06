@@ -114,12 +114,6 @@ Config(
         // $grpc_method $grpc_status $grpc_message
         access_log_format: Some("reqid=$request_id remote=$remote_addr peer=$peer_addr host=$host method=$method path=$path status=$status bytes=$body_bytes_sent elapsed_ms=$request_time_ms vhost=$vhost route=$route scheme=$scheme proto=$http_version ua=$user_agent referer=$referer grpc_service=$grpc_service grpc_method=$grpc_method grpc_status=$grpc_status"),
 
-        // Bearer token used by the Config management handler.
-        // Must not be empty and must not contain leading/trailing spaces.
-        // `handler: Config` 路由使用的 Bearer Token。
-        // 不能为空，且不能带前后空白。
-        config_api_token: Some("replace-with-a-real-admin-token"),
-
         // Server-side TLS for the default vhost.
         // The active example keeps this disabled so the file can be checked without local certs.
         // 默认虚拟主机的服务端 TLS。
@@ -555,69 +549,11 @@ Config(
             burst: None,
         ),
 
+        // Proxy example using header overrides and prefix stripping.
+        // 带请求头覆盖和前缀剥离的代理示例。
         LocationConfig(
-            matcher: Exact("/status"),
-            handler: Status,
-            grpc_service: None,
-            grpc_method: None,
-            allow_cidrs: [
-                "127.0.0.1/32",
-                "::1/128",
-                "10.0.0.0/8",
-            ],
-            deny_cidrs: [],
-            requests_per_sec: None,
-            burst: None,
-        ),
-
-        LocationConfig(
-            matcher: Exact("/metrics"),
-            handler: Metrics,
-            grpc_service: None,
-            grpc_method: None,
-            allow_cidrs: [
-                "127.0.0.1/32",
-                "::1/128",
-                "10.0.0.0/8",
-            ],
-            deny_cidrs: [],
-            requests_per_sec: None,
-            burst: None,
-        ),
-
-        LocationConfig(
-            // Management API route.
-            // Config handler requires:
-            // - Exact(...) matcher
-            // - non-empty allow_cidrs
-            // - server.config_api_token
-            //
-            // 管理 API 路由。
-            // Config 处理器要求：
-            // - 必须是 Exact(...)
-            // - allow_cidrs 不能为空
-            // - 必须设置 server.config_api_token
-            matcher: Exact("/-/config"),
-            handler: Config,
-            grpc_service: None,
-            grpc_method: None,
-            allow_cidrs: [
-                "127.0.0.1/32",
-                "::1/128",
-                "10.0.10.0/24",
-            ],
-            deny_cidrs: [],
-            requests_per_sec: Some(5),
-            burst: Some(5),
-        ),
-
-        LocationConfig(
-            // Proxy example using header overrides and prefix stripping.
-            // 带请求头覆盖和前缀剥离的代理示例。
             matcher: Prefix("/api"),
             handler: Proxy(
-                // Target upstream name.
-                // 目标 upstream 名称。
                 upstream: "backend_http",
 
                 // Preserve downstream Host header when proxying.
@@ -798,34 +734,6 @@ Config(
                         location: "",
                         body: Some("admin vhost root\n"),
                     ),
-                    grpc_service: None,
-                    grpc_method: None,
-                    allow_cidrs: [
-                        "127.0.0.1/32",
-                        "::1/128",
-                        "10.0.10.0/24",
-                    ],
-                    deny_cidrs: [],
-                    requests_per_sec: None,
-                    burst: None,
-                ),
-                LocationConfig(
-                    matcher: Exact("/status"),
-                    handler: Status,
-                    grpc_service: None,
-                    grpc_method: None,
-                    allow_cidrs: [
-                        "127.0.0.1/32",
-                        "::1/128",
-                        "10.0.10.0/24",
-                    ],
-                    deny_cidrs: [],
-                    requests_per_sec: None,
-                    burst: None,
-                ),
-                LocationConfig(
-                    matcher: Exact("/metrics"),
-                    handler: Metrics,
                     grpc_service: None,
                     grpc_method: None,
                     allow_cidrs: [

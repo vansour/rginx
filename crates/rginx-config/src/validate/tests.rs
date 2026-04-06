@@ -288,38 +288,6 @@ fn validate_rejects_tls_vhost_without_server_name() {
 }
 
 #[test]
-fn validate_rejects_config_handler_without_allow_cidrs() {
-    let mut config = base_config();
-    config.locations[0].matcher = MatcherConfig::Exact("/-/config".to_string());
-    config.locations[0].handler = HandlerConfig::Config;
-
-    let error = validate(&config).expect_err("config handler should require allow_cidrs");
-    assert!(error.to_string().contains("config handler requires non-empty allow_cidrs"));
-}
-
-#[test]
-fn validate_rejects_config_handler_with_prefix_matcher() {
-    let mut config = base_config();
-    config.locations[0].matcher = MatcherConfig::Prefix("/-/config".to_string());
-    config.locations[0].handler = HandlerConfig::Config;
-    config.locations[0].allow_cidrs = vec!["127.0.0.1/32".to_string()];
-
-    let error = validate(&config).expect_err("config handler should require exact matcher");
-    assert!(error.to_string().contains("config handler requires an Exact(...) matcher"));
-}
-
-#[test]
-fn validate_rejects_config_handler_without_server_token() {
-    let mut config = base_config();
-    config.locations[0].matcher = MatcherConfig::Exact("/-/config".to_string());
-    config.locations[0].handler = HandlerConfig::Config;
-    config.locations[0].allow_cidrs = vec!["127.0.0.1/32".to_string()];
-
-    let error = validate(&config).expect_err("config handler should require server token");
-    assert!(error.to_string().contains("config handler requires server.config_api_token"));
-}
-
-#[test]
 fn validate_rejects_empty_grpc_service() {
     let mut config = base_config();
     config.locations[0].grpc_service = Some("   ".to_string());
@@ -506,7 +474,6 @@ fn base_config() -> Config {
             request_body_read_timeout_secs: None,
             response_write_timeout_secs: None,
             access_log_format: None,
-            config_api_token: None,
             tls: None,
         },
         upstreams: vec![UpstreamConfig {

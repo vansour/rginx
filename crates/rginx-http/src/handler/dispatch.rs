@@ -1,12 +1,9 @@
 use super::access_log::{AccessLogContext, OwnedAccessLogContext, log_access_event};
-use super::admin::{
-    config_response, forbidden_response, full_body, metrics_response, status_response,
-    text_response, too_many_requests_response,
-};
 use super::grpc::{
     GrpcRequestMetadata, GrpcStatusCode, grpc_error_response, grpc_observability,
     grpc_request_metadata, wrap_grpc_observability_response,
 };
+use super::response::{forbidden_response, full_body, text_response, too_many_requests_response};
 use super::*;
 
 pub async fn handle(
@@ -15,7 +12,6 @@ pub async fn handle(
     remote_addr: SocketAddr,
 ) -> HttpResponse {
     let mut request = request;
-    let metrics = state.metrics();
     let active = state.snapshot().await;
     let config = active.config.clone();
     let method = request.method().clone();
@@ -63,14 +59,9 @@ pub async fn handle(
         Some(route) => {
             if let Some(response) = authorize_route(&request_headers, &route, &client_address) {
                 response
-            } else if let Some(response) = enforce_rate_limit(
-                &request_headers,
-                &state,
-                &route,
-                &route_id,
-                &client_address,
-                &metrics,
-            ) {
+            } else if let Some(response) =
+                enforce_rate_limit(&request_headers, &state, &route, &route_id, &client_address)
+            {
                 response
             } else {
                 build_route_response(
@@ -78,7 +69,6 @@ pub async fn handle(
                     state.clone(),
                     route.action,
                     active,
-                    metrics.clone(),
                     client_address.clone(),
                     &request_id,
                 )
@@ -105,15 +95,6 @@ pub async fn handle(
     let status = response.status();
     let elapsed_ms = started.elapsed().as_millis() as u64;
     let body_bytes_sent = response_body_bytes_sent(method.as_str(), &response);
-    metrics.observe_http_request(&route_id, status.as_u16(), elapsed_ms);
-    if let Some(metadata) = grpc_request {
-        metrics.record_grpc_request(
-            &route_id,
-            metadata.protocol,
-            metadata.service,
-            metadata.method,
-        );
-    }
 
     if let Some(grpc) = grpc_observability(grpc_request, response.headers()) {
         let format = config.server.access_log_format.clone();
@@ -133,7 +114,7 @@ pub async fn handle(
             downstream_scheme: downstream_scheme.to_string(),
             body_bytes_sent,
         };
-        return wrap_grpc_observability_response(response, metrics, format, context, grpc);
+        return wrap_grpc_observability_response(response, format, context, grpc);
     }
 
     log_access_event(
@@ -254,7 +235,6 @@ pub(super) fn enforce_rate_limit(
     route: &Route,
     route_metric_label: &str,
     client_address: &ClientAddress,
-    metrics: &Metrics,
 ) -> Option<HttpResponse> {
     if state.rate_limiters().check(
         route_metric_label,
@@ -264,7 +244,6 @@ pub(super) fn enforce_rate_limit(
         return None;
     }
 
-    metrics.record_rate_limited(route_metric_label);
     tracing::warn!(
         client_ip = %client_address.client_ip,
         peer_addr = %client_address.peer_addr,
@@ -286,7 +265,6 @@ async fn build_route_response(
     state: SharedState,
     action: RouteAction,
     active: ActiveState,
-    metrics: Metrics,
     client_address: ClientAddress,
     request_id: &str,
 ) -> HttpResponse {
@@ -308,9 +286,6 @@ async fn build_route_response(
             )
             .await
         }
-        RouteAction::Status => status_response(&active, metrics.active_connections()),
-        RouteAction::Metrics => metrics_response(&metrics),
-        RouteAction::Config => config_response(request, state, active).await,
         RouteAction::Return(action) => {
             let body = action.body.clone().unwrap_or_else(|| {
                 format!("{}\n", action.status.canonical_reason().unwrap_or("Redirect"))

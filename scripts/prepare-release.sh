@@ -15,7 +15,7 @@ Usage: prepare-release.sh --tag <tag> [options]
 
 Options:
   --tag <tag>
-      目标 release tag，例如 v0.1.2 或 v0.1.2-rc.2
+      目标 release tag，例如 v0.1.2 或 v0.1.2-rc.3
   --allow-dirty
       允许在有未提交改动的工作区内执行
   --skip-fetch
