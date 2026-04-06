@@ -7,6 +7,7 @@ pub(super) async fn proxy_upgraded_connection(
     upstream_name: String,
     peer_url: String,
     _active_peer: ActivePeerGuard,
+    _connection_guard: crate::state::ActiveConnectionGuard,
 ) {
     let (downstream_upgraded, upstream_upgraded) =
         match tokio::try_join!(downstream_upgrade, upstream_upgrade) {

@@ -196,12 +196,14 @@ pub async fn forward_request(
                 if let (Some(downstream_upgrade), Some(upstream_upgrade)) =
                     (downstream_upgrade.clone(), upstream_upgrade)
                 {
+                    let connection_guard = state.retain_connection_slot();
                     state.spawn_background_task(proxy_upgraded_connection(
                         downstream_upgrade,
                         upstream_upgrade,
                         target.upstream_name.clone(),
                         peer.url.clone(),
                         active_peer,
+                        connection_guard,
                     ));
                     return build_downstream_response(
                         response,

@@ -121,6 +121,13 @@ impl SharedState {
         }
     }
 
+    pub fn retain_connection_slot(&self) -> ActiveConnectionGuard {
+        self.active_connections.fetch_add(1, Ordering::AcqRel);
+        ActiveConnectionGuard {
+            active_connections: self.active_connections.clone(),
+        }
+    }
+
     pub async fn tls_acceptor(&self) -> Option<TlsAcceptor> {
         self.tls_acceptor.read().await.clone()
     }
