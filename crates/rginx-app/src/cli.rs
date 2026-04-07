@@ -26,6 +26,9 @@ pub struct Cli {
 #[derive(Debug, Clone, Copy, Subcommand)]
 pub enum Command {
     Check,
+    Status,
+    Counters,
+    Peers,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -84,7 +87,7 @@ mod tests {
 
     use clap::Parser;
 
-    use super::{Cli, SignalCommand, installed_config_path, pid_path_for_config};
+    use super::{Cli, Command, SignalCommand, installed_config_path, pid_path_for_config};
 
     #[test]
     fn installed_config_path_uses_etc_directory_for_usr_sbin_layout() {
@@ -136,5 +139,12 @@ mod tests {
         assert!(!cli.test_config);
         assert_eq!(cli.signal, Some(SignalCommand::Reload));
         assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn cli_accepts_status_subcommand() {
+        let cli = Cli::try_parse_from(["rginx", "status"]).expect("cli should parse");
+
+        assert!(matches!(cli.command, Some(Command::Status)));
     }
 }

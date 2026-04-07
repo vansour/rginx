@@ -6,6 +6,7 @@ use bytes::Bytes;
 use hyper::body::{Frame, SizeHint};
 use pin_project_lite::pin_project;
 use rginx_core::{ConfigSnapshot, Upstream, UpstreamLoadBalance, UpstreamPeer};
+use serde::{Deserialize, Serialize};
 
 use crate::handler::BoxError;
 
@@ -54,7 +55,7 @@ struct PeerHealth {
     state: Mutex<PeerHealthState>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerHealthSnapshot {
     pub peer_url: String,
     pub backup: bool,
@@ -68,7 +69,7 @@ pub struct PeerHealthSnapshot {
     pub active_requests: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpstreamHealthSnapshot {
     pub upstream_name: String,
     pub unhealthy_after_failures: u32,

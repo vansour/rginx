@@ -4,6 +4,7 @@ use rginx_core::{ConfigSnapshot, Error, Result};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
+use crate::admin;
 use crate::health;
 use crate::reload;
 use crate::shutdown;
@@ -37,6 +38,11 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
             tokio::spawn(rginx_http::serve(listener, state.http.clone(), shutdown_rx.clone()))
         })
         .collect::<Vec<_>>();
+    let mut admin_task = tokio::spawn(admin::run(
+        state.config_path.clone(),
+        state.http.clone(),
+        shutdown_tx.subscribe(),
+    ));
     let mut health_task = tokio::spawn(health::run(state.http.clone(), shutdown_tx.subscribe()));
 
     while let RuntimeSignal::Reload = shutdown::wait_for_signal().await? {
@@ -68,6 +74,9 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
 
     match tokio::time::timeout(current_config.runtime.shutdown_timeout, async {
         join_server_tasks(&mut server_tasks).await?;
+        (&mut admin_task).await.map_err(|error| {
+            Error::Server(format!("admin socket task failed to join: {error}"))
+        })??;
         (&mut health_task).await.map_err(|error| {
             Error::Server(format!("active health task failed to join: {error}"))
         })?;
@@ -84,9 +93,16 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
                 "shutdown timeout reached before background tasks drained all active work"
             );
             abort_server_tasks(&server_tasks);
+            admin_task.abort();
             health_task.abort();
 
             join_aborted_server_tasks(server_tasks).await;
+
+            if let Err(error) = admin_task.await
+                && !error.is_cancelled()
+            {
+                tracing::warn!(%error, "admin socket task failed after abort");
+            }
 
             if let Err(error) = health_task.await
                 && !error.is_cancelled()

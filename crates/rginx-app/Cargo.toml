@@ -21,6 +21,7 @@ rginx-config = { path = "../rginx-config" }
 rginx-http = { path = "../rginx-http" }
 rginx-observability = { path = "../rginx-observability" }
 rginx-runtime = { path = "../rginx-runtime" }
+serde_json.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
