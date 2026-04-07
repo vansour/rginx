@@ -2,15 +2,13 @@ use super::health::ActivePeerGuard;
 use super::*;
 
 pub(super) async fn proxy_upgraded_connection(
-    metrics: Metrics,
     downstream_upgrade: OnUpgrade,
     upstream_upgrade: OnUpgrade,
     upstream_name: String,
     peer_url: String,
     _active_peer: ActivePeerGuard,
+    _connection_guard: crate::state::ActiveConnectionGuard,
 ) {
-    let _guard = ActiveConnectionGuard::new(metrics);
-
     let (downstream_upgraded, upstream_upgraded) =
         match tokio::try_join!(downstream_upgrade, upstream_upgrade) {
             Ok(upgraded) => upgraded,
@@ -46,21 +44,5 @@ pub(super) async fn proxy_upgraded_connection(
                 "upgraded proxy tunnel failed"
             );
         }
-    }
-}
-
-struct ActiveConnectionGuard {
-    metrics: Metrics,
-}
-
-impl ActiveConnectionGuard {
-    fn new(metrics: Metrics) -> Self {
-        Self { metrics }
-    }
-}
-
-impl Drop for ActiveConnectionGuard {
-    fn drop(&mut self) {
-        self.metrics.decrement_active_connections();
     }
 }

@@ -6,7 +6,6 @@ use bytes::Bytes;
 use hyper::body::{Frame, SizeHint};
 use pin_project_lite::pin_project;
 use rginx_core::{ConfigSnapshot, Upstream, UpstreamLoadBalance, UpstreamPeer};
-use serde::Serialize;
 
 use crate::handler::BoxError;
 
@@ -63,19 +62,6 @@ pub(crate) struct PeerHealthRegistry {
 pub(crate) struct SelectedPeers {
     pub peers: Vec<UpstreamPeer>,
     pub skipped_unhealthy: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct PeerStatusSnapshot {
-    pub url: String,
-    pub weight: u32,
-    pub backup: bool,
-    pub healthy: bool,
-    pub active_requests: u64,
-    pub passive_consecutive_failures: u32,
-    pub passive_cooldown_remaining_ms: Option<u64>,
-    pub active_unhealthy: bool,
-    pub active_consecutive_successes: u32,
 }
 
 impl PeerHealthPolicy {
@@ -314,29 +300,6 @@ impl PeerHealthRegistry {
     fn get(&self, upstream_name: &str, peer_url: &str) -> Option<&Arc<PeerHealth>> {
         self.peers.get(upstream_name).and_then(|upstream_peers| upstream_peers.get(peer_url))
     }
-
-    pub(crate) fn snapshot(
-        &self,
-        upstream_name: &str,
-        peer_url: &str,
-        peer_display_url: &str,
-        peer_weight: u32,
-        peer_backup: bool,
-    ) -> PeerStatusSnapshot {
-        self.get(upstream_name, peer_url)
-            .map(|health| health.snapshot(peer_display_url, peer_weight, peer_backup))
-            .unwrap_or_else(|| PeerStatusSnapshot {
-                url: peer_display_url.to_string(),
-                weight: peer_weight,
-                backup: peer_backup,
-                healthy: true,
-                active_requests: 0,
-                passive_consecutive_failures: 0,
-                passive_cooldown_remaining_ms: None,
-                active_unhealthy: false,
-                active_consecutive_successes: 0,
-            })
-    }
 }
 
 impl PeerHealth {
@@ -415,30 +378,6 @@ impl PeerHealth {
 
     fn active_requests(&self) -> u64 {
         lock_peer_health(&self.state).active_requests
-    }
-
-    fn snapshot(&self, url: &str, weight: u32, backup: bool) -> PeerStatusSnapshot {
-        let state = lock_peer_health(&self.state);
-        let now = Instant::now();
-
-        let passive_cooldown_remaining_ms = state
-            .passive
-            .unhealthy_until
-            .and_then(|until| until.checked_duration_since(now))
-            .map(|remaining| remaining.as_millis() as u64);
-        let healthy = passive_cooldown_remaining_ms.is_none() && !state.active.unhealthy;
-
-        PeerStatusSnapshot {
-            url: url.to_string(),
-            weight,
-            backup,
-            healthy,
-            active_requests: state.active_requests,
-            passive_consecutive_failures: state.passive.consecutive_failures,
-            passive_cooldown_remaining_ms,
-            active_unhealthy: state.active.unhealthy,
-            active_consecutive_successes: state.active.consecutive_successes,
-        }
     }
 }
 

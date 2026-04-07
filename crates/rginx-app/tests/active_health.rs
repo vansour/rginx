@@ -3,13 +3,11 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::{Duration, Instant};
-
-use serde_json::Value;
+use std::time::Duration;
 
 mod support;
 
-use support::{READY_ROUTE_CONFIG, ServerHarness, reserve_loopback_addr};
+use support::{READY_ROUTE_CONFIG, ServerHarness, read_http_head, reserve_loopback_addr};
 
 #[test]
 fn active_health_checks_mark_peer_unhealthy_and_recover_after_successive_probes() {
@@ -22,60 +20,18 @@ fn active_health_checks_mark_peer_unhealthy_and_recover_after_successive_probes(
 
     server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
 
-    wait_for_status(
-        &mut server,
+    wait_for_proxy_response(
         listen_addr,
-        Duration::from_secs(5),
-        "peer should become actively unhealthy after failed probes",
-        |status| peer_status(status)["active_unhealthy"].as_bool() == Some(true),
-    );
-
-    let response =
-        send_http_request(listen_addr, "GET", "/api/demo").expect("proxy request should respond");
-    assert_eq!(response.status, 502);
-    assert!(
-        String::from_utf8_lossy(&response.body)
-            .contains("upstream `backend` has no healthy peers available"),
-        "unexpected proxy failure body: {:?}",
-        String::from_utf8_lossy(&response.body)
-    );
-
-    let metrics = metrics_body(
-        send_http_request(listen_addr, "GET", "/metrics").expect("metrics request should succeed"),
-    );
-    assert_metric_at_least(
-        &metrics,
-        &format!(
-            "rginx_active_health_checks_total{{upstream=\"backend\",peer=\"http://{upstream_addr}\",result=\"unhealthy_status\"}}"
-        ),
-        1,
+        "GET",
+        "/api/demo",
+        502,
+        "upstream `backend` has no healthy peers available",
+        Duration::from_secs(6),
+        "peer should enter cooldown after failed probes",
+        &mut server,
     );
 
     health_ok.store(true, Ordering::Relaxed);
-
-    wait_for_status(
-        &mut server,
-        listen_addr,
-        Duration::from_secs(3),
-        "peer should require one successful probe before recovery",
-        |status| {
-            let peer = peer_status(status);
-            peer["active_unhealthy"].as_bool() == Some(true)
-                && peer["active_consecutive_successes"].as_u64() == Some(1)
-        },
-    );
-
-    wait_for_status(
-        &mut server,
-        listen_addr,
-        Duration::from_secs(5),
-        "peer should recover after the configured number of successful probes",
-        |status| {
-            let peer = peer_status(status);
-            peer["active_unhealthy"].as_bool() == Some(false)
-                && peer["healthy"].as_bool() == Some(true)
-        },
-    );
 
     server.wait_for_http_text_response(
         listen_addr,
@@ -86,53 +42,34 @@ fn active_health_checks_mark_peer_unhealthy_and_recover_after_successive_probes(
         Duration::from_secs(5),
     );
 
-    let metrics = metrics_body(
-        send_http_request(listen_addr, "GET", "/metrics").expect("metrics request should succeed"),
-    );
-    assert_metric_at_least(
-        &metrics,
-        &format!(
-            "rginx_active_health_checks_total{{upstream=\"backend\",peer=\"http://{upstream_addr}\",result=\"healthy\"}}"
-        ),
-        2,
-    );
-
     server.shutdown_and_wait(Duration::from_secs(5));
 }
 
-fn peer_status(status: &Value) -> &Value {
-    &status["upstreams"][0]["peers"][0]
-}
-
-fn wait_for_status(
-    server: &mut ServerHarness,
+fn wait_for_proxy_response(
     listen_addr: SocketAddr,
+    method: &str,
+    path: &str,
+    expected_status: u16,
+    expected_body_contains: &str,
     timeout: Duration,
     expectation: &str,
-    predicate: impl Fn(&Value) -> bool,
-) -> Value {
-    let deadline = Instant::now() + timeout;
-    let mut last_status = Value::Null;
+    server: &mut ServerHarness,
+) {
+    let deadline = std::time::Instant::now() + timeout;
     let mut last_error = String::new();
 
-    while Instant::now() < deadline {
+    while std::time::Instant::now() < deadline {
         server.assert_running();
 
-        match send_http_request(listen_addr, "GET", "/status") {
-            Ok(response) if response.status == 200 => {
-                match serde_json::from_slice::<Value>(&response.body) {
-                    Ok(status) => {
-                        if predicate(&status) {
-                            return status;
-                        }
-                        last_status = status;
-                    }
-                    Err(error) => last_error = format!("status body should be JSON: {error}"),
-                }
-            }
+        match send_http_request(listen_addr, method, path) {
             Ok(response) => {
+                if response.status == expected_status
+                    && String::from_utf8_lossy(&response.body).contains(expected_body_contains)
+                {
+                    return;
+                }
                 last_error = format!(
-                    "unexpected /status response: status={} body={:?}",
+                    "unexpected response: status={} body={:?}",
                     response.status,
                     String::from_utf8_lossy(&response.body)
                 );
@@ -140,32 +77,10 @@ fn wait_for_status(
             Err(error) => last_error = error,
         }
 
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(100));
     }
 
-    panic!(
-        "{expectation}; last_status={last_status}; last_error={last_error}\n{}",
-        server.combined_output()
-    );
-}
-
-fn metrics_body(response: ParsedResponse) -> String {
-    assert_eq!(response.status, 200, "metrics endpoint should return 200");
-    String::from_utf8(response.body).expect("metrics body should be valid UTF-8")
-}
-
-fn assert_metric_at_least(metrics: &str, prefix: &str, min_value: u64) {
-    let value = metrics
-        .lines()
-        .find_map(|line| {
-            let (metric, value) = line.split_once(' ')?;
-            if metric == prefix { value.parse::<u64>().ok() } else { None }
-        })
-        .unwrap_or_else(|| panic!("missing metric line with prefix `{prefix}` in:\n{metrics}"));
-    assert!(
-        value >= min_value,
-        "expected metric `{prefix}` >= {min_value}, got {value}\n{metrics}"
-    );
+    panic!("{expectation}; last_error={last_error}\n{}", server.combined_output());
 }
 
 fn spawn_active_health_upstream(health_ok: Arc<AtomicBool>) -> SocketAddr {
@@ -180,9 +95,7 @@ fn spawn_active_health_upstream(health_ok: Arc<AtomicBool>) -> SocketAddr {
             let health_ok = health_ok.clone();
 
             thread::spawn(move || {
-                let Ok(head) = read_http_head(&mut stream) else {
-                    return;
-                };
+                let head = read_http_head(&mut stream);
                 let path = request_path(&head);
                 let (status, body) = if path == "/healthz" {
                     if health_ok.load(Ordering::Relaxed) {
@@ -205,28 +118,6 @@ fn spawn_active_health_upstream(health_ok: Arc<AtomicBool>) -> SocketAddr {
     });
 
     listen_addr
-}
-
-fn read_http_head(stream: &mut TcpStream) -> Result<String, String> {
-    let mut buffer = Vec::new();
-    let mut chunk = [0u8; 256];
-
-    loop {
-        let read = stream.read(&mut chunk).map_err(|error| format!("read failed: {error}"))?;
-        if read == 0 {
-            return Err("stream closed before request head completed".to_string());
-        }
-        buffer.extend_from_slice(&chunk[..read]);
-
-        if let Some(head_end) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
-            return String::from_utf8(buffer[..head_end + 4].to_vec())
-                .map_err(|error| format!("request head should be utf-8: {error}"));
-        }
-    }
-}
-
-fn request_path(head: &str) -> &str {
-    head.lines().next().and_then(|line| line.split_whitespace().nth(1)).unwrap_or("/")
 }
 
 #[derive(Debug)]
@@ -278,9 +169,13 @@ fn parse_http_response(bytes: &[u8]) -> Result<ParsedResponse, String> {
     Ok(ParsedResponse { status, body: bytes[head_end + 4..].to_vec() })
 }
 
+fn request_path(head: &str) -> &str {
+    head.lines().next().and_then(|line| line.split_whitespace().nth(1)).unwrap_or("/")
+}
+
 fn active_health_config(listen_addr: SocketAddr, upstream_addr: SocketAddr) -> String {
     format!(
-        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [\n                UpstreamPeerConfig(\n                    url: {:?},\n                ),\n            ],\n            request_timeout_secs: Some(1),\n            health_check_path: Some(\"/healthz\"),\n            health_check_interval_secs: Some(1),\n            health_check_timeout_secs: Some(1),\n            healthy_successes_required: Some(2),\n        ),\n    ],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/status\"),\n            handler: Status,\n        ),\n        LocationConfig(\n            matcher: Exact(\"/metrics\"),\n            handler: Metrics,\n        ),\n        LocationConfig(\n            matcher: Prefix(\"/api\"),\n            handler: Proxy(\n                upstream: \"backend\",\n            ),\n        ),\n    ],\n)\n",
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [\n                UpstreamPeerConfig(\n                    url: {:?},\n                ),\n            ],\n            request_timeout_secs: Some(1),\n            health_check_path: Some(\"/healthz\"),\n            health_check_interval_secs: Some(1),\n            health_check_timeout_secs: Some(1),\n            healthy_successes_required: Some(2),\n        ),\n    ],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Prefix(\"/api\"),\n            handler: Proxy(\n                upstream: \"backend\",\n            ),\n        ),\n    ],\n)\n",
         listen_addr.to_string(),
         format!("http://{upstream_addr}"),
         ready_route = READY_ROUTE_CONFIG,

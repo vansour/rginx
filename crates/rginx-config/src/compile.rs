@@ -108,7 +108,6 @@ mod tests {
                 request_body_read_timeout_secs: None,
                 response_write_timeout_secs: None,
                 access_log_format: None,
-                config_api_token: Some("dev-config-token".to_string()),
                 tls: None,
             },
             upstreams: vec![UpstreamConfig {
@@ -220,7 +219,6 @@ mod tests {
                 request_body_read_timeout_secs: None,
                 response_write_timeout_secs: None,
                 access_log_format: None,
-                config_api_token: Some("dev-config-token".to_string()),
                 tls: None,
             },
             upstreams: vec![UpstreamConfig {
@@ -310,7 +308,6 @@ mod tests {
                 request_body_read_timeout_secs: None,
                 response_write_timeout_secs: None,
                 access_log_format: None,
-                config_api_token: Some("dev-config-token".to_string()),
                 tls: None,
             },
             upstreams: vec![UpstreamConfig {
@@ -405,7 +402,6 @@ mod tests {
                 request_body_read_timeout_secs: None,
                 response_write_timeout_secs: None,
                 access_log_format: None,
-                config_api_token: Some("dev-config-token".to_string()),
                 tls: None,
             },
             upstreams: vec![UpstreamConfig {
@@ -496,7 +492,6 @@ mod tests {
                 request_body_read_timeout_secs: None,
                 response_write_timeout_secs: None,
                 access_log_format: None,
-                config_api_token: None,
                 tls: None,
             },
             upstreams: vec![UpstreamConfig {
@@ -602,7 +597,6 @@ mod tests {
                 request_body_read_timeout_secs: None,
                 response_write_timeout_secs: None,
                 access_log_format: None,
-                config_api_token: None,
                 tls: None,
             },
             upstreams: vec![UpstreamConfig {
@@ -708,7 +702,6 @@ mod tests {
                 request_body_read_timeout_secs: None,
                 response_write_timeout_secs: None,
                 access_log_format: None,
-                config_api_token: None,
                 tls: None,
             },
             upstreams: vec![UpstreamConfig {
@@ -801,7 +794,6 @@ mod tests {
                 request_body_read_timeout_secs: None,
                 response_write_timeout_secs: None,
                 access_log_format: None,
-                config_api_token: None,
                 tls: None,
             },
             upstreams: vec![UpstreamConfig {
@@ -897,7 +889,6 @@ mod tests {
                 request_body_read_timeout_secs: None,
                 response_write_timeout_secs: None,
                 access_log_format: None,
-                config_api_token: None,
                 tls: None,
             },
             upstreams: vec![UpstreamConfig {
@@ -1004,7 +995,6 @@ mod tests {
                 request_body_read_timeout_secs: None,
                 response_write_timeout_secs: None,
                 access_log_format: None,
-                config_api_token: None,
                 tls: None,
             },
             upstreams: vec![UpstreamConfig {
@@ -1088,7 +1078,6 @@ mod tests {
                 request_body_read_timeout_secs: None,
                 response_write_timeout_secs: None,
                 access_log_format: None,
-                config_api_token: None,
                 tls: None,
             },
             upstreams: vec![UpstreamConfig {
@@ -1148,138 +1137,6 @@ mod tests {
     }
 
     #[test]
-    fn compile_accepts_status_routes() {
-        let config = Config {
-            runtime: RuntimeConfig {
-                shutdown_timeout_secs: 10,
-                worker_threads: None,
-                accept_workers: None,
-            },
-            server: ServerConfig {
-                listen: "127.0.0.1:8080".to_string(),
-                server_names: Vec::new(),
-                trusted_proxies: Vec::new(),
-                keep_alive: None,
-                max_headers: None,
-                max_request_body_bytes: None,
-                max_connections: None,
-                header_read_timeout_secs: None,
-                request_body_read_timeout_secs: None,
-                response_write_timeout_secs: None,
-                access_log_format: None,
-                config_api_token: None,
-                tls: None,
-            },
-            upstreams: Vec::new(),
-            locations: vec![LocationConfig {
-                matcher: MatcherConfig::Exact("/status".to_string()),
-                handler: HandlerConfig::Status,
-                grpc_service: None,
-
-                grpc_method: None,
-
-                allow_cidrs: Vec::new(),
-                deny_cidrs: Vec::new(),
-                requests_per_sec: None,
-                burst: None,
-            }],
-            servers: Vec::new(),
-        };
-
-        let snapshot = compile(config).expect("status route should compile");
-        assert!(matches!(snapshot.default_vhost.routes[0].action, rginx_core::RouteAction::Status));
-    }
-
-    #[test]
-    fn compile_accepts_metrics_routes() {
-        let config = Config {
-            runtime: RuntimeConfig {
-                shutdown_timeout_secs: 10,
-                worker_threads: None,
-                accept_workers: None,
-            },
-            server: ServerConfig {
-                listen: "127.0.0.1:8080".to_string(),
-                server_names: Vec::new(),
-                trusted_proxies: Vec::new(),
-                keep_alive: None,
-                max_headers: None,
-                max_request_body_bytes: None,
-                max_connections: None,
-                header_read_timeout_secs: None,
-                request_body_read_timeout_secs: None,
-                response_write_timeout_secs: None,
-                access_log_format: None,
-                config_api_token: None,
-                tls: None,
-            },
-            upstreams: Vec::new(),
-            locations: vec![LocationConfig {
-                matcher: MatcherConfig::Exact("/metrics".to_string()),
-                handler: HandlerConfig::Metrics,
-                grpc_service: None,
-
-                grpc_method: None,
-
-                allow_cidrs: Vec::new(),
-                deny_cidrs: Vec::new(),
-                requests_per_sec: None,
-                burst: None,
-            }],
-            servers: Vec::new(),
-        };
-
-        let snapshot = compile(config).expect("metrics route should compile");
-        assert!(matches!(
-            snapshot.default_vhost.routes[0].action,
-            rginx_core::RouteAction::Metrics
-        ));
-    }
-
-    #[test]
-    fn compile_accepts_config_routes() {
-        let config = Config {
-            runtime: RuntimeConfig {
-                shutdown_timeout_secs: 10,
-                worker_threads: None,
-                accept_workers: None,
-            },
-            server: ServerConfig {
-                listen: "127.0.0.1:8080".to_string(),
-                server_names: Vec::new(),
-                trusted_proxies: Vec::new(),
-                keep_alive: None,
-                max_headers: None,
-                max_request_body_bytes: None,
-                max_connections: None,
-                header_read_timeout_secs: None,
-                request_body_read_timeout_secs: None,
-                response_write_timeout_secs: None,
-                access_log_format: None,
-                config_api_token: Some("dev-config-token".to_string()),
-                tls: None,
-            },
-            upstreams: Vec::new(),
-            locations: vec![LocationConfig {
-                matcher: MatcherConfig::Exact("/-/config".to_string()),
-                handler: HandlerConfig::Config,
-                grpc_service: None,
-
-                grpc_method: None,
-
-                allow_cidrs: vec!["127.0.0.1/32".to_string()],
-                deny_cidrs: Vec::new(),
-                requests_per_sec: None,
-                burst: None,
-            }],
-            servers: Vec::new(),
-        };
-
-        let snapshot = compile(config).expect("config route should compile");
-        assert!(matches!(snapshot.default_vhost.routes[0].action, rginx_core::RouteAction::Config));
-    }
-
-    #[test]
     fn compile_attaches_route_access_control() {
         let config = Config {
             runtime: RuntimeConfig {
@@ -1299,13 +1156,16 @@ mod tests {
                 request_body_read_timeout_secs: None,
                 response_write_timeout_secs: None,
                 access_log_format: None,
-                config_api_token: Some("dev-config-token".to_string()),
                 tls: None,
             },
             upstreams: Vec::new(),
             locations: vec![LocationConfig {
-                matcher: MatcherConfig::Exact("/status".to_string()),
-                handler: HandlerConfig::Status,
+                matcher: MatcherConfig::Exact("/".to_string()),
+                handler: HandlerConfig::Return {
+                    status: 200,
+                    location: String::new(),
+                    body: Some("ok\n".to_string()),
+                },
                 grpc_service: None,
 
                 grpc_method: None,
@@ -1343,7 +1203,6 @@ mod tests {
                 request_body_read_timeout_secs: None,
                 response_write_timeout_secs: None,
                 access_log_format: None,
-                config_api_token: None,
                 tls: None,
             },
             upstreams: Vec::new(),
@@ -1393,13 +1252,16 @@ mod tests {
                 request_body_read_timeout_secs: None,
                 response_write_timeout_secs: None,
                 access_log_format: None,
-                config_api_token: None,
                 tls: None,
             },
             upstreams: Vec::new(),
             locations: vec![LocationConfig {
-                matcher: MatcherConfig::Exact("/status".to_string()),
-                handler: HandlerConfig::Status,
+                matcher: MatcherConfig::Exact("/".to_string()),
+                handler: HandlerConfig::Return {
+                    status: 200,
+                    location: String::new(),
+                    body: Some("default site\n".to_string()),
+                },
                 grpc_service: None,
 
                 grpc_method: None,
@@ -1412,8 +1274,12 @@ mod tests {
             servers: vec![VirtualHostConfig {
                 server_names: vec!["api.example.com".to_string()],
                 locations: vec![LocationConfig {
-                    matcher: MatcherConfig::Exact("/status".to_string()),
-                    handler: HandlerConfig::Status,
+                    matcher: MatcherConfig::Exact("/".to_string()),
+                    handler: HandlerConfig::Return {
+                        status: 200,
+                        location: String::new(),
+                        body: Some("api site\n".to_string()),
+                    },
                     grpc_service: None,
 
                     grpc_method: None,
@@ -1431,8 +1297,8 @@ mod tests {
 
         assert_eq!(snapshot.default_vhost.id, "server");
         assert_eq!(snapshot.vhosts[0].id, "servers[0]");
-        assert_eq!(snapshot.default_vhost.routes[0].id, "server/routes[0]|exact:/status");
-        assert_eq!(snapshot.vhosts[0].routes[0].id, "servers[0]/routes[0]|exact:/status");
+        assert_eq!(snapshot.default_vhost.routes[0].id, "server/routes[0]|exact:/");
+        assert_eq!(snapshot.vhosts[0].routes[0].id, "servers[0]/routes[0]|exact:/");
         assert_eq!(snapshot.total_vhost_count(), 2);
         assert_eq!(snapshot.total_route_count(), 2);
     }
@@ -1468,7 +1334,6 @@ mod tests {
                 request_body_read_timeout_secs: None,
                 response_write_timeout_secs: None,
                 access_log_format: None,
-                config_api_token: None,
                 tls: Some(ServerTlsConfig {
                     cert_path: "server.crt".to_string(),
                     key_path: "server.key".to_string(),
@@ -1524,7 +1389,6 @@ mod tests {
                 request_body_read_timeout_secs: None,
                 response_write_timeout_secs: None,
                 access_log_format: None,
-                config_api_token: None,
                 tls: None,
             },
             upstreams: Vec::new(),
@@ -1573,7 +1437,6 @@ mod tests {
                 request_body_read_timeout_secs: Some(4),
                 response_write_timeout_secs: Some(5),
                 access_log_format: Some("$request_id $status $request".to_string()),
-                config_api_token: None,
                 tls: None,
             },
             upstreams: Vec::new(),
@@ -1631,7 +1494,6 @@ mod tests {
                 request_body_read_timeout_secs: None,
                 response_write_timeout_secs: None,
                 access_log_format: None,
-                config_api_token: None,
                 tls: None,
             },
             upstreams: Vec::new(),
@@ -1703,7 +1565,6 @@ mod tests {
                 request_body_read_timeout_secs: None,
                 response_write_timeout_secs: None,
                 access_log_format: Some("$trace_id $status".to_string()),
-                config_api_token: None,
                 tls: None,
             },
             upstreams: Vec::new(),

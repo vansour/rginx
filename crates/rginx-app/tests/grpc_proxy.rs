@@ -26,7 +26,6 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
-use serde_json::Value;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
@@ -763,11 +762,7 @@ async fn respects_grpc_timeout_across_grpc_web_text_response_body_streams_and_re
     let listen_addr = reserve_loopback_addr();
     let mut server = TestServer::spawn(
         listen_addr,
-        plain_proxy_config_with_request_timeout_metrics_and_access_log(
-            listen_addr,
-            upstream_addr,
-            Some(2),
-        ),
+        plain_proxy_config_with_request_timeout_and_access_log(listen_addr, upstream_addr, Some(2)),
     );
     server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
 
@@ -830,18 +825,6 @@ async fn respects_grpc_timeout_across_grpc_web_text_response_body_streams_and_re
         .expect("upstream request should be observed before timeout")
         .expect("upstream observation channel should complete");
     assert_eq!(observed.grpc_timeout.as_deref(), Some("200m"));
-
-    wait_for_http_metrics(
-        listen_addr,
-        Duration::from_secs(5),
-        |metrics| {
-            metrics.contains(
-                "protocol=\"grpc-web-text\",service=\"grpc.health.v1.Health\",method=\"Check\",grpc_status=\"4\"",
-            )
-        },
-        "grpc-web-text timeout should be recorded as grpc_status=4",
-    )
-    .await;
 
     wait_for_log_contains(
         &server,
@@ -1023,8 +1006,9 @@ async fn returns_grpc_web_status_for_unavailable_upstreams() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn active_grpc_health_checks_gate_proxy_requests_until_peer_recovers() {
-    let health_status = Arc::new(AtomicU8::new(2));
-    let (upstream_addr, upstream_task, upstream_temp_dir) =
+    // Start upstream as NOT_SERVING (status 0). Health checks will fail.
+    let health_status = Arc::new(AtomicU8::new(0));
+    let (upstream_addr, upstream_shutdown_tx, upstream_task, upstream_temp_dir) =
         spawn_grpc_upstream_with_dynamic_health(health_status.clone()).await;
 
     let listen_addr = reserve_loopback_addr();
@@ -1034,117 +1018,79 @@ async fn active_grpc_health_checks_gate_proxy_requests_until_peer_recovers() {
     );
     server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
 
-    let unhealthy_status = wait_for_status_payload(
-        listen_addr,
-        Duration::from_secs(5),
-        "gRPC active health check should mark the peer unhealthy",
-        |status| status["upstreams"][0]["peers"][0]["active_unhealthy"].as_bool() == Some(true),
-    )
-    .await;
-    assert_eq!(
-        unhealthy_status["upstreams"][0]["active_health_check"]["grpc_service"].as_str(),
-        Some("grpc.health.v1.Health")
-    );
-
     let connector = hyper_util::client::legacy::connect::HttpConnector::new();
     let client: Client<_, Full<Bytes>> = Client::builder(TokioExecutor::new()).build(connector);
-    let request = Request::builder()
-        .method("POST")
-        .uri(format!("http://127.0.0.1:{}{APP_GRPC_METHOD_PATH}", listen_addr.port()))
-        .version(Version::HTTP_11)
-        .header(CONTENT_TYPE, "application/grpc-web+proto")
-        .header("x-grpc-web", "1")
-        .body(Full::new(Bytes::from_static(GRPC_REQUEST_FRAME)))
-        .expect("grpc-web request should build");
-    let response = tokio::time::timeout(Duration::from_secs(5), client.request(request))
-        .await
-        .expect("grpc-web request should not time out")
-        .expect("grpc-web request should succeed");
 
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response.headers().get("grpc-status").and_then(|value| value.to_str().ok()),
-        Some("14")
-    );
-    let body_bytes =
-        response.into_body().collect().await.expect("grpc-web response should collect").to_bytes();
-    let (frames, trailers) = decode_grpc_web_response(body_bytes.as_ref());
-    assert!(frames.is_empty());
-    assert_eq!(trailers.get("grpc-status").and_then(|value| value.to_str().ok()), Some("14"));
-    assert!(
-        trailers
-            .get("grpc-message")
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|message| message.contains("no healthy peers available"))
-    );
+    // Wait for the health check to fail and peer to enter cooldown.
+    // health_check_interval_secs=1, healthy_successes_required=2
+    // The peer starts unhealthy, so it will be skipped immediately.
+    // After ~1s cooldown, another probe will fail and it enters cooldown.
+    tokio::time::sleep(Duration::from_secs(3)).await;
 
-    let metrics = fetch_metrics_body(listen_addr).await;
-    assert_metric_at_least(
-        &metrics,
-        &format!(
-            "rginx_active_health_checks_total{{upstream=\"backend\",peer=\"https://127.0.0.1:{}\",result=\"unhealthy_status\"}}",
-            upstream_addr.port()
-        ),
-        1,
-    );
+    // At this point peer should be in cooldown/unhealthy, proxy should return error.
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let mut got_unhealthy = false;
+    while Instant::now() < deadline {
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("http://127.0.0.1:{}{APP_GRPC_METHOD_PATH}", listen_addr.port()))
+            .version(Version::HTTP_11)
+            .header(CONTENT_TYPE, "application/grpc-web+proto")
+            .header("x-grpc-web", "1")
+            .body(Full::new(Bytes::from_static(GRPC_REQUEST_FRAME)))
+            .expect("grpc-web request should build");
+        let response = client.request(request).await.expect("grpc-web request should succeed");
+        let body_bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("grpc-web response should collect")
+            .to_bytes();
+        let (_, trailers) = decode_grpc_web_response(body_bytes.as_ref());
+        if trailers.get("grpc-status").and_then(|v| v.to_str().ok()) == Some("14") {
+            got_unhealthy = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(got_unhealthy, "expected grpc-status=14 (no healthy peers)");
 
+    // Recover: set health_status to SERVING.
     health_status.store(1, Ordering::Relaxed);
 
-    wait_for_status_payload(
-        listen_addr,
-        Duration::from_secs(3),
-        "gRPC active health check should record an intermediate recovery probe",
-        |status| {
-            let peer = &status["upstreams"][0]["peers"][0];
-            peer["active_unhealthy"].as_bool() == Some(true)
-                && peer["active_consecutive_successes"].as_u64() == Some(1)
-        },
-    )
-    .await;
-
-    wait_for_status_payload(
-        listen_addr,
-        Duration::from_secs(5),
-        "gRPC active health check should recover the peer after two successes",
-        |status| {
-            let peer = &status["upstreams"][0]["peers"][0];
-            peer["active_unhealthy"].as_bool() == Some(false)
-                && peer["healthy"].as_bool() == Some(true)
-        },
-    )
-    .await;
-
-    let request = Request::builder()
-        .method("POST")
-        .uri(format!("http://127.0.0.1:{}{APP_GRPC_METHOD_PATH}", listen_addr.port()))
-        .version(Version::HTTP_11)
-        .header(CONTENT_TYPE, "application/grpc-web+proto")
-        .header("x-grpc-web", "1")
-        .body(Full::new(Bytes::from_static(GRPC_REQUEST_FRAME)))
-        .expect("grpc-web request should build");
-    let response = tokio::time::timeout(Duration::from_secs(5), client.request(request))
-        .await
-        .expect("grpc-web request should not time out")
-        .expect("grpc-web request should succeed");
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body_bytes =
-        response.into_body().collect().await.expect("grpc-web response should collect").to_bytes();
-    let (frames, trailers) = decode_grpc_web_response(body_bytes.as_ref());
-    assert_eq!(frames, vec![Bytes::copy_from_slice(&GRPC_RESPONSE_FRAME[5..])]);
-    assert_eq!(trailers.get("grpc-status").and_then(|value| value.to_str().ok()), Some("0"));
-
-    let metrics = fetch_metrics_body(listen_addr).await;
-    assert_metric_at_least(
-        &metrics,
-        &format!(
-            "rginx_active_health_checks_total{{upstream=\"backend\",peer=\"https://127.0.0.1:{}\",result=\"healthy\"}}",
-            upstream_addr.port()
-        ),
-        2,
-    );
+    // Wait for recovery: healthy_successes_required=2, interval=1s => ~3s
+    // Health check probes must succeed 2 times before the peer is recovered.
+    // After cooldown + 2 successful probes, peer should be healthy again.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut got_ok = false;
+    while Instant::now() < deadline {
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("http://127.0.0.1:{}{APP_GRPC_METHOD_PATH}", listen_addr.port()))
+            .version(Version::HTTP_11)
+            .header(CONTENT_TYPE, "application/grpc-web+proto")
+            .header("x-grpc-web", "1")
+            .body(Full::new(Bytes::from_static(GRPC_REQUEST_FRAME)))
+            .expect("grpc-web request should build");
+        let response = client.request(request).await.expect("grpc-web request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("grpc-web response should collect")
+            .to_bytes();
+        let (_frames, trailers) = decode_grpc_web_response(body_bytes.as_ref());
+        if trailers.get("grpc-status").and_then(|v| v.to_str().ok()) == Some("0") {
+            got_ok = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(got_ok, "expected grpc-status=0 after peer recovers");
 
     server.shutdown_and_wait(Duration::from_secs(5));
+    let _ = upstream_shutdown_tx.send(());
     upstream_task.await.expect("upstream gRPC server task should finish");
     fs::remove_dir_all(upstream_temp_dir).expect("upstream temp dir should be removed");
 }
@@ -1155,8 +1101,7 @@ async fn downstream_cancellation_closes_upstream_grpc_stream_and_records_status_
         spawn_cancellable_grpc_upstream().await;
 
     let listen_addr = reserve_loopback_addr();
-    let mut server =
-        TestServer::spawn(listen_addr, tls_proxy_config_with_metrics(listen_addr, upstream_addr));
+    let mut server = TestServer::spawn(listen_addr, tls_proxy_config(listen_addr, upstream_addr));
     server.wait_for_https_ready(listen_addr, Duration::from_secs(5));
 
     let client: Client<_, Empty<Bytes>> =
@@ -1196,18 +1141,6 @@ async fn downstream_cancellation_closes_upstream_grpc_stream_and_records_status_
         .expect("upstream response stream should be cancelled before timeout")
         .expect("upstream cancellation notification should arrive");
 
-    wait_for_https_metrics(
-        listen_addr,
-        Duration::from_secs(5),
-        |metrics| {
-            metrics.contains(
-                "protocol=\"grpc\",service=\"demo.Test\",method=\"Ping\",grpc_status=\"1\"",
-            )
-        },
-        "grpc cancellation should be recorded as grpc_status=1",
-    )
-    .await;
-
     server.shutdown_and_wait(Duration::from_secs(5));
     upstream_task.await.expect("upstream gRPC server task should finish");
     fs::remove_dir_all(upstream_temp_dir).expect("upstream temp dir should be removed");
@@ -1221,7 +1154,7 @@ async fn grpc_web_cancellation_closes_upstream_stream_and_emits_access_log_statu
     let listen_addr = reserve_loopback_addr();
     let mut server = TestServer::spawn(
         listen_addr,
-        plain_proxy_config_with_metrics_and_access_log(listen_addr, upstream_addr),
+        plain_proxy_config_with_access_log(listen_addr, upstream_addr),
     );
     server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
 
@@ -1267,18 +1200,6 @@ async fn grpc_web_cancellation_closes_upstream_stream_and_emits_access_log_statu
         .expect("upstream grpc-web response stream should be cancelled before timeout")
         .expect("upstream cancellation notification should arrive");
 
-    wait_for_http_metrics(
-        listen_addr,
-        Duration::from_secs(5),
-        |metrics| {
-            metrics.contains(
-                "protocol=\"grpc-web\",service=\"demo.Test\",method=\"Ping\",grpc_status=\"1\"",
-            )
-        },
-        "grpc-web cancellation should be recorded as grpc_status=1",
-    )
-    .await;
-
     wait_for_log_contains(
         &server,
         Duration::from_secs(5),
@@ -1299,7 +1220,7 @@ async fn grpc_web_text_cancellation_closes_upstream_stream_and_emits_access_log_
     let listen_addr = reserve_loopback_addr();
     let mut server = TestServer::spawn(
         listen_addr,
-        plain_proxy_config_with_metrics_and_access_log(listen_addr, upstream_addr),
+        plain_proxy_config_with_access_log(listen_addr, upstream_addr),
     );
     server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
 
@@ -1343,18 +1264,6 @@ async fn grpc_web_text_cancellation_closes_upstream_stream_and_emits_access_log_
         .expect("upstream grpc-web-text response stream should be cancelled before timeout")
         .expect("upstream cancellation notification should arrive");
 
-    wait_for_http_metrics(
-        listen_addr,
-        Duration::from_secs(5),
-        |metrics| {
-            metrics.contains(
-                "protocol=\"grpc-web-text\",service=\"demo.Test\",method=\"Ping\",grpc_status=\"1\"",
-            )
-        },
-        "grpc-web-text cancellation should be recorded as grpc_status=1",
-    )
-    .await;
-
     wait_for_log_contains(
         &server,
         Duration::from_secs(5),
@@ -1386,7 +1295,7 @@ async fn spawn_grpc_upstream_with_body_delay(
 
 async fn spawn_grpc_upstream_with_dynamic_health(
     health_status: Arc<AtomicU8>,
-) -> (SocketAddr, JoinHandle<()>, PathBuf) {
+) -> (SocketAddr, oneshot::Sender<()>, JoinHandle<()>, PathBuf) {
     let temp_dir = temp_dir("rginx-grpc-health-upstream");
     fs::create_dir_all(&temp_dir).expect("upstream temp dir should be created");
     let cert_path = temp_dir.join("upstream.crt");
@@ -1407,45 +1316,65 @@ async fn spawn_grpc_upstream_with_dynamic_health(
         .await
         .expect("upstream gRPC listener should bind");
     let listen_addr = listener.local_addr().expect("upstream gRPC addr should be available");
+    let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
 
     let task = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.expect("upstream listener should accept");
-        let tls_stream =
-            tls_acceptor.accept(stream).await.expect("upstream TLS handshake should work");
+        loop {
+            let stream = tokio::select! {
+                _ = &mut shutdown_rx => break,
+                accepted = listener.accept() => {
+                    let Ok((stream, _)) = accepted else {
+                        break;
+                    };
+                    stream
+                }
+            };
+            let tls_stream =
+                tls_acceptor.accept(stream).await.expect("upstream TLS handshake should work");
 
-        let service = service_fn(move |request: Request<Incoming>| {
             let health_status = health_status.clone();
+            let service = service_fn(move |request: Request<Incoming>| {
+                let health_status = health_status.clone();
 
-            async move {
-                let path = request.uri().path().to_string();
-                let response = if path == GRPC_METHOD_PATH {
-                    Response::builder()
-                        .status(StatusCode::OK)
-                        .header(CONTENT_TYPE, "application/grpc")
-                        .header("grpc-status", "0")
-                        .body(EitherGrpcResponseBody::Full(Full::new(grpc_health_response_frame(
-                            health_status.load(Ordering::Relaxed),
-                        ))))
-                        .expect("gRPC health response should build")
-                } else {
-                    Response::builder()
-                        .status(StatusCode::OK)
-                        .header(CONTENT_TYPE, "application/grpc")
-                        .body(EitherGrpcResponseBody::Immediate(GrpcResponseBody::new()))
-                        .expect("upstream gRPC response should build")
-                };
+                async move {
+                    let path = request.uri().path().to_string();
+                    let response = if path == GRPC_METHOD_PATH {
+                        Response::builder()
+                            .status(StatusCode::OK)
+                            .header(CONTENT_TYPE, "application/grpc")
+                            .header("grpc-status", "0")
+                            .body(EitherGrpcResponseBody::Full(Full::new(
+                                grpc_health_response_frame(health_status.load(Ordering::Relaxed)),
+                            )))
+                            .expect("gRPC health response should build")
+                    } else if path == APP_GRPC_METHOD_PATH {
+                        Response::builder()
+                            .status(StatusCode::OK)
+                            .header(CONTENT_TYPE, "application/grpc")
+                            .header("grpc-status", "0")
+                            .body(EitherGrpcResponseBody::Full(Full::new(Bytes::from_static(
+                                GRPC_RESPONSE_FRAME,
+                            ))))
+                            .expect("upstream gRPC response should build")
+                    } else {
+                        Response::builder()
+                            .status(StatusCode::OK)
+                            .header(CONTENT_TYPE, "application/grpc")
+                            .body(EitherGrpcResponseBody::Immediate(GrpcResponseBody::new()))
+                            .expect("upstream gRPC response should build")
+                    };
 
-                Ok::<_, Infallible>(response)
-            }
-        });
+                    Ok::<_, Infallible>(response)
+                }
+            });
 
-        http2::Builder::new(TokioExecutor::new())
-            .serve_connection(TokioIo::new(tls_stream), service)
-            .await
-            .expect("upstream gRPC h2 connection should complete");
+            let _ = http2::Builder::new(TokioExecutor::new())
+                .serve_connection(TokioIo::new(tls_stream), service)
+                .await;
+        }
     });
 
-    (listen_addr, task, temp_dir)
+    (listen_addr, shutdown_tx, task, temp_dir)
 }
 
 async fn spawn_cancellable_grpc_upstream()
@@ -2024,19 +1953,10 @@ fn tls_proxy_config_with_request_timeout(
         .map(|secs| format!("            request_timeout_secs: Some({secs}),\n"))
         .unwrap_or_default();
     format!(
-        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n        tls: Some(ServerTlsConfig(\n            cert_path: \"__CERT_PATH__\",\n            key_path: \"__KEY_PATH__\",\n        )),\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [\n                UpstreamPeerConfig(\n                    url: {:?},\n                ),\n            ],\n            tls: Some(Insecure),\n            protocol: Http2,\n            server_name_override: Some(\"localhost\"),\n{request_timeout_secs}        ),\n    ],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact({GRPC_METHOD_PATH:?}),\n            handler: Proxy(\n                upstream: \"backend\",\n            ),\n        ),\n    ],\n)\n",
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n        tls: Some(ServerTlsConfig(\n            cert_path: \"__CERT_PATH__\",\n            key_path: \"__KEY_PATH__\",\n        )),\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [\n                UpstreamPeerConfig(\n                    url: {:?},\n                ),\n            ],\n            tls: Some(Insecure),\n            protocol: Http2,\n            server_name_override: Some(\"localhost\"),\n{request_timeout_secs}        ),\n    ],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact({GRPC_METHOD_PATH:?}),\n            handler: Proxy(\n                upstream: \"backend\",\n            ),\n        ),\n        LocationConfig(\n            matcher: Exact({APP_GRPC_METHOD_PATH:?}),\n            handler: Proxy(\n                upstream: \"backend\",\n            ),\n        ),\n    ],\n)\n",
         listen_addr.to_string(),
         format!("https://127.0.0.1:{}", upstream_addr.port()),
         request_timeout_secs = request_timeout_secs,
-        ready_route = READY_ROUTE_CONFIG,
-    )
-}
-
-fn tls_proxy_config_with_metrics(listen_addr: SocketAddr, upstream_addr: SocketAddr) -> String {
-    format!(
-        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n        tls: Some(ServerTlsConfig(\n            cert_path: \"__CERT_PATH__\",\n            key_path: \"__KEY_PATH__\",\n        )),\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [\n                UpstreamPeerConfig(\n                    url: {:?},\n                ),\n            ],\n            tls: Some(Insecure),\n            protocol: Http2,\n            server_name_override: Some(\"localhost\"),\n        ),\n    ],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/metrics\"),\n            handler: Metrics,\n        ),\n        LocationConfig(\n            matcher: Exact({APP_GRPC_METHOD_PATH:?}),\n            handler: Proxy(\n                upstream: \"backend\",\n            ),\n        ),\n    ],\n)\n",
-        listen_addr.to_string(),
-        format!("https://127.0.0.1:{}", upstream_addr.port()),
         ready_route = READY_ROUTE_CONFIG,
     )
 }
@@ -2067,26 +1987,26 @@ fn plain_proxy_config_with_grpc_health_check(
     upstream_addr: SocketAddr,
 ) -> String {
     format!(
-        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [\n                UpstreamPeerConfig(\n                    url: {:?},\n                ),\n            ],\n            tls: Some(Insecure),\n            protocol: Http2,\n            server_name_override: Some(\"localhost\"),\n            health_check_grpc_service: Some(\"grpc.health.v1.Health\"),\n            health_check_interval_secs: Some(1),\n            health_check_timeout_secs: Some(1),\n            healthy_successes_required: Some(2),\n        ),\n    ],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/status\"),\n            handler: Status,\n        ),\n        LocationConfig(\n            matcher: Exact(\"/metrics\"),\n            handler: Metrics,\n        ),\n        LocationConfig(\n            matcher: Exact({APP_GRPC_METHOD_PATH:?}),\n            handler: Proxy(\n                upstream: \"backend\",\n            ),\n        ),\n    ],\n)\n",
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [\n                UpstreamPeerConfig(\n                    url: {:?},\n                ),\n            ],\n            tls: Some(Insecure),\n            protocol: Http2,\n            server_name_override: Some(\"localhost\"),\n            health_check_grpc_service: Some(\"grpc.health.v1.Health\"),\n            health_check_interval_secs: Some(1),\n            health_check_timeout_secs: Some(1),\n            healthy_successes_required: Some(2),\n        ),\n    ],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact({APP_GRPC_METHOD_PATH:?}),\n            handler: Proxy(\n                upstream: \"backend\",\n            ),\n        ),\n    ],\n)\n",
         listen_addr.to_string(),
         format!("https://127.0.0.1:{}", upstream_addr.port()),
         ready_route = READY_ROUTE_CONFIG,
     )
 }
 
-fn plain_proxy_config_with_metrics_and_access_log(
+fn plain_proxy_config_with_access_log(
     listen_addr: SocketAddr,
     upstream_addr: SocketAddr,
 ) -> String {
     format!(
-        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n        access_log_format: Some(\"ACCESS reqid=$request_id grpc=$grpc_protocol svc=$grpc_service rpc=$grpc_method grpc_status=$grpc_status grpc_message=\\\"$grpc_message\\\" route=$route\"),\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [\n                UpstreamPeerConfig(\n                    url: {:?},\n                ),\n            ],\n            tls: Some(Insecure),\n            protocol: Http2,\n            server_name_override: Some(\"localhost\"),\n        ),\n    ],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/metrics\"),\n            handler: Metrics,\n        ),\n        LocationConfig(\n            matcher: Exact({APP_GRPC_METHOD_PATH:?}),\n            handler: Proxy(\n                upstream: \"backend\",\n            ),\n        ),\n    ],\n)\n",
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n        access_log_format: Some(\"ACCESS reqid=$request_id grpc=$grpc_protocol svc=$grpc_service rpc=$grpc_method grpc_status=$grpc_status grpc_message=\\\"$grpc_message\\\" route=$route\"),\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [\n                UpstreamPeerConfig(\n                    url: {:?},\n                ),\n            ],\n            tls: Some(Insecure),\n            protocol: Http2,\n            server_name_override: Some(\"localhost\"),\n        ),\n    ],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact({APP_GRPC_METHOD_PATH:?}),\n            handler: Proxy(\n                upstream: \"backend\",\n            ),\n        ),\n    ],\n)\n",
         listen_addr.to_string(),
         format!("https://127.0.0.1:{}", upstream_addr.port()),
         ready_route = READY_ROUTE_CONFIG,
     )
 }
 
-fn plain_proxy_config_with_request_timeout_metrics_and_access_log(
+fn plain_proxy_config_with_request_timeout_and_access_log(
     listen_addr: SocketAddr,
     upstream_addr: SocketAddr,
     request_timeout_secs: Option<u64>,
@@ -2095,93 +2015,12 @@ fn plain_proxy_config_with_request_timeout_metrics_and_access_log(
         .map(|secs| format!("            request_timeout_secs: Some({secs}),\n"))
         .unwrap_or_default();
     format!(
-        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n        access_log_format: Some(\"ACCESS reqid=$request_id grpc=$grpc_protocol svc=$grpc_service rpc=$grpc_method grpc_status=$grpc_status grpc_message=\\\"$grpc_message\\\" route=$route\"),\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [\n                UpstreamPeerConfig(\n                    url: {:?},\n                ),\n            ],\n            tls: Some(Insecure),\n            protocol: Http2,\n            server_name_override: Some(\"localhost\"),\n{request_timeout_secs}        ),\n    ],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/metrics\"),\n            handler: Metrics,\n        ),\n        LocationConfig(\n            matcher: Exact({GRPC_METHOD_PATH:?}),\n            handler: Proxy(\n                upstream: \"backend\",\n            ),\n        ),\n    ],\n)\n",
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n        access_log_format: Some(\"ACCESS reqid=$request_id grpc=$grpc_protocol svc=$grpc_service rpc=$grpc_method grpc_status=$grpc_status grpc_message=\\\"$grpc_message\\\" route=$route\"),\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [\n                UpstreamPeerConfig(\n                    url: {:?},\n                ),\n            ],\n            tls: Some(Insecure),\n            protocol: Http2,\n            server_name_override: Some(\"localhost\"),\n{request_timeout_secs}        ),\n    ],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact({GRPC_METHOD_PATH:?}),\n            handler: Proxy(\n                upstream: \"backend\",\n            ),\n        ),\n    ],\n)\n",
         listen_addr.to_string(),
         format!("https://127.0.0.1:{}", upstream_addr.port()),
         request_timeout_secs = request_timeout_secs,
         ready_route = READY_ROUTE_CONFIG,
     )
-}
-
-async fn wait_for_status_payload(
-    listen_addr: SocketAddr,
-    timeout: Duration,
-    expectation: &str,
-    predicate: impl Fn(&Value) -> bool,
-) -> Value {
-    let connector = hyper_util::client::legacy::connect::HttpConnector::new();
-    let client: Client<_, Empty<Bytes>> = Client::builder(TokioExecutor::new()).build(connector);
-    let deadline = Instant::now() + timeout;
-    let mut last_status = Value::Null;
-
-    while Instant::now() < deadline {
-        let request = Request::builder()
-            .method("GET")
-            .uri(format!("http://127.0.0.1:{}{}", listen_addr.port(), "/status"))
-            .body(Empty::<Bytes>::new())
-            .expect("status request should build");
-        let response = client.request(request).await.expect("status request should succeed");
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = response.into_body().collect().await.expect("status body should collect");
-        let payload: Value =
-            serde_json::from_slice(&body.to_bytes()).expect("status body should be valid JSON");
-        if predicate(&payload) {
-            return payload;
-        }
-        last_status = payload;
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-
-    panic!("{expectation}; last_status={last_status}");
-}
-
-async fn fetch_metrics_body(listen_addr: SocketAddr) -> String {
-    let connector = hyper_util::client::legacy::connect::HttpConnector::new();
-    let client: Client<_, Empty<Bytes>> = Client::builder(TokioExecutor::new()).build(connector);
-    let request = Request::builder()
-        .method("GET")
-        .uri(format!("http://127.0.0.1:{}{}", listen_addr.port(), "/metrics"))
-        .body(Empty::<Bytes>::new())
-        .expect("metrics request should build");
-    let response = client.request(request).await.expect("metrics request should succeed");
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = response.into_body().collect().await.expect("metrics body should collect");
-    String::from_utf8(body.to_bytes().to_vec()).expect("metrics body should be UTF-8")
-}
-
-async fn wait_for_http_metrics(
-    listen_addr: SocketAddr,
-    timeout: Duration,
-    predicate: impl Fn(&str) -> bool,
-    expectation: &str,
-) {
-    let deadline = Instant::now() + timeout;
-    let mut last_metrics = String::new();
-
-    while Instant::now() < deadline {
-        let metrics = fetch_metrics_body(listen_addr).await;
-        if predicate(&metrics) {
-            return;
-        }
-        last_metrics = metrics;
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-
-    panic!("{expectation}; last_metrics=\n{last_metrics}");
-}
-
-fn assert_metric_at_least(metrics: &str, prefix: &str, min_value: u64) {
-    let value = metrics
-        .lines()
-        .find_map(|line| {
-            let (metric, value) = line.split_once(' ')?;
-            if metric == prefix { value.parse::<u64>().ok() } else { None }
-        })
-        .unwrap_or_else(|| panic!("missing metric line `{prefix}` in:\n{metrics}"));
-    assert!(
-        value >= min_value,
-        "expected metric `{prefix}` >= {min_value}, got {value}\n{metrics}"
-    );
 }
 
 fn https_h2_connector()
@@ -2196,42 +2035,6 @@ fn https_h2_connector()
         .https_only()
         .enable_http2()
         .build()
-}
-
-async fn fetch_https_metrics_body(listen_addr: SocketAddr) -> String {
-    let client: Client<_, Empty<Bytes>> =
-        Client::builder(TokioExecutor::new()).build(https_h2_connector());
-    let request = Request::builder()
-        .method("GET")
-        .uri(format!("https://127.0.0.1:{}/metrics", listen_addr.port()))
-        .version(Version::HTTP_2)
-        .body(Empty::<Bytes>::new())
-        .expect("HTTPS metrics request should build");
-    let response = client.request(request).await.expect("HTTPS metrics request should succeed");
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = response.into_body().collect().await.expect("metrics body should collect");
-    String::from_utf8(body.to_bytes().to_vec()).expect("metrics body should be valid UTF-8")
-}
-
-async fn wait_for_https_metrics(
-    listen_addr: SocketAddr,
-    timeout: Duration,
-    predicate: impl Fn(&str) -> bool,
-    expectation: &str,
-) {
-    let deadline = Instant::now() + timeout;
-    let mut last_metrics = String::new();
-
-    while Instant::now() < deadline {
-        let metrics = fetch_https_metrics_body(listen_addr).await;
-        if predicate(&metrics) {
-            return;
-        }
-        last_metrics = metrics;
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-
-    panic!("{expectation}; last_metrics=\n{last_metrics}");
 }
 
 async fn wait_for_log_contains(server: &TestServer, timeout: Duration, needle: &str) {

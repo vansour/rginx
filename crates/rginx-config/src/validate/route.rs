@@ -9,7 +9,6 @@ pub(super) fn validate_locations(
     scope_label: Option<&str>,
     locations: &[LocationConfig],
     upstream_names: &HashSet<String>,
-    config_api_token: Option<&str>,
 ) -> Result<()> {
     let mut exact_routes = HashSet::new();
 
@@ -55,13 +54,6 @@ pub(super) fn validate_locations(
             &route_scope,
             location.grpc_service.as_deref(),
             location.grpc_method.as_deref(),
-        )?;
-        validate_management_handler_constraints(
-            &route_scope,
-            &location.matcher,
-            &location.handler,
-            &location.allow_cidrs,
-            config_api_token,
         )?;
         validate_handler(scope_label, &route_scope, &location.handler, upstream_names)?;
     }
@@ -158,38 +150,6 @@ fn validate_route_rate_limit(
     if requests_per_sec.is_none() && burst.is_some() {
         return Err(Error::Config(format!(
             "route matcher `{route_matcher}` burst requires requests_per_sec to be set"
-        )));
-    }
-
-    Ok(())
-}
-
-fn validate_management_handler_constraints(
-    route_scope: &str,
-    matcher: &MatcherConfig,
-    handler: &HandlerConfig,
-    allow_cidrs: &[String],
-    config_api_token: Option<&str>,
-) -> Result<()> {
-    if !matches!(handler, HandlerConfig::Config) {
-        return Ok(());
-    }
-
-    if !matches!(matcher, MatcherConfig::Exact(_)) {
-        return Err(Error::Config(format!(
-            "{route_scope} config handler requires an Exact(...) matcher"
-        )));
-    }
-
-    if allow_cidrs.is_empty() {
-        return Err(Error::Config(format!(
-            "{route_scope} config handler requires non-empty allow_cidrs"
-        )));
-    }
-
-    if config_api_token.is_none() {
-        return Err(Error::Config(format!(
-            "{route_scope} config handler requires server.config_api_token"
         )));
     }
 

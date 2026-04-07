@@ -128,9 +128,6 @@ impl GrpcRouteMatch {
 pub enum RouteAction {
     Proxy(ProxyTarget),
     Return(ReturnAction),
-    Status,
-    Metrics,
-    Config,
 }
 
 #[derive(Debug, Clone)]

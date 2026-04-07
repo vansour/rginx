@@ -104,9 +104,6 @@ fn compile_route_action(
             location,
             body,
         })),
-        HandlerConfig::Status => Ok(RouteAction::Status),
-        HandlerConfig::Metrics => Ok(RouteAction::Metrics),
-        HandlerConfig::Config => Ok(RouteAction::Config),
     }
 }
 

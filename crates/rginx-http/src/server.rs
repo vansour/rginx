@@ -29,7 +29,6 @@ pub async fn serve(
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     let mut connections = JoinSet::new();
-    let metrics = state.metrics();
 
     {
         let listener = listener;
@@ -40,7 +39,7 @@ pub async fn serve(
                     match changed {
                         Ok(()) if *shutdown.borrow() => {
                             tracing::info!(
-                                active_connections = connections.len(),
+                                active_connections = state.active_connection_count(),
                                 "http accept loop stopping"
                             );
                             break;
@@ -48,7 +47,7 @@ pub async fn serve(
                         Ok(()) => continue,
                         Err(_) => {
                             tracing::info!(
-                                active_connections = connections.len(),
+                                active_connections = state.active_connection_count(),
                                 "http accept loop stopping because shutdown channel closed"
                             );
                             break;
@@ -61,25 +60,22 @@ pub async fn serve(
                     }
 
                     let (stream, remote_addr) = accepted?;
+                    let state = state.clone();
+                    let shutdown = shutdown.clone();
+                    let tls_acceptor = state.tls_acceptor().await;
                     let current_config = state.current_config().await;
-                    let max_connections = current_config.server.max_connections;
-                    if max_connections.is_some_and(|limit| metrics.active_connections() >= limit as u64)
-                    {
+                    let Some(connection_guard) =
+                        state.try_acquire_connection(current_config.server.max_connections)
+                    else {
                         tracing::warn!(
                             remote_addr = %remote_addr,
-                            max_connections = max_connections.unwrap_or_default(),
-                            active_connections = metrics.active_connections(),
-                            "rejecting connection because the server connection limit is reached"
+                            max_connections = current_config.server.max_connections,
+                            active_connections = state.active_connection_count(),
+                            "rejecting downstream connection because server max_connections was reached"
                         );
                         drop(stream);
                         continue;
-                    }
-
-                    let state = state.clone();
-                    let metrics = metrics.clone();
-                    let shutdown = shutdown.clone();
-                    metrics.increment_active_connections();
-                    let tls_acceptor = state.tls_acceptor().await;
+                    };
                     let http1 = Http1ConnectionOptions {
                         keep_alive: current_config.server.keep_alive,
                         max_headers: current_config.server.max_headers,
@@ -91,11 +87,11 @@ pub async fn serve(
                         serve_connection(
                             stream,
                             state,
-                            metrics,
                             remote_addr,
                             shutdown,
                             tls_acceptor,
                             http1,
+                            connection_guard,
                         )
                         .await;
                     });
@@ -111,7 +107,7 @@ pub async fn serve(
 
     if !connections.is_empty() {
         tracing::info!(
-            active_connections = connections.len(),
+            active_connections = state.active_connection_count(),
             "waiting for active connections to drain"
         );
     }
@@ -128,11 +124,11 @@ pub async fn serve(
 async fn serve_connection(
     stream: tokio::net::TcpStream,
     state: crate::state::SharedState,
-    metrics: crate::metrics::Metrics,
     remote_addr: SocketAddr,
     shutdown: watch::Receiver<bool>,
     tls_acceptor: Option<TlsAcceptor>,
     http1: Http1ConnectionOptions,
+    _connection_guard: crate::state::ActiveConnectionGuard,
 ) {
     if let Some(tls_acceptor) = tls_acceptor {
         match tls_acceptor.accept(stream).await {
@@ -143,14 +139,8 @@ async fn serve_connection(
                         http1.response_write_timeout,
                         format!("downstream response to {remote_addr}"),
                     );
-                    serve_h2_connection_io(
-                        TokioIo::new(stream),
-                        state,
-                        metrics.clone(),
-                        remote_addr,
-                        shutdown,
-                    )
-                    .await;
+                    serve_h2_connection_io(TokioIo::new(stream), state, remote_addr, shutdown)
+                        .await;
                 } else {
                     let stream = WriteTimeoutIo::new(
                         stream,
@@ -160,7 +150,6 @@ async fn serve_connection(
                     serve_h1_connection_io(
                         TokioIo::new(stream),
                         state,
-                        metrics.clone(),
                         remote_addr,
                         shutdown,
                         http1,
@@ -170,7 +159,6 @@ async fn serve_connection(
             }
             Err(error) => {
                 tracing::warn!(remote_addr = %remote_addr, %error, "TLS handshake failed");
-                metrics.decrement_active_connections();
             }
         }
         return;
@@ -181,8 +169,7 @@ async fn serve_connection(
         http1.response_write_timeout,
         format!("downstream response to {remote_addr}"),
     );
-    serve_h1_connection_io(TokioIo::new(stream), state, metrics, remote_addr, shutdown, http1)
-        .await;
+    serve_h1_connection_io(TokioIo::new(stream), state, remote_addr, shutdown, http1).await;
 }
 
 fn negotiated_h2(stream: &tokio_rustls::server::TlsStream<tokio::net::TcpStream>) -> bool {
@@ -192,7 +179,6 @@ fn negotiated_h2(stream: &tokio_rustls::server::TlsStream<tokio::net::TcpStream>
 async fn serve_h1_connection_io<T>(
     io: TokioIo<T>,
     state: crate::state::SharedState,
-    metrics: crate::metrics::Metrics,
     remote_addr: SocketAddr,
     mut shutdown: watch::Receiver<bool>,
     options: Http1ConnectionOptions,
@@ -245,14 +231,11 @@ async fn serve_h1_connection_io<T>(
             }
         }
     }
-
-    metrics.decrement_active_connections();
 }
 
 async fn serve_h2_connection_io<T>(
     io: TokioIo<T>,
     state: crate::state::SharedState,
-    metrics: crate::metrics::Metrics,
     remote_addr: SocketAddr,
     mut shutdown: watch::Receiver<bool>,
 ) where
@@ -302,8 +285,6 @@ async fn serve_h2_connection_io<T>(
             }
         }
     }
-
-    metrics.decrement_active_connections();
 }
 
 fn log_connection_task_result(result: std::result::Result<(), JoinError>) {

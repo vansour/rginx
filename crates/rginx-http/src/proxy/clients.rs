@@ -1,6 +1,5 @@
 use super::health::{
-    ActivePeerGuard, ActiveProbeStatus, PeerFailureStatus, PeerHealthRegistry, PeerStatusSnapshot,
-    SelectedPeers,
+    ActivePeerGuard, ActiveProbeStatus, PeerFailureStatus, PeerHealthRegistry, SelectedPeers,
 };
 use super::*;
 
@@ -113,17 +112,6 @@ impl ProxyClients {
     ) -> ActivePeerGuard {
         self.health.track_active_request(upstream_name, peer_url)
     }
-
-    pub(crate) fn peer_statuses(&self, upstream: &Upstream) -> Vec<PeerStatusSnapshot> {
-        upstream
-            .peers
-            .iter()
-            .map(|peer| {
-                self.health.snapshot(&upstream.name, &peer.url, &peer.url, peer.weight, peer.backup)
-            })
-            .collect()
-    }
-
     #[cfg(test)]
     pub(super) fn cached_client_count(&self) -> usize {
         self.clients.len()

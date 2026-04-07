@@ -46,8 +46,6 @@ pub struct ServerConfig {
     #[serde(default)]
     pub access_log_format: Option<String>,
     #[serde(default)]
-    pub config_api_token: Option<String>,
-    #[serde(default)]
     pub tls: Option<ServerTlsConfig>,
 }
 
@@ -187,9 +185,6 @@ pub enum HandlerConfig {
         #[serde(default)]
         body: Option<String>,
     },
-    Status,
-    Metrics,
-    Config,
 }
 
 #[derive(Debug, Clone, Deserialize)]

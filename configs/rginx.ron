@@ -39,16 +39,6 @@ Config(
             ),
         ),
         LocationConfig(
-            matcher: Exact("/status"),
-            handler: Status,
-            allow_cidrs: ["127.0.0.1/32", "::1/128"],
-        ),
-        LocationConfig(
-            matcher: Exact("/metrics"),
-            handler: Metrics,
-            allow_cidrs: ["127.0.0.1/32", "::1/128"],
-        ),
-        LocationConfig(
             matcher: Prefix("/api"),
             handler: Proxy(
                 upstream: "backend",
