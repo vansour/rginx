@@ -145,7 +145,12 @@ impl PidFileGuard {
 
 impl Drop for PidFileGuard {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        let Ok(current) = fs::read_to_string(&self.path) else {
+            return;
+        };
+        if current.trim() == std::process::id().to_string() {
+            let _ = fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -159,6 +164,7 @@ fn send_signal_from_pid_file(pid_path: &Path, signal: SignalCommand) -> anyhow::
 
     let signal_number = match signal {
         SignalCommand::Reload => libc::SIGHUP,
+        SignalCommand::Restart => libc::SIGUSR2,
         SignalCommand::Stop => libc::SIGTERM,
         SignalCommand::Quit => libc::SIGQUIT,
     };
@@ -181,6 +187,7 @@ fn send_signal_from_pid_file(pid_path: &Path, signal: SignalCommand) -> anyhow::
 fn signal_name(signal: SignalCommand) -> &'static str {
     match signal {
         SignalCommand::Reload => "reload",
+        SignalCommand::Restart => "restart",
         SignalCommand::Stop => "stop",
         SignalCommand::Quit => "quit",
     }

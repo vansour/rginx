@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use rginx_core::{ConfigSnapshot, Error, Listener, Result};
@@ -7,6 +8,7 @@ use tokio::sync::watch;
 use crate::admin;
 use crate::health;
 use crate::reload;
+use crate::restart::{self, ListenerHandle};
 use crate::shutdown;
 use crate::shutdown::RuntimeSignal;
 use crate::state::RuntimeState;
@@ -14,9 +16,13 @@ use crate::state::RuntimeState;
 pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
     let state = RuntimeState::new(config_path, config)?;
     let current_config = state.current_config().await;
-    let listeners =
-        bind_server_listeners(&current_config.listeners, current_config.runtime.accept_workers)
-            .await?;
+    let inherited_listeners = restart::take_inherited_listeners_from_env()?;
+    let bound_listeners = bind_server_listeners(
+        &current_config.listeners,
+        current_config.runtime.accept_workers,
+        inherited_listeners,
+    )
+    .await?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     tracing::info!(
@@ -28,7 +34,8 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
         "starting rginx runtime"
     );
 
-    let mut server_tasks = listeners
+    let mut server_tasks = bound_listeners
+        .workers
         .into_iter()
         .map(|bound_listener| {
             tracing::info!(
@@ -51,23 +58,43 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
         shutdown_tx.subscribe(),
     ));
     let mut health_task = tokio::spawn(health::run(state.http.clone(), shutdown_tx.subscribe()));
+    restart::notify_ready_if_requested()?;
 
-    while let RuntimeSignal::Reload = shutdown::wait_for_signal().await? {
-        tracing::info!("reload signal received");
-        match reload::reload(&state).await {
-            Ok(result) => {
-                tracing::info!(
-                    revision = result.revision,
-                    listeners = result.config.total_listener_count(),
-                    vhosts = result.config.total_vhost_count(),
-                    routes = result.config.total_route_count(),
-                    upstreams = result.config.upstreams.len(),
-                    "configuration reloaded"
-                );
+    loop {
+        match shutdown::wait_for_signal().await? {
+            RuntimeSignal::Reload => {
+                tracing::info!("reload signal received");
+                match reload::reload(&state).await {
+                    Ok(result) => {
+                        tracing::info!(
+                            revision = result.revision,
+                            listeners = result.config.total_listener_count(),
+                            vhosts = result.config.total_vhost_count(),
+                            routes = result.config.total_route_count(),
+                            upstreams = result.config.upstreams.len(),
+                            "configuration reloaded"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "configuration reload failed");
+                    }
+                }
             }
-            Err(error) => {
-                tracing::warn!(%error, "configuration reload failed");
+            RuntimeSignal::Restart => {
+                tracing::info!("restart signal received");
+                match restart::restart(&state.config_path, &bound_listeners.handles).await {
+                    Ok(()) => {
+                        tracing::info!(
+                            "replacement process became ready; starting graceful handoff"
+                        );
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "graceful restart failed");
+                    }
+                }
             }
+            RuntimeSignal::Shutdown => break,
         }
     }
 
@@ -127,16 +154,29 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
 async fn bind_server_listeners(
     listeners: &[Listener],
     accept_workers: usize,
-) -> Result<Vec<BoundListener>> {
-    let mut bound_listeners = Vec::new();
+    mut inherited: HashMap<std::net::SocketAddr, std::net::TcpListener>,
+) -> Result<BoundListeners> {
+    let mut worker_listeners = Vec::new();
+    let mut listener_handles = Vec::new();
 
     for listener in listeners {
-        let socket = TcpListener::bind(listener.server.listen_addr).await?;
-        let std_listener = socket.into_std()?;
+        let std_listener = match inherited.remove(&listener.server.listen_addr) {
+            Some(listener_socket) => listener_socket,
+            None => {
+                let socket = std::net::TcpListener::bind(listener.server.listen_addr)?;
+                socket.set_nonblocking(true)?;
+                socket
+            }
+        };
+        let std_listener = std::sync::Arc::new(std_listener);
+        listener_handles.push(ListenerHandle {
+            listener: listener.clone(),
+            std_listener: std_listener.clone(),
+        });
 
         for worker_index in 0..accept_workers {
             let listener_socket = TcpListener::from_std(std_listener.try_clone()?)?;
-            bound_listeners.push(BoundListener {
+            worker_listeners.push(BoundListener {
                 listener: listener_socket,
                 listener_id: listener.id.clone(),
                 listener_name: listener.name.clone(),
@@ -146,7 +186,7 @@ async fn bind_server_listeners(
         }
     }
 
-    Ok(bound_listeners)
+    Ok(BoundListeners { workers: worker_listeners, handles: listener_handles })
 }
 
 struct BoundListener {
@@ -155,6 +195,11 @@ struct BoundListener {
     listener_name: String,
     listen_addr: std::net::SocketAddr,
     worker_index: usize,
+}
+
+struct BoundListeners {
+    workers: Vec<BoundListener>,
+    handles: Vec<ListenerHandle>,
 }
 
 async fn join_server_tasks(server_tasks: &mut [tokio::task::JoinHandle<Result<()>>]) -> Result<()> {

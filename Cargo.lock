@@ -771,6 +771,7 @@ dependencies = [
 name = "rginx-runtime"
 version = "0.1.2-rc.5"
 dependencies = [
+ "libc",
  "rginx-config",
  "rginx-core",
  "rginx-http",

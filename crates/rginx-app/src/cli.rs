@@ -34,6 +34,7 @@ pub enum Command {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum SignalCommand {
     Reload,
+    Restart,
     Stop,
     Quit,
 }
@@ -139,6 +140,13 @@ mod tests {
         assert!(!cli.test_config);
         assert_eq!(cli.signal, Some(SignalCommand::Reload));
         assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn cli_accepts_restart_signal_flag() {
+        let cli = Cli::try_parse_from(["rginx", "-s", "restart"]).expect("cli should parse");
+
+        assert_eq!(cli.signal, Some(SignalCommand::Restart));
     }
 
     #[test]

@@ -235,6 +235,7 @@
 | `X-Request-ID` 透传或生成 | ✅ | 已贯通请求链路、响应和 access log。 |
 | `Ctrl-C` / `SIGTERM` 平滑退出 | ✅ | 支持。 |
 | `SIGHUP` 热重载 | ✅ | 支持。 |
+| `rginx -s restart` 优雅重启 | ✅ | Linux 下已支持显式 fd 继承 + exec restart。 |
 | 安装 / 卸载脚本 | ✅ | 仓库内已提供。 |
 | Release workflow | ✅ | 已有准备脚本和 release 文档。 |
 | `rginx status` 本地命令 | ✅ | 已通过本地 UDS 只读接口实现。 |
@@ -314,6 +315,10 @@
 下面的阶段不是对外版本承诺，而是按当前代码形态最自然、风险最低的收口顺序。
 
 ### Phase 1：产品边界冻结
+
+状态：`✅`
+
+### Week 6：优雅重启路径打通
 
 状态：`✅`
 
@@ -712,6 +717,13 @@
 
 - 修改监听地址或 runtime worker 参数时，不再只能硬停进程。
 - 新旧进程交接期间不出现明显的连接丢失和状态失真。
+- reload 与 restart 的职责边界清晰可解释。
+
+实现说明：
+
+- 当前 Linux 主路径已选择“显式 fd 继承 + exec restart”。
+- `rginx -s restart` 会触发 replacement process 启动、listener fd 继承和 ready 握手。
+- 新进程 ready 后，旧进程进入现有 graceful drain 路径，不再继续接受新连接。
 
 ### Week 7：部署兼容性补强
 

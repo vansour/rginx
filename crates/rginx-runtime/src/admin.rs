@@ -1,5 +1,6 @@
 use std::fs;
 use std::io;
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -54,8 +55,9 @@ pub async fn run(
     mut shutdown: watch::Receiver<bool>,
 ) -> io::Result<()> {
     let socket_path = admin_socket_path_for_config(&config_path);
-    let _guard = AdminSocketGuard::bind_path(&socket_path)?;
+    AdminSocketGuard::prepare_path(&socket_path)?;
     let listener = UnixListener::bind(&socket_path)?;
+    let _guard = AdminSocketGuard::from_bound_path(&socket_path)?;
     set_admin_socket_permissions(&socket_path)?;
     let mut connections = JoinSet::new();
 
@@ -135,10 +137,12 @@ async fn handle_connection(stream: UnixStream, state: SharedState) -> io::Result
 
 struct AdminSocketGuard {
     path: PathBuf,
+    device: u64,
+    inode: u64,
 }
 
 impl AdminSocketGuard {
-    fn bind_path(path: &Path) -> io::Result<Self> {
+    fn prepare_path(path: &Path) -> io::Result<()> {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
@@ -149,13 +153,23 @@ impl AdminSocketGuard {
             fs::remove_file(path)?;
         }
 
-        Ok(Self { path: path.to_path_buf() })
+        Ok(())
+    }
+
+    fn from_bound_path(path: &Path) -> io::Result<Self> {
+        let metadata = fs::metadata(path)?;
+        Ok(Self { path: path.to_path_buf(), device: metadata.dev(), inode: metadata.ino() })
     }
 }
 
 impl Drop for AdminSocketGuard {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        let Ok(metadata) = fs::metadata(&self.path) else {
+            return;
+        };
+        if metadata.dev() == self.device && metadata.ino() == self.inode {
+            let _ = fs::remove_file(&self.path);
+        }
     }
 }
 

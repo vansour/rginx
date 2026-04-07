@@ -990,7 +990,20 @@ rginx -s reload
 ```bash
 rginx -s quit
 rginx -s stop
+rginx -s reload
+rginx -s restart
 ```
+
+其中建议这样理解：
+
+- `reload`
+  - 适用于不改变监听集合和 runtime 启动参数的配置替换
+- `restart`
+  - 适用于监听地址、listener 集合、`runtime.worker_threads`、`runtime.accept_workers` 这类启动期结构变化
+
+当前 Linux 主路径已经支持“旧进程传递 listener fd -> 新进程 ready -> 旧进程 graceful drain”的显式 fd 继承式优雅重启。
+
+当前这条优雅重启路径是 Linux 定位能力，不承诺非 Linux 平台具备同样的进程交接语义。
 
 ### 本地只读状态
 
@@ -1034,7 +1047,7 @@ rginx peers
 - 更完整的高级压缩策略当前仍未支持（目前只支持基础 br/gzip 协商）
 - 配置变更当前只支持“修改本地配置文件 + `rginx check` + reload”，不提供远程动态配置 API 或 partial patch
 - `SO_REUSEPORT` 多进程 worker 形态当前仍未支持
-- 热重载不能切换监听地址、listener 集合、`runtime.worker_threads` 或 `runtime.accept_workers`
+- 热重载不能切换监听地址、listener 集合、`runtime.worker_threads` 或 `runtime.accept_workers`；这些变更应通过 `rginx -s restart` 处理
 - 本地只读运维面当前只提供 UDS + CLI，不提供远程查询协议、分页或 watch 流
 
 更细致的能力矩阵、工程演进观察和建议阶段规划，见 [ROADMAP.md](ROADMAP.md)。
