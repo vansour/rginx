@@ -3,10 +3,10 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 mod support;
 
@@ -140,6 +140,103 @@ fn sighup_reload_picks_up_updated_included_fragments() {
     server.shutdown_and_wait(Duration::from_secs(5));
 }
 
+#[test]
+fn nginx_style_restart_command_applies_listen_address_changes() {
+    let _guard = test_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let initial_addr = reserve_loopback_addr();
+    let restarted_addr = reserve_loopback_addr();
+    let mut server = TestServer::spawn(initial_addr, "before restart\n");
+
+    server.wait_for_body(initial_addr, "before restart\n", Duration::from_secs(5));
+    let old_pid = read_pid_file(&server.pid_path());
+
+    server.write_return_config(restarted_addr, "after restart\n");
+    let output = server.send_cli_signal("restart");
+    assert!(output.status.success(), "rginx -s restart should succeed: {}", render_output(&output));
+
+    let new_pid = wait_for_pid_change(&server.pid_path(), old_pid, Duration::from_secs(10));
+    let status = server.wait_for_exit(Duration::from_secs(10));
+    assert!(status.success(), "old process should exit cleanly after restart: {status}");
+
+    wait_for_body(restarted_addr, "after restart\n", Duration::from_secs(10));
+    assert_unreachable(initial_addr, Duration::from_millis(500));
+
+    let quit = server.send_cli_signal("quit");
+    assert!(
+        quit.status.success(),
+        "rginx -s quit should stop replacement process: {}",
+        render_output(&quit)
+    );
+    wait_for_process_exit(new_pid, Duration::from_secs(10));
+}
+
+#[test]
+fn nginx_style_restart_command_applies_runtime_worker_changes() {
+    let _guard = test_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let listen_addr = reserve_loopback_addr();
+    let mut server = TestServer::spawn(listen_addr, "runtime restart\n");
+
+    server.wait_for_body(listen_addr, "runtime restart\n", Duration::from_secs(5));
+    let old_pid = read_pid_file(&server.pid_path());
+
+    server.write_config(return_config_with_runtime(
+        listen_addr,
+        "runtime restart\n",
+        "        worker_threads: Some(2),\n        accept_workers: Some(2),\n",
+    ));
+    let output = server.send_cli_signal("restart");
+    assert!(output.status.success(), "rginx -s restart should succeed: {}", render_output(&output));
+
+    let new_pid = wait_for_pid_change(&server.pid_path(), old_pid, Duration::from_secs(10));
+    let status = server.wait_for_exit(Duration::from_secs(10));
+    assert!(status.success(), "old process should exit cleanly after restart: {status}");
+
+    wait_for_body(listen_addr, "runtime restart\n", Duration::from_secs(10));
+    let status_output = server.run_cli_command(["status"]);
+    assert!(
+        status_output.status.success(),
+        "rginx status should succeed after restart: {}",
+        render_output(&status_output)
+    );
+    let stdout = String::from_utf8_lossy(&status_output.stdout);
+    assert!(stdout.contains("worker_threads=2"));
+    assert!(stdout.contains("accept_workers=2"));
+
+    let quit = server.send_cli_signal("quit");
+    assert!(
+        quit.status.success(),
+        "rginx -s quit should stop replacement process: {}",
+        render_output(&quit)
+    );
+    wait_for_process_exit(new_pid, Duration::from_secs(10));
+}
+
+#[test]
+fn nginx_style_restart_command_keeps_old_process_running_when_replacement_fails() {
+    let _guard = test_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let listen_addr = reserve_loopback_addr();
+    let mut server = TestServer::spawn(listen_addr, "stable runtime\n");
+
+    server.wait_for_body(listen_addr, "stable runtime\n", Duration::from_secs(5));
+    let old_pid = read_pid_file(&server.pid_path());
+
+    server.write_config(
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 0,\n    ),\n    server: ServerConfig(\n        listen: \"127.0.0.1:0\",\n    ),\n    upstreams: [],\n    locations: [],\n)\n".to_string(),
+    );
+    let output = server.send_cli_signal("restart");
+    assert!(
+        output.status.success(),
+        "restart signal delivery should still succeed: {}",
+        render_output(&output)
+    );
+
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(read_pid_file(&server.pid_path()), old_pid);
+    server.wait_for_body(listen_addr, "stable runtime\n", Duration::from_secs(5));
+
+    server.shutdown_and_wait(Duration::from_secs(5));
+}
+
 struct TestServer {
     inner: ServerHarness,
 }
@@ -196,6 +293,10 @@ impl TestServer {
         self.inner.temp_dir()
     }
 
+    fn pid_path(&self) -> PathBuf {
+        self.inner.config_path().with_extension("pid")
+    }
+
     fn send_cli_signal(&self, signal: &str) -> Output {
         Command::new(binary_path())
             .arg("--config")
@@ -204,6 +305,15 @@ impl TestServer {
             .arg(signal)
             .output()
             .expect("rginx signal command should run")
+    }
+
+    fn run_cli_command<'a>(&self, args: impl IntoIterator<Item = &'a str>) -> Output {
+        let mut command = Command::new(binary_path());
+        command.arg("--config").arg(self.inner.config_path());
+        for arg in args {
+            command.arg(arg);
+        }
+        command.output().expect("rginx command should run")
     }
 }
 
@@ -281,6 +391,69 @@ fn assert_unreachable(listen_addr: SocketAddr, timeout: Duration) {
             }
         }
     }
+}
+
+fn wait_for_body(listen_addr: SocketAddr, expected: &str, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    let mut last_error = String::new();
+
+    while Instant::now() < deadline {
+        match fetch_text_response(listen_addr, "/") {
+            Ok((200, body)) if body == expected => return,
+            Ok((status, body)) => {
+                last_error = format!("unexpected response: status={status} body={body:?}");
+            }
+            Err(error) => last_error = error,
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    panic!(
+        "timed out waiting for expected response on {}; expected body {:?}; last error: {}",
+        listen_addr, expected, last_error
+    );
+}
+
+fn read_pid_file(path: &Path) -> i32 {
+    fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("failed to read pid file {}: {error}", path.display()))
+        .trim()
+        .parse::<i32>()
+        .unwrap_or_else(|error| panic!("invalid pid file {}: {error}", path.display()))
+}
+
+fn wait_for_pid_change(path: &Path, old_pid: i32, timeout: Duration) -> i32 {
+    let deadline = Instant::now() + timeout;
+
+    while Instant::now() < deadline {
+        if path.exists() {
+            let pid = read_pid_file(path);
+            if pid != old_pid {
+                return pid;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    panic!("timed out waiting for pid file {} to move away from pid {}", path.display(), old_pid);
+}
+
+fn wait_for_process_exit(pid: i32, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+
+    while Instant::now() < deadline {
+        let result = unsafe { libc::kill(pid, 0) };
+        if result != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ESRCH) {
+                return;
+            }
+        }
+
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    panic!("timed out waiting for pid {pid} to exit");
 }
 
 fn binary_path() -> std::path::PathBuf {
