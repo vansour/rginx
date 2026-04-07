@@ -34,6 +34,8 @@ fn status_command_reads_local_admin_socket() {
     let listen_addr = reserve_loopback_addr();
     let mut server = ServerHarness::spawn("rginx-admin-status", |_| return_config(listen_addr));
     server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
+    let socket_path = admin_socket_path_for_config(server.config_path());
+    wait_for_admin_socket(&socket_path, Duration::from_secs(5));
 
     let output = run_rginx(["--config", server.config_path().to_str().unwrap(), "status"]);
     assert!(output.status.success(), "status command should succeed: {}", render_output(&output));
@@ -52,6 +54,8 @@ fn counters_command_reports_local_connection_and_response_counters() {
     let listen_addr = reserve_loopback_addr();
     let mut server = ServerHarness::spawn("rginx-admin-counters", |_| return_config(listen_addr));
     server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
+    let socket_path = admin_socket_path_for_config(server.config_path());
+    wait_for_admin_socket(&socket_path, Duration::from_secs(5));
 
     fetch_text_response(listen_addr, "/").expect("root request should succeed");
     fetch_text_response(listen_addr, "/missing").expect("missing request should respond");
@@ -82,6 +86,8 @@ fn peers_command_reports_upstream_health_snapshot() {
     let mut server =
         ServerHarness::spawn("rginx-admin-peers", |_| proxy_config(listen_addr, upstream_addr));
     server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
+    let socket_path = admin_socket_path_for_config(server.config_path());
+    wait_for_admin_socket(&socket_path, Duration::from_secs(5));
 
     let output = run_rginx(["--config", server.config_path().to_str().unwrap(), "peers"]);
     assert!(output.status.success(), "peers command should succeed: {}", render_output(&output));
