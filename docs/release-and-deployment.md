@@ -7,18 +7,18 @@
 ### 预发布
 
 1. 确认目标提交已经合并到 `origin/main`。
-2. 版本号已经更新到目标 prerelease，例如 `0.1.2-rc.7`。
+2. 版本号已经更新到目标 prerelease，例如 `0.1.2-rc.8`。
 3. 本地执行：
 
 ```bash
-./scripts/prepare-release.sh --tag v0.1.2-rc.7
+./scripts/prepare-release.sh --tag v0.1.2-rc.8
 ```
 
 4. 打 tag 并 push：
 
 ```bash
-git tag v0.1.2-rc.7
-git push origin v0.1.2-rc.7
+git tag v0.1.2-rc.8
+git push origin v0.1.2-rc.8
 ```
 
 5. 检查 GitHub Actions `Release` workflow：
