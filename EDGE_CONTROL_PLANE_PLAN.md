@@ -211,6 +211,63 @@
 - `GetPeerHealth`
 - `GetRevision`
 
+第一版建议直接围绕这四类只读查询建模，先把状态快照内核定住，再决定 UDS 上的最终编码格式。
+
+建议的第一版最小字段集合：
+
+- `GetStatus`
+  - `revision`
+  - `config_path`
+  - `listen`
+  - `worker_threads`
+  - `accept_workers`
+  - `total_vhosts`
+  - `total_routes`
+  - `total_upstreams`
+  - `tls_enabled`
+  - `active_connections`
+  - `last_reload_result`
+  - `reload_attempts_total`
+  - `reload_successes_total`
+  - `reload_failures_total`
+
+- `GetCounters`
+  - `downstream_connections_accepted_total`
+  - `downstream_connections_rejected_total`
+  - `downstream_requests_total`
+  - `downstream_responses_total`
+  - `downstream_responses_1xx_total`
+  - `downstream_responses_2xx_total`
+  - `downstream_responses_3xx_total`
+  - `downstream_responses_4xx_total`
+  - `downstream_responses_5xx_total`
+
+- `GetPeerHealth`
+  - `upstream_name`
+  - `unhealthy_after_failures`
+  - `cooldown_ms`
+  - `active_health_enabled`
+  - `peers[]`
+    - `peer_url`
+    - `backup`
+    - `weight`
+    - `available`
+    - `passive_consecutive_failures`
+    - `passive_cooldown_remaining_ms`
+    - `passive_pending_recovery`
+    - `active_unhealthy`
+    - `active_consecutive_successes`
+    - `active_requests`
+
+- `GetRevision`
+  - `revision`
+
+这里先不要过度设计：
+
+- 先保证字段稳定可解释，再考虑更复杂的分页、过滤或流式 watch。
+- 先做“进程内可稳定快照”的内核，再做 UDS 对外协议。
+- 先服务本机 CLI 和 `edge-agent`，不要倒回去做公网管理路由。
+
 如果要极简，也可以先做状态文件：
 
 - `/run/rginx/status.json`

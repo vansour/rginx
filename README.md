@@ -8,6 +8,8 @@
 
 - [ROADMAP.md](ROADMAP.md)
 
+如果你想看更具体的近期执行顺序，`ROADMAP.md` 里现在也包含“8 周执行路线图”。
+
 许可证见：
 
 - [LICENSE](LICENSE)
@@ -46,6 +48,33 @@
 - `SIGHUP` 热重载配置
 - `rginx check` 配置检查
 
+## 专项反向代理替代合同
+
+`rginx` 当前要替代的，不是“所有场景下的 nginx”，而是下面这条更收口的子集：
+
+- 中小规模部署里的 HTTP / HTTPS 入口反向代理
+- API gateway 前置反代
+- gRPC ingress 和 grpc-web 入口转换
+- 边缘节点或 LB / CDN 后置反代
+- TLS 终止、Host/Path 路由、健康检查、基础流量治理和热重载
+
+当前对外承诺应只围绕这条子集展开。某项能力要写进稳定承诺，至少应同时满足：
+
+- 代码已实现
+- 仓库内有测试覆盖
+- README / ROADMAP 已写清能力边界
+- 默认配置或示例配置里存在合理落点
+
+当前明确不做的方向：
+
+- 本地静态文件或内容分发
+- 远程 HTTP 管理面、动态配置 API、公网 admin 路由
+- 通用入口代理的全量 drop-in replacement
+- 完整 nginx 配置语法兼容
+- `stream` / `mail` / FastCGI 这类非当前主线协议能力
+
+如果某个需求不能稳定落在上面的目标场景里，它就不应挤占当前版本线的主路径预算。
+
 ## 项目结构
 
 `rginx` 是一个 Cargo workspace，当前核心 crate 分工如下：
@@ -68,6 +97,10 @@
 如果你想先判断项目边界，建议优先看：
 
 - [ROADMAP.md](ROADMAP.md)
+
+如果你想按周推进接下来的开发工作，优先看：
+
+- [ROADMAP.md](ROADMAP.md) 里的“8 周执行路线图”
 
 如果你想先跑起来，优先看本 README 里的“快速开始”和“配置结构”两节。
 
@@ -915,7 +948,7 @@ rginx -s stop
 - 当前支持基础 `grpc-web` 二进制和 text 模式，也支持将下游提前取消补记为 `grpc-status = 1`；明文 `h2c` gRPC upstream 与更完整的高级 gRPC 语义（例如更主动的 cancellation 协同或更完整的协议级兼容）仍未支持
 - 主动 gRPC health check 当前只支持 `https://` upstream，不支持明文 `h2c`
 - 更完整的高级压缩策略当前仍未支持（目前只支持基础 br/gzip 协商）
-- 动态配置 API 当前只支持完整文档替换，不支持 partial patch
+- 配置变更当前只支持“修改本地配置文件 + `rginx check` + reload”，不提供远程动态配置 API 或 partial patch
 - `SO_REUSEPORT` 多进程 worker 形态当前仍未支持
 - 热重载不能切换监听地址、`runtime.worker_threads` 或 `runtime.accept_workers`
 
@@ -933,4 +966,8 @@ rginx -s stop
 - 健康检查
 - 平滑退出与热重载
 
-它当前的定位不是通用入口代理的全量兼容实现，而是先把中小规模部署里最常见、最稳定、最容易落地的一组入口能力做扎实。
+更准确地说，它当前的定位是：
+
+- 先把 nginx 最常见的反向代理子集做扎实，而不是追求全量兼容
+- 先把本地可运维性、代理能力和上线可信度补齐，而不是继续扩展非主线功能
+- 先服务 API / gRPC / 边缘入口这些高频专项场景，而不是泛化成“什么都做一点”的入口层

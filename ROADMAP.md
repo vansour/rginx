@@ -34,6 +34,11 @@
 - 不再把“本地文件映射 / 静态站点服务”当成主产品方向。
 - 不追求在当前阶段成为其他成熟入口代理的 drop-in replacement。
 
+这里的“反向代理”需要理解成专项替代，而不是全量替代：
+
+- 当前替代目标是“nginx 用作入口反向代理 / API gateway / gRPC ingress”的常见子集。
+- 当前不追求替代 nginx 在静态文件、通用配置 DSL、L4 `stream`、mail、FastCGI 等方向上的历史能力。
+
 ## 当前版本线
 
 当前正式发布线收口为 `v0.1.1`。
@@ -57,6 +62,42 @@
 - 后续主要投入 upstream 选择、重试、主动健康检查、gRPC / grpc-web、HTTP/2、Upgrade、TLS 和 observability。
 
 下面的“能力矩阵”描述的是当前代码现状。
+
+## 专项反向代理替代合同
+
+这不是营销文案，而是决定“什么可以写进对外承诺、什么不该插队进入主线”的实际合同。
+
+### 目标场景
+
+当前版本线应优先覆盖下面这些场景：
+
+- 中小规模部署下的 HTTP / HTTPS 入口反向代理
+- API gateway 前置代理
+- gRPC ingress 和 grpc-web 入口转换
+- 边缘节点反代，或部署在 LB / CDN 后方的入口代理
+- TLS 终止、Host/Path 路由、upstream 负载均衡、健康检查、基础流量治理、热重载和可观测性
+
+### 明确非目标
+
+下面这些方向当前不应被当作主线投入：
+
+- 本地静态文件、本地内容分发和网站托管
+- 远程 HTTP 管理面、公网 admin 路由、动态配置 API
+- 通用入口代理的全量 drop-in replacement
+- 完整 nginx 配置语法兼容
+- `stream` / `mail` / FastCGI / uwsgi / scgi 这类非当前主线协议能力
+
+### 写进稳定承诺的最低条件
+
+某项能力只有同时满足下面这些条件，才应写进稳定承诺：
+
+- 代码已实现
+- 仓库内已有测试覆盖
+- README / ROADMAP 已明确说明边界
+- 默认配置、示例配置或 CLI 中已有合理使用落点
+- 失败语义和不支持边界已经写清
+
+如果一个需求不能稳定落在目标场景里，或者暂时无法满足上面的承诺条件，它就不应挤占当前版本线的主路径预算。
 
 ## 能力矩阵
 
@@ -227,7 +268,7 @@
 ### 路由与配置边界
 
 - 不支持正则路由。
-- 动态配置 API 只支持完整文档替换，不支持 partial patch。
+- 不提供远程动态配置 API；配置变更通过“写文件 + `check` + reload”完成。
 - 热重载不能切换 `listen`、`runtime.worker_threads` 或 `runtime.accept_workers`。
 - 单实例当前围绕一个监听地址工作，不是多 `listen` 入口模型。
 
@@ -464,6 +505,263 @@
 1. 先修真实协议与运维风险。
 2. 再补配置与管理体验。
 3. 最后做更广泛的兼容性与语法扩展。
+
+## 8 周执行路线图
+
+这份 8 周路线图不是“8 周后一定全部完成”的对外承诺，而是基于当前代码基线、当前产品边界和“专项反向代理替代 nginx”这个目标，给出的最稳妥推进顺序。
+
+执行假设：
+
+- 继续坚持“纯反向代理数据面”边界，不回头恢复公网 HTTP 管理面、本地文件服务和动态配置 API。
+- 目标是替代“nginx 用作入口反向代理 / API gateway / gRPC ingress”的常见子集，不追求 full drop-in replacement。
+- 每周默认包含代码、测试、README / ROADMAP 同步，而不是只交代码。
+- 如果中途资源不足，优先保 Week 1 到 Week 6，Week 7 到 Week 8 可以顺延，但不应反向侵蚀前面的基础闭环。
+
+阶段护栏：
+
+- Week 1 到 Week 3 的目标是补齐“本地可运维性”。
+- Week 4 到 Week 6 的目标是补齐“入口模型和进程生命周期”。
+- Week 7 到 Week 8 的目标是补齐“部署兼容性、迁移体验和上线可信度”。
+
+### Week 1：替代边界冻结与验收合同
+
+目标：
+
+- 把“替代什么、不替代什么、做到什么算可上线”写成正式合同，避免后续 feature 漂移。
+
+核心动作：
+
+- 在 README 和 ROADMAP 里补一份明确的 capability contract。
+- 把目标场景写死为：API 反向代理、gRPC ingress、边缘反代、TLS 终止、Host/Path 路由、基础流量治理、健康检查、热重载、可观测性。
+- 把非目标写死为：静态文件、本地内容服务、远程 admin API、完整 nginx 语法兼容、L4 stream、mail、FastCGI。
+- 为后续 7 周拆出明确的 issue / milestone 列表，按“必须完成 / 可以顺延”分级。
+
+交付物：
+
+- 更新后的 README 能力边界说明。
+- 更新后的 ROADMAP 能力矩阵与非目标说明。
+- 一个按周拆分的 backlog 列表。
+
+验收标准：
+
+- 后续新增需求都能判断是否属于“专项反向代理替代品”范围。
+- 对外不再出现“入口代理 + 其他能力”的模糊表述。
+
+### Week 2 到 Week 8 backlog 交付约定
+
+从 Week 2 开始，执行项不应只存在于路线图正文里，而应同时具备下面两层载体：
+
+- 文档层：保留在本文件里的按周计划、目标和验收标准
+- 执行层：拆成真实的 milestone 和 issues，并按“必须完成 / 可以顺延”分级
+
+对 Week 2 到 Week 8 的 issue 拆分，最低要求是：
+
+- 每周至少有一个对应的主 issue
+- 每个主 issue 都显式写出“必须完成”
+- 每个主 issue 都显式写出“可以顺延”
+- 每个主 issue 都显式写出验收标准
+
+只要执行层 backlog 还没建起来，Week 1 就不算真正完成。
+
+当前执行层 backlog 已同步到 GitHub：
+
+- milestone: [专项反向代理替代路线图（8 周主线）](https://github.com/vansour/rginx/milestone/1)
+- Week 2: [#13](https://github.com/vansour/rginx/issues/13)
+- Week 3: [#14](https://github.com/vansour/rginx/issues/14)
+- Week 4: [#15](https://github.com/vansour/rginx/issues/15)
+- Week 5: [#16](https://github.com/vansour/rginx/issues/16)
+- Week 6: [#17](https://github.com/vansour/rginx/issues/17)
+- Week 7: [#18](https://github.com/vansour/rginx/issues/18)
+- Week 8: [#19](https://github.com/vansour/rginx/issues/19)
+
+### Week 2：本地只读运维面设计与状态快照内核
+
+目标：
+
+- 先补齐内部可读取状态，把“删掉公网 admin”真正闭环成“本地可运维”。
+
+核心动作：
+
+- 设计本地只读运维接口模型，优先走 UDS，与 [`EDGE_CONTROL_PLANE_PLAN.md`](EDGE_CONTROL_PLANE_PLAN.md) 保持一致。
+- 在 `SharedState` 上补充可快照的运行时状态：当前 revision、active connections、最近 reload 结果、基础 counters。
+- 在 `PeerHealthRegistry` 和 `ProxyClients` 上补充只读 snapshot 能力。
+- 明确第一版状态集：`GetStatus`、`GetCounters`、`GetPeerHealth`、`GetRevision`。
+
+交付物：
+
+- UDS 管理面 RFC 或实现草案。
+- 运行时状态快照结构体。
+- 单元测试，覆盖状态读取的一致性和并发安全性。
+
+验收标准：
+
+- 不依赖公网端口，也能从进程内稳定读取当前运行状态。
+- 状态模型足够支撑后续 CLI 和 `edge-agent` 集成。
+
+### Week 3：本地只读运维面落地
+
+目标：
+
+- 交付真正可用的本地运维入口，而不是只停留在内部状态结构。
+
+核心动作：
+
+- 在 runtime 内增加 UDS 只读服务，例如 `/run/rginx/admin.sock`。
+- 在 CLI 中增加本地查询命令，例如 `rginx status`、`rginx peers`、`rginx counters`。
+- 为本地 UDS 和 CLI 补集成测试。
+- 更新文档，明确运维方式已经收口为“check / reload / 本地状态读取 / 日志”。
+
+交付物：
+
+- 本地只读 UDS 管理面实现。
+- 新 CLI 子命令。
+- 集成测试与示例输出。
+
+验收标准：
+
+- 不暴露公网管理路由。
+- 运维人员可以在本机查询 revision、连接数、upstream peer 健康状态和基础 counters。
+
+### Week 4：多监听入口模型设计与配置兼容方案
+
+目标：
+
+- 把当前“单实例单 listen”限制升级为“可覆盖典型 nginx 反代入口模型”的配置设计。
+
+核心动作：
+
+- 设计顶层 `listeners: []` 或等价模型，让监听配置和虚拟主机配置解耦。
+- 明确 listener 负责的字段：监听地址、TLS、连接限制、读写超时、trusted proxies。
+- 明确 vhost 负责的字段：`server_names`、routes、可选证书覆盖。
+- 设计旧配置到新配置的兼容编译路径，避免一次性打断当前用户。
+
+交付物：
+
+- 新配置模型设计。
+- 向后兼容策略。
+- 配置校验和编译的迁移方案。
+
+验收标准：
+
+- 能清楚表达 `:80`、`:443`、IPv4 / IPv6、多入口部署需求。
+- 旧的 `server.listen` 模型仍能被编译为默认 listener。
+
+### Week 5：多监听入口模型实现
+
+目标：
+
+- 真正支持常见 nginx 反代部署形态，而不只是完成配置设计。
+
+核心动作：
+
+- 修改 `rginx-config` 的 `model / validate / compile` 链路，实现多 listener。
+- 修改 runtime bootstrap 和 HTTP server accept loop，使单进程可持有多个 listener 组。
+- 补端到端测试：`:80 + :443`、双 listener、默认 redirect host、IPv4 / IPv6 组合。
+- 保持现有 TLS/SNI 逻辑在多 listener 下仍然可解释。
+
+交付物：
+
+- 多 listener 的配置编译和运行时实现。
+- 向后兼容测试。
+- 典型部署示例配置。
+
+验收标准：
+
+- 单进程同时监听多个入口地址。
+- 能支持最常见的 `80 -> 443` 和多域名 TLS 入口部署。
+
+### Week 6：优雅重启路径打通
+
+目标：
+
+- 解决当前 `SIGHUP` 不能切 `listen` / `worker_threads` / `accept_workers` 的现实短板。
+
+核心动作：
+
+- 在 Linux 上选择一条主路径实现优雅重启：优先二选一，而不是同时铺开。
+- 备选方案 A：systemd socket activation。
+- 备选方案 B：显式 fd 继承 + exec restart。
+- 保持现有配置热重载逻辑，用“热重载处理可原地替换项，优雅重启处理监听和 runtime 结构变化”分层解决。
+- 补 listener 交接、连接 drain、失败回退测试。
+
+交付物：
+
+- Linux 主路径优雅重启实现。
+- 对应 CLI / 运维说明。
+- 进程切换和 drain 测试。
+
+验收标准：
+
+- 修改监听地址或 runtime worker 参数时，不再只能硬停进程。
+- 新旧进程交接期间不出现明显的连接丢失和状态失真。
+
+### Week 7：部署兼容性补强
+
+目标：
+
+- 补齐真实部署里最常见、最容易卡住替代落地的兼容能力。
+
+核心动作：
+
+- 支持 upstream hostname 的 DNS 重解析与刷新。
+- 支持 inbound `PROXY protocol`，与 `trusted_proxies`、`X-Forwarded-For` 语义打通。
+- 为后置于 LB / CDN / 四层代理后的部署补示例与回归测试。
+- 明确这些能力的失败语义、刷新周期和默认安全边界。
+
+交付物：
+
+- DNS 重解析实现。
+- inbound `PROXY protocol` 实现。
+- 相关测试和部署文档。
+
+验收标准：
+
+- upstream 指向域名时，后端 IP 变化不需要靠手动重启追踪。
+- LB / CDN 后置部署中，客户端真实地址链路可稳定保留。
+
+### Week 8：迁移体验、性能基线与发布收口
+
+目标：
+
+- 让项目从“有能力”进入“可迁移、可验证、可发布”的状态。
+
+核心动作：
+
+- 补一份“nginx 反向代理子集 -> rginx 配置模型”的迁移手册。
+- 视时间实现一个最小迁移辅助工具，至少覆盖 `listen / server_name / location / proxy_pass / proxy_set_header / client_max_body_size / upstream weight / backup`。
+- 固定一套 benchmark 和 soak test 场景：HTTP/1.1、TLS termination、HTTP/2、gRPC、grpc-web、Upgrade、reload / restart 期间连接稳定性。
+- 更新 release checklist、systemd / supervisor 建议和上线说明。
+
+交付物：
+
+- nginx 子集迁移文档。
+- benchmark / soak test 报告。
+- 发布与部署收口文档。
+
+验收标准：
+
+- 常见 nginx API 反代配置已有清晰迁移路径。
+- 发布文档开始包含性能和容量边界，而不只是功能列表。
+
+### 8 周后应达到的最低结果
+
+如果这 8 周按上面的优先级完成，`rginx` 至少应达到下面这个替代门槛：
+
+- 不再依赖公网 admin 路由，也具备本地可运维性。
+- 可以覆盖最常见的多入口 nginx 反向代理部署形态。
+- 监听和 runtime 结构变化不再只能靠硬停进程处理。
+- 在 LB / CDN / 域名 upstream 这类真实部署里不再缺关键兼容件。
+- 有一套可执行的迁移文档、性能基线和发布收口方法。
+
+### 8 周内不建议插队的方向
+
+为了保证路线图收敛，下面这些方向不建议在 8 周窗口内抢占主线：
+
+- 恢复公网 HTTP admin surface。
+- 恢复静态文件或本地内容服务。
+- 追求完整 nginx 配置语法兼容。
+- 优先做 HTTP/3，而不是先补多 listener、优雅重启和本地运维面。
+- 没有真实场景驱动的额外负载均衡策略或语法糖。
 
 ## 文档与测试同步约定
 

@@ -11,7 +11,7 @@ pub(crate) use grpc_health_codec::{
 };
 pub(crate) use registry::{
     ActivePeerBody, ActivePeerGuard, ActiveProbeStatus, PeerFailureStatus, PeerHealthRegistry,
-    SelectedPeers,
+    SelectedPeers, UpstreamHealthSnapshot,
 };
 
 pub async fn probe_upstream_peer(
