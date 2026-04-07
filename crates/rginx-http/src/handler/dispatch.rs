@@ -5,6 +5,7 @@ use super::grpc::{
 };
 use super::response::{forbidden_response, full_body, text_response, too_many_requests_response};
 use super::*;
+use crate::client_ip::ConnectionPeerAddrs;
 
 #[derive(Clone, Copy)]
 struct ListenerRequestContext<'a> {
@@ -17,7 +18,7 @@ struct ListenerRequestContext<'a> {
 pub async fn handle(
     request: Request<Incoming>,
     state: SharedState,
-    remote_addr: SocketAddr,
+    connection: ConnectionPeerAddrs,
     listener_id: &str,
 ) -> HttpResponse {
     let mut request = request;
@@ -54,7 +55,7 @@ pub async fn handle(
     let grpc_request = grpc_request_metadata(&request_headers, &request_path);
     let route_match_context = route_match_context(&request_path, grpc_request);
     let started = Instant::now();
-    let client_address = resolve_client_address(request.headers(), &listener.server, remote_addr);
+    let client_address = resolve_client_address(request.headers(), &listener.server, connection);
     let downstream_scheme = if listener.tls_enabled() { "https" } else { "http" };
     let (selected_vhost_id, selected_route) = {
         let selected_vhost =

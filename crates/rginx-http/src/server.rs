@@ -5,12 +5,13 @@ use hyper::server::conn::{http1, http2};
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use rginx_core::Result;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::{JoinError, JoinSet};
 use tokio_rustls::TlsAcceptor;
 
+use crate::client_ip::ConnectionPeerAddrs;
 use crate::timeout::WriteTimeoutIo;
 
 const ALPN_H2: &[u8] = b"h2";
@@ -133,7 +134,7 @@ pub async fn serve(
 }
 
 async fn serve_connection(
-    stream: tokio::net::TcpStream,
+    mut stream: tokio::net::TcpStream,
     listener_id: String,
     state: crate::state::SharedState,
     remote_addr: SocketAddr,
@@ -142,6 +143,35 @@ async fn serve_connection(
     http1: Http1ConnectionOptions,
     _connection_guard: crate::state::ActiveConnectionGuard,
 ) {
+    let current_listener = state
+        .current_listener(&listener_id)
+        .await
+        .expect("listener id should remain available while connection is running");
+    let proxy_protocol_source_addr = if current_listener.proxy_protocol_enabled {
+        match read_proxy_protocol_source_addr(
+            &mut stream,
+            remote_addr,
+            current_listener.server.is_trusted_proxy(remote_addr.ip()),
+        )
+        .await
+        {
+            Ok(source_addr) => source_addr,
+            Err(error) => {
+                tracing::warn!(
+                    remote_addr = %remote_addr,
+                    listener = %listener_id,
+                    %error,
+                    "failed to parse proxy protocol header"
+                );
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    let connection_addrs =
+        ConnectionPeerAddrs { socket_peer_addr: remote_addr, proxy_protocol_source_addr };
+
     if let Some(tls_acceptor) = tls_acceptor {
         match tls_acceptor.accept(stream).await {
             Ok(stream) => {
@@ -155,7 +185,7 @@ async fn serve_connection(
                         TokioIo::new(stream),
                         listener_id,
                         state,
-                        remote_addr,
+                        connection_addrs,
                         shutdown,
                     )
                     .await;
@@ -169,7 +199,7 @@ async fn serve_connection(
                         TokioIo::new(stream),
                         listener_id,
                         state,
-                        remote_addr,
+                        connection_addrs,
                         shutdown,
                         http1,
                     )
@@ -188,8 +218,15 @@ async fn serve_connection(
         http1.response_write_timeout,
         format!("downstream response to {remote_addr}"),
     );
-    serve_h1_connection_io(TokioIo::new(stream), listener_id, state, remote_addr, shutdown, http1)
-        .await;
+    serve_h1_connection_io(
+        TokioIo::new(stream),
+        listener_id,
+        state,
+        connection_addrs,
+        shutdown,
+        http1,
+    )
+    .await;
 }
 
 fn negotiated_h2(stream: &tokio_rustls::server::TlsStream<tokio::net::TcpStream>) -> bool {
@@ -200,7 +237,7 @@ async fn serve_h1_connection_io<T>(
     io: TokioIo<T>,
     listener_id: String,
     state: crate::state::SharedState,
-    remote_addr: SocketAddr,
+    connection_addrs: ConnectionPeerAddrs,
     mut shutdown: watch::Receiver<bool>,
     options: Http1ConnectionOptions,
 ) where
@@ -209,9 +246,10 @@ async fn serve_h1_connection_io<T>(
     let service = service_fn(move |request| {
         let state = state.clone();
         let listener_id = listener_id.clone();
+        let connection_addrs = connection_addrs;
         async move {
             Ok::<_, Infallible>(
-                crate::handler::handle(request, state, remote_addr, &listener_id).await,
+                crate::handler::handle(request, state, connection_addrs, &listener_id).await,
             )
         }
     });
@@ -237,7 +275,7 @@ async fn serve_h1_connection_io<T>(
         tokio::select! {
             result = connection.as_mut() => {
                 if let Err(error) = result {
-                    tracing::warn!(remote_addr = %remote_addr, %error, "connection closed with error");
+                    tracing::warn!(remote_addr = %connection_addrs.socket_peer_addr, %error, "connection closed with error");
                 }
                 break;
             }
@@ -245,7 +283,7 @@ async fn serve_h1_connection_io<T>(
                 match changed {
                     Ok(()) if *shutdown.borrow() => {
                         draining = true;
-                        tracing::debug!(remote_addr = %remote_addr, "starting graceful shutdown for connection");
+                        tracing::debug!(remote_addr = %connection_addrs.socket_peer_addr, "starting graceful shutdown for connection");
                         connection.as_mut().graceful_shutdown();
                     }
                     Ok(()) => {}
@@ -263,7 +301,7 @@ async fn serve_h2_connection_io<T>(
     io: TokioIo<T>,
     listener_id: String,
     state: crate::state::SharedState,
-    remote_addr: SocketAddr,
+    connection_addrs: ConnectionPeerAddrs,
     mut shutdown: watch::Receiver<bool>,
 ) where
     T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -271,9 +309,10 @@ async fn serve_h2_connection_io<T>(
     let service = service_fn(move |request| {
         let state = state.clone();
         let listener_id = listener_id.clone();
+        let connection_addrs = connection_addrs;
         async move {
             Ok::<_, Infallible>(
-                crate::handler::handle(request, state, remote_addr, &listener_id).await,
+                crate::handler::handle(request, state, connection_addrs, &listener_id).await,
             )
         }
     });
@@ -291,7 +330,7 @@ async fn serve_h2_connection_io<T>(
             result = connection.as_mut() => {
                 if let Err(error) = result {
                     tracing::warn!(
-                        remote_addr = %remote_addr,
+                        remote_addr = %connection_addrs.socket_peer_addr,
                         %error,
                         "http2 connection closed with error"
                     );
@@ -303,7 +342,7 @@ async fn serve_h2_connection_io<T>(
                     Ok(()) if *shutdown.borrow() => {
                         draining = true;
                         tracing::debug!(
-                            remote_addr = %remote_addr,
+                            remote_addr = %connection_addrs.socket_peer_addr,
                             "starting graceful shutdown for http2 connection"
                         );
                         connection.as_mut().graceful_shutdown();
@@ -319,6 +358,115 @@ async fn serve_h2_connection_io<T>(
     }
 }
 
+const MAX_PROXY_PROTOCOL_HEADER_BYTES: usize = 108;
+
+async fn read_proxy_protocol_source_addr(
+    stream: &mut tokio::net::TcpStream,
+    remote_addr: SocketAddr,
+    trust_remote_addr: bool,
+) -> std::io::Result<Option<SocketAddr>> {
+    let mut header = Vec::with_capacity(MAX_PROXY_PROTOCOL_HEADER_BYTES);
+    loop {
+        if header.len() >= MAX_PROXY_PROTOCOL_HEADER_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "proxy protocol header is too long",
+            ));
+        }
+
+        let byte = stream.read_u8().await?;
+        header.push(byte);
+        if header.ends_with(b"\r\n") {
+            break;
+        }
+    }
+
+    let header = std::str::from_utf8(&header).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "proxy protocol header is not valid utf-8",
+        )
+    })?;
+    parse_proxy_protocol_v1(header, remote_addr, trust_remote_addr)
+}
+
+fn parse_proxy_protocol_v1(
+    header: &str,
+    remote_addr: SocketAddr,
+    trust_remote_addr: bool,
+) -> std::io::Result<Option<SocketAddr>> {
+    let header = header.trim_end_matches("\r\n");
+    if header == "PROXY UNKNOWN" {
+        return Ok(None);
+    }
+
+    let mut parts = header.split_whitespace();
+    let prefix = parts.next();
+    let protocol = parts.next();
+    let source_addr = parts.next();
+    let _destination_addr = parts.next();
+    let source_port = parts.next();
+    let _destination_port = parts.next();
+    let trailing = parts.next();
+
+    if prefix != Some("PROXY") || trailing.is_some() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid proxy protocol header",
+        ));
+    }
+
+    let source = match protocol {
+        Some("TCP4") | Some("TCP6") => {
+            let ip = source_addr
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "missing proxy protocol source address",
+                    )
+                })?
+                .parse::<std::net::IpAddr>()
+                .map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "invalid proxy protocol source address",
+                    )
+                })?;
+            let port = source_port
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "missing proxy protocol source port",
+                    )
+                })?
+                .parse::<u16>()
+                .map_err(|_| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "invalid proxy protocol source port",
+                    )
+                })?;
+            Some(SocketAddr::new(ip, port))
+        }
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "unsupported proxy protocol transport",
+            ));
+        }
+    };
+
+    if !trust_remote_addr {
+        tracing::warn!(
+            remote_addr = %remote_addr,
+            "ignoring proxy protocol header because the transport peer is not trusted"
+        );
+        return Ok(None);
+    }
+
+    Ok(source)
+}
+
 fn log_connection_task_result(result: std::result::Result<(), JoinError>) {
     if let Err(error) = result {
         if error.is_panic() {
@@ -326,5 +474,39 @@ fn log_connection_task_result(result: std::result::Result<(), JoinError>) {
         } else if !error.is_cancelled() {
             tracing::warn!(%error, "connection task failed to join");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_proxy_protocol_v1;
+
+    #[test]
+    fn proxy_protocol_v1_parses_tcp4_source_address() {
+        let source = parse_proxy_protocol_v1(
+            "PROXY TCP4 198.51.100.9 203.0.113.10 12345 443\r\n",
+            "10.0.0.1:4000".parse().unwrap(),
+            true,
+        )
+        .expect("header should parse");
+
+        assert_eq!(source, Some("198.51.100.9:12345".parse().unwrap()));
+    }
+
+    #[test]
+    fn proxy_protocol_v1_accepts_unknown_transport() {
+        let source =
+            parse_proxy_protocol_v1("PROXY UNKNOWN\r\n", "10.0.0.1:4000".parse().unwrap(), true)
+                .expect("unknown header should parse");
+
+        assert_eq!(source, None);
+    }
+
+    #[test]
+    fn proxy_protocol_v1_rejects_invalid_headers() {
+        let error = parse_proxy_protocol_v1("BROKEN\r\n", "10.0.0.1:4000".parse().unwrap(), true)
+            .expect_err("invalid header should fail");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 }

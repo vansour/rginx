@@ -2,7 +2,7 @@
 
 `rginx` 的产品定义是：一个面向中小规模部署的 Rust 入口反向代理，稳定支持 TLS 终止、Host/Path 路由、上游代理、基础流量治理、健康检查、热重载和可观测性。
 
-当前正式发布线收口为 `v0.1.1`。当前正在准备下一条预发布标签 `v0.1.2-rc.6`，用于验证最近一轮测试、文档和发布流程补强。
+当前正式发布线收口为 `v0.1.1`。当前正在准备下一条预发布标签 `v0.1.2-rc.7`，用于验证最近一轮测试、文档和发布流程补强。
 
 当前明确限制、演进方向和发布前收口项见：
 
@@ -37,6 +37,8 @@
 - 按路由做 CIDR 访问控制
 - 按路由做请求速率限制
 - 支持 `trusted_proxies`，可从 `X-Forwarded-For` 解析真实客户端 IP
+- 支持入站 `PROXY protocol` v1，并与 `trusted_proxies` / `X-Forwarded-For` 语义打通
+- 支持 hostname upstream peer；新建 upstream 连接时可重新解析域名，无需重启 `rginx`
 - 自动透传或生成 `X-Request-ID`
 - 支持 `server.access_log_format` 自定义 access log 模板
 - 配置支持相对 `include` 和字符串环境变量展开
@@ -135,7 +137,7 @@
 curl -fsSL https://raw.githubusercontent.com/vansour/rginx/main/scripts/install.sh | bash -s -- --mode release --version <tag>
 ```
 
-其中 `latest` 只会解析最新稳定版；如果你要安装预发布版，请显式传入具体 tag，例如 `v0.1.2-rc.6`。
+其中 `latest` 只会解析最新稳定版；如果你要安装预发布版，请显式传入具体 tag，例如 `v0.1.2-rc.7`。
 
 安装脚本默认会：
 
@@ -279,6 +281,48 @@ Config(
 
 - [MULTI_LISTENER_MODEL_PLAN.md](MULTI_LISTENER_MODEL_PLAN.md)
 
+### `proxy_protocol`
+
+`proxy_protocol` 现在可以配置在：
+
+- 兼容旧模型下的 `server.proxy_protocol`
+- 显式多 listener 模型下的 `ListenerConfig.proxy_protocol`
+
+当前语义：
+
+- 这是一个 listener 级开关
+- 开启后，该 listener 期望每条下游连接都以 `PROXY protocol` v1 头开头
+- `rginx` 只会在 TCP 对端地址属于 `trusted_proxies` 时信任 `PROXY protocol` 里声明的源地址
+- 若 TCP 对端不在 `trusted_proxies` 内，`PROXY protocol` 头会被消费但不会改变客户端真实地址判定
+
+当前边界：
+
+- 只支持入站 `PROXY protocol` v1
+- 不支持 `PROXY protocol` v2
+- 这是下游 listener 能力，不会向 upstream 发送 `PROXY protocol`
+
+### hostname upstream 与 DNS 刷新
+
+upstream peer 现在支持 hostname，例如：
+
+```ron
+UpstreamPeerConfig(
+    url: "http://localhost:9000",
+)
+```
+
+当前语义：
+
+- `rginx` 在建立新的 upstream 连接时会通过系统 resolver 解析 hostname
+- 因此 backend IP 变化后，不需要重启 `rginx` 才能建立到新地址的连接
+- 已建立或池化中的旧连接仍然遵循连接池生命周期，不会被强制中断
+
+如果你希望更快感知 hostname 变更，收紧对应 upstream 的连接池空闲超时即可，例如：
+
+```ron
+pool_idle_timeout_secs: Some(1),
+```
+
 ### `include` 与环境变量
 
 配置加载阶段支持两类轻量预处理：
@@ -327,6 +371,7 @@ servers: [
 
 - `listen`: 监听地址，例如 `"0.0.0.0:80"`
 - `server_names`: 可选。默认虚拟主机匹配的域名列表；为空时可作为兜底主机使用
+- `proxy_protocol`: 可选。启用后该 listener 期望入站连接携带 `PROXY protocol` v1 头
 - `trusted_proxies`: 可选。只有当 `rginx` 部署在另一层代理、LB 或 CDN 后面时才需要配置，可写单个 IP 或 CIDR
 - `keep_alive`: 可选。是否启用 HTTP/1.1 keep-alive，默认 `true`
 - `max_headers`: 可选。单请求头数量上限
@@ -347,6 +392,7 @@ servers: [
 - `response_write_timeout_secs` 主要用于尽早回收长时间不读取响应的慢客户端连接
 - `access_log_format` 未设置时，仍使用默认的结构化 tracing access log
 - `worker_threads` 和 `accept_workers` 都是启动期参数，热重载不会变更它们
+- `proxy_protocol` 只在对端属于 `trusted_proxies` 时才会改变真实客户端地址判定；否则只消费头部而不会信任其来源
 
 ### `servers`
 
@@ -690,6 +736,7 @@ UpstreamConfig(
 - `idle_timeout_secs` 用于限制长时间无进展的响应流
 - `pool_idle_timeout_secs` 控制连接池内空闲连接保留时长
 - `pool_max_idle_per_host` 控制每个 upstream host 的最大空闲连接数
+- hostname upstream peer 在新建连接时会重新通过系统 resolver 解析；如果你希望更快感知 IP 变化，应配合较短的 `pool_idle_timeout_secs`
 
 ### 9. 基于客户端 IP 的粘性转发
 
@@ -928,7 +975,7 @@ Release Notes 分类规则来自：
 建议的本地发版前检查：
 
 ```bash
-./scripts/prepare-release.sh --tag v0.1.2-rc.6
+./scripts/prepare-release.sh --tag v0.1.2-rc.7
 ```
 
 建议流程：
@@ -1049,6 +1096,8 @@ rginx peers
 - `SO_REUSEPORT` 多进程 worker 形态当前仍未支持
 - 热重载不能切换监听地址、listener 集合、`runtime.worker_threads` 或 `runtime.accept_workers`；这些变更应通过 `rginx -s restart` 处理
 - 本地只读运维面当前只提供 UDS + CLI，不提供远程查询协议、分页或 watch 流
+- hostname upstream 的重解析发生在“新连接建立时”；已复用的连接仍遵循连接池生命周期
+- 入站 `PROXY protocol` 当前只支持 v1，不支持 v2
 
 更细致的能力矩阵、工程演进观察和建议阶段规划，见 [ROADMAP.md](ROADMAP.md)。
 

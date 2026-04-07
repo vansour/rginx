@@ -19,6 +19,7 @@ pub(super) fn compile_legacy_server(
 ) -> Result<CompiledServer> {
     let ServerConfig {
         listen,
+        proxy_protocol,
         server_names,
         trusted_proxies,
         keep_alive,
@@ -56,6 +57,7 @@ pub(super) fn compile_legacy_server(
             name: "default".to_string(),
             server: compiled.server,
             tls_termination_enabled: compiled.server_tls.is_some() || any_vhost_tls,
+            proxy_protocol_enabled: proxy_protocol.unwrap_or(false),
         },
         server_names,
     })
@@ -72,6 +74,7 @@ pub(super) fn compile_listeners(
             let ListenerConfig {
                 name,
                 listen,
+                proxy_protocol,
                 trusted_proxies,
                 keep_alive,
                 max_headers,
@@ -106,6 +109,7 @@ pub(super) fn compile_listeners(
                 name,
                 server: compiled.server,
                 tls_termination_enabled: compiled.server_tls.is_some(),
+                proxy_protocol_enabled: proxy_protocol.unwrap_or(false),
             })
         })
         .collect()

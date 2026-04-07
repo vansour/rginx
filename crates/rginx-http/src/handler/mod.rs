@@ -1,5 +1,4 @@
 use std::error::Error as StdError;
-use std::net::SocketAddr;
 use std::time::Instant;
 
 use base64::Engine as _;
@@ -578,6 +577,7 @@ mod tests {
                 name: "default".to_string(),
                 server,
                 tls_termination_enabled: false,
+                proxy_protocol_enabled: false,
             }],
             default_vhost,
             vhosts,

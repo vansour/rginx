@@ -197,6 +197,7 @@ mod tests {
                 name: "default".to_string(),
                 server,
                 tls_termination_enabled: false,
+                proxy_protocol_enabled: false,
             }],
             default_vhost: VirtualHost {
                 id: "server".to_string(),

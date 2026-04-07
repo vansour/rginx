@@ -173,6 +173,7 @@
 | :--- | :--- | :--- |
 | `http://` upstream | ✅ | 支持。 |
 | `https://` upstream | ✅ | 支持。 |
+| hostname upstream peer | ✅ | 支持；新建 upstream 连接时会重新做系统 DNS 解析。 |
 | 上游 TLS 模式 | ✅ | `NativeRoots` / `CustomCa` / `Insecure`。 |
 | `preserve_host` | ✅ | 可保留下游 Host。 |
 | `strip_prefix` | ✅ | 基础 URL 改写。 |
@@ -191,7 +192,7 @@
 | 主动 HTTP 健康检查 | ✅ | 定时探测。 |
 | 主动 gRPC health check | ✅ | 支持标准 health service，但当前要求 `https://` peer。 |
 | 明文 upstream `h2c` | ❌ | 当前不支持。 |
-| Proxy Protocol | ❌ | 当前不支持。 |
+| inbound Proxy Protocol | ✅ | 当前支持 listener 级 `PROXY protocol` v1。 |
 
 ### 6. HTTP/2、gRPC 与 grpc-web
 
@@ -277,7 +278,7 @@
 ### 代理与兼容性边界
 
 - 只承诺基础 grpc-web binary / text 模式，不承诺更完整高级 grpc-web 兼容。
-- 不支持 Proxy Protocol。
+- 不支持 inbound `PROXY protocol` v2，也不支持向 upstream 发送 `PROXY protocol`。
 - 当前产品目标不是其他成熟入口代理的全量语义兼容实现。
 
 ### 运维与发布边界
@@ -727,6 +728,8 @@
 
 ### Week 7：部署兼容性补强
 
+状态：`✅`
+
 目标：
 
 - 补齐真实部署里最常见、最容易卡住替代落地的兼容能力。
@@ -748,6 +751,13 @@
 
 - upstream 指向域名时，后端 IP 变化不需要靠手动重启追踪。
 - LB / CDN 后置部署中，客户端真实地址链路可稳定保留。
+- 文档里已经写清默认安全边界，而不是只写“支持”。
+
+实现说明：
+
+- 当前已支持 hostname upstream peer；新建 upstream 连接时会重新通过系统 resolver 解析域名。
+- 已建立或池化中的旧连接仍遵循连接池生命周期，不做强制中断。
+- 当前已支持 listener 级 inbound `PROXY protocol` v1，并与 `trusted_proxies` / `X-Forwarded-For` 的真实地址判定链路打通。
 
 ### Week 8：迁移体验、性能基线与发布收口
 

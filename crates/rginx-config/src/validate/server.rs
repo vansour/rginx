@@ -10,6 +10,7 @@ pub(super) fn validate_server(server: &ServerConfig) -> Result<()> {
     validate_listener_like(ListenerLikeRef {
         owner_label: "server",
         listen: server.listen.as_deref(),
+        proxy_protocol: server.proxy_protocol,
         trusted_proxies: &server.trusted_proxies,
         max_headers: server.max_headers,
         max_request_body_bytes: server.max_request_body_bytes,
@@ -63,6 +64,7 @@ pub(super) fn validate_listeners(
         validate_listener_like(ListenerLikeRef {
             owner_label: &owner,
             listen: Some(listener.listen.as_str()),
+            proxy_protocol: listener.proxy_protocol,
             trusted_proxies: &listener.trusted_proxies,
             max_headers: listener.max_headers,
             max_request_body_bytes: listener.max_request_body_bytes,
@@ -117,6 +119,7 @@ pub(super) fn validate_server_names(
 struct ListenerLikeRef<'a> {
     owner_label: &'a str,
     listen: Option<&'a str>,
+    proxy_protocol: Option<bool>,
     trusted_proxies: &'a [String],
     max_headers: Option<u64>,
     max_request_body_bytes: Option<u64>,
@@ -136,6 +139,8 @@ fn validate_listener_like(config: ListenerLikeRef<'_>) -> Result<()> {
             return Err(Error::Config(format!("{} listen must not be empty", config.owner_label)));
         }
     }
+
+    let _ = config.proxy_protocol;
 
     for value in config.trusted_proxies {
         validate_trusted_proxy_with_owner(config.owner_label, value)?;

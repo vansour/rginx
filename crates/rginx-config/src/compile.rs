@@ -132,6 +132,7 @@ mod tests {
             listeners: Vec::new(),
             server: ServerConfig {
                 listen: Some("127.0.0.1:8080".to_string()),
+                proxy_protocol: None,
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -244,6 +245,7 @@ mod tests {
             listeners: Vec::new(),
             server: ServerConfig {
                 listen: Some("127.0.0.1:8080".to_string()),
+                proxy_protocol: None,
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -334,6 +336,7 @@ mod tests {
             listeners: Vec::new(),
             server: ServerConfig {
                 listen: Some("127.0.0.1:8080".to_string()),
+                proxy_protocol: None,
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -429,6 +432,7 @@ mod tests {
             listeners: Vec::new(),
             server: ServerConfig {
                 listen: Some("127.0.0.1:8080".to_string()),
+                proxy_protocol: None,
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -520,6 +524,7 @@ mod tests {
             listeners: Vec::new(),
             server: ServerConfig {
                 listen: Some("127.0.0.1:8080".to_string()),
+                proxy_protocol: None,
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -626,6 +631,7 @@ mod tests {
             listeners: Vec::new(),
             server: ServerConfig {
                 listen: Some("127.0.0.1:8080".to_string()),
+                proxy_protocol: None,
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -732,6 +738,7 @@ mod tests {
             listeners: Vec::new(),
             server: ServerConfig {
                 listen: Some("127.0.0.1:8080".to_string()),
+                proxy_protocol: None,
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -825,6 +832,7 @@ mod tests {
             listeners: Vec::new(),
             server: ServerConfig {
                 listen: Some("127.0.0.1:8080".to_string()),
+                proxy_protocol: None,
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -921,6 +929,7 @@ mod tests {
             listeners: Vec::new(),
             server: ServerConfig {
                 listen: Some("127.0.0.1:8080".to_string()),
+                proxy_protocol: None,
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -1028,6 +1037,7 @@ mod tests {
             listeners: Vec::new(),
             server: ServerConfig {
                 listen: Some("127.0.0.1:8080".to_string()),
+                proxy_protocol: None,
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -1112,6 +1122,7 @@ mod tests {
             listeners: Vec::new(),
             server: ServerConfig {
                 listen: Some("127.0.0.1:8080".to_string()),
+                proxy_protocol: None,
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -1191,6 +1202,7 @@ mod tests {
             listeners: Vec::new(),
             server: ServerConfig {
                 listen: Some("127.0.0.1:8080".to_string()),
+                proxy_protocol: None,
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -1239,6 +1251,7 @@ mod tests {
             listeners: Vec::new(),
             server: ServerConfig {
                 listen: Some("127.0.0.1:8080".to_string()),
+                proxy_protocol: None,
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -1289,6 +1302,7 @@ mod tests {
             listeners: Vec::new(),
             server: ServerConfig {
                 listen: Some("127.0.0.1:8080".to_string()),
+                proxy_protocol: None,
                 server_names: vec!["default.example.com".to_string()],
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -1372,6 +1386,7 @@ mod tests {
             listeners: Vec::new(),
             server: ServerConfig {
                 listen: Some("127.0.0.1:8080".to_string()),
+                proxy_protocol: None,
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -1428,6 +1443,7 @@ mod tests {
             listeners: Vec::new(),
             server: ServerConfig {
                 listen: Some("127.0.0.1:8080".to_string()),
+                proxy_protocol: None,
                 server_names: Vec::new(),
                 trusted_proxies: vec!["10.0.0.0/8".to_string(), "127.0.0.1".to_string()],
                 keep_alive: None,
@@ -1477,6 +1493,7 @@ mod tests {
             listeners: Vec::new(),
             server: ServerConfig {
                 listen: Some("127.0.0.1:8080".to_string()),
+                proxy_protocol: None,
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: Some(false),
@@ -1535,6 +1552,7 @@ mod tests {
             listeners: Vec::new(),
             server: ServerConfig {
                 listen: Some("127.0.0.1:8080".to_string()),
+                proxy_protocol: None,
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -1607,6 +1625,7 @@ mod tests {
             listeners: Vec::new(),
             server: ServerConfig {
                 listen: Some("127.0.0.1:8080".to_string()),
+                proxy_protocol: None,
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -1654,6 +1673,7 @@ mod tests {
             listeners: vec![
                 ListenerConfig {
                     name: "http".to_string(),
+                    proxy_protocol: None,
                     listen: "127.0.0.1:8080".to_string(),
                     trusted_proxies: Vec::new(),
                     keep_alive: Some(true),
@@ -1668,6 +1688,7 @@ mod tests {
                 },
                 ListenerConfig {
                     name: "https".to_string(),
+                    proxy_protocol: None,
                     listen: "127.0.0.1:8443".to_string(),
                     trusted_proxies: Vec::new(),
                     keep_alive: Some(true),
@@ -1683,6 +1704,7 @@ mod tests {
             ],
             server: ServerConfig {
                 listen: None,
+                proxy_protocol: None,
                 server_names: vec!["example.com".to_string()],
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
