@@ -47,6 +47,7 @@
 - `Ctrl-C` / `SIGTERM` 平滑退出
 - `SIGHUP` 热重载配置
 - `rginx check` 配置检查
+- 本地只读运维面：`rginx status` / `rginx counters` / `rginx peers`（UDS）
 
 ## 专项反向代理替代合同
 
@@ -150,6 +151,7 @@ curl -fsSL https://raw.githubusercontent.com/vansour/rginx/main/scripts/install.
 rginx check
 rginx -t
 rginx
+rginx status
 ```
 
 ### 一键卸载
@@ -187,6 +189,7 @@ cargo run -p rginx -- -t --config configs/rginx.ron
 cargo build -p rginx
 ./target/debug/rginx --config configs/rginx.ron
 ./target/debug/rginx check --config configs/rginx.ron
+./target/debug/rginx status --config configs/rginx.ron
 ```
 
 ### 仓库默认配置
@@ -941,6 +944,39 @@ rginx -s quit
 rginx -s stop
 ```
 
+### 本地只读状态
+
+`rginx` 不再暴露公网 HTTP 管理路由；当前版本线的本地只读运维入口改为 UDS + CLI。
+
+常用命令：
+
+```bash
+rginx status
+rginx counters
+rginx peers
+```
+
+默认安装路径下，运行时会使用：
+
+```text
+/run/rginx/admin.sock
+```
+
+如果你使用自定义配置路径，例如 `/tmp/site.ron`，对应的本地 admin socket 会落在：
+
+```text
+/tmp/site.admin.sock
+```
+
+这条本地只读面当前提供四类查询能力：
+
+- `GetStatus`
+- `GetCounters`
+- `GetPeerHealth`
+- `GetRevision`
+
+它的目标是服务本机 CLI 和后续 `edge-agent` 集成，而不是重新引入远程管理面。
+
 ## 当前限制
 
 - 明文 HTTP/2（h2c）入站仍未支持
@@ -951,6 +987,7 @@ rginx -s stop
 - 配置变更当前只支持“修改本地配置文件 + `rginx check` + reload”，不提供远程动态配置 API 或 partial patch
 - `SO_REUSEPORT` 多进程 worker 形态当前仍未支持
 - 热重载不能切换监听地址、`runtime.worker_threads` 或 `runtime.accept_workers`
+- 本地只读运维面当前只提供 UDS + CLI，不提供远程查询协议、分页或 watch 流
 
 更细致的能力矩阵、工程演进观察和建议阶段规划，见 [ROADMAP.md](ROADMAP.md)。
 

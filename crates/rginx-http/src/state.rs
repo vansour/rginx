@@ -2,10 +2,11 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use http::StatusCode;
 use rginx_core::{ConfigSnapshot, Error, Result};
+use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, watch};
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
@@ -27,7 +28,7 @@ struct PreparedState {
     tls_acceptor: Option<TlsAcceptor>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HttpCountersSnapshot {
     pub downstream_connections_accepted: u64,
     pub downstream_connections_rejected: u64,
@@ -40,19 +41,19 @@ pub struct HttpCountersSnapshot {
     pub downstream_responses_5xx: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReloadOutcomeSnapshot {
     Success { revision: u64 },
     Failure { error: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReloadResultSnapshot {
-    pub finished_at: SystemTime,
+    pub finished_at_unix_ms: u64,
     pub outcome: ReloadOutcomeSnapshot,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ReloadStatusSnapshot {
     pub attempts_total: u64,
     pub successes_total: u64,
@@ -60,7 +61,7 @@ pub struct ReloadStatusSnapshot {
     pub last_result: Option<ReloadResultSnapshot>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeStatusSnapshot {
     pub revision: u64,
     pub config_path: Option<PathBuf>,
@@ -274,7 +275,7 @@ impl SharedState {
         history.attempts_total += 1;
         history.successes_total += 1;
         history.last_result = Some(ReloadResultSnapshot {
-            finished_at: SystemTime::now(),
+            finished_at_unix_ms: unix_time_ms(SystemTime::now()),
             outcome: ReloadOutcomeSnapshot::Success { revision },
         });
     }
@@ -285,7 +286,7 @@ impl SharedState {
         history.attempts_total += 1;
         history.failures_total += 1;
         history.last_result = Some(ReloadResultSnapshot {
-            finished_at: SystemTime::now(),
+            finished_at_unix_ms: unix_time_ms(SystemTime::now()),
             outcome: ReloadOutcomeSnapshot::Failure { error: error.into() },
         });
     }
@@ -402,6 +403,12 @@ impl ReloadHistory {
             last_result: self.last_result.clone(),
         }
     }
+}
+
+fn unix_time_ms(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
 }
 
 pub fn validate_config_transition(current: &ConfigSnapshot, next: &ConfigSnapshot) -> Result<()> {

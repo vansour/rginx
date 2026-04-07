@@ -57,8 +57,8 @@ const MAX_GRPC_TIMEOUT_DIGITS: usize = 8;
 
 pub use clients::{ProxyClient, ProxyClients};
 pub use forward::{DownstreamRequestOptions, forward_request};
-pub(crate) use health::UpstreamHealthSnapshot;
 pub use health::probe_upstream_peer;
+pub use health::{PeerHealthSnapshot, UpstreamHealthSnapshot};
 
 use grpc_web::GrpcWebMode;
 

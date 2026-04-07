@@ -4,10 +4,16 @@ mod cli;
 compile_error!("rginx supports Linux only");
 
 use std::fs;
+use std::io::{BufReader, Read, Write};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, anyhow};
 use clap::Parser;
+use rginx_runtime::admin::{
+    AdminRequest, AdminResponse, RevisionSnapshot, admin_socket_path_for_config,
+};
 
 use crate::cli::{Cli, Command, SignalCommand, pid_path_for_config};
 
@@ -25,6 +31,24 @@ fn main() -> anyhow::Result<()> {
     if let Some(signal) = cli.signal {
         send_signal_from_pid_file(&pid_path_for_config(&cli.config), signal)?;
         return Ok(());
+    }
+
+    if let Some(command) = cli.command {
+        match command {
+            Command::Status => {
+                print_admin_status(&cli.config)?;
+                return Ok(());
+            }
+            Command::Counters => {
+                print_admin_counters(&cli.config)?;
+                return Ok(());
+            }
+            Command::Peers => {
+                print_admin_peers(&cli.config)?;
+                return Ok(());
+            }
+            Command::Check => {}
+        }
     }
 
     rginx_observability::init_logging()
@@ -84,6 +108,9 @@ fn main() -> anyhow::Result<()> {
                 .context("runtime exited with an error")
         }
         Some(Command::Check) => unreachable!("`check` subcommand and `-t` conflict at clap level"),
+        Some(Command::Status | Command::Counters | Command::Peers) => {
+            unreachable!("admin subcommands return before runtime initialization")
+        }
     }
 }
 
@@ -156,5 +183,161 @@ fn signal_name(signal: SignalCommand) -> &'static str {
         SignalCommand::Reload => "reload",
         SignalCommand::Stop => "stop",
         SignalCommand::Quit => "quit",
+    }
+}
+
+fn print_admin_status(config_path: &Path) -> anyhow::Result<()> {
+    match query_admin_socket(config_path, AdminRequest::GetStatus)? {
+        AdminResponse::Status(status) => {
+            println!("revision={}", status.revision);
+            println!(
+                "config_path={}",
+                status
+                    .config_path
+                    .as_deref()
+                    .map(Path::display)
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "-".to_string())
+            );
+            println!("listen={}", status.listen_addr);
+            println!(
+                "worker_threads={}",
+                status
+                    .worker_threads
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "auto".to_string())
+            );
+            println!("accept_workers={}", status.accept_workers);
+            println!("vhosts={}", status.total_vhosts);
+            println!("routes={}", status.total_routes);
+            println!("upstreams={}", status.total_upstreams);
+            println!("tls={}", if status.tls_enabled { "enabled" } else { "disabled" });
+            println!("active_connections={}", status.active_connections);
+            println!("reload_attempts={}", status.reload.attempts_total);
+            println!("reload_successes={}", status.reload.successes_total);
+            println!("reload_failures={}", status.reload.failures_total);
+            println!("last_reload={}", render_last_reload(status.reload.last_result.as_ref()));
+            Ok(())
+        }
+        response => Err(unexpected_admin_response("status", &response)),
+    }
+}
+
+fn print_admin_counters(config_path: &Path) -> anyhow::Result<()> {
+    match query_admin_socket(config_path, AdminRequest::GetCounters)? {
+        AdminResponse::Counters(counters) => {
+            println!(
+                "downstream_connections_accepted_total={}",
+                counters.downstream_connections_accepted
+            );
+            println!(
+                "downstream_connections_rejected_total={}",
+                counters.downstream_connections_rejected
+            );
+            println!("downstream_requests_total={}", counters.downstream_requests);
+            println!("downstream_responses_total={}", counters.downstream_responses);
+            println!("downstream_responses_1xx_total={}", counters.downstream_responses_1xx);
+            println!("downstream_responses_2xx_total={}", counters.downstream_responses_2xx);
+            println!("downstream_responses_3xx_total={}", counters.downstream_responses_3xx);
+            println!("downstream_responses_4xx_total={}", counters.downstream_responses_4xx);
+            println!("downstream_responses_5xx_total={}", counters.downstream_responses_5xx);
+            Ok(())
+        }
+        response => Err(unexpected_admin_response("counters", &response)),
+    }
+}
+
+fn print_admin_peers(config_path: &Path) -> anyhow::Result<()> {
+    match query_admin_socket(config_path, AdminRequest::GetPeerHealth)? {
+        AdminResponse::PeerHealth(upstreams) => {
+            for upstream in upstreams {
+                println!(
+                    "upstream={} unhealthy_after_failures={} cooldown_ms={} active_health_enabled={}",
+                    upstream.upstream_name,
+                    upstream.unhealthy_after_failures,
+                    upstream.cooldown_ms,
+                    upstream.active_health_enabled
+                );
+                for peer in upstream.peers {
+                    println!(
+                        "  peer={} backup={} weight={} available={} passive_failures={} passive_cooldown_remaining_ms={} passive_pending_recovery={} active_unhealthy={} active_successes={} active_requests={}",
+                        peer.peer_url,
+                        peer.backup,
+                        peer.weight,
+                        peer.available,
+                        peer.passive_consecutive_failures,
+                        peer.passive_cooldown_remaining_ms
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "-".to_string()),
+                        peer.passive_pending_recovery,
+                        peer.active_unhealthy,
+                        peer.active_consecutive_successes,
+                        peer.active_requests,
+                    );
+                }
+            }
+            Ok(())
+        }
+        response => Err(unexpected_admin_response("peers", &response)),
+    }
+}
+
+fn query_admin_socket(config_path: &Path, request: AdminRequest) -> anyhow::Result<AdminResponse> {
+    let socket_path = admin_socket_path_for_config(config_path);
+    let mut stream = UnixStream::connect(&socket_path)
+        .with_context(|| format!("failed to connect to admin socket {}", socket_path.display()))?;
+    serde_json::to_writer(&mut stream, &request)
+        .context("failed to encode admin socket request")?;
+    stream.write_all(b"\n").context("failed to terminate admin socket request")?;
+    stream
+        .shutdown(std::net::Shutdown::Write)
+        .context("failed to shutdown admin socket write side")?;
+
+    let mut response = String::new();
+    BufReader::new(stream)
+        .read_to_string(&mut response)
+        .context("failed to read admin socket response")?;
+    let response: AdminResponse =
+        serde_json::from_str(response.trim()).context("failed to decode admin socket response")?;
+    match response {
+        AdminResponse::Error { message } => Err(anyhow!("admin socket error: {message}")),
+        response => Ok(response),
+    }
+}
+
+fn unexpected_admin_response(command: &str, response: &AdminResponse) -> anyhow::Error {
+    anyhow!("unexpected admin response for `{command}`: {}", admin_response_kind(response))
+}
+
+fn admin_response_kind(response: &AdminResponse) -> &'static str {
+    match response {
+        AdminResponse::Status(_) => "status",
+        AdminResponse::Counters(_) => "counters",
+        AdminResponse::PeerHealth(_) => "peer_health",
+        AdminResponse::Revision(RevisionSnapshot { .. }) => "revision",
+        AdminResponse::Error { .. } => "error",
+    }
+}
+
+fn render_last_reload(result: Option<&rginx_http::ReloadResultSnapshot>) -> String {
+    let Some(result) = result else {
+        return "-".to_string();
+    };
+
+    let finished_at = result
+        .finished_at_unix_ms
+        .checked_div(1000)
+        .and_then(|seconds| UNIX_EPOCH.checked_add(std::time::Duration::from_secs(seconds)))
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs().to_string())
+        .unwrap_or_else(|| result.finished_at_unix_ms.to_string());
+
+    match &result.outcome {
+        rginx_http::ReloadOutcomeSnapshot::Success { revision } => {
+            format!("success revision={revision} finished_at_unix_s={finished_at}")
+        }
+        rginx_http::ReloadOutcomeSnapshot::Failure { error } => {
+            format!("failure error={error:?} finished_at_unix_s={finished_at}")
+        }
     }
 }

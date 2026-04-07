@@ -236,7 +236,8 @@
 | `SIGHUP` 热重载 | ✅ | 支持。 |
 | 安装 / 卸载脚本 | ✅ | 仓库内已提供。 |
 | Release workflow | ✅ | 已有准备脚本和 release 文档。 |
-| `rginx status` 本地命令 | ❌ | 未实现。 |
+| `rginx status` 本地命令 | ✅ | 已通过本地 UDS 只读接口实现。 |
+| `rginx counters` / `rginx peers` | ✅ | 已通过本地 UDS 只读接口实现。 |
 | `/status` JSON | ❌ | 已移除。 |
 | `/metrics` Prometheus | ❌ | 已移除，指标仅通过 access log 观察。 |
 | 内建 systemd / service unit | ❌ | 当前不内置。 |
@@ -599,6 +600,8 @@
 - 状态模型足够支撑后续 CLI 和 `edge-agent` 集成。
 
 ### Week 3：本地只读运维面落地
+
+状态：`✅`
 
 目标：
 

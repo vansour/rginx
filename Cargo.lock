@@ -754,6 +754,7 @@ dependencies = [
  "rginx-core",
  "rustls",
  "rustls-pemfile",
+ "serde",
  "tokio",
  "tokio-rustls",
  "tracing",
@@ -773,6 +774,8 @@ dependencies = [
  "rginx-config",
  "rginx-core",
  "rginx-http",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
 ]

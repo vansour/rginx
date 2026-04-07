@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod bootstrap;
 mod health;
 pub mod reload;

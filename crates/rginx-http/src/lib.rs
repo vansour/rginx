@@ -9,5 +9,9 @@ pub mod state;
 mod timeout;
 mod tls;
 
+pub use proxy::{PeerHealthSnapshot, UpstreamHealthSnapshot};
 pub use server::serve;
-pub use state::SharedState;
+pub use state::{
+    HttpCountersSnapshot, ReloadOutcomeSnapshot, ReloadResultSnapshot, ReloadStatusSnapshot,
+    RuntimeStatusSnapshot, SharedState,
+};
