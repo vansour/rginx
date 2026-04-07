@@ -83,7 +83,7 @@ python3 scripts/run-benchmark-matrix.py \
 
 这份 Week 8 收口时已经记录了一次本地基线，口径如下：
 
-- candidate line: `v0.1.2-rc.8`
+- commit / tag: `98eb3ce` / `v0.1.2-rc.8`
 - host shape: `16` vCPU, `Linux 6.12.74+deb13+1-cloud-amd64 x86_64`
 - client tool: `curl 8.14.1` with `HTTP2`
 - benchmark target: 本地双 listener `Return(200, "ok\n")` 配置
