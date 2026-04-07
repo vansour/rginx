@@ -3,17 +3,20 @@ use std::path::Path;
 use std::time::Duration;
 
 use ipnet::IpNet;
-use rginx_core::{AccessLogFormat, Error, Result, Server, ServerTls};
+use rginx_core::{AccessLogFormat, Error, Listener, Result, Server, ServerTls};
 
-use crate::model::{ServerConfig, ServerTlsConfig};
+use crate::model::{ListenerConfig, ServerConfig, ServerTlsConfig};
 
 pub(super) struct CompiledServer {
-    pub server: Server,
+    pub listener: Listener,
     pub server_names: Vec<String>,
-    pub server_tls: Option<ServerTls>,
 }
 
-pub(super) fn compile_server(server: ServerConfig, base_dir: &Path) -> Result<CompiledServer> {
+pub(super) fn compile_legacy_server(
+    server: ServerConfig,
+    base_dir: &Path,
+    any_vhost_tls: bool,
+) -> Result<CompiledServer> {
     let ServerConfig {
         listen,
         server_names,
@@ -29,24 +32,83 @@ pub(super) fn compile_server(server: ServerConfig, base_dir: &Path) -> Result<Co
         tls,
     } = server;
 
-    let server_tls = compile_server_tls(tls, base_dir)?;
+    let listen = listen.expect("legacy server listen should be validated before compile");
+    let compiled = compile_server_fields(
+        ServerFieldConfig {
+            listen,
+            trusted_proxies,
+            keep_alive,
+            max_headers,
+            max_request_body_bytes,
+            max_connections,
+            header_read_timeout_secs,
+            request_body_read_timeout_secs,
+            response_write_timeout_secs,
+            access_log_format,
+            tls,
+        },
+        base_dir,
+    )?;
+
     Ok(CompiledServer {
-        server: Server {
-            listen_addr: listen.parse()?,
-            trusted_proxies: compile_trusted_proxies(trusted_proxies)?,
-            keep_alive: keep_alive.unwrap_or(true),
-            max_headers: compile_max_headers(max_headers)?,
-            max_request_body_bytes: compile_max_request_body_bytes(max_request_body_bytes)?,
-            max_connections: compile_max_connections(max_connections)?,
-            header_read_timeout: header_read_timeout_secs.map(Duration::from_secs),
-            request_body_read_timeout: request_body_read_timeout_secs.map(Duration::from_secs),
-            response_write_timeout: response_write_timeout_secs.map(Duration::from_secs),
-            access_log_format: compile_access_log_format(access_log_format)?,
-            tls: server_tls.clone(),
+        listener: Listener {
+            id: "default".to_string(),
+            name: "default".to_string(),
+            server: compiled.server,
+            tls_termination_enabled: compiled.server_tls.is_some() || any_vhost_tls,
         },
         server_names,
-        server_tls,
     })
+}
+
+pub(super) fn compile_listeners(
+    listeners: Vec<ListenerConfig>,
+    base_dir: &Path,
+) -> Result<Vec<Listener>> {
+    listeners
+        .into_iter()
+        .enumerate()
+        .map(|(index, listener)| {
+            let ListenerConfig {
+                name,
+                listen,
+                trusted_proxies,
+                keep_alive,
+                max_headers,
+                max_request_body_bytes,
+                max_connections,
+                header_read_timeout_secs,
+                request_body_read_timeout_secs,
+                response_write_timeout_secs,
+                access_log_format,
+                tls,
+            } = listener;
+
+            let compiled = compile_server_fields(
+                ServerFieldConfig {
+                    listen,
+                    trusted_proxies,
+                    keep_alive,
+                    max_headers,
+                    max_request_body_bytes,
+                    max_connections,
+                    header_read_timeout_secs,
+                    request_body_read_timeout_secs,
+                    response_write_timeout_secs,
+                    access_log_format,
+                    tls,
+                },
+                base_dir,
+            )?;
+
+            Ok(Listener {
+                id: format!("listeners[{index}]"),
+                name,
+                server: compiled.server,
+                tls_termination_enabled: compiled.server_tls.is_some(),
+            })
+        })
+        .collect()
 }
 
 pub(super) fn compile_server_tls(
@@ -74,6 +136,62 @@ pub(super) fn compile_server_tls(
     }
 
     Ok(Some(ServerTls { cert_path, key_path }))
+}
+
+struct CompiledServerFields {
+    server: Server,
+    server_tls: Option<ServerTls>,
+}
+
+struct ServerFieldConfig {
+    listen: String,
+    trusted_proxies: Vec<String>,
+    keep_alive: Option<bool>,
+    max_headers: Option<u64>,
+    max_request_body_bytes: Option<u64>,
+    max_connections: Option<u64>,
+    header_read_timeout_secs: Option<u64>,
+    request_body_read_timeout_secs: Option<u64>,
+    response_write_timeout_secs: Option<u64>,
+    access_log_format: Option<String>,
+    tls: Option<ServerTlsConfig>,
+}
+
+fn compile_server_fields(
+    config: ServerFieldConfig,
+    base_dir: &Path,
+) -> Result<CompiledServerFields> {
+    let ServerFieldConfig {
+        listen,
+        trusted_proxies,
+        keep_alive,
+        max_headers,
+        max_request_body_bytes,
+        max_connections,
+        header_read_timeout_secs,
+        request_body_read_timeout_secs,
+        response_write_timeout_secs,
+        access_log_format,
+        tls,
+    } = config;
+
+    let server_tls = compile_server_tls(tls, base_dir)?;
+    Ok(CompiledServerFields {
+        server: Server {
+            listen_addr: listen.parse()?,
+            trusted_proxies: compile_trusted_proxies(trusted_proxies)?,
+            keep_alive: keep_alive.unwrap_or(true),
+            max_headers: compile_max_headers(max_headers)?,
+            max_request_body_bytes: compile_max_request_body_bytes(max_request_body_bytes)?,
+            max_connections: compile_max_connections(max_connections)?,
+            header_read_timeout: header_read_timeout_secs.map(Duration::from_secs),
+            request_body_read_timeout: request_body_read_timeout_secs.map(Duration::from_secs),
+            response_write_timeout: response_write_timeout_secs.map(Duration::from_secs),
+            access_log_format: compile_access_log_format(access_log_format)?,
+            tls: server_tls.clone(),
+        },
+        server_tls,
+    })
 }
 
 fn compile_max_headers(max_headers: Option<u64>) -> Result<Option<usize>> {

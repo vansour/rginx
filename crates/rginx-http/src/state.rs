@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -5,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use http::StatusCode;
-use rginx_core::{ConfigSnapshot, Error, Result};
+use rginx_core::{ConfigSnapshot, Error, Listener, Result};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, watch};
 use tokio::task::JoinHandle;
@@ -25,7 +26,7 @@ pub struct ActiveState {
 struct PreparedState {
     config: Arc<ConfigSnapshot>,
     clients: ProxyClients,
-    tls_acceptor: Option<TlsAcceptor>,
+    listener_tls_acceptors: HashMap<String, Option<TlsAcceptor>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,7 +103,8 @@ pub struct SharedState {
     inner: Arc<RwLock<ActiveState>>,
     revisions: watch::Sender<u64>,
     rate_limiters: RateLimiters,
-    tls_acceptor: Arc<RwLock<Option<TlsAcceptor>>>,
+    listener_tls_acceptors: Arc<RwLock<HashMap<String, Option<TlsAcceptor>>>>,
+    listener_active_connections: Arc<HashMap<String, Arc<AtomicUsize>>>,
     background_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
     active_connections: Arc<AtomicUsize>,
     counters: Arc<HttpCounters>,
@@ -113,11 +115,13 @@ pub struct SharedState {
 
 pub struct ActiveConnectionGuard {
     active_connections: Arc<AtomicUsize>,
+    listener_active_connections: Arc<AtomicUsize>,
 }
 
 impl Drop for ActiveConnectionGuard {
     fn drop(&mut self) {
         self.active_connections.fetch_sub(1, Ordering::AcqRel);
+        self.listener_active_connections.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -135,6 +139,12 @@ impl SharedState {
         let revision = 0u64;
         let (revisions, _rx) = watch::channel(revision);
         let rate_limiters = RateLimiters::default();
+        let listener_active_connections = prepared
+            .config
+            .listeners
+            .iter()
+            .map(|listener| (listener.id.clone(), Arc::new(AtomicUsize::new(0))))
+            .collect::<HashMap<_, _>>();
 
         Ok(Self {
             inner: Arc::new(RwLock::new(ActiveState {
@@ -144,7 +154,8 @@ impl SharedState {
             })),
             revisions,
             rate_limiters,
-            tls_acceptor: Arc::new(RwLock::new(prepared.tls_acceptor)),
+            listener_tls_acceptors: Arc::new(RwLock::new(prepared.listener_tls_acceptors)),
+            listener_active_connections: Arc::new(listener_active_connections),
             background_tasks: Arc::new(Mutex::new(Vec::new())),
             active_connections: Arc::new(AtomicUsize::new(0)),
             counters: Arc::new(HttpCounters::default()),
@@ -164,6 +175,10 @@ impl SharedState {
 
     pub async fn current_revision(&self) -> u64 {
         self.inner.read().await.revision
+    }
+
+    pub async fn current_listener(&self, listener_id: &str) -> Option<Listener> {
+        self.inner.read().await.config.listener(listener_id).cloned()
     }
 
     pub fn config_path(&self) -> Option<&PathBuf> {
@@ -211,28 +226,44 @@ impl SharedState {
         self.inner.read().await.clients.peer_health_snapshot()
     }
 
-    pub fn try_acquire_connection(&self, limit: Option<usize>) -> Option<ActiveConnectionGuard> {
+    pub fn try_acquire_connection(
+        &self,
+        listener_id: &str,
+        limit: Option<usize>,
+    ) -> Option<ActiveConnectionGuard> {
+        let listener_active_connections =
+            self.listener_active_connections.get(listener_id)?.clone();
         loop {
-            let current = self.active_connections.load(Ordering::Acquire);
+            let current = listener_active_connections.load(Ordering::Acquire);
             if limit.is_some_and(|limit| current >= limit) {
                 return None;
             }
 
-            if self
-                .active_connections
+            if listener_active_connections
                 .compare_exchange_weak(current, current + 1, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
+                self.active_connections.fetch_add(1, Ordering::AcqRel);
                 return Some(ActiveConnectionGuard {
                     active_connections: self.active_connections.clone(),
+                    listener_active_connections,
                 });
             }
         }
     }
 
-    pub fn retain_connection_slot(&self) -> ActiveConnectionGuard {
+    pub fn retain_connection_slot(&self, listener_id: &str) -> ActiveConnectionGuard {
+        let listener_active_connections = self
+            .listener_active_connections
+            .get(listener_id)
+            .expect("listener id should exist while retaining a connection slot")
+            .clone();
+        listener_active_connections.fetch_add(1, Ordering::AcqRel);
         self.active_connections.fetch_add(1, Ordering::AcqRel);
-        ActiveConnectionGuard { active_connections: self.active_connections.clone() }
+        ActiveConnectionGuard {
+            active_connections: self.active_connections.clone(),
+            listener_active_connections,
+        }
     }
 
     pub(crate) fn record_connection_accepted(&self) {
@@ -291,8 +322,8 @@ impl SharedState {
         });
     }
 
-    pub async fn tls_acceptor(&self) -> Option<TlsAcceptor> {
-        self.tls_acceptor.read().await.clone()
+    pub async fn tls_acceptor(&self, listener_id: &str) -> Option<TlsAcceptor> {
+        self.listener_tls_acceptors.read().await.get(listener_id).cloned().flatten()
     }
 
     pub async fn replace(&self, config: ConfigSnapshot) -> Result<Arc<ConfigSnapshot>> {
@@ -316,7 +347,7 @@ impl SharedState {
             next_revision
         };
 
-        *self.tls_acceptor.write().await = prepared.tls_acceptor;
+        *self.listener_tls_acceptors.write().await = prepared.listener_tls_acceptors;
         let _ = self.revisions.send(next_revision);
 
         prepared.config
@@ -369,9 +400,21 @@ impl SharedState {
 fn prepare_state(config: ConfigSnapshot) -> Result<PreparedState> {
     let config = Arc::new(config);
     let clients = ProxyClients::from_config(config.as_ref())?;
-    let tls_acceptor = build_tls_acceptor(&config.default_vhost, &config.vhosts)?;
+    let listener_tls_acceptors = config
+        .listeners
+        .iter()
+        .map(|listener| {
+            let tls_acceptor = build_tls_acceptor(
+                listener.server.tls.as_ref(),
+                listener.tls_enabled(),
+                &config.default_vhost,
+                &config.vhosts,
+            )?;
+            Ok((listener.id.clone(), tls_acceptor))
+        })
+        .collect::<Result<HashMap<_, _>>>()?;
 
-    Ok(PreparedState { config, clients, tls_acceptor })
+    Ok(PreparedState { config, clients, listener_tls_acceptors })
 }
 
 impl HttpCounters {
@@ -412,11 +455,30 @@ fn unix_time_ms(time: SystemTime) -> u64 {
 }
 
 pub fn validate_config_transition(current: &ConfigSnapshot, next: &ConfigSnapshot) -> Result<()> {
-    if current.server.listen_addr != next.server.listen_addr {
+    if current.listeners.len() != next.listeners.len() {
         return Err(Error::Config(format!(
-            "reloading listen address from `{}` to `{}` is not supported; restart rginx instead",
-            current.server.listen_addr, next.server.listen_addr
+            "reloading listener count from `{}` to `{}` is not supported; restart rginx instead",
+            current.listeners.len(),
+            next.listeners.len()
         )));
+    }
+
+    for (current_listener, next_listener) in current.listeners.iter().zip(next.listeners.iter()) {
+        if current_listener.id != next_listener.id {
+            return Err(Error::Config(format!(
+                "reloading listener id from `{}` to `{}` is not supported; restart rginx instead",
+                current_listener.id, next_listener.id
+            )));
+        }
+
+        if current_listener.server.listen_addr != next_listener.server.listen_addr {
+            return Err(Error::Config(format!(
+                "reloading listen address for listener `{}` from `{}` to `{}` is not supported; restart rginx instead",
+                current_listener.id,
+                current_listener.server.listen_addr,
+                next_listener.server.listen_addr
+            )));
+        }
     }
 
     if current.runtime.worker_threads != next.runtime.worker_threads {
@@ -450,30 +512,37 @@ mod tests {
     use std::time::Duration;
 
     use http::StatusCode;
-    use rginx_core::{RuntimeSettings, Server, VirtualHost};
+    use rginx_core::{Listener, RuntimeSettings, Server, VirtualHost};
 
     use super::{ConfigSnapshot, ReloadOutcomeSnapshot, SharedState, validate_config_transition};
 
     fn snapshot(listen: &str) -> ConfigSnapshot {
+        let server = Server {
+            listen_addr: listen.parse().unwrap(),
+            trusted_proxies: Vec::new(),
+            keep_alive: true,
+            max_headers: None,
+            max_request_body_bytes: None,
+            max_connections: None,
+            header_read_timeout: None,
+            request_body_read_timeout: None,
+            response_write_timeout: None,
+            access_log_format: None,
+            tls: None,
+        };
         ConfigSnapshot {
             runtime: RuntimeSettings {
                 shutdown_timeout: Duration::from_secs(10),
                 worker_threads: None,
                 accept_workers: 1,
             },
-            server: Server {
-                listen_addr: listen.parse().unwrap(),
-                trusted_proxies: Vec::new(),
-                keep_alive: true,
-                max_headers: None,
-                max_request_body_bytes: None,
-                max_connections: None,
-                header_read_timeout: None,
-                request_body_read_timeout: None,
-                response_write_timeout: None,
-                access_log_format: None,
-                tls: None,
-            },
+            server: server.clone(),
+            listeners: vec![Listener {
+                id: "default".to_string(),
+                name: "default".to_string(),
+                server,
+                tls_termination_enabled: false,
+            }],
             default_vhost: VirtualHost {
                 id: "server".to_string(),
                 server_names: Vec::new(),

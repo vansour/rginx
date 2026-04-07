@@ -6,15 +6,28 @@ use super::grpc::{
 use super::response::{forbidden_response, full_body, text_response, too_many_requests_response};
 use super::*;
 
+#[derive(Clone, Copy)]
+struct ListenerRequestContext<'a> {
+    listener_id: &'a str,
+    listener_tls_enabled: bool,
+    request_body_read_timeout: Option<std::time::Duration>,
+    max_request_body_bytes: Option<usize>,
+}
+
 pub async fn handle(
     request: Request<Incoming>,
     state: SharedState,
     remote_addr: SocketAddr,
+    listener_id: &str,
 ) -> HttpResponse {
     let mut request = request;
     state.record_downstream_request();
     let active = state.snapshot().await;
     let config = active.config.clone();
+    let listener = config
+        .listener(listener_id)
+        .cloned()
+        .expect("listener id should remain available while serving requests");
     let method = request.method().clone();
     let request_version = request.version();
     let request_headers = request.headers().clone();
@@ -41,8 +54,8 @@ pub async fn handle(
     let grpc_request = grpc_request_metadata(&request_headers, &request_path);
     let route_match_context = route_match_context(&request_path, grpc_request);
     let started = Instant::now();
-    let client_address = resolve_client_address(request.headers(), &config.server, remote_addr);
-    let downstream_scheme = if config.tls_enabled() { "https" } else { "http" };
+    let client_address = resolve_client_address(request.headers(), &listener.server, remote_addr);
+    let downstream_scheme = if listener.tls_enabled() { "https" } else { "http" };
     let (selected_vhost_id, selected_route) = {
         let selected_vhost =
             select_vhost_for_request(config.as_ref(), request.headers(), request.uri());
@@ -56,6 +69,12 @@ pub async fn handle(
         .as_ref()
         .map(|route| route.id.clone())
         .unwrap_or_else(|| "__unmatched__".to_string());
+    let listener_context = ListenerRequestContext {
+        listener_id,
+        listener_tls_enabled: listener.tls_enabled(),
+        request_body_read_timeout: listener.server.request_body_read_timeout,
+        max_request_body_bytes: listener.server.max_request_body_bytes,
+    };
     let mut response = match selected_route {
         Some(route) => {
             if let Some(response) = authorize_route(&request_headers, &route, &client_address) {
@@ -70,6 +89,7 @@ pub async fn handle(
                     state.clone(),
                     route.action,
                     active,
+                    listener_context,
                     client_address.clone(),
                     &request_id,
                 )
@@ -267,24 +287,29 @@ async fn build_route_response(
     state: SharedState,
     action: RouteAction,
     active: ActiveState,
+    listener: ListenerRequestContext<'_>,
     client_address: ClientAddress,
     request_id: &str,
 ) -> HttpResponse {
     match &action {
         RouteAction::Proxy(proxy) => {
-            let downstream_proto = if active.config.tls_enabled() { "https" } else { "http" };
+            let downstream_proto = if listener.listener_tls_enabled { "https" } else { "http" };
             crate::proxy::forward_request(
                 state,
                 active.clients,
                 request,
+                listener.listener_id,
                 proxy,
                 client_address,
-                downstream_proto,
-                crate::proxy::DownstreamRequestOptions {
-                    request_body_read_timeout: active.config.server.request_body_read_timeout,
-                    max_request_body_bytes: active.config.server.max_request_body_bytes,
+                crate::proxy::DownstreamRequestContext {
+                    listener_id: listener.listener_id,
+                    downstream_proto,
+                    request_id,
+                    options: crate::proxy::DownstreamRequestOptions {
+                        request_body_read_timeout: listener.request_body_read_timeout,
+                        max_request_body_bytes: listener.max_request_body_bytes,
+                    },
                 },
-                request_id,
             )
             .await
         }

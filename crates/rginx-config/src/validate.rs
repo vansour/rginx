@@ -19,6 +19,7 @@ pub fn validate(config: &Config) -> Result<()> {
         return Err(Error::Config("at least one location must be configured".to_string()));
     }
     server::validate_server(&config.server)?;
+    server::validate_listeners(&config.listeners, &config.server, &config.servers)?;
     let upstream_names = upstream::validate_upstreams(&config.upstreams)?;
     route::validate_locations(None, &config.locations, &upstream_names)?;
 

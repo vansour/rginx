@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use rginx_core::{ConfigSnapshot, Error, Result};
+use rginx_core::{ConfigSnapshot, Error, Listener, Result};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
@@ -14,15 +14,13 @@ use crate::state::RuntimeState;
 pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
     let state = RuntimeState::new(config_path, config)?;
     let current_config = state.current_config().await;
-    let listeners = bind_server_listeners(
-        current_config.server.listen_addr,
-        current_config.runtime.accept_workers,
-    )
-    .await?;
+    let listeners =
+        bind_server_listeners(&current_config.listeners, current_config.runtime.accept_workers)
+            .await?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     tracing::info!(
-        listen = %current_config.server.listen_addr,
+        listeners = current_config.total_listener_count(),
         worker_threads = current_config.runtime.worker_threads,
         accept_workers = current_config.runtime.accept_workers,
         vhosts = current_config.total_vhost_count(),
@@ -32,10 +30,19 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
 
     let mut server_tasks = listeners
         .into_iter()
-        .enumerate()
-        .map(|(worker_index, listener)| {
-            tracing::info!(worker = worker_index, "starting accept worker");
-            tokio::spawn(rginx_http::serve(listener, state.http.clone(), shutdown_rx.clone()))
+        .map(|bound_listener| {
+            tracing::info!(
+                listener = %bound_listener.listener_name,
+                listen = %bound_listener.listen_addr,
+                worker = bound_listener.worker_index,
+                "starting accept worker"
+            );
+            tokio::spawn(rginx_http::serve(
+                bound_listener.listener,
+                bound_listener.listener_id,
+                state.http.clone(),
+                shutdown_rx.clone(),
+            ))
         })
         .collect::<Vec<_>>();
     let mut admin_task = tokio::spawn(admin::run(
@@ -51,7 +58,7 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
             Ok(result) => {
                 tracing::info!(
                     revision = result.revision,
-                    listen = %result.config.server.listen_addr,
+                    listeners = result.config.total_listener_count(),
                     vhosts = result.config.total_vhost_count(),
                     routes = result.config.total_route_count(),
                     upstreams = result.config.upstreams.len(),
@@ -118,19 +125,36 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
 }
 
 async fn bind_server_listeners(
-    listen_addr: std::net::SocketAddr,
+    listeners: &[Listener],
     accept_workers: usize,
-) -> Result<Vec<TcpListener>> {
-    let listener = TcpListener::bind(listen_addr).await?;
-    let std_listener = listener.into_std()?;
-    let mut listeners = Vec::with_capacity(accept_workers);
+) -> Result<Vec<BoundListener>> {
+    let mut bound_listeners = Vec::new();
 
-    for _ in 1..accept_workers {
-        listeners.push(TcpListener::from_std(std_listener.try_clone()?)?);
+    for listener in listeners {
+        let socket = TcpListener::bind(listener.server.listen_addr).await?;
+        let std_listener = socket.into_std()?;
+
+        for worker_index in 0..accept_workers {
+            let listener_socket = TcpListener::from_std(std_listener.try_clone()?)?;
+            bound_listeners.push(BoundListener {
+                listener: listener_socket,
+                listener_id: listener.id.clone(),
+                listener_name: listener.name.clone(),
+                listen_addr: listener.server.listen_addr,
+                worker_index,
+            });
+        }
     }
-    listeners.push(TcpListener::from_std(std_listener)?);
 
-    Ok(listeners)
+    Ok(bound_listeners)
+}
+
+struct BoundListener {
+    listener: TcpListener,
+    listener_id: String,
+    listener_name: String,
+    listen_addr: std::net::SocketAddr,
+    worker_index: usize,
 }
 
 async fn join_server_tasks(server_tasks: &mut [tokio::task::JoinHandle<Result<()>>]) -> Result<()> {

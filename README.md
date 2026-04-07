@@ -20,6 +20,7 @@
 
 - 基于 RON 配置文件启动反向代理
 - 单进程多 worker 运行时，支持可配置的 tokio worker 线程数与 accept worker 数
+- 支持多监听入口模型 `listeners: []`，并兼容旧 `server.listen` 单入口配置
 - `Exact("/foo")` / `Prefix("/api")` 两种路由匹配，并支持按 `grpc_service` / `grpc_method` 细分 gRPC 路由
 - `Proxy` / `Return` 两种处理器
 - 多上游节点轮询、加权与主备转发
@@ -102,6 +103,10 @@
 如果你想按周推进接下来的开发工作，优先看：
 
 - [ROADMAP.md](ROADMAP.md) 里的“8 周执行路线图”
+
+如果你想直接看 Week 4 产出的多监听设计稿，优先看：
+
+- [MULTI_LISTENER_MODEL_PLAN.md](MULTI_LISTENER_MODEL_PLAN.md)
 
 如果你想先跑起来，优先看本 README 里的“快速开始”和“配置结构”两节。
 
@@ -230,6 +235,49 @@ Config(
     servers: [],
 )
 ```
+
+除了这个兼容旧模型的写法，也支持显式多 listener 模型：
+
+```ron
+Config(
+    runtime: RuntimeConfig(
+        shutdown_timeout_secs: 10,
+    ),
+    listeners: [
+        ListenerConfig(
+            name: "http",
+            listen: "0.0.0.0:80",
+        ),
+        ListenerConfig(
+            name: "https",
+            listen: "0.0.0.0:443",
+            tls: Some(ServerTlsConfig(
+                cert_path: "/etc/rginx/certs/default.crt",
+                key_path: "/etc/rginx/certs/default.key",
+            )),
+        ),
+    ],
+    server: ServerConfig(
+        server_names: ["example.com"],
+    ),
+    upstreams: [],
+    locations: [
+        LocationConfig(
+            matcher: Exact("/"),
+            handler: Return(
+                status: 200,
+                location: "",
+                body: Some("ok\n"),
+            ),
+        ),
+    ],
+    servers: [],
+)
+```
+
+如果你想看多 listener 模型的字段归属、兼容编译路径和迁移示例，直接看：
+
+- [MULTI_LISTENER_MODEL_PLAN.md](MULTI_LISTENER_MODEL_PLAN.md)
 
 ### `include` 与环境变量
 
@@ -986,7 +1034,7 @@ rginx peers
 - 更完整的高级压缩策略当前仍未支持（目前只支持基础 br/gzip 协商）
 - 配置变更当前只支持“修改本地配置文件 + `rginx check` + reload”，不提供远程动态配置 API 或 partial patch
 - `SO_REUSEPORT` 多进程 worker 形态当前仍未支持
-- 热重载不能切换监听地址、`runtime.worker_threads` 或 `runtime.accept_workers`
+- 热重载不能切换监听地址、listener 集合、`runtime.worker_threads` 或 `runtime.accept_workers`
 - 本地只读运维面当前只提供 UDS + CLI，不提供远程查询协议、分页或 watch 流
 
 更细致的能力矩阵、工程演进观察和建议阶段规划，见 [ROADMAP.md](ROADMAP.md)。

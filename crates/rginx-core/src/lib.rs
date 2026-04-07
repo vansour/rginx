@@ -5,7 +5,7 @@ pub mod service;
 pub mod types;
 
 pub use config::{
-    AccessLogFormat, AccessLogValues, ActiveHealthCheck, ConfigSnapshot, GrpcRouteMatch,
+    AccessLogFormat, AccessLogValues, ActiveHealthCheck, ConfigSnapshot, GrpcRouteMatch, Listener,
     ProxyTarget, ReturnAction, Route, RouteAccessControl, RouteAction, RouteMatcher,
     RouteRateLimit, RuntimeSettings, Server, ServerTls, Upstream, UpstreamLoadBalance,
     UpstreamPeer, UpstreamProtocol, UpstreamSettings, UpstreamTls, VirtualHost,

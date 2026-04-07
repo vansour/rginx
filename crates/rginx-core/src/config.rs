@@ -23,6 +23,7 @@ pub use upstream::{
 pub struct ConfigSnapshot {
     pub runtime: RuntimeSettings,
     pub server: Server,
+    pub listeners: Vec<Listener>,
     pub default_vhost: VirtualHost,
     pub vhosts: Vec<VirtualHost>,
     pub upstreams: HashMap<String, Arc<Upstream>>,
@@ -38,8 +39,30 @@ impl ConfigSnapshot {
         1 + self.vhosts.len()
     }
 
+    pub fn total_listener_count(&self) -> usize {
+        self.listeners.len()
+    }
+
     pub fn tls_enabled(&self) -> bool {
-        self.default_vhost.tls.is_some() || self.vhosts.iter().any(|vhost| vhost.tls.is_some())
+        self.listeners.iter().any(Listener::tls_enabled)
+    }
+
+    pub fn listener(&self, id: &str) -> Option<&Listener> {
+        self.listeners.iter().find(|listener| listener.id == id)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Listener {
+    pub id: String,
+    pub name: String,
+    pub server: Server,
+    pub tls_termination_enabled: bool,
+}
+
+impl Listener {
+    pub fn tls_enabled(&self) -> bool {
+        self.tls_termination_enabled
     }
 }
 
