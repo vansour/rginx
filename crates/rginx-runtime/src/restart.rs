@@ -154,11 +154,15 @@ mod tests {
     use std::env;
     use std::net::{SocketAddr, TcpListener as StdTcpListener};
     use std::os::fd::AsRawFd;
+    use std::sync::Mutex;
 
     use super::{INHERITED_LISTENERS_ENV, InheritedListenerFd, take_inherited_listeners_from_env};
 
+    static INHERITED_LISTENERS_ENV_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn take_inherited_listeners_from_env_returns_empty_when_unset() {
+        let _guard = INHERITED_LISTENERS_ENV_LOCK.lock().expect("env lock should not be poisoned");
         unsafe {
             env::remove_var(INHERITED_LISTENERS_ENV);
         }
@@ -170,6 +174,7 @@ mod tests {
 
     #[test]
     fn take_inherited_listeners_from_env_parses_listener_map() {
+        let _guard = INHERITED_LISTENERS_ENV_LOCK.lock().expect("env lock should not be poisoned");
         let listener = StdTcpListener::bind(("127.0.0.1", 0)).expect("listener should bind");
         listener.set_nonblocking(true).expect("listener should support nonblocking mode");
         let listen_addr: SocketAddr = listener.local_addr().expect("listener addr should exist");
