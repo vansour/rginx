@@ -2,7 +2,7 @@
 
 `rginx` 的产品定义是：一个面向中小规模部署的 Rust 入口反向代理，稳定支持 TLS 终止、Host/Path 路由、上游代理、基础流量治理、健康检查、热重载和可观测性。
 
-当前正式发布线收口为 `v0.1.1`。当前最新预发布标签为 `v0.1.2-rc.7`，它作为 `v0.1.2` 的正式版候选线，已经覆盖最近一轮测试、迁移文档、benchmark / soak 基线和发布流程补强。
+当前正式发布线收口为 `v0.1.1`。当前最新预发布标签为 `v0.1.2-rc.8`，它作为 `v0.1.2` 的正式版候选线，已经覆盖最近一轮测试、迁移文档、benchmark / soak 基线和发布流程补强。
 
 当前明确限制、演进方向和发布前收口项见：
 
@@ -147,7 +147,7 @@
 curl -fsSL https://raw.githubusercontent.com/vansour/rginx/main/scripts/install.sh | bash -s -- --mode release --version <tag>
 ```
 
-其中 `latest` 只会解析最新稳定版；如果你要安装预发布版，请显式传入具体 tag，例如 `v0.1.2-rc.7`。
+其中 `latest` 只会解析最新稳定版；如果你要安装预发布版，请显式传入具体 tag，例如 `v0.1.2-rc.8`。
 
 安装脚本默认会：
 
@@ -1008,7 +1008,7 @@ Release Notes 分类规则来自：
 建议的本地发版前检查：
 
 ```bash
-./scripts/prepare-release.sh --tag v0.1.2-rc.7
+./scripts/prepare-release.sh --tag v0.1.2-rc.8
 ```
 
 建议流程：
