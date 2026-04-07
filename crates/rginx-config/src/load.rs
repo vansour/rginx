@@ -328,7 +328,7 @@ mod tests {
         )
         .expect("config should load with env expansion");
 
-        assert_eq!(config.server.listen, "127.0.0.1:19090");
+        assert_eq!(config.server.listen.as_deref(), Some("127.0.0.1:19090"));
         match &config.locations[0].handler {
             crate::model::HandlerConfig::Return { body, .. } => {
                 assert_eq!(body.as_deref(), Some("hello \"env\"\n"));
@@ -355,7 +355,7 @@ mod tests {
         )
         .expect("config should load with env defaults");
 
-        assert_eq!(config.server.listen, "127.0.0.1:18080");
+        assert_eq!(config.server.listen.as_deref(), Some("127.0.0.1:18080"));
         match &config.locations[0].handler {
             crate::model::HandlerConfig::Return { body, .. } => {
                 assert_eq!(body.as_deref(), Some("${rginx_test_missing}"));

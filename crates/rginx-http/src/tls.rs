@@ -48,24 +48,36 @@ impl ResolvesServerCert for SniCertificateResolver {
 
 /// 构建支持 SNI 的 TLS acceptor
 pub fn build_tls_acceptor(
+    default_tls: Option<&ServerTls>,
+    tls_termination_enabled: bool,
     default_vhost: &VirtualHost,
     vhosts: &[VirtualHost],
 ) -> Result<Option<TlsAcceptor>> {
+    if !tls_termination_enabled {
+        return Ok(None);
+    }
+
     // 收集所有 vhost 的证书
     let mut all_certs: HashMap<String, Arc<rustls::sign::CertifiedKey>> = HashMap::new();
     let mut default_cert: Option<Arc<rustls::sign::CertifiedKey>> = None;
 
-    // 处理 default_vhost
-    if let Some(tls) = &default_vhost.tls {
+    // 处理 listener 默认 TLS
+    if let Some(tls) = default_tls {
         let cert_key = load_certified_key(tls)?;
         default_cert = Some(cert_key.clone());
-        // 为 default_vhost 的 server_names 注册证书
         for name in &default_vhost.server_names {
             all_certs.insert(name.to_lowercase(), cert_key.clone());
         }
     }
 
-    // 处理额外的 vhosts
+    // 处理 default_vhost 的显式证书覆盖
+    if let Some(tls) = &default_vhost.tls {
+        let cert_key = load_certified_key(tls)?;
+        for name in &default_vhost.server_names {
+            all_certs.insert(name.to_lowercase(), cert_key.clone());
+        }
+    }
+
     for vhost in vhosts {
         if let Some(tls) = &vhost.tls {
             let cert_key = load_certified_key(tls)?;
@@ -75,7 +87,6 @@ pub fn build_tls_acceptor(
         }
     }
 
-    // 如果没有默认证书且没有任何 vhost 证书，则不需要 TLS
     if default_cert.is_none() && all_certs.is_empty() {
         return Ok(None);
     }
@@ -155,7 +166,7 @@ mod tests {
         };
         let vhosts: Vec<VirtualHost> = Vec::new();
 
-        assert!(build_tls_acceptor(&default_vhost, &vhosts).unwrap().is_none());
+        assert!(build_tls_acceptor(None, false, &default_vhost, &vhosts).unwrap().is_none());
     }
 
     #[test]
@@ -183,7 +194,8 @@ mod tests {
         let vhosts: Vec<VirtualHost> = Vec::new();
 
         let acceptor =
-            build_tls_acceptor(&default_vhost, &vhosts).expect("TLS acceptor should load");
+            build_tls_acceptor(default_vhost.tls.as_ref(), true, &default_vhost, &vhosts)
+                .expect("TLS acceptor should load");
         assert!(acceptor.is_some());
         assert_eq!(
             acceptor

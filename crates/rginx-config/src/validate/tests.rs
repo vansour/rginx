@@ -1,6 +1,6 @@
 use crate::model::{
-    Config, HandlerConfig, LocationConfig, MatcherConfig, RuntimeConfig, ServerConfig,
-    ServerTlsConfig, UpstreamConfig, UpstreamLoadBalanceConfig, UpstreamPeerConfig,
+    Config, HandlerConfig, ListenerConfig, LocationConfig, MatcherConfig, RuntimeConfig,
+    ServerConfig, ServerTlsConfig, UpstreamConfig, UpstreamLoadBalanceConfig, UpstreamPeerConfig,
     UpstreamProtocolConfig, VirtualHostConfig,
 };
 
@@ -455,6 +455,113 @@ fn validate_rejects_invalid_http2_upstream_peer_uri() {
     assert!(error.to_string().contains("peer url `not a uri` is not a valid URI"));
 }
 
+#[test]
+fn validate_accepts_explicit_listeners_when_legacy_listener_fields_are_empty() {
+    let mut config = base_config();
+    config.server.listen = None;
+    config.listeners = vec![
+        ListenerConfig {
+            name: "http".to_string(),
+            listen: "127.0.0.1:8080".to_string(),
+            trusted_proxies: Vec::new(),
+            keep_alive: Some(true),
+            max_headers: None,
+            max_request_body_bytes: None,
+            max_connections: Some(10),
+            header_read_timeout_secs: None,
+            request_body_read_timeout_secs: None,
+            response_write_timeout_secs: None,
+            access_log_format: None,
+            tls: None,
+        },
+        ListenerConfig {
+            name: "https".to_string(),
+            listen: "127.0.0.1:8443".to_string(),
+            trusted_proxies: Vec::new(),
+            keep_alive: Some(true),
+            max_headers: None,
+            max_request_body_bytes: None,
+            max_connections: Some(20),
+            header_read_timeout_secs: None,
+            request_body_read_timeout_secs: None,
+            response_write_timeout_secs: None,
+            access_log_format: None,
+            tls: Some(ServerTlsConfig {
+                cert_path: "server.crt".to_string(),
+                key_path: "server.key".to_string(),
+            }),
+        },
+    ];
+
+    validate(&config).expect("explicit listeners should validate");
+}
+
+#[test]
+fn validate_rejects_mixing_legacy_listener_fields_with_explicit_listeners() {
+    let mut config = base_config();
+    config.listeners = vec![ListenerConfig {
+        name: "http".to_string(),
+        listen: "127.0.0.1:8080".to_string(),
+        trusted_proxies: Vec::new(),
+        keep_alive: Some(true),
+        max_headers: None,
+        max_request_body_bytes: None,
+        max_connections: None,
+        header_read_timeout_secs: None,
+        request_body_read_timeout_secs: None,
+        response_write_timeout_secs: None,
+        access_log_format: None,
+        tls: None,
+    }];
+
+    let error = validate(&config).expect_err("mixed legacy and explicit listeners should fail");
+    assert!(error.to_string().contains("cannot be used together with listeners"));
+}
+
+#[test]
+fn validate_rejects_vhost_tls_without_any_tls_listener() {
+    let mut config = base_config();
+    config.server.listen = None;
+    config.listeners = vec![ListenerConfig {
+        name: "http".to_string(),
+        listen: "127.0.0.1:8080".to_string(),
+        trusted_proxies: Vec::new(),
+        keep_alive: Some(true),
+        max_headers: None,
+        max_request_body_bytes: None,
+        max_connections: None,
+        header_read_timeout_secs: None,
+        request_body_read_timeout_secs: None,
+        response_write_timeout_secs: None,
+        access_log_format: None,
+        tls: None,
+    }];
+    config.servers = vec![VirtualHostConfig {
+        server_names: vec!["api.example.com".to_string()],
+        locations: vec![LocationConfig {
+            matcher: MatcherConfig::Exact("/".to_string()),
+            handler: HandlerConfig::Return {
+                status: 200,
+                location: String::new(),
+                body: Some("ok\n".to_string()),
+            },
+            grpc_service: None,
+            grpc_method: None,
+            allow_cidrs: Vec::new(),
+            deny_cidrs: Vec::new(),
+            requests_per_sec: None,
+            burst: None,
+        }],
+        tls: Some(ServerTlsConfig {
+            cert_path: "server.crt".to_string(),
+            key_path: "server.key".to_string(),
+        }),
+    }];
+
+    let error = validate(&config).expect_err("vhost tls should require a tls listener");
+    assert!(error.to_string().contains("requires at least one listener with tls"));
+}
+
 fn base_config() -> Config {
     Config {
         runtime: RuntimeConfig {
@@ -462,8 +569,9 @@ fn base_config() -> Config {
             worker_threads: None,
             accept_workers: None,
         },
+        listeners: Vec::new(),
         server: ServerConfig {
-            listen: "127.0.0.1:8080".to_string(),
+            listen: Some("127.0.0.1:8080".to_string()),
             server_names: Vec::new(),
             trusted_proxies: Vec::new(),
             keep_alive: None,

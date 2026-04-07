@@ -5,8 +5,8 @@ use std::time::Duration;
 use http::StatusCode;
 
 use super::{
-    AccessLogFormat, AccessLogValues, ConfigSnapshot, ReturnAction, Route, RouteAccessControl,
-    RouteAction, RouteMatcher, RuntimeSettings, Server, VirtualHost,
+    AccessLogFormat, AccessLogValues, ConfigSnapshot, Listener, ReturnAction, Route,
+    RouteAccessControl, RouteAction, RouteMatcher, RuntimeSettings, Server, VirtualHost,
 };
 
 #[test]
@@ -61,25 +61,32 @@ fn server_matches_trusted_proxy_cidrs() {
 
 #[test]
 fn config_snapshot_counts_routes_across_all_vhosts() {
+    let server = Server {
+        listen_addr: "127.0.0.1:8080".parse().unwrap(),
+        trusted_proxies: Vec::new(),
+        keep_alive: true,
+        max_headers: None,
+        max_request_body_bytes: None,
+        max_connections: None,
+        header_read_timeout: None,
+        request_body_read_timeout: None,
+        response_write_timeout: None,
+        access_log_format: None,
+        tls: None,
+    };
     let snapshot = ConfigSnapshot {
         runtime: RuntimeSettings {
             shutdown_timeout: Duration::from_secs(1),
             worker_threads: None,
             accept_workers: 1,
         },
-        server: Server {
-            listen_addr: "127.0.0.1:8080".parse().unwrap(),
-            trusted_proxies: Vec::new(),
-            keep_alive: true,
-            max_headers: None,
-            max_request_body_bytes: None,
-            max_connections: None,
-            header_read_timeout: None,
-            request_body_read_timeout: None,
-            response_write_timeout: None,
-            access_log_format: None,
-            tls: None,
-        },
+        server: server.clone(),
+        listeners: vec![Listener {
+            id: "default".to_string(),
+            name: "default".to_string(),
+            server,
+            tls_termination_enabled: false,
+        }],
         default_vhost: VirtualHost {
             id: "server".to_string(),
             server_names: Vec::new(),

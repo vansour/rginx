@@ -25,6 +25,7 @@ struct Http1ConnectionOptions {
 
 pub async fn serve(
     listener: TcpListener,
+    listener_id: String,
     state: crate::state::SharedState,
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
@@ -62,15 +63,21 @@ pub async fn serve(
                     let (stream, remote_addr) = accepted?;
                     let state = state.clone();
                     let shutdown = shutdown.clone();
-                    let tls_acceptor = state.tls_acceptor().await;
-                    let current_config = state.current_config().await;
+                    let tls_acceptor = state.tls_acceptor(&listener_id).await;
+                    let current_listener = state.current_listener(&listener_id).await.expect(
+                        "listener id should remain available while accept loop is running",
+                    );
                     let Some(connection_guard) =
-                        state.try_acquire_connection(current_config.server.max_connections)
+                        state.try_acquire_connection(
+                            &listener_id,
+                            current_listener.server.max_connections,
+                        )
                     else {
                         state.record_connection_rejected();
                         tracing::warn!(
                             remote_addr = %remote_addr,
-                            max_connections = current_config.server.max_connections,
+                            listener = %listener_id,
+                            max_connections = current_listener.server.max_connections,
                             active_connections = state.active_connection_count(),
                             "rejecting downstream connection because server max_connections was reached"
                         );
@@ -79,15 +86,17 @@ pub async fn serve(
                     };
                     state.record_connection_accepted();
                     let http1 = Http1ConnectionOptions {
-                        keep_alive: current_config.server.keep_alive,
-                        max_headers: current_config.server.max_headers,
-                        header_read_timeout: current_config.server.header_read_timeout,
-                        response_write_timeout: current_config.server.response_write_timeout,
+                        keep_alive: current_listener.server.keep_alive,
+                        max_headers: current_listener.server.max_headers,
+                        header_read_timeout: current_listener.server.header_read_timeout,
+                        response_write_timeout: current_listener.server.response_write_timeout,
                     };
+                    let connection_listener_id = listener_id.clone();
 
                     connections.spawn(async move {
                         serve_connection(
                             stream,
+                            connection_listener_id,
                             state,
                             remote_addr,
                             shutdown,
@@ -125,6 +134,7 @@ pub async fn serve(
 
 async fn serve_connection(
     stream: tokio::net::TcpStream,
+    listener_id: String,
     state: crate::state::SharedState,
     remote_addr: SocketAddr,
     shutdown: watch::Receiver<bool>,
@@ -141,8 +151,14 @@ async fn serve_connection(
                         http1.response_write_timeout,
                         format!("downstream response to {remote_addr}"),
                     );
-                    serve_h2_connection_io(TokioIo::new(stream), state, remote_addr, shutdown)
-                        .await;
+                    serve_h2_connection_io(
+                        TokioIo::new(stream),
+                        listener_id,
+                        state,
+                        remote_addr,
+                        shutdown,
+                    )
+                    .await;
                 } else {
                     let stream = WriteTimeoutIo::new(
                         stream,
@@ -151,6 +167,7 @@ async fn serve_connection(
                     );
                     serve_h1_connection_io(
                         TokioIo::new(stream),
+                        listener_id,
                         state,
                         remote_addr,
                         shutdown,
@@ -171,7 +188,8 @@ async fn serve_connection(
         http1.response_write_timeout,
         format!("downstream response to {remote_addr}"),
     );
-    serve_h1_connection_io(TokioIo::new(stream), state, remote_addr, shutdown, http1).await;
+    serve_h1_connection_io(TokioIo::new(stream), listener_id, state, remote_addr, shutdown, http1)
+        .await;
 }
 
 fn negotiated_h2(stream: &tokio_rustls::server::TlsStream<tokio::net::TcpStream>) -> bool {
@@ -180,6 +198,7 @@ fn negotiated_h2(stream: &tokio_rustls::server::TlsStream<tokio::net::TcpStream>
 
 async fn serve_h1_connection_io<T>(
     io: TokioIo<T>,
+    listener_id: String,
     state: crate::state::SharedState,
     remote_addr: SocketAddr,
     mut shutdown: watch::Receiver<bool>,
@@ -189,7 +208,12 @@ async fn serve_h1_connection_io<T>(
 {
     let service = service_fn(move |request| {
         let state = state.clone();
-        async move { Ok::<_, Infallible>(crate::handler::handle(request, state, remote_addr).await) }
+        let listener_id = listener_id.clone();
+        async move {
+            Ok::<_, Infallible>(
+                crate::handler::handle(request, state, remote_addr, &listener_id).await,
+            )
+        }
     });
 
     let mut builder = http1::Builder::new();
@@ -237,6 +261,7 @@ async fn serve_h1_connection_io<T>(
 
 async fn serve_h2_connection_io<T>(
     io: TokioIo<T>,
+    listener_id: String,
     state: crate::state::SharedState,
     remote_addr: SocketAddr,
     mut shutdown: watch::Receiver<bool>,
@@ -245,7 +270,12 @@ async fn serve_h2_connection_io<T>(
 {
     let service = service_fn(move |request| {
         let state = state.clone();
-        async move { Ok::<_, Infallible>(crate::handler::handle(request, state, remote_addr).await) }
+        let listener_id = listener_id.clone();
+        async move {
+            Ok::<_, Infallible>(
+                crate::handler::handle(request, state, remote_addr, &listener_id).await,
+            )
+        }
     });
 
     let connection = http2::Builder::new(TokioExecutor::new()).serve_connection(io, service);

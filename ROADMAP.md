@@ -113,7 +113,8 @@
 | 配置语义校验 | ✅ | 字段合法性、跨字段约束、gRPC 路由约束都已前置。 |
 | 编译为运行时快照 | ✅ | 启动与重载都统一编译为 `ConfigSnapshot`。 |
 | 热重载 | ✅ | `SIGHUP` 支持无中断切换新快照。 |
-| 热重载切换 `listen` | ❌ | 改监听地址必须重启。 |
+| 多监听入口模型 | ✅ | 支持 `listeners: []`，并兼容旧 `server.listen`。 |
+| 热重载切换 `listen` | ❌ | 改监听地址或 listener 集合必须重启。 |
 | 热重载切换 `runtime.worker_threads` | ❌ | 变更 tokio worker 数必须重启。 |
 | 热重载切换 `runtime.accept_workers` | ❌ | 变更 accept worker 数必须重启。 |
 
@@ -132,7 +133,7 @@
 | 总并发连接数限制 | ✅ | `server.max_connections`。 |
 | 请求头读取超时 | ✅ | `server.header_read_timeout_secs`。 |
 | 响应写出超时 | ✅ | `server.response_write_timeout_secs`。 |
-| 多监听地址 | ❌ | 当前单实例围绕一个 `listen` 工作。 |
+| 多监听地址 | ✅ | 单进程可同时持有多个 listener。 |
 | `SO_REUSEPORT` 多进程入口 | ❌ | 当前是单进程多 worker，不支持多进程端口复用架构。 |
 
 ### 3. 路由、虚拟主机与 handler
@@ -270,8 +271,7 @@
 
 - 不支持正则路由。
 - 不提供远程动态配置 API；配置变更通过“写文件 + `check` + reload”完成。
-- 热重载不能切换 `listen`、`runtime.worker_threads` 或 `runtime.accept_workers`。
-- 单实例当前围绕一个监听地址工作，不是多 `listen` 入口模型。
+- 热重载不能切换 `listen`、listener 集合、`runtime.worker_threads` 或 `runtime.accept_workers`。
 
 ### 代理与兼容性边界
 
@@ -627,6 +627,8 @@
 
 ### Week 4：多监听入口模型设计与配置兼容方案
 
+状态：`✅`
+
 目标：
 
 - 把当前“单实例单 listen”限制升级为“可覆盖典型 nginx 反代入口模型”的配置设计。
@@ -648,8 +650,15 @@
 
 - 能清楚表达 `:80`、`:443`、IPv4 / IPv6、多入口部署需求。
 - 旧的 `server.listen` 模型仍能被编译为默认 listener。
+- 配置设计不会打断当前用户的迁移路径。
+
+设计文档：
+
+- [MULTI_LISTENER_MODEL_PLAN.md](MULTI_LISTENER_MODEL_PLAN.md)
 
 ### Week 5：多监听入口模型实现
+
+状态：`✅`
 
 目标：
 
@@ -672,6 +681,12 @@
 
 - 单进程同时监听多个入口地址。
 - 能支持最常见的 `80 -> 443` 和多域名 TLS 入口部署。
+
+实现说明：
+
+- 当前已经支持 `listeners: []`，并保留旧 `server.listen` 兼容编译路径。
+- 新模型的字段归属、迁移示例和兼容约束见：
+  - [MULTI_LISTENER_MODEL_PLAN.md](MULTI_LISTENER_MODEL_PLAN.md)
 
 ### Week 6：优雅重启路径打通
 

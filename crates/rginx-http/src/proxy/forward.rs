@@ -13,6 +13,14 @@ pub struct DownstreamRequestOptions {
     pub max_request_body_bytes: Option<usize>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct DownstreamRequestContext<'a> {
+    pub listener_id: &'a str,
+    pub downstream_proto: &'a str,
+    pub request_id: &'a str,
+    pub options: DownstreamRequestOptions,
+}
+
 #[derive(Debug, Clone)]
 struct GrpcResponseDeadline {
     pub deadline: TokioInstant,
@@ -24,11 +32,10 @@ pub async fn forward_request(
     state: SharedState,
     clients: ProxyClients,
     mut request: Request<Incoming>,
+    listener_id: &str,
     target: &ProxyTarget,
     client_address: ClientAddress,
-    downstream_proto: &str,
-    downstream: DownstreamRequestOptions,
-    request_id: &str,
+    downstream: DownstreamRequestContext<'_>,
 ) -> HttpResponse {
     let request_headers = request.headers().clone();
     let grpc_web_mode = match detect_grpc_web_mode(request.headers()) {
@@ -47,7 +54,7 @@ pub async fn forward_request(
         Ok(client) => client,
         Err(error) => {
             tracing::warn!(
-                request_id = %request_id,
+                request_id = %downstream.request_id,
                 upstream = %target.upstream_name,
                 %error,
                 "failed to select proxy client"
@@ -68,10 +75,10 @@ pub async fn forward_request(
     let mut prepared_request = match PreparedProxyRequest::from_request(
         request,
         &target.upstream_name,
-        downstream.request_body_read_timeout,
+        downstream.options.request_body_read_timeout,
         target.upstream.write_timeout,
         target.upstream.max_replayable_request_body_bytes,
-        downstream.max_request_body_bytes,
+        downstream.options.max_request_body_bytes,
         grpc_web_mode.as_ref(),
     )
     .await
@@ -79,7 +86,7 @@ pub async fn forward_request(
         Ok(request) => request,
         Err(PrepareRequestError::PayloadTooLarge { max_request_body_bytes }) => {
             tracing::info!(
-                request_id = %request_id,
+                request_id = %downstream.request_id,
                 upstream = %target.upstream_name,
                 max_request_body_bytes,
                 "rejecting request body that exceeds configured server limit"
@@ -93,7 +100,7 @@ pub async fn forward_request(
         }
         Err(error) => {
             tracing::warn!(
-                request_id = %request_id,
+                request_id = %downstream.request_id,
                 upstream = %target.upstream_name,
                 %error,
                 "failed to prepare upstream request"
@@ -113,10 +120,10 @@ pub async fn forward_request(
     let peers = selected.peers;
     if peers.is_empty() {
         tracing::warn!(
-            request_id = %request_id,
-            upstream = %target.upstream_name,
-            skipped_unhealthy = selected.skipped_unhealthy,
-            "proxy route has no healthy peers available"
+                        request_id = %downstream.request_id,
+                        upstream = %target.upstream_name,
+                        skipped_unhealthy = selected.skipped_unhealthy,
+                        "proxy route has no healthy peers available"
         );
         return bad_gateway(
             &request_headers,
@@ -138,13 +145,13 @@ pub async fn forward_request(
             peer,
             target,
             &client_address,
-            downstream_proto,
+            downstream.downstream_proto,
             grpc_web_mode.as_ref(),
         ) {
             Ok(request) => request,
             Err(error) => {
                 tracing::warn!(
-                    request_id = %request_id,
+                    request_id = %downstream.request_id,
                     upstream = %target.upstream_name,
                     peer = %peer.url,
                     %error,
@@ -177,7 +184,7 @@ pub async fn forward_request(
                 }
                 if attempt_index > 0 {
                     tracing::info!(
-                        request_id = %request_id,
+                        request_id = %downstream.request_id,
                         upstream = %target.upstream_name,
                         peer = %peer.url,
                         attempt = attempt_index + 1,
@@ -196,7 +203,7 @@ pub async fn forward_request(
                 if let (Some(downstream_upgrade), Some(upstream_upgrade)) =
                     (downstream_upgrade.clone(), upstream_upgrade)
                 {
-                    let connection_guard = state.retain_connection_slot();
+                    let connection_guard = state.retain_connection_slot(listener_id);
                     state.spawn_background_task(proxy_upgraded_connection(
                         downstream_upgrade,
                         upstream_upgrade,
@@ -230,7 +237,7 @@ pub async fn forward_request(
                 let failure = clients.record_peer_failure(&target.upstream_name, &peer.url);
                 let next_peer = &peers[attempt_index + 1];
                 tracing::warn!(
-                    request_id = %request_id,
+                    request_id = %downstream.request_id,
                     upstream = %target.upstream_name,
                     failed_peer = %peer.url,
                     next_peer = %next_peer.url,
@@ -244,7 +251,7 @@ pub async fn forward_request(
             Ok(Err(error)) => {
                 let failure = clients.record_peer_failure(&target.upstream_name, &peer.url);
                 tracing::warn!(
-                    request_id = %request_id,
+                    request_id = %downstream.request_id,
                     upstream = %target.upstream_name,
                     peer = %peer.url,
                     consecutive_failures = failure.consecutive_failures,
@@ -261,7 +268,7 @@ pub async fn forward_request(
                 let failure = clients.record_peer_failure(&target.upstream_name, &peer.url);
                 let next_peer = &peers[attempt_index + 1];
                 tracing::warn!(
-                    request_id = %request_id,
+                    request_id = %downstream.request_id,
                     upstream = %target.upstream_name,
                     failed_peer = %peer.url,
                     next_peer = %next_peer.url,
@@ -276,7 +283,7 @@ pub async fn forward_request(
             Err(error) => {
                 let failure = clients.record_peer_failure(&target.upstream_name, &peer.url);
                 tracing::warn!(
-                    request_id = %request_id,
+                    request_id = %downstream.request_id,
                     upstream = %target.upstream_name,
                     peer = %peer.url,
                     timeout_ms = upstream_request_timeout.as_millis() as u64,

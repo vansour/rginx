@@ -35,16 +35,42 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
     validate(&raw)?;
     let base_dir = base_dir.as_ref();
 
-    let Config { runtime, server, upstreams: raw_upstreams, locations, servers: raw_servers } = raw;
+    let Config {
+        runtime,
+        listeners: raw_listeners,
+        server,
+        upstreams: raw_upstreams,
+        locations,
+        servers: raw_servers,
+    } = raw;
     let runtime = runtime::compile_runtime_settings(runtime)?;
-    let compiled_server = server::compile_server(server, base_dir)?;
+    let any_vhost_tls = raw_servers.iter().any(|vhost| vhost.tls.is_some());
+    let (listeners, primary_server, default_server_names, default_server_tls) =
+        if raw_listeners.is_empty() {
+            let compiled_server = server::compile_legacy_server(server, base_dir, any_vhost_tls)?;
+            (
+                vec![compiled_server.listener.clone()],
+                compiled_server.listener.server.clone(),
+                compiled_server.server_names,
+                compiled_server.listener.server.tls.clone(),
+            )
+        } else {
+            let default_server_names = server.server_names;
+            let listeners = server::compile_listeners(raw_listeners, base_dir)?;
+            let primary_server = listeners
+                .first()
+                .expect("at least one explicit listener should be compiled")
+                .server
+                .clone();
+            (listeners, primary_server, default_server_names, None)
+        };
     let upstreams = upstream::compile_upstreams(raw_upstreams, base_dir)?;
 
     let default_vhost = VirtualHost {
         id: DEFAULT_VHOST_ID.to_string(),
-        server_names: compiled_server.server_names,
+        server_names: default_server_names,
         routes: route::compile_routes(locations, &upstreams, DEFAULT_VHOST_ID)?,
-        tls: compiled_server.server_tls.clone(),
+        tls: default_server_tls,
     };
 
     let vhosts = raw_servers
@@ -60,7 +86,14 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
         })
         .collect::<Result<Vec<_>>>()?;
 
-    Ok(ConfigSnapshot { runtime, server: compiled_server.server, default_vhost, vhosts, upstreams })
+    Ok(ConfigSnapshot {
+        runtime,
+        server: primary_server,
+        listeners,
+        default_vhost,
+        vhosts,
+        upstreams,
+    })
 }
 
 pub(super) fn resolve_path(base_dir: &Path, path: String) -> PathBuf {
@@ -75,9 +108,9 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::model::{
-        Config, HandlerConfig, LocationConfig, MatcherConfig, RuntimeConfig, ServerConfig,
-        ServerTlsConfig, UpstreamConfig, UpstreamLoadBalanceConfig, UpstreamPeerConfig,
-        UpstreamProtocolConfig, UpstreamTlsConfig, VirtualHostConfig,
+        Config, HandlerConfig, ListenerConfig, LocationConfig, MatcherConfig, RuntimeConfig,
+        ServerConfig, ServerTlsConfig, UpstreamConfig, UpstreamLoadBalanceConfig,
+        UpstreamPeerConfig, UpstreamProtocolConfig, UpstreamTlsConfig, VirtualHostConfig,
     };
 
     use super::{
@@ -96,8 +129,9 @@ mod tests {
                 worker_threads: None,
                 accept_workers: None,
             },
+            listeners: Vec::new(),
             server: ServerConfig {
-                listen: "127.0.0.1:8080".to_string(),
+                listen: Some("127.0.0.1:8080".to_string()),
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -207,8 +241,9 @@ mod tests {
                 worker_threads: None,
                 accept_workers: None,
             },
+            listeners: Vec::new(),
             server: ServerConfig {
-                listen: "127.0.0.1:8080".to_string(),
+                listen: Some("127.0.0.1:8080".to_string()),
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -296,8 +331,9 @@ mod tests {
                 worker_threads: None,
                 accept_workers: None,
             },
+            listeners: Vec::new(),
             server: ServerConfig {
-                listen: "127.0.0.1:8080".to_string(),
+                listen: Some("127.0.0.1:8080".to_string()),
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -390,8 +426,9 @@ mod tests {
                 worker_threads: None,
                 accept_workers: None,
             },
+            listeners: Vec::new(),
             server: ServerConfig {
-                listen: "127.0.0.1:8080".to_string(),
+                listen: Some("127.0.0.1:8080".to_string()),
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -480,8 +517,9 @@ mod tests {
                 worker_threads: None,
                 accept_workers: None,
             },
+            listeners: Vec::new(),
             server: ServerConfig {
-                listen: "127.0.0.1:8080".to_string(),
+                listen: Some("127.0.0.1:8080".to_string()),
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -585,8 +623,9 @@ mod tests {
                 worker_threads: None,
                 accept_workers: None,
             },
+            listeners: Vec::new(),
             server: ServerConfig {
-                listen: "127.0.0.1:8080".to_string(),
+                listen: Some("127.0.0.1:8080".to_string()),
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -690,8 +729,9 @@ mod tests {
                 worker_threads: None,
                 accept_workers: None,
             },
+            listeners: Vec::new(),
             server: ServerConfig {
-                listen: "127.0.0.1:8080".to_string(),
+                listen: Some("127.0.0.1:8080".to_string()),
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -782,8 +822,9 @@ mod tests {
                 worker_threads: None,
                 accept_workers: None,
             },
+            listeners: Vec::new(),
             server: ServerConfig {
-                listen: "127.0.0.1:8080".to_string(),
+                listen: Some("127.0.0.1:8080".to_string()),
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -877,8 +918,9 @@ mod tests {
                 worker_threads: None,
                 accept_workers: None,
             },
+            listeners: Vec::new(),
             server: ServerConfig {
-                listen: "127.0.0.1:8080".to_string(),
+                listen: Some("127.0.0.1:8080".to_string()),
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -983,8 +1025,9 @@ mod tests {
                 worker_threads: None,
                 accept_workers: None,
             },
+            listeners: Vec::new(),
             server: ServerConfig {
-                listen: "127.0.0.1:8080".to_string(),
+                listen: Some("127.0.0.1:8080".to_string()),
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -1066,8 +1109,9 @@ mod tests {
                 worker_threads: None,
                 accept_workers: None,
             },
+            listeners: Vec::new(),
             server: ServerConfig {
-                listen: "127.0.0.1:8080".to_string(),
+                listen: Some("127.0.0.1:8080".to_string()),
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -1144,8 +1188,9 @@ mod tests {
                 worker_threads: None,
                 accept_workers: None,
             },
+            listeners: Vec::new(),
             server: ServerConfig {
-                listen: "127.0.0.1:8080".to_string(),
+                listen: Some("127.0.0.1:8080".to_string()),
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -1191,8 +1236,9 @@ mod tests {
                 worker_threads: None,
                 accept_workers: None,
             },
+            listeners: Vec::new(),
             server: ServerConfig {
-                listen: "127.0.0.1:8080".to_string(),
+                listen: Some("127.0.0.1:8080".to_string()),
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -1240,8 +1286,9 @@ mod tests {
                 worker_threads: None,
                 accept_workers: None,
             },
+            listeners: Vec::new(),
             server: ServerConfig {
-                listen: "127.0.0.1:8080".to_string(),
+                listen: Some("127.0.0.1:8080".to_string()),
                 server_names: vec!["default.example.com".to_string()],
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -1322,8 +1369,9 @@ mod tests {
                 worker_threads: None,
                 accept_workers: None,
             },
+            listeners: Vec::new(),
             server: ServerConfig {
-                listen: "127.0.0.1:8080".to_string(),
+                listen: Some("127.0.0.1:8080".to_string()),
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -1377,8 +1425,9 @@ mod tests {
                 worker_threads: None,
                 accept_workers: None,
             },
+            listeners: Vec::new(),
             server: ServerConfig {
-                listen: "127.0.0.1:8080".to_string(),
+                listen: Some("127.0.0.1:8080".to_string()),
                 server_names: Vec::new(),
                 trusted_proxies: vec!["10.0.0.0/8".to_string(), "127.0.0.1".to_string()],
                 keep_alive: None,
@@ -1425,8 +1474,9 @@ mod tests {
                 worker_threads: Some(3),
                 accept_workers: Some(2),
             },
+            listeners: Vec::new(),
             server: ServerConfig {
-                listen: "127.0.0.1:8080".to_string(),
+                listen: Some("127.0.0.1:8080".to_string()),
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: Some(false),
@@ -1482,8 +1532,9 @@ mod tests {
                 worker_threads: None,
                 accept_workers: None,
             },
+            listeners: Vec::new(),
             server: ServerConfig {
-                listen: "127.0.0.1:8080".to_string(),
+                listen: Some("127.0.0.1:8080".to_string()),
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -1553,8 +1604,9 @@ mod tests {
                 worker_threads: None,
                 accept_workers: None,
             },
+            listeners: Vec::new(),
             server: ServerConfig {
-                listen: "127.0.0.1:8080".to_string(),
+                listen: Some("127.0.0.1:8080".to_string()),
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -1589,5 +1641,84 @@ mod tests {
 
         let error = compile(config).expect_err("unknown access log variables should be rejected");
         assert!(error.to_string().contains("access_log_format variable `$trace_id`"));
+    }
+
+    #[test]
+    fn compile_supports_explicit_multi_listener_configs() {
+        let config = Config {
+            runtime: RuntimeConfig {
+                shutdown_timeout_secs: 10,
+                worker_threads: None,
+                accept_workers: None,
+            },
+            listeners: vec![
+                ListenerConfig {
+                    name: "http".to_string(),
+                    listen: "127.0.0.1:8080".to_string(),
+                    trusted_proxies: Vec::new(),
+                    keep_alive: Some(true),
+                    max_headers: None,
+                    max_request_body_bytes: None,
+                    max_connections: Some(10),
+                    header_read_timeout_secs: None,
+                    request_body_read_timeout_secs: None,
+                    response_write_timeout_secs: None,
+                    access_log_format: None,
+                    tls: None,
+                },
+                ListenerConfig {
+                    name: "https".to_string(),
+                    listen: "127.0.0.1:8443".to_string(),
+                    trusted_proxies: Vec::new(),
+                    keep_alive: Some(true),
+                    max_headers: None,
+                    max_request_body_bytes: None,
+                    max_connections: Some(20),
+                    header_read_timeout_secs: None,
+                    request_body_read_timeout_secs: None,
+                    response_write_timeout_secs: None,
+                    access_log_format: None,
+                    tls: None,
+                },
+            ],
+            server: ServerConfig {
+                listen: None,
+                server_names: vec!["example.com".to_string()],
+                trusted_proxies: Vec::new(),
+                keep_alive: None,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout_secs: None,
+                request_body_read_timeout_secs: None,
+                response_write_timeout_secs: None,
+                access_log_format: None,
+                tls: None,
+            },
+            upstreams: Vec::new(),
+            locations: vec![LocationConfig {
+                matcher: MatcherConfig::Exact("/".to_string()),
+                handler: HandlerConfig::Return {
+                    status: 200,
+                    location: String::new(),
+                    body: Some("ok\n".to_string()),
+                },
+                grpc_service: None,
+                grpc_method: None,
+                allow_cidrs: Vec::new(),
+                deny_cidrs: Vec::new(),
+                requests_per_sec: None,
+                burst: None,
+            }],
+            servers: Vec::new(),
+        };
+
+        let snapshot = compile(config).expect("explicit multi-listener config should compile");
+        assert_eq!(snapshot.listeners.len(), 2);
+        assert_eq!(snapshot.total_listener_count(), 2);
+        assert_eq!(snapshot.server.listen_addr, "127.0.0.1:8080".parse().unwrap());
+        assert_eq!(snapshot.listeners[0].name, "http");
+        assert_eq!(snapshot.listeners[1].name, "https");
+        assert_eq!(snapshot.listeners[1].server.max_connections, Some(20));
     }
 }
