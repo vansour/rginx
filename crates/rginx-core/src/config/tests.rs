@@ -86,6 +86,7 @@ fn config_snapshot_counts_routes_across_all_vhosts() {
             name: "default".to_string(),
             server,
             tls_termination_enabled: false,
+            proxy_protocol_enabled: false,
         }],
         default_vhost: VirtualHost {
             id: "server".to_string(),

@@ -462,6 +462,7 @@ fn validate_accepts_explicit_listeners_when_legacy_listener_fields_are_empty() {
     config.listeners = vec![
         ListenerConfig {
             name: "http".to_string(),
+            proxy_protocol: None,
             listen: "127.0.0.1:8080".to_string(),
             trusted_proxies: Vec::new(),
             keep_alive: Some(true),
@@ -476,6 +477,7 @@ fn validate_accepts_explicit_listeners_when_legacy_listener_fields_are_empty() {
         },
         ListenerConfig {
             name: "https".to_string(),
+            proxy_protocol: None,
             listen: "127.0.0.1:8443".to_string(),
             trusted_proxies: Vec::new(),
             keep_alive: Some(true),
@@ -501,6 +503,7 @@ fn validate_rejects_mixing_legacy_listener_fields_with_explicit_listeners() {
     let mut config = base_config();
     config.listeners = vec![ListenerConfig {
         name: "http".to_string(),
+        proxy_protocol: None,
         listen: "127.0.0.1:8080".to_string(),
         trusted_proxies: Vec::new(),
         keep_alive: Some(true),
@@ -524,6 +527,7 @@ fn validate_rejects_vhost_tls_without_any_tls_listener() {
     config.server.listen = None;
     config.listeners = vec![ListenerConfig {
         name: "http".to_string(),
+        proxy_protocol: None,
         listen: "127.0.0.1:8080".to_string(),
         trusted_proxies: Vec::new(),
         keep_alive: Some(true),
@@ -572,6 +576,7 @@ fn base_config() -> Config {
         listeners: Vec::new(),
         server: ServerConfig {
             listen: Some("127.0.0.1:8080".to_string()),
+            proxy_protocol: None,
             server_names: Vec::new(),
             trusted_proxies: Vec::new(),
             keep_alive: None,

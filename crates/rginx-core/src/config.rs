@@ -58,6 +58,7 @@ pub struct Listener {
     pub name: String,
     pub server: Server,
     pub tls_termination_enabled: bool,
+    pub proxy_protocol_enabled: bool,
 }
 
 impl Listener {

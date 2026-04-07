@@ -27,6 +27,7 @@ pub struct RuntimeConfig {
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub listen: Option<String>,
+    pub proxy_protocol: Option<bool>,
     pub server_names: Vec<String>,
     pub trusted_proxies: Vec<String>,
     pub keep_alive: Option<bool>,
@@ -44,6 +45,8 @@ pub struct ServerConfig {
 pub struct ListenerConfig {
     pub name: String,
     pub listen: String,
+    #[serde(default)]
+    pub proxy_protocol: Option<bool>,
     #[serde(default)]
     pub trusted_proxies: Vec<String>,
     #[serde(default)]
@@ -224,6 +227,8 @@ impl<'de> Deserialize<'de> for ServerConfig {
             #[serde(default)]
             listen: MaybeString,
             #[serde(default)]
+            proxy_protocol: Option<bool>,
+            #[serde(default)]
             server_names: Vec<String>,
             #[serde(default)]
             trusted_proxies: Vec<String>,
@@ -250,6 +255,7 @@ impl<'de> Deserialize<'de> for ServerConfig {
         let server = ServerConfigDe::deserialize(deserializer)?;
         Ok(ServerConfig {
             listen: server.listen.0,
+            proxy_protocol: server.proxy_protocol,
             server_names: server.server_names,
             trusted_proxies: server.trusted_proxies,
             keep_alive: server.keep_alive,

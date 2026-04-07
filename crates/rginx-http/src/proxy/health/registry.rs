@@ -675,6 +675,7 @@ mod tests {
                 name: "default".to_string(),
                 server,
                 tls_termination_enabled: false,
+                proxy_protocol_enabled: false,
             }],
             default_vhost: rginx_core::VirtualHost {
                 id: "server".to_string(),
