@@ -1,4 +1,5 @@
 mod cli;
+mod migrate_nginx;
 
 #[cfg(not(target_os = "linux"))]
 compile_error!("rginx supports Linux only");
@@ -15,7 +16,7 @@ use rginx_runtime::admin::{
     AdminRequest, AdminResponse, RevisionSnapshot, admin_socket_path_for_config,
 };
 
-use crate::cli::{Cli, Command, SignalCommand, pid_path_for_config};
+use crate::cli::{Cli, Command, MigrateNginxArgs, SignalCommand, pid_path_for_config};
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -33,7 +34,7 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    if let Some(command) = cli.command {
+    if let Some(command) = cli.command.as_ref() {
         match command {
             Command::Status => {
                 print_admin_status(&cli.config)?;
@@ -45,6 +46,10 @@ fn main() -> anyhow::Result<()> {
             }
             Command::Peers => {
                 print_admin_peers(&cli.config)?;
+                return Ok(());
+            }
+            Command::MigrateNginx(args) => {
+                run_migrate_nginx(args)?;
                 return Ok(());
             }
             Command::Check => {}
@@ -108,10 +113,35 @@ fn main() -> anyhow::Result<()> {
                 .context("runtime exited with an error")
         }
         Some(Command::Check) => unreachable!("`check` subcommand and `-t` conflict at clap level"),
-        Some(Command::Status | Command::Counters | Command::Peers) => {
+        Some(Command::Status | Command::Counters | Command::Peers | Command::MigrateNginx(_)) => {
             unreachable!("admin subcommands return before runtime initialization")
         }
     }
+}
+
+fn run_migrate_nginx(args: &MigrateNginxArgs) -> anyhow::Result<()> {
+    let migrated = migrate_nginx::migrate_file(&args.input)?;
+
+    if let Some(output) = &args.output {
+        fs::write(output, &migrated.ron)
+            .with_context(|| format!("failed to write migrated config {}", output.display()))?;
+        eprintln!(
+            "wrote migrated rginx config to {} (warnings: {})",
+            output.display(),
+            migrated.warnings.len()
+        );
+    } else {
+        print!("{}", migrated.ron);
+    }
+
+    if !migrated.warnings.is_empty() {
+        eprintln!("migration warnings:");
+        for warning in &migrated.warnings {
+            eprintln!("- {warning}");
+        }
+    }
+
+    Ok(())
 }
 
 fn build_runtime(worker_threads: Option<usize>) -> anyhow::Result<tokio::runtime::Runtime> {

@@ -2,7 +2,7 @@
 
 `rginx` 的产品定义是：一个面向中小规模部署的 Rust 入口反向代理，稳定支持 TLS 终止、Host/Path 路由、上游代理、基础流量治理、健康检查、热重载和可观测性。
 
-当前正式发布线收口为 `v0.1.1`。当前正在准备下一条预发布标签 `v0.1.2-rc.7`，用于验证最近一轮测试、文档和发布流程补强。
+当前正式发布线收口为 `v0.1.1`。当前最新预发布标签为 `v0.1.2-rc.7`，它作为 `v0.1.2` 的正式版候选线，已经覆盖最近一轮测试、迁移文档、benchmark / soak 基线和发布流程补强。
 
 当前明确限制、演进方向和发布前收口项见：
 
@@ -50,6 +50,7 @@
 - `Ctrl-C` / `SIGTERM` 平滑退出
 - `SIGHUP` 热重载配置
 - `rginx check` 配置检查
+- `rginx migrate-nginx` nginx 反代子集迁移辅助
 - 本地只读运维面：`rginx status` / `rginx counters` / `rginx peers`（UDS）
 
 ## 专项反向代理替代合同
@@ -109,6 +110,15 @@
 如果你想直接看 Week 4 产出的多监听设计稿，优先看：
 
 - [MULTI_LISTENER_MODEL_PLAN.md](MULTI_LISTENER_MODEL_PLAN.md)
+
+如果你正在做 nginx API 反代迁移，优先看：
+
+- [docs/nginx-migration.md](docs/nginx-migration.md)
+
+如果你准备做 release 前验收或上线容量确认，优先看：
+
+- [docs/benchmark-and-soak.md](docs/benchmark-and-soak.md)
+- [docs/release-and-deployment.md](docs/release-and-deployment.md)
 
 如果你想先跑起来，优先看本 README 里的“快速开始”和“配置结构”两节。
 
@@ -205,6 +215,25 @@ cargo build -p rginx
 
 - `configs/rginx.ron`
 - `configs/conf.d/default.ron`
+
+### nginx 子集迁移
+
+如果你是从 nginx 常见 API 反代配置迁过来，先导出最终生效配置：
+
+```bash
+nginx -T > /tmp/nginx-expanded.conf
+```
+
+然后运行内置迁移辅助子命令：
+
+```bash
+cargo run -p rginx -- migrate-nginx --input /tmp/nginx-expanded.conf --output /tmp/rginx.ron
+rginx check --config /tmp/rginx.ron
+```
+
+迁移说明、支持范围和已知限制见：
+
+- [docs/nginx-migration.md](docs/nginx-migration.md)
 
 ## 配置结构
 
@@ -972,6 +1001,10 @@ Release Notes 分类规则来自：
 
 - `.github/release.yml`
 
+更完整的 release checklist、上线动作和 service manager 示例见：
+
+- [docs/release-and-deployment.md](docs/release-and-deployment.md)
+
 建议的本地发版前检查：
 
 ```bash
@@ -1005,6 +1038,15 @@ Release Notes 分类规则来自：
 - 默认前缀 `/usr` 时使用 `/usr/sbin/rginx`
 - 活跃配置使用 `/etc/rginx/rginx.ron`
 - 站点拆分配置放在 `/etc/rginx/conf.d/*.ron`
+
+仓库内的示例 service manager 配置见：
+
+- [deploy/systemd/rginx.service](deploy/systemd/rginx.service)
+- [deploy/supervisor/rginx.conf](deploy/supervisor/rginx.conf)
+
+发布前的 benchmark / soak 基线与容量边界说明见：
+
+- [docs/benchmark-and-soak.md](docs/benchmark-and-soak.md)
 
 ### 热重载
 

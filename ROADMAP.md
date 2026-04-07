@@ -761,6 +761,8 @@
 
 ### Week 8：迁移体验、性能基线与发布收口
 
+状态：`✅`
+
 目标：
 
 - 让项目从“有能力”进入“可迁移、可验证、可发布”的状态。
@@ -782,6 +784,13 @@
 
 - 常见 nginx API 反代配置已有清晰迁移路径。
 - 发布文档开始包含性能和容量边界，而不只是功能列表。
+
+实现说明：
+
+- 当前已提供 `rginx migrate-nginx` 最小迁移辅助子命令，覆盖 `listen / server_name / location / proxy_pass / proxy_set_header / client_max_body_size / upstream weight / backup` 这条子集。
+- 当前已补齐 nginx 子集迁移手册、benchmark / soak 基线文档，以及 release / deployment 收口文档。
+- 当前仓库已内置 `scripts/run-benchmark-matrix.py` 和 `scripts/run-soak.sh`，用于固定 release 前的验证矩阵。
+- 当前已补齐 systemd / supervisor 示例，发布文档开始显式描述容量边界和 rollout / rollback 动作。
 
 ### 8 周后应达到的最低结果
 

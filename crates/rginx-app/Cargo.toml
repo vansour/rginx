@@ -16,6 +16,7 @@ categories = ["network-programming", "web-programming::http-server"]
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+http.workspace = true
 libc = "0.2"
 rginx-config = { path = "../rginx-config" }
 rginx-http = { path = "../rginx-http" }
