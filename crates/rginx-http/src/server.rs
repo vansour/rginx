@@ -67,6 +67,7 @@ pub async fn serve(
                     let Some(connection_guard) =
                         state.try_acquire_connection(current_config.server.max_connections)
                     else {
+                        state.record_connection_rejected();
                         tracing::warn!(
                             remote_addr = %remote_addr,
                             max_connections = current_config.server.max_connections,
@@ -76,6 +77,7 @@ pub async fn serve(
                         drop(stream);
                         continue;
                     };
+                    state.record_connection_accepted();
                     let http1 = Http1ConnectionOptions {
                         keep_alive: current_config.server.keep_alive,
                         max_headers: current_config.server.max_headers,

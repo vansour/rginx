@@ -171,9 +171,41 @@ fn upgraded_tunnels_still_count_towards_max_connections() {
         .expect("second client should connect before being rejected");
     extra.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
     extra.set_write_timeout(Some(Duration::from_millis(500))).unwrap();
-    write!(extra, "GET / HTTP/1.1\r\nHost: {listen_addr}\r\n\r\n")
-        .expect("second client should write request");
-    extra.flush().expect("second client request should flush");
+    let write_rejected = match write!(extra, "GET / HTTP/1.1\r\nHost: {listen_addr}\r\n\r\n") {
+        Ok(()) => match extra.flush() {
+            Ok(()) => false,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::UnexpectedEof
+                ) =>
+            {
+                true
+            }
+            Err(error) => panic!("expected second connection to close cleanly, got {error}"),
+        },
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::UnexpectedEof
+            ) =>
+        {
+            true
+        }
+        Err(error) => panic!("expected second connection to close cleanly, got {error}"),
+    };
+
+    if write_rejected {
+        drop(extra);
+        drop(upgraded);
+        server.shutdown_and_wait(Duration::from_secs(5));
+        upstream_task.join().expect("upstream thread should complete");
+        return;
+    }
 
     let mut buffer = [0u8; 64];
     match extra.read(&mut buffer) {

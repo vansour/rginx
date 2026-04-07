@@ -42,12 +42,13 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
     while let RuntimeSignal::Reload = shutdown::wait_for_signal().await? {
         tracing::info!("reload signal received");
         match reload::reload(&state).await {
-            Ok(config) => {
+            Ok(result) => {
                 tracing::info!(
-                    listen = %config.server.listen_addr,
-                    vhosts = config.total_vhost_count(),
-                    routes = config.total_route_count(),
-                    upstreams = config.upstreams.len(),
+                    revision = result.revision,
+                    listen = %result.config.server.listen_addr,
+                    vhosts = result.config.total_vhost_count(),
+                    routes = result.config.total_route_count(),
+                    upstreams = result.config.upstreams.len(),
                     "configuration reloaded"
                 );
             }

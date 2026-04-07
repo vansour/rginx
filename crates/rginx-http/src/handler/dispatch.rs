@@ -12,6 +12,7 @@ pub async fn handle(
     remote_addr: SocketAddr,
 ) -> HttpResponse {
     let mut request = request;
+    state.record_downstream_request();
     let active = state.snapshot().await;
     let config = active.config.clone();
     let method = request.method().clone();
@@ -93,6 +94,7 @@ pub async fn handle(
     response.headers_mut().insert("x-request-id", request_id_header);
 
     let status = response.status();
+    state.record_downstream_response(status);
     let elapsed_ms = started.elapsed().as_millis() as u64;
     let body_bytes_sent = response_body_bytes_sent(method.as_str(), &response);
 

@@ -2,13 +2,15 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
+use http::StatusCode;
 use rginx_core::{ConfigSnapshot, Error, Result};
 use tokio::sync::{RwLock, watch};
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 
-use crate::proxy::ProxyClients;
+use crate::proxy::{ProxyClients, UpstreamHealthSnapshot};
 use crate::rate_limit::RateLimiters;
 use crate::tls::build_tls_acceptor;
 
@@ -25,6 +27,75 @@ struct PreparedState {
     tls_acceptor: Option<TlsAcceptor>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HttpCountersSnapshot {
+    pub downstream_connections_accepted: u64,
+    pub downstream_connections_rejected: u64,
+    pub downstream_requests: u64,
+    pub downstream_responses: u64,
+    pub downstream_responses_1xx: u64,
+    pub downstream_responses_2xx: u64,
+    pub downstream_responses_3xx: u64,
+    pub downstream_responses_4xx: u64,
+    pub downstream_responses_5xx: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReloadOutcomeSnapshot {
+    Success { revision: u64 },
+    Failure { error: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReloadResultSnapshot {
+    pub finished_at: SystemTime,
+    pub outcome: ReloadOutcomeSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ReloadStatusSnapshot {
+    pub attempts_total: u64,
+    pub successes_total: u64,
+    pub failures_total: u64,
+    pub last_result: Option<ReloadResultSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeStatusSnapshot {
+    pub revision: u64,
+    pub config_path: Option<PathBuf>,
+    pub listen_addr: std::net::SocketAddr,
+    pub worker_threads: Option<usize>,
+    pub accept_workers: usize,
+    pub total_vhosts: usize,
+    pub total_routes: usize,
+    pub total_upstreams: usize,
+    pub tls_enabled: bool,
+    pub active_connections: usize,
+    pub reload: ReloadStatusSnapshot,
+}
+
+#[derive(Debug, Default)]
+struct HttpCounters {
+    downstream_connections_accepted: AtomicU64,
+    downstream_connections_rejected: AtomicU64,
+    downstream_requests: AtomicU64,
+    downstream_responses: AtomicU64,
+    downstream_responses_1xx: AtomicU64,
+    downstream_responses_2xx: AtomicU64,
+    downstream_responses_3xx: AtomicU64,
+    downstream_responses_4xx: AtomicU64,
+    downstream_responses_5xx: AtomicU64,
+}
+
+#[derive(Debug, Default)]
+struct ReloadHistory {
+    attempts_total: u64,
+    successes_total: u64,
+    failures_total: u64,
+    last_result: Option<ReloadResultSnapshot>,
+}
+
 #[derive(Clone)]
 pub struct SharedState {
     inner: Arc<RwLock<ActiveState>>,
@@ -33,6 +104,8 @@ pub struct SharedState {
     tls_acceptor: Arc<RwLock<Option<TlsAcceptor>>>,
     background_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
     active_connections: Arc<AtomicUsize>,
+    counters: Arc<HttpCounters>,
+    reload_history: Arc<Mutex<ReloadHistory>>,
     request_ids: Arc<AtomicU64>,
     config_path: Option<Arc<PathBuf>>,
 }
@@ -73,6 +146,8 @@ impl SharedState {
             tls_acceptor: Arc::new(RwLock::new(prepared.tls_acceptor)),
             background_tasks: Arc::new(Mutex::new(Vec::new())),
             active_connections: Arc::new(AtomicUsize::new(0)),
+            counters: Arc::new(HttpCounters::default()),
+            reload_history: Arc::new(Mutex::new(ReloadHistory::default())),
             request_ids: Arc::new(AtomicU64::new(1)),
             config_path: config_path.map(Arc::new),
         })
@@ -84,6 +159,10 @@ impl SharedState {
 
     pub async fn current_config(&self) -> Arc<ConfigSnapshot> {
         self.inner.read().await.config.clone()
+    }
+
+    pub async fn current_revision(&self) -> u64 {
+        self.inner.read().await.revision
     }
 
     pub fn config_path(&self) -> Option<&PathBuf> {
@@ -100,6 +179,35 @@ impl SharedState {
 
     pub fn active_connection_count(&self) -> usize {
         self.active_connections.load(Ordering::Acquire)
+    }
+
+    pub fn counters_snapshot(&self) -> HttpCountersSnapshot {
+        self.counters.snapshot()
+    }
+
+    pub fn reload_status_snapshot(&self) -> ReloadStatusSnapshot {
+        self.reload_history.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).snapshot()
+    }
+
+    pub async fn status_snapshot(&self) -> RuntimeStatusSnapshot {
+        let state = self.inner.read().await;
+        RuntimeStatusSnapshot {
+            revision: state.revision,
+            config_path: self.config_path.as_deref().cloned(),
+            listen_addr: state.config.server.listen_addr,
+            worker_threads: state.config.runtime.worker_threads,
+            accept_workers: state.config.runtime.accept_workers,
+            total_vhosts: state.config.total_vhost_count(),
+            total_routes: state.config.total_route_count(),
+            total_upstreams: state.config.upstreams.len(),
+            tls_enabled: state.config.tls_enabled(),
+            active_connections: self.active_connection_count(),
+            reload: self.reload_status_snapshot(),
+        }
+    }
+
+    pub async fn peer_health_snapshot(&self) -> Vec<UpstreamHealthSnapshot> {
+        self.inner.read().await.clients.peer_health_snapshot()
     }
 
     pub fn try_acquire_connection(&self, limit: Option<usize>) -> Option<ActiveConnectionGuard> {
@@ -124,6 +232,62 @@ impl SharedState {
     pub fn retain_connection_slot(&self) -> ActiveConnectionGuard {
         self.active_connections.fetch_add(1, Ordering::AcqRel);
         ActiveConnectionGuard { active_connections: self.active_connections.clone() }
+    }
+
+    pub(crate) fn record_connection_accepted(&self) {
+        self.counters.downstream_connections_accepted.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_connection_rejected(&self) {
+        self.counters.downstream_connections_rejected.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_downstream_request(&self) {
+        self.counters.downstream_requests.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_downstream_response(&self, status: StatusCode) {
+        self.counters.downstream_responses.fetch_add(1, Ordering::Relaxed);
+        match status.as_u16() / 100 {
+            1 => {
+                self.counters.downstream_responses_1xx.fetch_add(1, Ordering::Relaxed);
+            }
+            2 => {
+                self.counters.downstream_responses_2xx.fetch_add(1, Ordering::Relaxed);
+            }
+            3 => {
+                self.counters.downstream_responses_3xx.fetch_add(1, Ordering::Relaxed);
+            }
+            4 => {
+                self.counters.downstream_responses_4xx.fetch_add(1, Ordering::Relaxed);
+            }
+            5 => {
+                self.counters.downstream_responses_5xx.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+
+    pub fn record_reload_success(&self, revision: u64) {
+        let mut history =
+            self.reload_history.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        history.attempts_total += 1;
+        history.successes_total += 1;
+        history.last_result = Some(ReloadResultSnapshot {
+            finished_at: SystemTime::now(),
+            outcome: ReloadOutcomeSnapshot::Success { revision },
+        });
+    }
+
+    pub fn record_reload_failure(&self, error: impl Into<String>) {
+        let mut history =
+            self.reload_history.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        history.attempts_total += 1;
+        history.failures_total += 1;
+        history.last_result = Some(ReloadResultSnapshot {
+            finished_at: SystemTime::now(),
+            outcome: ReloadOutcomeSnapshot::Failure { error: error.into() },
+        });
     }
 
     pub async fn tls_acceptor(&self) -> Option<TlsAcceptor> {
@@ -209,6 +373,37 @@ fn prepare_state(config: ConfigSnapshot) -> Result<PreparedState> {
     Ok(PreparedState { config, clients, tls_acceptor })
 }
 
+impl HttpCounters {
+    fn snapshot(&self) -> HttpCountersSnapshot {
+        HttpCountersSnapshot {
+            downstream_connections_accepted: self
+                .downstream_connections_accepted
+                .load(Ordering::Relaxed),
+            downstream_connections_rejected: self
+                .downstream_connections_rejected
+                .load(Ordering::Relaxed),
+            downstream_requests: self.downstream_requests.load(Ordering::Relaxed),
+            downstream_responses: self.downstream_responses.load(Ordering::Relaxed),
+            downstream_responses_1xx: self.downstream_responses_1xx.load(Ordering::Relaxed),
+            downstream_responses_2xx: self.downstream_responses_2xx.load(Ordering::Relaxed),
+            downstream_responses_3xx: self.downstream_responses_3xx.load(Ordering::Relaxed),
+            downstream_responses_4xx: self.downstream_responses_4xx.load(Ordering::Relaxed),
+            downstream_responses_5xx: self.downstream_responses_5xx.load(Ordering::Relaxed),
+        }
+    }
+}
+
+impl ReloadHistory {
+    fn snapshot(&self) -> ReloadStatusSnapshot {
+        ReloadStatusSnapshot {
+            attempts_total: self.attempts_total,
+            successes_total: self.successes_total,
+            failures_total: self.failures_total,
+            last_result: self.last_result.clone(),
+        }
+    }
+}
+
 pub fn validate_config_transition(current: &ConfigSnapshot, next: &ConfigSnapshot) -> Result<()> {
     if current.server.listen_addr != next.server.listen_addr {
         return Err(Error::Config(format!(
@@ -244,11 +439,13 @@ fn take_background_tasks(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::path::PathBuf;
     use std::time::Duration;
 
+    use http::StatusCode;
     use rginx_core::{RuntimeSettings, Server, VirtualHost};
 
-    use super::{ConfigSnapshot, validate_config_transition};
+    use super::{ConfigSnapshot, ReloadOutcomeSnapshot, SharedState, validate_config_transition};
 
     fn snapshot(listen: &str) -> ConfigSnapshot {
         ConfigSnapshot {
@@ -322,5 +519,74 @@ mod tests {
         let error = validate_config_transition(&current, &next)
             .expect_err("transition should reject accept workers");
         assert!(error.to_string().contains("runtime.accept_workers"));
+    }
+
+    #[tokio::test]
+    async fn status_snapshot_reports_runtime_summary() {
+        let shared = SharedState::from_config_path(
+            PathBuf::from("/etc/rginx/rginx.ron"),
+            snapshot("127.0.0.1:8080"),
+        )
+        .expect("shared state should build");
+
+        let status = shared.status_snapshot().await;
+        assert_eq!(status.revision, 0);
+        assert_eq!(status.config_path, Some(PathBuf::from("/etc/rginx/rginx.ron")));
+        assert_eq!(status.listen_addr, "127.0.0.1:8080".parse().unwrap());
+        assert_eq!(status.total_vhosts, 1);
+        assert_eq!(status.total_routes, 0);
+        assert_eq!(status.total_upstreams, 0);
+        assert!(!status.tls_enabled);
+        assert_eq!(status.active_connections, 0);
+        assert_eq!(status.reload.attempts_total, 0);
+    }
+
+    #[test]
+    fn counters_snapshot_tracks_connections_requests_and_response_buckets() {
+        let shared = SharedState::from_config(snapshot("127.0.0.1:8080"))
+            .expect("shared state should build");
+
+        shared.record_connection_accepted();
+        shared.record_connection_rejected();
+        shared.record_downstream_request();
+        shared.record_downstream_request();
+        shared.record_downstream_response(StatusCode::OK);
+        shared.record_downstream_response(StatusCode::NOT_FOUND);
+        shared.record_downstream_response(StatusCode::BAD_GATEWAY);
+
+        let counters = shared.counters_snapshot();
+        assert_eq!(counters.downstream_connections_accepted, 1);
+        assert_eq!(counters.downstream_connections_rejected, 1);
+        assert_eq!(counters.downstream_requests, 2);
+        assert_eq!(counters.downstream_responses, 3);
+        assert_eq!(counters.downstream_responses_2xx, 1);
+        assert_eq!(counters.downstream_responses_4xx, 1);
+        assert_eq!(counters.downstream_responses_5xx, 1);
+    }
+
+    #[test]
+    fn reload_status_snapshot_tracks_last_success_and_failure() {
+        let shared = SharedState::from_config(snapshot("127.0.0.1:8080"))
+            .expect("shared state should build");
+
+        shared.record_reload_success(2);
+        let first = shared.reload_status_snapshot();
+        assert_eq!(first.attempts_total, 1);
+        assert_eq!(first.successes_total, 1);
+        assert_eq!(first.failures_total, 0);
+        assert!(matches!(
+            first.last_result.as_ref().map(|result| &result.outcome),
+            Some(ReloadOutcomeSnapshot::Success { revision: 2 })
+        ));
+
+        shared.record_reload_failure("bad config");
+        let second = shared.reload_status_snapshot();
+        assert_eq!(second.attempts_total, 2);
+        assert_eq!(second.successes_total, 1);
+        assert_eq!(second.failures_total, 1);
+        assert!(matches!(
+            second.last_result.as_ref().map(|result| &result.outcome),
+            Some(ReloadOutcomeSnapshot::Failure { error }) if error == "bad config"
+        ));
     }
 }
