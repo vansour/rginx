@@ -1,7 +1,7 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
-use clap::{ArgAction, Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -23,12 +23,22 @@ pub struct Cli {
     pub command: Option<Command>,
 }
 
-#[derive(Debug, Clone, Copy, Subcommand)]
+#[derive(Debug, Clone, Subcommand)]
 pub enum Command {
     Check,
     Status,
     Counters,
     Peers,
+    MigrateNginx(MigrateNginxArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct MigrateNginxArgs {
+    #[arg(long)]
+    pub input: PathBuf,
+
+    #[arg(long)]
+    pub output: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -88,7 +98,9 @@ mod tests {
 
     use clap::Parser;
 
-    use super::{Cli, Command, SignalCommand, installed_config_path, pid_path_for_config};
+    use super::{
+        Cli, Command, MigrateNginxArgs, SignalCommand, installed_config_path, pid_path_for_config,
+    };
 
     #[test]
     fn installed_config_path_uses_etc_directory_for_usr_sbin_layout() {
@@ -154,5 +166,20 @@ mod tests {
         let cli = Cli::try_parse_from(["rginx", "status"]).expect("cli should parse");
 
         assert!(matches!(cli.command, Some(Command::Status)));
+    }
+
+    #[test]
+    fn cli_accepts_migrate_nginx_subcommand() {
+        let cli = Cli::try_parse_from([
+            "rginx",
+            "migrate-nginx",
+            "--input",
+            "nginx.conf",
+            "--output",
+            "rginx.ron",
+        ])
+        .expect("cli should parse");
+
+        assert!(matches!(cli.command, Some(Command::MigrateNginx(MigrateNginxArgs { .. }))));
     }
 }
