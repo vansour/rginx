@@ -12,7 +12,7 @@ use support::{READY_ROUTE_CONFIG, ServerHarness, read_http_head, reserve_loopbac
 #[test]
 fn active_health_checks_mark_peer_unhealthy_and_recover_after_successive_probes() {
     let health_ok = Arc::new(AtomicBool::new(false));
-    let upstream_addr = spawn_active_health_upstream(health_ok.clone());
+    let upstream_addr = spawn_health_upstream(Some(health_ok.clone()), "backend ok\n");
     let listen_addr = reserve_loopback_addr();
     let mut server = ServerHarness::spawn("rginx-active-health", |_| {
         active_health_config(listen_addr, upstream_addr)
@@ -40,6 +40,45 @@ fn active_health_checks_mark_peer_unhealthy_and_recover_after_successive_probes(
         200,
         "backend ok\n",
         Duration::from_secs(5),
+    );
+
+    server.shutdown_and_wait(Duration::from_secs(5));
+}
+
+#[test]
+fn active_health_uses_backup_peer_until_primary_recovers() {
+    let primary_health_ok = Arc::new(AtomicBool::new(false));
+    let primary_addr = spawn_health_upstream(Some(primary_health_ok.clone()), "primary ok\n");
+    let backup_addr = spawn_health_upstream(None, "backup ok\n");
+    let listen_addr = reserve_loopback_addr();
+    let mut server = ServerHarness::spawn("rginx-active-health-backup", |_| {
+        active_health_backup_config(listen_addr, primary_addr, backup_addr)
+    });
+
+    server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
+
+    wait_for_proxy_response(
+        listen_addr,
+        "GET",
+        "/api/demo",
+        200,
+        "backup ok\n",
+        Duration::from_secs(8),
+        "backup peer should serve traffic while primary is unhealthy",
+        &mut server,
+    );
+
+    primary_health_ok.store(true, Ordering::Relaxed);
+
+    wait_for_proxy_response(
+        listen_addr,
+        "GET",
+        "/api/demo",
+        200,
+        "primary ok\n",
+        Duration::from_secs(10),
+        "primary peer should recover after successive successful probes",
+        &mut server,
     );
 
     server.shutdown_and_wait(Duration::from_secs(5));
@@ -83,7 +122,7 @@ fn wait_for_proxy_response(
     panic!("{expectation}; last_error={last_error}\n{}", server.combined_output());
 }
 
-fn spawn_active_health_upstream(health_ok: Arc<AtomicBool>) -> SocketAddr {
+fn spawn_health_upstream(health_ok: Option<Arc<AtomicBool>>, body: &'static str) -> SocketAddr {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("upstream listener should bind");
     let listen_addr = listener.local_addr().expect("upstream listener addr should be available");
 
@@ -98,13 +137,15 @@ fn spawn_active_health_upstream(health_ok: Arc<AtomicBool>) -> SocketAddr {
                 let head = read_http_head(&mut stream);
                 let path = request_path(&head);
                 let (status, body) = if path == "/healthz" {
-                    if health_ok.load(Ordering::Relaxed) {
-                        ("200 OK", "healthy\n")
-                    } else {
-                        ("503 Service Unavailable", "unhealthy\n")
+                    match health_ok.as_ref() {
+                        Some(health_ok) if health_ok.load(Ordering::Relaxed) => {
+                            ("200 OK", "healthy\n")
+                        }
+                        Some(_) => ("503 Service Unavailable", "unhealthy\n"),
+                        None => ("200 OK", "healthy\n"),
                     }
                 } else {
-                    ("200 OK", "backend ok\n")
+                    ("200 OK", body)
                 };
 
                 let response = format!(
@@ -178,6 +219,20 @@ fn active_health_config(listen_addr: SocketAddr, upstream_addr: SocketAddr) -> S
         "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [\n                UpstreamPeerConfig(\n                    url: {:?},\n                ),\n            ],\n            request_timeout_secs: Some(1),\n            health_check_path: Some(\"/healthz\"),\n            health_check_interval_secs: Some(1),\n            health_check_timeout_secs: Some(1),\n            healthy_successes_required: Some(2),\n        ),\n    ],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Prefix(\"/api\"),\n            handler: Proxy(\n                upstream: \"backend\",\n            ),\n        ),\n    ],\n)\n",
         listen_addr.to_string(),
         format!("http://{upstream_addr}"),
+        ready_route = READY_ROUTE_CONFIG,
+    )
+}
+
+fn active_health_backup_config(
+    listen_addr: SocketAddr,
+    primary_addr: SocketAddr,
+    backup_addr: SocketAddr,
+) -> String {
+    format!(
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [\n                UpstreamPeerConfig(\n                    url: {:?},\n                    backup: false,\n                ),\n                UpstreamPeerConfig(\n                    url: {:?},\n                    backup: true,\n                ),\n            ],\n            request_timeout_secs: Some(1),\n            unhealthy_after_failures: Some(1),\n            unhealthy_cooldown_secs: Some(2),\n            health_check_path: Some(\"/healthz\"),\n            health_check_interval_secs: Some(1),\n            health_check_timeout_secs: Some(1),\n            healthy_successes_required: Some(2),\n        ),\n    ],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Prefix(\"/api\"),\n            handler: Proxy(\n                upstream: \"backend\",\n            ),\n        ),\n    ],\n)\n",
+        listen_addr.to_string(),
+        format!("http://{primary_addr}"),
+        format!("http://{backup_addr}"),
         ready_route = READY_ROUTE_CONFIG,
     )
 }

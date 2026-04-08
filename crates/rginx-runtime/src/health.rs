@@ -40,7 +40,9 @@ pub async fn run(state: SharedState, mut shutdown: watch::Receiver<bool>) {
         next_due.retain(|key, _| active_keys.contains(key));
 
         for target in &targets {
-            next_due.entry(target.key.clone()).or_insert(now);
+            next_due.entry(target.key.clone()).or_insert_with(|| {
+                initial_probe_due_at(now, &target.key, target.health_check.interval)
+            });
         }
 
         let due_targets = targets
@@ -123,6 +125,32 @@ fn collect_probe_targets(snapshot: ActiveState) -> Vec<ProbeTarget> {
     targets
 }
 
+fn initial_probe_due_at(now: Instant, key: &ProbeKey, interval: std::time::Duration) -> Instant {
+    now + initial_probe_delay(key, interval)
+}
+
+fn initial_probe_delay(key: &ProbeKey, interval: std::time::Duration) -> std::time::Duration {
+    let interval_nanos = interval.as_nanos();
+    if interval_nanos == 0 {
+        return std::time::Duration::ZERO;
+    }
+
+    let jitter_nanos = stable_probe_hash(key) % interval_nanos;
+    let jitter_nanos = jitter_nanos.min(u128::from(u64::MAX)) as u64;
+    std::time::Duration::from_nanos(jitter_nanos)
+}
+
+fn stable_probe_hash(key: &ProbeKey) -> u128 {
+    const FNV_OFFSET: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
+    const FNV_PRIME: u128 = 0x0000_0000_0100_0000_0000_0000_0000_013b;
+
+    key.upstream_name
+        .bytes()
+        .chain(std::iter::once(0))
+        .chain(key.peer_url.bytes())
+        .fold(FNV_OFFSET, |hash, byte| (hash ^ u128::from(byte)).wrapping_mul(FNV_PRIME))
+}
+
 fn log_probe_task_result(result: std::result::Result<(), JoinError>) {
     if let Err(error) = result {
         if error.is_panic() {
@@ -146,7 +174,7 @@ mod tests {
     };
     use rginx_http::SharedState;
 
-    use super::collect_probe_targets;
+    use super::{ProbeKey, collect_probe_targets, initial_probe_delay};
 
     #[tokio::test]
     async fn collect_probe_targets_only_includes_enabled_upstreams() {
@@ -219,6 +247,36 @@ mod tests {
         assert_eq!(targets[0].key.upstream_name, "healthy");
         assert_eq!(targets[0].key.peer_url, "http://127.0.0.1:9000");
         assert_eq!(targets[0].health_check.path, "/healthz");
+    }
+
+    #[test]
+    fn initial_probe_delay_stays_within_interval_and_is_deterministic() {
+        let interval = Duration::from_secs(5);
+        let key = ProbeKey {
+            upstream_name: "backend".to_string(),
+            peer_url: "http://127.0.0.1:9000".to_string(),
+        };
+
+        let first = initial_probe_delay(&key, interval);
+        let second = initial_probe_delay(&key, interval);
+
+        assert!(first < interval);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn initial_probe_delay_varies_across_probe_targets() {
+        let interval = Duration::from_secs(5);
+        let first = ProbeKey {
+            upstream_name: "backend-a".to_string(),
+            peer_url: "http://127.0.0.1:9000".to_string(),
+        };
+        let second = ProbeKey {
+            upstream_name: "backend-b".to_string(),
+            peer_url: "http://127.0.0.1:9001".to_string(),
+        };
+
+        assert_ne!(initial_probe_delay(&first, interval), initial_probe_delay(&second, interval));
     }
 
     fn peer(url: &str) -> UpstreamPeer {

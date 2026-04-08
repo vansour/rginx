@@ -116,6 +116,46 @@ fn sighup_rejects_runtime_worker_thread_changes() {
 }
 
 #[test]
+fn sighup_status_reports_restart_required_fields_for_startup_boundary_changes() {
+    let _guard = test_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let listen_addr = reserve_loopback_addr();
+    let mut server = TestServer::spawn(listen_addr, "stable runtime\n");
+
+    server.wait_for_body(listen_addr, "stable runtime\n", Duration::from_secs(5));
+
+    server.write_config(return_config_with_runtime(
+        listen_addr,
+        "should not apply\n",
+        "        worker_threads: Some(2),\n        accept_workers: Some(2),\n",
+    ));
+    server.send_signal(libc::SIGHUP);
+
+    server.wait_for_body(listen_addr, "stable runtime\n", Duration::from_secs(5));
+    let status_output = server.run_cli_command(["status"]);
+    assert!(
+        status_output.status.success(),
+        "rginx status should succeed after rejected reload: {}",
+        render_output(&status_output)
+    );
+    let stdout = String::from_utf8_lossy(&status_output.stdout);
+    assert!(stdout.contains("reload_failures=1"), "stdout should report reload failure: {stdout}");
+    assert!(
+        stdout.contains("reload requires restart because these startup-boundary fields changed"),
+        "stdout should explain restart boundary: {stdout}"
+    );
+    assert!(
+        stdout.contains("runtime.worker_threads"),
+        "stdout should mention worker_threads: {stdout}"
+    );
+    assert!(
+        stdout.contains("runtime.accept_workers"),
+        "stdout should mention accept_workers: {stdout}"
+    );
+
+    server.kill_and_wait(Duration::from_secs(5));
+}
+
+#[test]
 fn sighup_reload_picks_up_updated_included_fragments() {
     let _guard = test_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let listen_addr = reserve_loopback_addr();

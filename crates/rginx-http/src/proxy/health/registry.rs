@@ -9,6 +9,7 @@ use rginx_core::{ConfigSnapshot, Upstream, UpstreamLoadBalance, UpstreamPeer};
 use serde::{Deserialize, Serialize};
 
 use crate::handler::BoxError;
+use crate::proxy::HealthChangeNotifier;
 
 #[derive(Debug, Clone, Copy)]
 struct PeerHealthPolicy {
@@ -83,6 +84,7 @@ pub(crate) struct PeerHealthRegistry {
     policies: Arc<HashMap<String, PeerHealthPolicy>>,
     peers: Arc<HashMap<String, HashMap<String, Arc<PeerHealth>>>>,
     peer_order: Arc<HashMap<String, Vec<UpstreamPeer>>>,
+    notifier: Option<HealthChangeNotifier>,
 }
 
 pub(crate) struct SelectedPeers {
@@ -102,6 +104,13 @@ impl PeerHealthPolicy {
 
 impl PeerHealthRegistry {
     pub(crate) fn from_config(config: &ConfigSnapshot) -> Self {
+        Self::from_config_with_notifier(config, None)
+    }
+
+    pub(crate) fn from_config_with_notifier(
+        config: &ConfigSnapshot,
+        notifier: Option<HealthChangeNotifier>,
+    ) -> Self {
         let policies = config
             .upstreams
             .iter()
@@ -131,6 +140,7 @@ impl PeerHealthRegistry {
             policies: Arc::new(policies),
             peers: Arc::new(peers),
             peer_order: Arc::new(peer_order),
+            notifier,
         }
     }
 
@@ -277,7 +287,9 @@ impl PeerHealthRegistry {
 
     pub(crate) fn record_success(&self, upstream_name: &str, peer_url: &str) -> bool {
         if let Some(health) = self.get(upstream_name, peer_url) {
-            return health.record_success();
+            let recovered = health.record_success();
+            self.notify_change(upstream_name);
+            return recovered;
         }
 
         false
@@ -289,7 +301,11 @@ impl PeerHealthRegistry {
         };
 
         self.get(upstream_name, peer_url)
-            .map(|health| health.record_failure(policy))
+            .map(|health| {
+                let status = health.record_failure(policy);
+                self.notify_change(upstream_name);
+                status
+            })
             .unwrap_or(PeerFailureStatus { consecutive_failures: 0, entered_cooldown: false })
     }
 
@@ -304,7 +320,11 @@ impl PeerHealthRegistry {
         healthy_successes_required: u32,
     ) -> ActiveProbeStatus {
         self.get(upstream_name, peer_url)
-            .map(|health| health.record_active_success(healthy_successes_required))
+            .map(|health| {
+                let status = health.record_active_success(healthy_successes_required);
+                self.notify_change(upstream_name);
+                status
+            })
             .unwrap_or(ActiveProbeStatus {
                 healthy: true,
                 recovered: false,
@@ -313,7 +333,11 @@ impl PeerHealthRegistry {
     }
 
     pub(crate) fn record_active_failure(&self, upstream_name: &str, peer_url: &str) -> bool {
-        self.get(upstream_name, peer_url).is_some_and(|health| health.record_active_failure())
+        self.get(upstream_name, peer_url).is_some_and(|health| {
+            let changed = health.record_active_failure();
+            self.notify_change(upstream_name);
+            changed
+        })
     }
 
     pub(crate) fn track_active_request(
@@ -324,9 +348,14 @@ impl PeerHealthRegistry {
         let peer = self.get(upstream_name, peer_url).cloned();
         if let Some(ref peer) = peer {
             peer.increment_active_requests();
+            self.notify_change(upstream_name);
         }
 
-        ActivePeerGuard { peer }
+        ActivePeerGuard {
+            peer,
+            notifier: self.notifier.clone(),
+            upstream_name: upstream_name.to_string(),
+        }
     }
 
     fn active_requests(&self, upstream_name: &str, peer_url: &str) -> u64 {
@@ -375,6 +404,12 @@ impl PeerHealthRegistry {
         }
 
         snapshots
+    }
+
+    fn notify_change(&self, upstream_name: &str) {
+        if let Some(notifier) = &self.notifier {
+            notifier(upstream_name);
+        }
     }
 }
 
@@ -483,12 +518,17 @@ impl PeerHealth {
 
 pub(crate) struct ActivePeerGuard {
     peer: Option<Arc<PeerHealth>>,
+    notifier: Option<HealthChangeNotifier>,
+    upstream_name: String,
 }
 
 impl Drop for ActivePeerGuard {
     fn drop(&mut self) {
         if let Some(peer) = self.peer.take() {
             peer.decrement_active_requests();
+            if let Some(notifier) = &self.notifier {
+                notifier(&self.upstream_name);
+            }
         }
     }
 }
@@ -597,6 +637,7 @@ mod tests {
                     backup: false,
                 }],
             )])),
+            notifier: None,
         };
 
         let actual = registry

@@ -26,9 +26,15 @@ pub struct Cli {
 #[derive(Debug, Clone, Subcommand)]
 pub enum Command {
     Check,
+    Snapshot(SnapshotArgs),
+    SnapshotVersion,
+    Delta(DeltaArgs),
+    Wait(WaitArgs),
     Status,
     Counters,
+    Traffic(WindowArgs),
     Peers,
+    Upstreams(WindowArgs),
     MigrateNginx(MigrateNginxArgs),
 }
 
@@ -39,6 +45,52 @@ pub struct MigrateNginxArgs {
 
     #[arg(long)]
     pub output: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct WaitArgs {
+    #[arg(long)]
+    pub since_version: u64,
+
+    #[arg(long)]
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Args, Default)]
+pub struct WindowArgs {
+    #[arg(long, value_parser = parse_recent_window_secs)]
+    pub window_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Args, Default)]
+pub struct SnapshotArgs {
+    #[arg(long, value_enum)]
+    pub include: Vec<SnapshotModuleArg>,
+
+    #[arg(long, value_parser = parse_recent_window_secs)]
+    pub window_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct DeltaArgs {
+    #[arg(long)]
+    pub since_version: u64,
+
+    #[arg(long, value_enum)]
+    pub include: Vec<SnapshotModuleArg>,
+
+    #[arg(long, value_parser = parse_recent_window_secs)]
+    pub window_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SnapshotModuleArg {
+    Status,
+    Counters,
+    Traffic,
+    #[value(name = "peer-health")]
+    PeerHealth,
+    Upstreams,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -72,6 +124,16 @@ fn default_config_path() -> PathBuf {
     PathBuf::from("configs/rginx.ron")
 }
 
+fn parse_recent_window_secs(value: &str) -> Result<u64, String> {
+    let parsed = value
+        .parse::<u64>()
+        .map_err(|error| format!("invalid recent window `{value}`: {error}"))?;
+    match parsed {
+        60 | 300 => Ok(parsed),
+        _ => Err("recent window must be either 60 or 300 seconds".to_string()),
+    }
+}
+
 fn installed_config_path(executable: &Path) -> Option<PathBuf> {
     let bin_dir = executable.parent()?;
     let prefix = bin_dir.parent()?;
@@ -99,7 +161,8 @@ mod tests {
     use clap::Parser;
 
     use super::{
-        Cli, Command, MigrateNginxArgs, SignalCommand, installed_config_path, pid_path_for_config,
+        Cli, Command, DeltaArgs, MigrateNginxArgs, SignalCommand, SnapshotArgs, SnapshotModuleArg,
+        WaitArgs, WindowArgs, installed_config_path, pid_path_for_config,
     };
 
     #[test]
@@ -166,6 +229,93 @@ mod tests {
         let cli = Cli::try_parse_from(["rginx", "status"]).expect("cli should parse");
 
         assert!(matches!(cli.command, Some(Command::Status)));
+    }
+
+    #[test]
+    fn cli_accepts_snapshot_subcommand() {
+        let cli = Cli::try_parse_from(["rginx", "snapshot"]).expect("cli should parse");
+
+        assert!(
+            matches!(cli.command, Some(Command::Snapshot(SnapshotArgs { include, window_secs: None })) if include.is_empty())
+        );
+    }
+
+    #[test]
+    fn cli_accepts_snapshot_version_subcommand() {
+        let cli = Cli::try_parse_from(["rginx", "snapshot-version"]).expect("cli should parse");
+
+        assert!(matches!(cli.command, Some(Command::SnapshotVersion)));
+    }
+
+    #[test]
+    fn cli_accepts_delta_subcommand() {
+        let cli = Cli::try_parse_from(["rginx", "delta", "--since-version", "3"])
+            .expect("cli should parse");
+
+        assert!(matches!(
+            cli.command,
+            Some(Command::Delta(DeltaArgs {
+                since_version: 3,
+                include,
+                window_secs: None,
+            })) if include.is_empty()
+        ));
+    }
+
+    #[test]
+    fn cli_accepts_snapshot_include_flags() {
+        let cli = Cli::try_parse_from([
+            "rginx",
+            "snapshot",
+            "--include",
+            "traffic",
+            "--include",
+            "upstreams",
+        ])
+        .expect("cli should parse");
+
+        assert!(matches!(
+            cli.command,
+            Some(Command::Snapshot(SnapshotArgs { include, window_secs: None }))
+                if include == vec![SnapshotModuleArg::Traffic, SnapshotModuleArg::Upstreams]
+        ));
+    }
+
+    #[test]
+    fn cli_accepts_window_secs_flags() {
+        let cli = Cli::try_parse_from(["rginx", "traffic", "--window-secs", "300"])
+            .expect("cli should parse");
+
+        assert!(matches!(
+            cli.command,
+            Some(Command::Traffic(WindowArgs { window_secs: Some(300) }))
+        ));
+    }
+
+    #[test]
+    fn cli_accepts_wait_subcommand() {
+        let cli =
+            Cli::try_parse_from(["rginx", "wait", "--since-version", "3", "--timeout-ms", "1000"])
+                .expect("cli should parse");
+
+        assert!(matches!(
+            cli.command,
+            Some(Command::Wait(WaitArgs { since_version: 3, timeout_ms: Some(1000) }))
+        ));
+    }
+
+    #[test]
+    fn cli_accepts_traffic_subcommand() {
+        let cli = Cli::try_parse_from(["rginx", "traffic"]).expect("cli should parse");
+
+        assert!(matches!(cli.command, Some(Command::Traffic(WindowArgs { window_secs: None }))));
+    }
+
+    #[test]
+    fn cli_accepts_upstreams_subcommand() {
+        let cli = Cli::try_parse_from(["rginx", "upstreams"]).expect("cli should parse");
+
+        assert!(matches!(cli.command, Some(Command::Upstreams(WindowArgs { window_secs: None }))));
     }
 
     #[test]

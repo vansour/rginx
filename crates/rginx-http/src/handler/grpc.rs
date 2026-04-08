@@ -197,12 +197,17 @@ impl GrpcObservability {
 struct GrpcResponseFinalizer {
     format: Option<AccessLogFormat>,
     context: OwnedAccessLogContext,
+    stats: Option<GrpcStatsContext>,
     finalized: bool,
 }
 
 impl GrpcResponseFinalizer {
-    fn new(format: Option<AccessLogFormat>, context: OwnedAccessLogContext) -> Self {
-        Self { format, context, finalized: false }
+    fn new(
+        format: Option<AccessLogFormat>,
+        context: OwnedAccessLogContext,
+        stats: Option<GrpcStatsContext>,
+    ) -> Self {
+        Self { format, context, stats, finalized: false }
     }
 
     fn finalize(&mut self, grpc: &GrpcObservability) {
@@ -211,8 +216,24 @@ impl GrpcResponseFinalizer {
         }
         self.finalized = true;
 
+        if let Some(stats) = &self.stats {
+            stats.state.record_grpc_status(
+                &stats.listener_id,
+                &stats.vhost_id,
+                stats.route_id.as_deref(),
+                grpc.status.as_deref(),
+            );
+        }
         log_access_event(self.format.as_ref(), self.context.as_borrowed(Some(grpc)));
     }
+}
+
+#[derive(Clone)]
+pub(super) struct GrpcStatsContext {
+    pub state: SharedState,
+    pub listener_id: String,
+    pub vhost_id: String,
+    pub route_id: Option<String>,
 }
 
 struct GrpcAccessLogBody {
@@ -313,10 +334,12 @@ pub(super) fn wrap_grpc_observability_response(
     format: Option<AccessLogFormat>,
     context: OwnedAccessLogContext,
     grpc: GrpcObservability,
+    stats: Option<GrpcStatsContext>,
 ) -> HttpResponse {
     let (parts, body) = response.into_parts();
-    let body = GrpcAccessLogBody::new(body, GrpcResponseFinalizer::new(format, context), grpc)
-        .boxed_unsync();
+    let body =
+        GrpcAccessLogBody::new(body, GrpcResponseFinalizer::new(format, context, stats), grpc)
+            .boxed_unsync();
     Response::from_parts(parts, body)
 }
 
