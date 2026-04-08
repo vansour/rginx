@@ -67,6 +67,7 @@ pub struct AdminSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
+#[allow(clippy::large_enum_variant)]
 pub enum AdminResponse {
     Snapshot(AdminSnapshot),
     SnapshotVersion(SnapshotVersionSnapshot),
