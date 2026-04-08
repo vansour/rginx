@@ -347,8 +347,10 @@ impl PeerHealthRegistry {
     ) -> ActivePeerGuard {
         let peer = self.get(upstream_name, peer_url).cloned();
         if let Some(ref peer) = peer {
-            peer.increment_active_requests();
-            self.notify_change(upstream_name);
+            let transitioned_from_idle = peer.increment_active_requests();
+            if transitioned_from_idle {
+                self.notify_change(upstream_name);
+            }
         }
 
         ActivePeerGuard {
@@ -478,13 +480,18 @@ impl PeerHealth {
         was_healthy
     }
 
-    fn increment_active_requests(&self) {
-        lock_peer_health(&self.state).active_requests += 1;
+    fn increment_active_requests(&self) -> bool {
+        let mut state = lock_peer_health(&self.state);
+        let transitioned_from_idle = state.active_requests == 0;
+        state.active_requests += 1;
+        transitioned_from_idle
     }
 
-    fn decrement_active_requests(&self) {
+    fn decrement_active_requests(&self) -> bool {
         let mut state = lock_peer_health(&self.state);
+        let was_active = state.active_requests > 0;
         state.active_requests = state.active_requests.saturating_sub(1);
+        was_active && state.active_requests == 0
     }
 
     fn active_requests(&self) -> u64 {
@@ -525,8 +532,8 @@ pub(crate) struct ActivePeerGuard {
 impl Drop for ActivePeerGuard {
     fn drop(&mut self) {
         if let Some(peer) = self.peer.take() {
-            peer.decrement_active_requests();
-            if let Some(notifier) = &self.notifier {
+            let transitioned_to_idle = peer.decrement_active_requests();
+            if transitioned_to_idle && let Some(notifier) = &self.notifier {
                 notifier(&self.upstream_name);
             }
         }
@@ -609,6 +616,7 @@ fn projected_least_conn_load(
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use rginx_core::{
@@ -755,5 +763,48 @@ mod tests {
         assert_eq!(peer.active_requests, 1);
 
         drop(guard);
+    }
+
+    #[test]
+    fn track_active_request_only_notifies_when_peer_becomes_active_or_idle() {
+        let notifications = Arc::new(AtomicUsize::new(0));
+        let registry = PeerHealthRegistry {
+            policies: Arc::new(HashMap::new()),
+            peers: Arc::new(HashMap::from([(
+                "backend".to_string(),
+                HashMap::from([(
+                    "http://127.0.0.1:8080".to_string(),
+                    Arc::new(PeerHealth::default()),
+                )]),
+            )])),
+            peer_order: Arc::new(HashMap::from([(
+                "backend".to_string(),
+                vec![UpstreamPeer {
+                    url: "http://127.0.0.1:8080".to_string(),
+                    scheme: "http".to_string(),
+                    authority: "127.0.0.1:8080".to_string(),
+                    weight: 1,
+                    backup: false,
+                }],
+            )])),
+            notifier: Some(Arc::new({
+                let notifications = notifications.clone();
+                move |_upstream_name| {
+                    notifications.fetch_add(1, Ordering::Relaxed);
+                }
+            })),
+        };
+
+        let first = registry.track_active_request("backend", "http://127.0.0.1:8080");
+        assert_eq!(notifications.load(Ordering::Relaxed), 1);
+
+        let second = registry.track_active_request("backend", "http://127.0.0.1:8080");
+        assert_eq!(notifications.load(Ordering::Relaxed), 1);
+
+        drop(first);
+        assert_eq!(notifications.load(Ordering::Relaxed), 1);
+
+        drop(second);
+        assert_eq!(notifications.load(Ordering::Relaxed), 2);
     }
 }
