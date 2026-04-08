@@ -3,9 +3,11 @@ use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use rginx_http::{
-    HttpCountersSnapshot, RuntimeStatusSnapshot, SharedState, UpstreamHealthSnapshot,
+    HttpCountersSnapshot, RuntimeStatusSnapshot, SharedState, SnapshotDeltaSnapshot,
+    SnapshotModule, TrafficStatsSnapshot, UpstreamHealthSnapshot, UpstreamStatsSnapshot,
 };
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -15,12 +17,21 @@ use tokio::task::{JoinError, JoinSet};
 
 const INSTALLED_CONFIG_PATH: &str = "/etc/rginx/rginx.ron";
 const INSTALLED_ADMIN_SOCKET_PATH: &str = "/run/rginx/admin.sock";
+const ADMIN_SNAPSHOT_SCHEMA_VERSION: u32 = 3;
+const DEFAULT_RECENT_WINDOW_SECS: u64 = 60;
+const EXTENDED_RECENT_WINDOW_SECS: u64 = 300;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AdminRequest {
+    GetSnapshot { include: Option<Vec<SnapshotModule>>, window_secs: Option<u64> },
+    GetSnapshotVersion,
+    GetDelta { since_version: u64, include: Option<Vec<SnapshotModule>>, window_secs: Option<u64> },
+    WaitForSnapshotChange { since_version: u64, timeout_ms: Option<u64> },
     GetStatus,
     GetCounters,
+    GetTrafficStats { window_secs: Option<u64> },
     GetPeerHealth,
+    GetUpstreamStats { window_secs: Option<u64> },
     GetRevision,
 }
 
@@ -30,11 +41,41 @@ pub struct RevisionSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnapshotVersionSnapshot {
+    pub snapshot_version: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdminSnapshot {
+    pub schema_version: u32,
+    pub snapshot_version: u64,
+    pub captured_at_unix_ms: u64,
+    pub pid: u32,
+    pub binary_version: String,
+    pub included_modules: Vec<SnapshotModule>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<RuntimeStatusSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub counters: Option<HttpCountersSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub traffic: Option<TrafficStatsSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer_health: Option<Vec<UpstreamHealthSnapshot>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstreams: Option<Vec<UpstreamStatsSnapshot>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum AdminResponse {
+    Snapshot(AdminSnapshot),
+    SnapshotVersion(SnapshotVersionSnapshot),
+    Delta(SnapshotDeltaSnapshot),
     Status(RuntimeStatusSnapshot),
     Counters(HttpCountersSnapshot),
+    TrafficStats(TrafficStatsSnapshot),
     PeerHealth(Vec<UpstreamHealthSnapshot>),
+    UpstreamStats(Vec<UpstreamStatsSnapshot>),
     Revision(RevisionSnapshot),
     Error { message: String },
 }
@@ -117,10 +158,76 @@ async fn handle_connection(stream: UnixStream, state: SharedState) -> io::Result
     })?;
 
     let response = match request {
+        AdminRequest::GetSnapshot { include, window_secs } => {
+            let window_secs = normalize_recent_window_secs(window_secs)
+                .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
+            let included_modules = SnapshotModule::normalize(include.as_deref());
+            let status = if included_modules.contains(&SnapshotModule::Status) {
+                Some(state.status_snapshot().await)
+            } else {
+                None
+            };
+            let counters = included_modules
+                .contains(&SnapshotModule::Counters)
+                .then(|| state.counters_snapshot());
+            let traffic = included_modules
+                .contains(&SnapshotModule::Traffic)
+                .then(|| state.traffic_stats_snapshot_with_window(window_secs));
+            let peer_health = if included_modules.contains(&SnapshotModule::PeerHealth) {
+                Some(state.peer_health_snapshot().await)
+            } else {
+                None
+            };
+            let upstreams = included_modules
+                .contains(&SnapshotModule::Upstreams)
+                .then(|| state.upstream_stats_snapshot_with_window(window_secs));
+            AdminResponse::Snapshot(AdminSnapshot {
+                schema_version: ADMIN_SNAPSHOT_SCHEMA_VERSION,
+                snapshot_version: state.current_snapshot_version(),
+                captured_at_unix_ms: unix_time_ms(SystemTime::now()),
+                pid: std::process::id(),
+                binary_version: env!("CARGO_PKG_VERSION").to_string(),
+                included_modules: included_modules.clone(),
+                status,
+                counters,
+                traffic,
+                peer_health,
+                upstreams,
+            })
+        }
+        AdminRequest::GetSnapshotVersion => {
+            AdminResponse::SnapshotVersion(SnapshotVersionSnapshot {
+                snapshot_version: state.current_snapshot_version(),
+            })
+        }
+        AdminRequest::GetDelta { since_version, include, window_secs } => {
+            let window_secs = normalize_recent_window_secs(window_secs)
+                .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
+            AdminResponse::Delta(state.snapshot_delta_since(
+                since_version,
+                include.as_deref(),
+                window_secs,
+            ))
+        }
+        AdminRequest::WaitForSnapshotChange { since_version, timeout_ms } => {
+            let timeout = timeout_ms.map(std::time::Duration::from_millis);
+            let snapshot_version = state.wait_for_snapshot_change(since_version, timeout).await;
+            AdminResponse::SnapshotVersion(SnapshotVersionSnapshot { snapshot_version })
+        }
         AdminRequest::GetStatus => AdminResponse::Status(state.status_snapshot().await),
         AdminRequest::GetCounters => AdminResponse::Counters(state.counters_snapshot()),
+        AdminRequest::GetTrafficStats { window_secs } => {
+            let window_secs = normalize_recent_window_secs(window_secs)
+                .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
+            AdminResponse::TrafficStats(state.traffic_stats_snapshot_with_window(window_secs))
+        }
         AdminRequest::GetPeerHealth => {
             AdminResponse::PeerHealth(state.peer_health_snapshot().await)
+        }
+        AdminRequest::GetUpstreamStats { window_secs } => {
+            let window_secs = normalize_recent_window_secs(window_secs)
+                .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
+            AdminResponse::UpstreamStats(state.upstream_stats_snapshot_with_window(window_secs))
         }
         AdminRequest::GetRevision => {
             AdminResponse::Revision(RevisionSnapshot { revision: state.current_revision().await })
@@ -186,6 +293,23 @@ fn log_admin_connection_result(result: Result<(), JoinError>) {
 fn set_admin_socket_permissions(path: &Path) -> io::Result<()> {
     let permissions = fs::Permissions::from_mode(0o600);
     fs::set_permissions(path, permissions)
+}
+
+fn unix_time_ms(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
+}
+
+fn normalize_recent_window_secs(window_secs: Option<u64>) -> Result<Option<u64>, String> {
+    match window_secs {
+        None => Ok(None),
+        Some(DEFAULT_RECENT_WINDOW_SECS) => Ok(Some(DEFAULT_RECENT_WINDOW_SECS)),
+        Some(EXTENDED_RECENT_WINDOW_SECS) => Ok(Some(EXTENDED_RECENT_WINDOW_SECS)),
+        Some(other) => Err(format!(
+            "unsupported recent window `{other}`; only {DEFAULT_RECENT_WINDOW_SECS} or {EXTENDED_RECENT_WINDOW_SECS} seconds are supported"
+        )),
+    }
 }
 
 #[cfg(test)]

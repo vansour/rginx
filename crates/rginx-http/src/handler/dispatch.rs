@@ -1,6 +1,6 @@
 use super::access_log::{AccessLogContext, OwnedAccessLogContext, log_access_event};
 use super::grpc::{
-    GrpcRequestMetadata, GrpcStatusCode, grpc_error_response, grpc_observability,
+    GrpcRequestMetadata, GrpcStatsContext, GrpcStatusCode, grpc_error_response, grpc_observability,
     grpc_request_metadata, wrap_grpc_observability_response,
 };
 use super::response::{forbidden_response, full_body, text_response, too_many_requests_response};
@@ -22,7 +22,6 @@ pub async fn handle(
     listener_id: &str,
 ) -> HttpResponse {
     let mut request = request;
-    state.record_downstream_request();
     let active = state.snapshot().await;
     let config = active.config.clone();
     let listener = config
@@ -70,6 +69,16 @@ pub async fn handle(
         .as_ref()
         .map(|route| route.id.clone())
         .unwrap_or_else(|| "__unmatched__".to_string());
+    let selected_route_id = selected_route.as_ref().map(|route| route.id.clone());
+    state.record_downstream_request(listener_id, &selected_vhost_id, selected_route_id.as_deref());
+    if let Some(grpc_request) = grpc_request {
+        state.record_grpc_request(
+            listener_id,
+            &selected_vhost_id,
+            selected_route_id.as_deref(),
+            grpc_request.protocol,
+        );
+    }
     let listener_context = ListenerRequestContext {
         listener_id,
         listener_tls_enabled: listener.tls_enabled(),
@@ -79,10 +88,12 @@ pub async fn handle(
     let mut response = match selected_route {
         Some(route) => {
             if let Some(response) = authorize_route(&request_headers, &route, &client_address) {
+                state.record_route_access_denied(&route.id);
                 response
             } else if let Some(response) =
                 enforce_rate_limit(&request_headers, &state, &route, &route_id, &client_address)
             {
+                state.record_route_rate_limited(&route.id);
                 response
             } else {
                 build_route_response(
@@ -115,7 +126,12 @@ pub async fn handle(
     response.headers_mut().insert("x-request-id", request_id_header);
 
     let status = response.status();
-    state.record_downstream_response(status);
+    state.record_downstream_response(
+        listener_id,
+        &selected_vhost_id,
+        selected_route_id.as_deref(),
+        status,
+    );
     let elapsed_ms = started.elapsed().as_millis() as u64;
     let body_bytes_sent = response_body_bytes_sent(method.as_str(), &response);
 
@@ -130,14 +146,25 @@ pub async fn handle(
             user_agent,
             referer,
             client_address,
-            vhost: selected_vhost_id,
-            route: route_id,
+            vhost: selected_vhost_id.clone(),
+            route: route_id.clone(),
             status: status.as_u16(),
             elapsed_ms,
             downstream_scheme: downstream_scheme.to_string(),
             body_bytes_sent,
         };
-        return wrap_grpc_observability_response(response, format, context, grpc);
+        return wrap_grpc_observability_response(
+            response,
+            format,
+            context,
+            grpc,
+            Some(GrpcStatsContext {
+                state: state.clone(),
+                listener_id: listener_id.to_string(),
+                vhost_id: selected_vhost_id.clone(),
+                route_id: selected_route_id,
+            }),
+        );
     }
 
     log_access_event(

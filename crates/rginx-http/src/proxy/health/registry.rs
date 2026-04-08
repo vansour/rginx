@@ -9,6 +9,7 @@ use rginx_core::{ConfigSnapshot, Upstream, UpstreamLoadBalance, UpstreamPeer};
 use serde::{Deserialize, Serialize};
 
 use crate::handler::BoxError;
+use crate::proxy::HealthChangeNotifier;
 
 #[derive(Debug, Clone, Copy)]
 struct PeerHealthPolicy {
@@ -83,6 +84,7 @@ pub(crate) struct PeerHealthRegistry {
     policies: Arc<HashMap<String, PeerHealthPolicy>>,
     peers: Arc<HashMap<String, HashMap<String, Arc<PeerHealth>>>>,
     peer_order: Arc<HashMap<String, Vec<UpstreamPeer>>>,
+    notifier: Option<HealthChangeNotifier>,
 }
 
 pub(crate) struct SelectedPeers {
@@ -102,6 +104,13 @@ impl PeerHealthPolicy {
 
 impl PeerHealthRegistry {
     pub(crate) fn from_config(config: &ConfigSnapshot) -> Self {
+        Self::from_config_with_notifier(config, None)
+    }
+
+    pub(crate) fn from_config_with_notifier(
+        config: &ConfigSnapshot,
+        notifier: Option<HealthChangeNotifier>,
+    ) -> Self {
         let policies = config
             .upstreams
             .iter()
@@ -131,6 +140,7 @@ impl PeerHealthRegistry {
             policies: Arc::new(policies),
             peers: Arc::new(peers),
             peer_order: Arc::new(peer_order),
+            notifier,
         }
     }
 
@@ -277,7 +287,9 @@ impl PeerHealthRegistry {
 
     pub(crate) fn record_success(&self, upstream_name: &str, peer_url: &str) -> bool {
         if let Some(health) = self.get(upstream_name, peer_url) {
-            return health.record_success();
+            let recovered = health.record_success();
+            self.notify_change(upstream_name);
+            return recovered;
         }
 
         false
@@ -289,7 +301,11 @@ impl PeerHealthRegistry {
         };
 
         self.get(upstream_name, peer_url)
-            .map(|health| health.record_failure(policy))
+            .map(|health| {
+                let status = health.record_failure(policy);
+                self.notify_change(upstream_name);
+                status
+            })
             .unwrap_or(PeerFailureStatus { consecutive_failures: 0, entered_cooldown: false })
     }
 
@@ -304,7 +320,11 @@ impl PeerHealthRegistry {
         healthy_successes_required: u32,
     ) -> ActiveProbeStatus {
         self.get(upstream_name, peer_url)
-            .map(|health| health.record_active_success(healthy_successes_required))
+            .map(|health| {
+                let status = health.record_active_success(healthy_successes_required);
+                self.notify_change(upstream_name);
+                status
+            })
             .unwrap_or(ActiveProbeStatus {
                 healthy: true,
                 recovered: false,
@@ -313,7 +333,11 @@ impl PeerHealthRegistry {
     }
 
     pub(crate) fn record_active_failure(&self, upstream_name: &str, peer_url: &str) -> bool {
-        self.get(upstream_name, peer_url).is_some_and(|health| health.record_active_failure())
+        self.get(upstream_name, peer_url).is_some_and(|health| {
+            let changed = health.record_active_failure();
+            self.notify_change(upstream_name);
+            changed
+        })
     }
 
     pub(crate) fn track_active_request(
@@ -323,10 +347,17 @@ impl PeerHealthRegistry {
     ) -> ActivePeerGuard {
         let peer = self.get(upstream_name, peer_url).cloned();
         if let Some(ref peer) = peer {
-            peer.increment_active_requests();
+            let transitioned_from_idle = peer.increment_active_requests();
+            if transitioned_from_idle {
+                self.notify_change(upstream_name);
+            }
         }
 
-        ActivePeerGuard { peer }
+        ActivePeerGuard {
+            peer,
+            notifier: self.notifier.clone(),
+            upstream_name: upstream_name.to_string(),
+        }
     }
 
     fn active_requests(&self, upstream_name: &str, peer_url: &str) -> u64 {
@@ -375,6 +406,12 @@ impl PeerHealthRegistry {
         }
 
         snapshots
+    }
+
+    fn notify_change(&self, upstream_name: &str) {
+        if let Some(notifier) = &self.notifier {
+            notifier(upstream_name);
+        }
     }
 }
 
@@ -443,13 +480,18 @@ impl PeerHealth {
         was_healthy
     }
 
-    fn increment_active_requests(&self) {
-        lock_peer_health(&self.state).active_requests += 1;
+    fn increment_active_requests(&self) -> bool {
+        let mut state = lock_peer_health(&self.state);
+        let transitioned_from_idle = state.active_requests == 0;
+        state.active_requests += 1;
+        transitioned_from_idle
     }
 
-    fn decrement_active_requests(&self) {
+    fn decrement_active_requests(&self) -> bool {
         let mut state = lock_peer_health(&self.state);
+        let was_active = state.active_requests > 0;
         state.active_requests = state.active_requests.saturating_sub(1);
+        was_active && state.active_requests == 0
     }
 
     fn active_requests(&self) -> u64 {
@@ -483,12 +525,17 @@ impl PeerHealth {
 
 pub(crate) struct ActivePeerGuard {
     peer: Option<Arc<PeerHealth>>,
+    notifier: Option<HealthChangeNotifier>,
+    upstream_name: String,
 }
 
 impl Drop for ActivePeerGuard {
     fn drop(&mut self) {
         if let Some(peer) = self.peer.take() {
-            peer.decrement_active_requests();
+            let transitioned_to_idle = peer.decrement_active_requests();
+            if transitioned_to_idle && let Some(notifier) = &self.notifier {
+                notifier(&self.upstream_name);
+            }
         }
     }
 }
@@ -569,6 +616,7 @@ fn projected_least_conn_load(
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use rginx_core::{
@@ -597,6 +645,7 @@ mod tests {
                     backup: false,
                 }],
             )])),
+            notifier: None,
         };
 
         let actual = registry
@@ -714,5 +763,48 @@ mod tests {
         assert_eq!(peer.active_requests, 1);
 
         drop(guard);
+    }
+
+    #[test]
+    fn track_active_request_only_notifies_when_peer_becomes_active_or_idle() {
+        let notifications = Arc::new(AtomicUsize::new(0));
+        let registry = PeerHealthRegistry {
+            policies: Arc::new(HashMap::new()),
+            peers: Arc::new(HashMap::from([(
+                "backend".to_string(),
+                HashMap::from([(
+                    "http://127.0.0.1:8080".to_string(),
+                    Arc::new(PeerHealth::default()),
+                )]),
+            )])),
+            peer_order: Arc::new(HashMap::from([(
+                "backend".to_string(),
+                vec![UpstreamPeer {
+                    url: "http://127.0.0.1:8080".to_string(),
+                    scheme: "http".to_string(),
+                    authority: "127.0.0.1:8080".to_string(),
+                    weight: 1,
+                    backup: false,
+                }],
+            )])),
+            notifier: Some(Arc::new({
+                let notifications = notifications.clone();
+                move |_upstream_name| {
+                    notifications.fetch_add(1, Ordering::Relaxed);
+                }
+            })),
+        };
+
+        let first = registry.track_active_request("backend", "http://127.0.0.1:8080");
+        assert_eq!(notifications.load(Ordering::Relaxed), 1);
+
+        let second = registry.track_active_request("backend", "http://127.0.0.1:8080");
+        assert_eq!(notifications.load(Ordering::Relaxed), 1);
+
+        drop(first);
+        assert_eq!(notifications.load(Ordering::Relaxed), 1);
+
+        drop(second);
+        assert_eq!(notifications.load(Ordering::Relaxed), 2);
     }
 }

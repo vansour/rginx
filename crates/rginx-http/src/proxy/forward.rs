@@ -6,6 +6,7 @@ use super::health::{ActivePeerBody, ActivePeerGuard};
 use super::request_body::{PrepareRequestError, PreparedProxyRequest, can_retry_peer_request};
 use super::upgrade::proxy_upgraded_connection;
 use super::*;
+use std::error::Error as StdError;
 
 #[derive(Debug, Clone, Copy)]
 pub struct DownstreamRequestOptions {
@@ -38,9 +39,11 @@ pub async fn forward_request(
     downstream: DownstreamRequestContext<'_>,
 ) -> HttpResponse {
     let request_headers = request.headers().clone();
+    state.record_upstream_request(&target.upstream_name);
     let grpc_web_mode = match detect_grpc_web_mode(request.headers()) {
         Ok(mode) => mode,
         Err(message) => {
+            state.record_upstream_unsupported_media_type_response(&target.upstream_name);
             return unsupported_media_type(&request_headers, format!("{message}\n"));
         }
     };
@@ -48,7 +51,10 @@ pub async fn forward_request(
         match effective_upstream_request_timeout(&request_headers, target.upstream.request_timeout)
         {
             Ok(timeout) => timeout,
-            Err(message) => return bad_request(&request_headers, format!("{message}\n")),
+            Err(message) => {
+                state.record_upstream_bad_request_response(&target.upstream_name);
+                return bad_request(&request_headers, format!("{message}\n"));
+            }
         };
     let client = match clients.for_upstream(target.upstream.as_ref()) {
         Ok(client) => client,
@@ -59,6 +65,7 @@ pub async fn forward_request(
                 %error,
                 "failed to select proxy client"
             );
+            state.record_upstream_bad_gateway_response(&target.upstream_name);
             return bad_gateway(
                 &request_headers,
                 format!("upstream `{}` TLS client is unavailable\n", target.upstream_name),
@@ -91,6 +98,7 @@ pub async fn forward_request(
                 max_request_body_bytes,
                 "rejecting request body that exceeds configured server limit"
             );
+            state.record_upstream_payload_too_large_response(&target.upstream_name);
             return payload_too_large(
                 &request_headers,
                 format!(
@@ -105,6 +113,14 @@ pub async fn forward_request(
                 %error,
                 "failed to prepare upstream request"
             );
+            if invalid_downstream_request_body_error(&error) {
+                state.record_upstream_bad_request_response(&target.upstream_name);
+                return bad_request(
+                    &request_headers,
+                    format!("invalid downstream request body: {error}\n"),
+                );
+            }
+            state.record_upstream_bad_gateway_response(&target.upstream_name);
             return bad_gateway(
                 &request_headers,
                 format!("failed to prepare upstream request for `{}`\n", target.upstream_name),
@@ -125,6 +141,8 @@ pub async fn forward_request(
                         skipped_unhealthy = selected.skipped_unhealthy,
                         "proxy route has no healthy peers available"
         );
+        state.record_upstream_no_healthy_peers(&target.upstream_name);
+        state.record_upstream_bad_gateway_response(&target.upstream_name);
         return bad_gateway(
             &request_headers,
             format!("upstream `{}` has no healthy peers available\n", target.upstream_name),
@@ -157,12 +175,14 @@ pub async fn forward_request(
                     %error,
                     "failed to build upstream request"
                 );
+                state.record_upstream_bad_gateway_response(&target.upstream_name);
                 return bad_gateway(
                     &request_headers,
                     format!("failed to build upstream request for `{}`\n", target.upstream_name),
                 );
             }
         };
+        state.record_upstream_peer_attempt(&target.upstream_name, &peer.url);
         let active_peer = clients.track_active_request(&target.upstream_name, &peer.url);
 
         match wait_for_upstream_stage(
@@ -174,6 +194,8 @@ pub async fn forward_request(
         .await
         {
             Ok(Ok(mut response)) => {
+                state.record_upstream_peer_success(&target.upstream_name, &peer.url);
+                state.record_upstream_completed_response(&target.upstream_name);
                 let recovered = clients.record_peer_success(&target.upstream_name, &peer.url);
                 if recovered {
                     tracing::info!(
@@ -234,6 +256,8 @@ pub async fn forward_request(
                 );
             }
             Ok(Err(error)) if can_retry_peer_request(&prepared_request, &peers, attempt_index) => {
+                state.record_upstream_peer_failure(&target.upstream_name, &peer.url);
+                state.record_upstream_failover(&target.upstream_name);
                 let failure = clients.record_peer_failure(&target.upstream_name, &peer.url);
                 let next_peer = &peers[attempt_index + 1];
                 tracing::warn!(
@@ -249,6 +273,21 @@ pub async fn forward_request(
                 );
             }
             Ok(Err(error)) => {
+                if invalid_downstream_request_body_error(&error) {
+                    tracing::warn!(
+                        request_id = %downstream.request_id,
+                        upstream = %target.upstream_name,
+                        peer = %peer.url,
+                        %error,
+                        "downstream request body was invalid while proxying upstream request"
+                    );
+                    state.record_upstream_bad_request_response(&target.upstream_name);
+                    return bad_request(
+                        &request_headers,
+                        format!("invalid downstream request body: {error}\n"),
+                    );
+                }
+                state.record_upstream_peer_failure(&target.upstream_name, &peer.url);
                 let failure = clients.record_peer_failure(&target.upstream_name, &peer.url);
                 tracing::warn!(
                     request_id = %downstream.request_id,
@@ -259,12 +298,15 @@ pub async fn forward_request(
                     %error,
                     "upstream request failed"
                 );
+                state.record_upstream_bad_gateway_response(&target.upstream_name);
                 return bad_gateway(
                     &request_headers,
                     format!("upstream `{}` is unavailable\n", target.upstream_name),
                 );
             }
             Err(error) if can_retry_peer_request(&prepared_request, &peers, attempt_index) => {
+                state.record_upstream_peer_timeout(&target.upstream_name, &peer.url);
+                state.record_upstream_failover(&target.upstream_name);
                 let failure = clients.record_peer_failure(&target.upstream_name, &peer.url);
                 let next_peer = &peers[attempt_index + 1];
                 tracing::warn!(
@@ -281,6 +323,7 @@ pub async fn forward_request(
                 );
             }
             Err(error) => {
+                state.record_upstream_peer_timeout(&target.upstream_name, &peer.url);
                 let failure = clients.record_peer_failure(&target.upstream_name, &peer.url);
                 tracing::warn!(
                     request_id = %downstream.request_id,
@@ -292,6 +335,7 @@ pub async fn forward_request(
                     %error,
                     "upstream request timed out"
                 );
+                state.record_upstream_gateway_timeout_response(&target.upstream_name);
                 return gateway_timeout(
                     &request_headers,
                     format!(
@@ -303,7 +347,31 @@ pub async fn forward_request(
         }
     }
 
+    state.record_upstream_bad_gateway_response(&target.upstream_name);
     bad_gateway(&request_headers, format!("upstream `{}` is unavailable\n", target.upstream_name))
+}
+
+fn invalid_downstream_request_body_error(error: &(dyn StdError + 'static)) -> bool {
+    let mut current = Some(error);
+    while let Some(candidate) = current {
+        if let Some(io_error) = candidate.downcast_ref::<std::io::Error>()
+            && matches!(
+                io_error.kind(),
+                std::io::ErrorKind::InvalidData | std::io::ErrorKind::InvalidInput
+            )
+        {
+            return true;
+        }
+
+        let message = candidate.to_string();
+        if message.contains("grpc-web") && message.contains("invalid") {
+            return true;
+        }
+
+        current = candidate.source();
+    }
+
+    false
 }
 
 pub(super) async fn wait_for_upstream_stage<T>(

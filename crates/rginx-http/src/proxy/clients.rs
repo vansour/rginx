@@ -5,6 +5,7 @@ use super::health::{
 use super::*;
 
 pub type ProxyClient = Client<HttpsConnector<HttpConnector>, HttpBody>;
+pub(crate) type HealthChangeNotifier = Arc<dyn Fn(&str) + Send + Sync + 'static>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct UpstreamClientProfile {
@@ -47,6 +48,13 @@ pub struct ProxyClients {
 
 impl ProxyClients {
     pub fn from_config(config: &ConfigSnapshot) -> Result<Self, Error> {
+        Self::from_config_with_health_notifier(config, None)
+    }
+
+    pub(crate) fn from_config_with_health_notifier(
+        config: &ConfigSnapshot,
+        notifier: Option<HealthChangeNotifier>,
+    ) -> Result<Self, Error> {
         let profiles = config
             .upstreams
             .values()
@@ -59,7 +67,13 @@ impl ProxyClients {
             clients.insert(profile, client);
         }
 
-        Ok(Self { clients: Arc::new(clients), health: PeerHealthRegistry::from_config(config) })
+        let health = if let Some(notifier) = notifier {
+            PeerHealthRegistry::from_config_with_notifier(config, Some(notifier))
+        } else {
+            PeerHealthRegistry::from_config(config)
+        };
+
+        Ok(Self { clients: Arc::new(clients), health })
     }
 
     pub fn for_upstream(&self, upstream: &Upstream) -> Result<ProxyClient, Error> {

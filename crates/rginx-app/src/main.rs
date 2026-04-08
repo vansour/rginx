@@ -1,3 +1,4 @@
+mod admin_cli;
 mod cli;
 mod migrate_nginx;
 
@@ -5,16 +6,10 @@ mod migrate_nginx;
 compile_error!("rginx supports Linux only");
 
 use std::fs;
-use std::io::{BufReader, Read, Write};
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, anyhow};
 use clap::Parser;
-use rginx_runtime::admin::{
-    AdminRequest, AdminResponse, RevisionSnapshot, admin_socket_path_for_config,
-};
 
 use crate::cli::{Cli, Command, MigrateNginxArgs, SignalCommand, pid_path_for_config};
 
@@ -35,24 +30,13 @@ fn main() -> anyhow::Result<()> {
     }
 
     if let Some(command) = cli.command.as_ref() {
-        match command {
-            Command::Status => {
-                print_admin_status(&cli.config)?;
-                return Ok(());
-            }
-            Command::Counters => {
-                print_admin_counters(&cli.config)?;
-                return Ok(());
-            }
-            Command::Peers => {
-                print_admin_peers(&cli.config)?;
-                return Ok(());
-            }
-            Command::MigrateNginx(args) => {
-                run_migrate_nginx(args)?;
-                return Ok(());
-            }
-            Command::Check => {}
+        if admin_cli::run_admin_command(&cli.config, command)? {
+            return Ok(());
+        }
+
+        if let Command::MigrateNginx(args) = command {
+            run_migrate_nginx(args)?;
+            return Ok(());
         }
     }
 
@@ -67,19 +51,23 @@ fn main() -> anyhow::Result<()> {
             rginx_http::SharedState::from_config(config.clone())
                 .context("failed to initialize runtime dependencies")?;
 
-            println!(
-                "configuration is valid: listen={} tls={} vhosts={} routes={} upstreams={} worker_threads={} accept_workers={}",
-                config.server.listen_addr,
-                if config.tls_enabled() { "enabled" } else { "disabled" },
-                config.total_vhost_count(),
-                config.total_route_count(),
-                config.upstreams.len(),
-                config
-                    .runtime
-                    .worker_threads
-                    .map(|count| count.to_string())
-                    .unwrap_or_else(|| "auto".to_string()),
-                config.runtime.accept_workers,
+            print_check_success(
+                &cli.config,
+                CheckSummary {
+                    listener_model: listener_model(
+                        config.total_listener_count(),
+                        config.listeners.first().map(|listener| listener.id.as_str()),
+                        config.listeners.first().map(|listener| listener.name.as_str()),
+                    ),
+                    listener_count: config.total_listener_count(),
+                    listen_addr: config.server.listen_addr,
+                    tls_enabled: config.tls_enabled(),
+                    total_vhost_count: config.total_vhost_count(),
+                    total_route_count: config.total_route_count(),
+                    upstream_count: config.upstreams.len(),
+                    worker_threads: config.runtime.worker_threads,
+                    accept_workers: config.runtime.accept_workers,
+                },
             );
             Ok(())
         }
@@ -87,19 +75,23 @@ fn main() -> anyhow::Result<()> {
             rginx_http::SharedState::from_config(config.clone())
                 .context("failed to initialize runtime dependencies")?;
 
-            println!(
-                "configuration is valid: listen={} tls={} vhosts={} routes={} upstreams={} worker_threads={} accept_workers={}",
-                config.server.listen_addr,
-                if config.tls_enabled() { "enabled" } else { "disabled" },
-                config.total_vhost_count(),
-                config.total_route_count(),
-                config.upstreams.len(),
-                config
-                    .runtime
-                    .worker_threads
-                    .map(|count| count.to_string())
-                    .unwrap_or_else(|| "auto".to_string()),
-                config.runtime.accept_workers,
+            print_check_success(
+                &cli.config,
+                CheckSummary {
+                    listener_model: listener_model(
+                        config.total_listener_count(),
+                        config.listeners.first().map(|listener| listener.id.as_str()),
+                        config.listeners.first().map(|listener| listener.name.as_str()),
+                    ),
+                    listener_count: config.total_listener_count(),
+                    listen_addr: config.server.listen_addr,
+                    tls_enabled: config.tls_enabled(),
+                    total_vhost_count: config.total_vhost_count(),
+                    total_route_count: config.total_route_count(),
+                    upstream_count: config.upstreams.len(),
+                    worker_threads: config.runtime.worker_threads,
+                    accept_workers: config.runtime.accept_workers,
+                },
             );
             Ok(())
         }
@@ -113,7 +105,18 @@ fn main() -> anyhow::Result<()> {
                 .context("runtime exited with an error")
         }
         Some(Command::Check) => unreachable!("`check` subcommand and `-t` conflict at clap level"),
-        Some(Command::Status | Command::Counters | Command::Peers | Command::MigrateNginx(_)) => {
+        Some(
+            Command::Status
+            | Command::SnapshotVersion
+            | Command::Snapshot(_)
+            | Command::Delta(_)
+            | Command::Wait(_)
+            | Command::Counters
+            | Command::Traffic(_)
+            | Command::Peers
+            | Command::Upstreams(_)
+            | Command::MigrateNginx(_),
+        ) => {
             unreachable!("admin subcommands return before runtime initialization")
         }
     }
@@ -151,6 +154,55 @@ fn build_runtime(worker_threads: Option<usize>) -> anyhow::Result<tokio::runtime
         builder.worker_threads(worker_threads);
     }
     builder.build().map_err(|error| anyhow!("failed to build tokio runtime: {error}"))
+}
+
+struct CheckSummary {
+    listener_model: &'static str,
+    listener_count: usize,
+    listen_addr: std::net::SocketAddr,
+    tls_enabled: bool,
+    total_vhost_count: usize,
+    total_route_count: usize,
+    upstream_count: usize,
+    worker_threads: Option<usize>,
+    accept_workers: usize,
+}
+
+fn print_check_success(config_path: &Path, summary: CheckSummary) {
+    println!(
+        "configuration is valid: config={} listener_model={} listeners={} listen={} tls={} vhosts={} routes={} upstreams={} worker_threads={} accept_workers={}",
+        config_path.display(),
+        summary.listener_model,
+        summary.listener_count,
+        summary.listen_addr,
+        if summary.tls_enabled { "enabled" } else { "disabled" },
+        summary.total_vhost_count,
+        summary.total_route_count,
+        summary.upstream_count,
+        summary
+            .worker_threads
+            .map(|count: usize| count.to_string())
+            .unwrap_or_else(|| "auto".to_string()),
+        summary.accept_workers,
+    );
+    println!(
+        "reload_requires_restart_for=listen,listeners,runtime.worker_threads,runtime.accept_workers"
+    );
+}
+
+fn listener_model(
+    listener_count: usize,
+    first_listener_id: Option<&str>,
+    first_listener_name: Option<&str>,
+) -> &'static str {
+    if listener_count == 1
+        && first_listener_id == Some("default")
+        && first_listener_name == Some("default")
+    {
+        "legacy"
+    } else {
+        "explicit"
+    }
 }
 
 struct PidFileGuard {
@@ -220,161 +272,5 @@ fn signal_name(signal: SignalCommand) -> &'static str {
         SignalCommand::Restart => "restart",
         SignalCommand::Stop => "stop",
         SignalCommand::Quit => "quit",
-    }
-}
-
-fn print_admin_status(config_path: &Path) -> anyhow::Result<()> {
-    match query_admin_socket(config_path, AdminRequest::GetStatus)? {
-        AdminResponse::Status(status) => {
-            println!("revision={}", status.revision);
-            println!(
-                "config_path={}",
-                status
-                    .config_path
-                    .as_deref()
-                    .map(Path::display)
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "-".to_string())
-            );
-            println!("listen={}", status.listen_addr);
-            println!(
-                "worker_threads={}",
-                status
-                    .worker_threads
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "auto".to_string())
-            );
-            println!("accept_workers={}", status.accept_workers);
-            println!("vhosts={}", status.total_vhosts);
-            println!("routes={}", status.total_routes);
-            println!("upstreams={}", status.total_upstreams);
-            println!("tls={}", if status.tls_enabled { "enabled" } else { "disabled" });
-            println!("active_connections={}", status.active_connections);
-            println!("reload_attempts={}", status.reload.attempts_total);
-            println!("reload_successes={}", status.reload.successes_total);
-            println!("reload_failures={}", status.reload.failures_total);
-            println!("last_reload={}", render_last_reload(status.reload.last_result.as_ref()));
-            Ok(())
-        }
-        response => Err(unexpected_admin_response("status", &response)),
-    }
-}
-
-fn print_admin_counters(config_path: &Path) -> anyhow::Result<()> {
-    match query_admin_socket(config_path, AdminRequest::GetCounters)? {
-        AdminResponse::Counters(counters) => {
-            println!(
-                "downstream_connections_accepted_total={}",
-                counters.downstream_connections_accepted
-            );
-            println!(
-                "downstream_connections_rejected_total={}",
-                counters.downstream_connections_rejected
-            );
-            println!("downstream_requests_total={}", counters.downstream_requests);
-            println!("downstream_responses_total={}", counters.downstream_responses);
-            println!("downstream_responses_1xx_total={}", counters.downstream_responses_1xx);
-            println!("downstream_responses_2xx_total={}", counters.downstream_responses_2xx);
-            println!("downstream_responses_3xx_total={}", counters.downstream_responses_3xx);
-            println!("downstream_responses_4xx_total={}", counters.downstream_responses_4xx);
-            println!("downstream_responses_5xx_total={}", counters.downstream_responses_5xx);
-            Ok(())
-        }
-        response => Err(unexpected_admin_response("counters", &response)),
-    }
-}
-
-fn print_admin_peers(config_path: &Path) -> anyhow::Result<()> {
-    match query_admin_socket(config_path, AdminRequest::GetPeerHealth)? {
-        AdminResponse::PeerHealth(upstreams) => {
-            for upstream in upstreams {
-                println!(
-                    "upstream={} unhealthy_after_failures={} cooldown_ms={} active_health_enabled={}",
-                    upstream.upstream_name,
-                    upstream.unhealthy_after_failures,
-                    upstream.cooldown_ms,
-                    upstream.active_health_enabled
-                );
-                for peer in upstream.peers {
-                    println!(
-                        "  peer={} backup={} weight={} available={} passive_failures={} passive_cooldown_remaining_ms={} passive_pending_recovery={} active_unhealthy={} active_successes={} active_requests={}",
-                        peer.peer_url,
-                        peer.backup,
-                        peer.weight,
-                        peer.available,
-                        peer.passive_consecutive_failures,
-                        peer.passive_cooldown_remaining_ms
-                            .map(|value| value.to_string())
-                            .unwrap_or_else(|| "-".to_string()),
-                        peer.passive_pending_recovery,
-                        peer.active_unhealthy,
-                        peer.active_consecutive_successes,
-                        peer.active_requests,
-                    );
-                }
-            }
-            Ok(())
-        }
-        response => Err(unexpected_admin_response("peers", &response)),
-    }
-}
-
-fn query_admin_socket(config_path: &Path, request: AdminRequest) -> anyhow::Result<AdminResponse> {
-    let socket_path = admin_socket_path_for_config(config_path);
-    let mut stream = UnixStream::connect(&socket_path)
-        .with_context(|| format!("failed to connect to admin socket {}", socket_path.display()))?;
-    serde_json::to_writer(&mut stream, &request)
-        .context("failed to encode admin socket request")?;
-    stream.write_all(b"\n").context("failed to terminate admin socket request")?;
-    stream
-        .shutdown(std::net::Shutdown::Write)
-        .context("failed to shutdown admin socket write side")?;
-
-    let mut response = String::new();
-    BufReader::new(stream)
-        .read_to_string(&mut response)
-        .context("failed to read admin socket response")?;
-    let response: AdminResponse =
-        serde_json::from_str(response.trim()).context("failed to decode admin socket response")?;
-    match response {
-        AdminResponse::Error { message } => Err(anyhow!("admin socket error: {message}")),
-        response => Ok(response),
-    }
-}
-
-fn unexpected_admin_response(command: &str, response: &AdminResponse) -> anyhow::Error {
-    anyhow!("unexpected admin response for `{command}`: {}", admin_response_kind(response))
-}
-
-fn admin_response_kind(response: &AdminResponse) -> &'static str {
-    match response {
-        AdminResponse::Status(_) => "status",
-        AdminResponse::Counters(_) => "counters",
-        AdminResponse::PeerHealth(_) => "peer_health",
-        AdminResponse::Revision(RevisionSnapshot { .. }) => "revision",
-        AdminResponse::Error { .. } => "error",
-    }
-}
-
-fn render_last_reload(result: Option<&rginx_http::ReloadResultSnapshot>) -> String {
-    let Some(result) = result else {
-        return "-".to_string();
-    };
-
-    let finished_at = result
-        .finished_at_unix_ms
-        .checked_div(1000)
-        .and_then(|seconds| UNIX_EPOCH.checked_add(std::time::Duration::from_secs(seconds)))
-        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| duration.as_secs().to_string())
-        .unwrap_or_else(|| result.finished_at_unix_ms.to_string());
-
-    match &result.outcome {
-        rginx_http::ReloadOutcomeSnapshot::Success { revision } => {
-            format!("success revision={revision} finished_at_unix_s={finished_at}")
-        }
-        rginx_http::ReloadOutcomeSnapshot::Failure { error } => {
-            format!("failure error={error:?} finished_at_unix_s={finished_at}")
-        }
     }
 }

@@ -12,6 +12,8 @@ mod tls;
 pub use proxy::{PeerHealthSnapshot, UpstreamHealthSnapshot};
 pub use server::serve;
 pub use state::{
-    HttpCountersSnapshot, ReloadOutcomeSnapshot, ReloadResultSnapshot, ReloadStatusSnapshot,
-    RuntimeStatusSnapshot, SharedState,
+    GrpcTrafficSnapshot, HttpCountersSnapshot, ListenerStatsSnapshot, ReloadOutcomeSnapshot,
+    ReloadResultSnapshot, ReloadStatusSnapshot, RouteStatsSnapshot, RuntimeStatusSnapshot,
+    SharedState, SnapshotDeltaSnapshot, SnapshotModule, TrafficStatsSnapshot,
+    UpstreamPeerStatsSnapshot, UpstreamStatsSnapshot, VhostStatsSnapshot,
 };
