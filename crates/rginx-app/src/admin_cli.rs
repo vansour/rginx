@@ -3,9 +3,9 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
-use anyhow::{Context, anyhow};
+use anyhow::{anyhow, Context};
 use rginx_runtime::admin::{
-    AdminRequest, AdminResponse, RevisionSnapshot, admin_socket_path_for_config,
+    admin_socket_path_for_config, AdminRequest, AdminResponse, RevisionSnapshot,
 };
 
 use crate::cli::{Command, DeltaArgs, SnapshotArgs, SnapshotModuleArg, WaitArgs, WindowArgs};
@@ -81,6 +81,22 @@ fn print_admin_status(config_path: &Path) -> anyhow::Result<()> {
                     ("routes", status.total_routes.to_string()),
                     ("upstreams", status.total_upstreams.to_string()),
                     ("tls", if status.tls_enabled { "enabled" } else { "disabled" }.to_string()),
+                    ("tls_listeners", status.tls.listeners.len().to_string()),
+                    ("tls_certificates", status.tls.certificates.len().to_string()),
+                    (
+                        "tls_expiring_certificates",
+                        status.tls.expiring_certificate_count.to_string(),
+                    ),
+                    ("mtls_listeners", status.mtls.configured_listeners.to_string()),
+                    ("mtls_optional_listeners", status.mtls.optional_listeners.to_string()),
+                    ("mtls_required_listeners", status.mtls.required_listeners.to_string()),
+                    (
+                        "mtls_authenticated_connections",
+                        status.mtls.authenticated_connections.to_string(),
+                    ),
+                    ("mtls_authenticated_requests", status.mtls.authenticated_requests.to_string()),
+                    ("mtls_anonymous_requests", status.mtls.anonymous_requests.to_string()),
+                    ("mtls_handshake_failures", status.mtls.handshake_failures_total.to_string()),
                     ("active_connections", status.active_connections.to_string()),
                     ("reload_attempts", status.reload.attempts_total.to_string()),
                     ("reload_successes", status.reload.successes_total.to_string()),
@@ -88,6 +104,85 @@ fn print_admin_status(config_path: &Path) -> anyhow::Result<()> {
                     ("last_reload", render_last_reload(status.reload.last_result.as_ref())),
                 ],
             );
+            for certificate in &status.tls.certificates {
+                print_record(
+                    "status_tls_certificate",
+                    [
+                        ("scope", certificate.scope.clone()),
+                        ("cert_path", certificate.cert_path.display().to_string()),
+                        (
+                            "sha256",
+                            certificate
+                                .fingerprint_sha256
+                                .clone()
+                                .unwrap_or_else(|| "-".to_string()),
+                        ),
+                        ("subject", certificate.subject.clone().unwrap_or_else(|| "-".to_string())),
+                        ("issuer", certificate.issuer.clone().unwrap_or_else(|| "-".to_string())),
+                        (
+                            "serial",
+                            certificate.serial_number.clone().unwrap_or_else(|| "-".to_string()),
+                        ),
+                        (
+                            "san_dns_names",
+                            if certificate.san_dns_names.is_empty() {
+                                "-".to_string()
+                            } else {
+                                certificate.san_dns_names.join(",")
+                            },
+                        ),
+                        (
+                            "ski",
+                            certificate
+                                .subject_key_identifier
+                                .clone()
+                                .unwrap_or_else(|| "-".to_string()),
+                        ),
+                        (
+                            "aki",
+                            certificate
+                                .authority_key_identifier
+                                .clone()
+                                .unwrap_or_else(|| "-".to_string()),
+                        ),
+                        (
+                            "is_ca",
+                            certificate
+                                .is_ca
+                                .map(|value| value.to_string())
+                                .unwrap_or_else(|| "-".to_string()),
+                        ),
+                        (
+                            "path_len_constraint",
+                            certificate
+                                .path_len_constraint
+                                .map(|value| value.to_string())
+                                .unwrap_or_else(|| "-".to_string()),
+                        ),
+                        (
+                            "key_usage",
+                            certificate.key_usage.clone().unwrap_or_else(|| "-".to_string()),
+                        ),
+                        (
+                            "extended_key_usage",
+                            if certificate.extended_key_usage.is_empty() {
+                                "-".to_string()
+                            } else {
+                                certificate.extended_key_usage.join(",")
+                            },
+                        ),
+                        ("chain_length", certificate.chain_length.to_string()),
+                        (
+                            "chain_diagnostics",
+                            if certificate.chain_diagnostics.is_empty() {
+                                "-".to_string()
+                            } else {
+                                certificate.chain_diagnostics.join("|")
+                            },
+                        ),
+                    ],
+                );
+            }
             Ok(())
         }
         response => Err(unexpected_admin_response("status", &response)),
@@ -212,6 +307,38 @@ fn print_admin_counters(config_path: &Path) -> anyhow::Result<()> {
                     (
                         "downstream_responses_5xx_total",
                         counters.downstream_responses_5xx.to_string(),
+                    ),
+                    (
+                        "downstream_mtls_authenticated_connections_total",
+                        counters.downstream_mtls_authenticated_connections.to_string(),
+                    ),
+                    (
+                        "downstream_mtls_authenticated_requests_total",
+                        counters.downstream_mtls_authenticated_requests.to_string(),
+                    ),
+                    (
+                        "downstream_mtls_anonymous_requests_total",
+                        counters.downstream_mtls_anonymous_requests.to_string(),
+                    ),
+                    (
+                        "downstream_tls_handshake_failures_total",
+                        counters.downstream_tls_handshake_failures.to_string(),
+                    ),
+                    (
+                        "downstream_tls_handshake_failures_missing_client_cert_total",
+                        counters.downstream_tls_handshake_failures_missing_client_cert.to_string(),
+                    ),
+                    (
+                        "downstream_tls_handshake_failures_unknown_ca_total",
+                        counters.downstream_tls_handshake_failures_unknown_ca.to_string(),
+                    ),
+                    (
+                        "downstream_tls_handshake_failures_bad_certificate_total",
+                        counters.downstream_tls_handshake_failures_bad_certificate.to_string(),
+                    ),
+                    (
+                        "downstream_tls_handshake_failures_other_total",
+                        counters.downstream_tls_handshake_failures_other.to_string(),
                     ),
                 ],
             );

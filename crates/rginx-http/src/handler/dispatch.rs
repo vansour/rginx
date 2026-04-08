@@ -5,7 +5,7 @@ use super::grpc::{
 };
 use super::response::{forbidden_response, full_body, text_response, too_many_requests_response};
 use super::*;
-use crate::client_ip::ConnectionPeerAddrs;
+use crate::client_ip::{ConnectionPeerAddrs, TlsClientIdentity};
 
 #[derive(Clone, Copy)]
 struct ListenerRequestContext<'a> {
@@ -22,6 +22,7 @@ pub async fn handle(
     listener_id: &str,
 ) -> HttpResponse {
     let mut request = request;
+    super::attach_connection_metadata(&mut request, &connection);
     let active = state.snapshot().await;
     let config = active.config.clone();
     let listener = config
@@ -45,6 +46,7 @@ pub async fn handle(
     let request_id_header =
         HeaderValue::from_str(&request_id).expect("generated request ids should be valid headers");
     request.headers_mut().insert("x-request-id", request_id_header.clone());
+    let tls_client_identity = request.extensions().get::<TlsClientIdentity>().cloned();
     let path = request
         .uri()
         .path_and_query()
@@ -54,6 +56,8 @@ pub async fn handle(
     let grpc_request = grpc_request_metadata(&request_headers, &request_path);
     let route_match_context = route_match_context(&request_path, grpc_request);
     let started = Instant::now();
+    let tls_version = connection.tls_version.clone();
+    let tls_alpn = connection.tls_alpn.clone();
     let client_address = resolve_client_address(request.headers(), &listener.server, connection);
     let downstream_scheme = if listener.tls_enabled() { "https" } else { "http" };
     let (selected_vhost_id, selected_route) = {
@@ -71,6 +75,15 @@ pub async fn handle(
         .unwrap_or_else(|| "__unmatched__".to_string());
     let selected_route_id = selected_route.as_ref().map(|route| route.id.clone());
     state.record_downstream_request(listener_id, &selected_vhost_id, selected_route_id.as_deref());
+    if listener
+        .server
+        .tls
+        .as_ref()
+        .and_then(|tls| tls.client_auth.as_ref())
+        .is_some()
+    {
+        state.record_mtls_request(listener_id, tls_client_identity.is_some());
+    }
     if let Some(grpc_request) = grpc_request {
         state.record_grpc_request(
             listener_id,
@@ -151,7 +164,10 @@ pub async fn handle(
             status: status.as_u16(),
             elapsed_ms,
             downstream_scheme: downstream_scheme.to_string(),
+            tls_version: tls_version.clone(),
+            tls_alpn: tls_alpn.clone(),
             body_bytes_sent,
+            tls_client_identity: tls_client_identity.clone(),
         };
         return wrap_grpc_observability_response(
             response,
@@ -183,7 +199,10 @@ pub async fn handle(
             status: status.as_u16(),
             elapsed_ms,
             downstream_scheme,
+            tls_version: tls_version.as_deref(),
+            tls_alpn: tls_alpn.as_deref(),
             body_bytes_sent,
+            tls_client_identity: tls_client_identity.as_ref(),
             grpc: None,
         },
     );

@@ -3,7 +3,9 @@ use std::collections::HashSet;
 use http::uri::PathAndQuery;
 use rginx_core::{Error, Result};
 
-use crate::model::{UpstreamConfig, UpstreamProtocolConfig, UpstreamTlsConfig};
+use crate::model::{
+    TlsVersionConfig, UpstreamConfig, UpstreamProtocolConfig, UpstreamTlsModeConfig,
+};
 
 pub(super) fn validate_upstreams(upstreams: &[UpstreamConfig]) -> Result<HashSet<String>> {
     let mut upstream_names = HashSet::new();
@@ -40,13 +42,42 @@ pub(super) fn validate_upstreams(upstreams: &[UpstreamConfig]) -> Result<HashSet
             }
         }
 
-        if let Some(UpstreamTlsConfig::CustomCa { ca_cert_path }) = &upstream.tls
-            && ca_cert_path.trim().is_empty()
-        {
-            return Err(Error::Config(format!(
-                "upstream `{}` custom CA path must not be empty",
-                upstream.name
-            )));
+        if let Some(tls) = &upstream.tls {
+            if let UpstreamTlsModeConfig::CustomCa { ca_cert_path } = &tls.verify
+                && ca_cert_path.trim().is_empty()
+            {
+                return Err(Error::Config(format!(
+                    "upstream `{}` custom CA path must not be empty",
+                    upstream.name
+                )));
+            }
+
+            validate_tls_versions(&upstream.name, tls.versions.as_deref())?;
+
+            match (&tls.client_cert_path, &tls.client_key_path) {
+                (Some(cert_path), Some(key_path)) => {
+                    if cert_path.trim().is_empty() {
+                        return Err(Error::Config(format!(
+                            "upstream `{}` client_cert_path must not be empty",
+                            upstream.name
+                        )));
+                    }
+
+                    if key_path.trim().is_empty() {
+                        return Err(Error::Config(format!(
+                            "upstream `{}` client_key_path must not be empty",
+                            upstream.name
+                        )));
+                    }
+                }
+                (None, None) => {}
+                _ => {
+                    return Err(Error::Config(format!(
+                        "upstream `{}` mTLS identity requires both client_cert_path and client_key_path",
+                        upstream.name
+                    )));
+                }
+            }
         }
 
         if let Some(server_name_override) = &upstream.server_name_override
@@ -261,4 +292,27 @@ pub(super) fn validate_upstreams(upstreams: &[UpstreamConfig]) -> Result<HashSet
     }
 
     Ok(upstream_names)
+}
+
+fn validate_tls_versions(upstream_name: &str, versions: Option<&[TlsVersionConfig]>) -> Result<()> {
+    let Some(versions) = versions else {
+        return Ok(());
+    };
+
+    if versions.is_empty() {
+        return Err(Error::Config(format!(
+            "upstream `{upstream_name}` TLS versions must not be empty"
+        )));
+    }
+
+    let mut seen = HashSet::new();
+    for version in versions {
+        if !seen.insert(version) {
+            return Err(Error::Config(format!(
+                "upstream `{upstream_name}` TLS versions must not contain duplicates"
+            )));
+        }
+    }
+
+    Ok(())
 }

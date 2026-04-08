@@ -26,10 +26,19 @@ pub struct ClientAddress {
     pub source: ClientIpSource,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TlsClientIdentity {
+    pub subject: Option<String>,
+    pub san_dns_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectionPeerAddrs {
     pub socket_peer_addr: SocketAddr,
     pub proxy_protocol_source_addr: Option<SocketAddr>,
+    pub tls_client_identity: Option<TlsClientIdentity>,
+    pub tls_version: Option<String>,
+    pub tls_alpn: Option<String>,
 }
 
 pub fn resolve_client_address(
@@ -94,7 +103,11 @@ fn parse_x_forwarded_for(headers: &HeaderMap) -> Option<Vec<IpAddr>> {
         }
     }
 
-    if chain.is_empty() { None } else { Some(chain) }
+    if chain.is_empty() {
+        None
+    } else {
+        Some(chain)
+    }
 }
 
 fn parse_forwarded_ip(token: &str) -> Option<IpAddr> {
@@ -124,12 +137,13 @@ mod tests {
     use http::{HeaderMap, HeaderValue};
     use rginx_core::Server;
 
-    use super::{ClientIpSource, ConnectionPeerAddrs, resolve_client_address};
+    use super::{resolve_client_address, ClientIpSource, ConnectionPeerAddrs};
 
     #[test]
     fn untrusted_peer_ignores_spoofed_x_forwarded_for() {
         let server = Server {
             listen_addr: "127.0.0.1:8080".parse().unwrap(),
+            default_certificate: None,
             trusted_proxies: vec!["10.0.0.0/8".parse().unwrap()],
             keep_alive: true,
             max_headers: None,
@@ -150,6 +164,9 @@ mod tests {
             ConnectionPeerAddrs {
                 socket_peer_addr: "192.0.2.10:4000".parse().unwrap(),
                 proxy_protocol_source_addr: None,
+                tls_client_identity: None,
+                tls_version: None,
+                tls_alpn: None,
             },
         );
 
@@ -162,6 +179,7 @@ mod tests {
     fn trusted_peer_uses_last_untrusted_x_forwarded_for_entry() {
         let server = Server {
             listen_addr: "127.0.0.1:8080".parse().unwrap(),
+            default_certificate: None,
             trusted_proxies: vec!["10.0.0.0/8".parse().unwrap()],
             keep_alive: true,
             max_headers: None,
@@ -182,6 +200,9 @@ mod tests {
             ConnectionPeerAddrs {
                 socket_peer_addr: "10.2.3.4:4000".parse().unwrap(),
                 proxy_protocol_source_addr: None,
+                tls_client_identity: None,
+                tls_version: None,
+                tls_alpn: None,
             },
         );
 
@@ -194,6 +215,7 @@ mod tests {
     fn trusted_peer_keeps_leftmost_entry_when_chain_is_all_trusted() {
         let server = Server {
             listen_addr: "127.0.0.1:8080".parse().unwrap(),
+            default_certificate: None,
             trusted_proxies: vec!["10.0.0.0/8".parse().unwrap()],
             keep_alive: true,
             max_headers: None,
@@ -214,6 +236,9 @@ mod tests {
             ConnectionPeerAddrs {
                 socket_peer_addr: "10.3.4.5:4000".parse().unwrap(),
                 proxy_protocol_source_addr: None,
+                tls_client_identity: None,
+                tls_version: None,
+                tls_alpn: None,
             },
         );
 
@@ -225,6 +250,7 @@ mod tests {
     fn malformed_x_forwarded_for_falls_back_to_peer() {
         let server = Server {
             listen_addr: "127.0.0.1:8080".parse().unwrap(),
+            default_certificate: None,
             trusted_proxies: vec!["10.0.0.0/8".parse().unwrap()],
             keep_alive: true,
             max_headers: None,
@@ -245,6 +271,9 @@ mod tests {
             ConnectionPeerAddrs {
                 socket_peer_addr: "10.2.3.4:4000".parse().unwrap(),
                 proxy_protocol_source_addr: None,
+                tls_client_identity: None,
+                tls_version: None,
+                tls_alpn: None,
             },
         );
 
@@ -256,6 +285,7 @@ mod tests {
     fn x_forwarded_for_entries_may_include_socket_addresses() {
         let server = Server {
             listen_addr: "127.0.0.1:8080".parse().unwrap(),
+            default_certificate: None,
             trusted_proxies: vec!["10.0.0.0/8".parse().unwrap()],
             keep_alive: true,
             max_headers: None,
@@ -276,6 +306,9 @@ mod tests {
             ConnectionPeerAddrs {
                 socket_peer_addr: "10.2.3.4:4000".parse().unwrap(),
                 proxy_protocol_source_addr: None,
+                tls_client_identity: None,
+                tls_version: None,
+                tls_alpn: None,
             },
         );
 
@@ -287,6 +320,7 @@ mod tests {
     fn trusted_proxy_protocol_source_is_used_when_xff_is_absent() {
         let server = Server {
             listen_addr: "127.0.0.1:8080".parse().unwrap(),
+            default_certificate: None,
             trusted_proxies: vec!["10.0.0.0/8".parse().unwrap()],
             keep_alive: true,
             max_headers: None,
@@ -305,6 +339,9 @@ mod tests {
             ConnectionPeerAddrs {
                 socket_peer_addr: "10.2.3.4:4000".parse().unwrap(),
                 proxy_protocol_source_addr: Some("198.51.100.9:1234".parse().unwrap()),
+                tls_client_identity: None,
+                tls_version: None,
+                tls_alpn: None,
             },
         );
 

@@ -3,7 +3,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 
 #[derive(Debug)]
 pub struct MigrationOutput {
@@ -203,6 +203,7 @@ struct ParsedServer {
     listens: Vec<ParsedListen>,
     server_names: Vec<String>,
     client_max_body_size: Option<u64>,
+    tls: ParsedServerTls,
     locations: Vec<ParsedLocation>,
 }
 
@@ -219,6 +220,26 @@ struct ParsedLocation {
     preserve_host: bool,
     proxy_set_headers: BTreeMap<String, String>,
     client_max_body_size: Option<u64>,
+    upstream_tls: ParsedUpstreamTls,
+}
+
+#[derive(Debug, Default, Clone)]
+struct ParsedServerTls {
+    cert_path: Option<String>,
+    key_path: Option<String>,
+    versions: Vec<String>,
+    client_ca_path: Option<String>,
+    client_auth_mode: Option<String>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct ParsedUpstreamTls {
+    verify: Option<ConvertedUpstreamVerify>,
+    versions: Vec<String>,
+    client_cert_path: Option<String>,
+    client_key_path: Option<String>,
+    server_name: Option<bool>,
+    server_name_override: Option<String>,
 }
 
 #[derive(Debug)]
@@ -364,6 +385,7 @@ fn parse_server_block(
     let mut listens = Vec::new();
     let mut server_names = Vec::new();
     let mut client_max_body_size = None;
+    let mut tls = ParsedServerTls::default();
     let mut locations = Vec::new();
 
     for child in children {
@@ -379,6 +401,34 @@ fn parse_server_block(
                     .first()
                     .ok_or_else(|| anyhow!("client_max_body_size requires a value"))?;
                 client_max_body_size = Some(parse_size(value)?);
+            }
+            Statement::Directive { name, args } if name == "ssl_certificate" => {
+                tls.cert_path = args.first().cloned();
+            }
+            Statement::Directive { name, args } if name == "ssl_certificate_key" => {
+                tls.key_path = args.first().cloned();
+            }
+            Statement::Directive { name, args } if name == "ssl_client_certificate" => {
+                tls.client_ca_path = args.first().cloned();
+            }
+            Statement::Directive { name, args } if name == "ssl_verify_client" => {
+                let value = args
+                    .first()
+                    .ok_or_else(|| anyhow!("ssl_verify_client requires a value"))?;
+                tls.client_auth_mode = match value.as_str() {
+                    "optional" => Some("Optional".to_string()),
+                    "on" | "required" => Some("Required".to_string()),
+                    "off" => None,
+                    other => {
+                        warnings.push(format!(
+                            "nginx `ssl_verify_client {other}` is not migrated automatically; review downstream mTLS policy manually"
+                        ));
+                        None
+                    }
+                };
+            }
+            Statement::Directive { name, args } if name == "ssl_protocols" => {
+                tls.versions = parse_tls_versions(&args, "ssl_protocols", warnings);
             }
             Statement::Block { name, args, children } if name == "location" => {
                 locations.push(parse_location(&args, children, warnings)?);
@@ -404,7 +454,7 @@ fn parse_server_block(
         listens.push(ParsedListen { address: "0.0.0.0:80".to_string(), ssl: false });
     }
 
-    Ok(ParsedServer { listens, server_names, client_max_body_size, locations })
+    Ok(ParsedServer { listens, server_names, client_max_body_size, tls, locations })
 }
 
 fn parse_listen(args: &[String], warnings: &mut Vec<String>) -> Result<ParsedListen> {
@@ -473,6 +523,7 @@ fn parse_location(
     let mut preserve_host = false;
     let mut proxy_set_headers = BTreeMap::new();
     let mut client_max_body_size = None;
+    let mut upstream_tls = ParsedUpstreamTls::default();
 
     for child in children {
         match child {
@@ -532,6 +583,39 @@ fn parse_location(
                         .to_string(),
                 );
             }
+            Statement::Directive { name, args } if name == "proxy_ssl_verify" => {
+                let value = args
+                    .first()
+                    .ok_or_else(|| anyhow!("proxy_ssl_verify requires a value"))?;
+                upstream_tls.verify = Some(match value.as_str() {
+                    "off" => ConvertedUpstreamVerify::Insecure,
+                    _ => ConvertedUpstreamVerify::NativeRoots,
+                });
+            }
+            Statement::Directive { name, args } if name == "proxy_ssl_trusted_certificate" => {
+                let value = args
+                    .first()
+                    .ok_or_else(|| anyhow!("proxy_ssl_trusted_certificate requires a path"))?;
+                upstream_tls.verify = Some(ConvertedUpstreamVerify::CustomCa(value.clone()));
+            }
+            Statement::Directive { name, args } if name == "proxy_ssl_certificate" => {
+                upstream_tls.client_cert_path = args.first().cloned();
+            }
+            Statement::Directive { name, args } if name == "proxy_ssl_certificate_key" => {
+                upstream_tls.client_key_path = args.first().cloned();
+            }
+            Statement::Directive { name, args } if name == "proxy_ssl_protocols" => {
+                upstream_tls.versions = parse_tls_versions(&args, "proxy_ssl_protocols", warnings);
+            }
+            Statement::Directive { name, args } if name == "proxy_ssl_name" => {
+                upstream_tls.server_name_override = args.first().cloned();
+            }
+            Statement::Directive { name, args } if name == "proxy_ssl_server_name" => {
+                let value = args
+                    .first()
+                    .ok_or_else(|| anyhow!("proxy_ssl_server_name requires a value"))?;
+                upstream_tls.server_name = Some(!matches!(value.as_str(), "off" | "false" | "0"));
+            }
             Statement::Directive { name, .. } => warnings.push(format!(
                 "ignored nginx location directive `{name}` because it is outside the supported migration subset"
             )),
@@ -551,6 +635,7 @@ fn parse_location(
         preserve_host,
         proxy_set_headers,
         client_max_body_size,
+        upstream_tls,
     })
 }
 
@@ -567,6 +652,185 @@ fn parse_size(raw: &str) -> Result<u64> {
     value.checked_mul(multiplier).ok_or_else(|| anyhow!("size value `{raw}` exceeds u64 limits"))
 }
 
+fn parse_tls_versions(args: &[String], directive: &str, warnings: &mut Vec<String>) -> Vec<String> {
+    let mut versions = Vec::new();
+    for version in args {
+        let mapped = match version.as_str() {
+            "TLSv1.2" => Some("Tls12"),
+            "TLSv1.3" => Some("Tls13"),
+            "TLSv1" | "TLSv1.1" => None,
+            _ => None,
+        };
+        if let Some(mapped) = mapped {
+            if !versions.iter().any(|existing| existing == mapped) {
+                versions.push(mapped.to_string());
+            }
+        } else {
+            warnings.push(format!(
+                "nginx `{directive} {version}` is not migrated because this rustls-based build only supports TLSv1.2 and TLSv1.3"
+            ));
+        }
+    }
+    versions
+}
+
+fn convert_server_tls(
+    tls: &ParsedServerTls,
+    warnings: &mut Vec<String>,
+) -> Option<ConvertedServerTls> {
+    let (Some(cert_path), Some(key_path)) = (tls.cert_path.clone(), tls.key_path.clone()) else {
+        if tls.cert_path.is_some()
+            || tls.key_path.is_some()
+            || !tls.versions.is_empty()
+            || tls.client_auth_mode.is_some()
+        {
+            warnings.push(
+                "nginx downstream SSL directives were detected but certificate/key were incomplete; review `server.tls` manually after migration"
+                    .to_string(),
+            );
+        }
+        return None;
+    };
+
+    Some(ConvertedServerTls {
+        cert_path,
+        key_path,
+        versions: tls.versions.clone(),
+        client_ca_path: tls.client_ca_path.clone(),
+        client_auth_mode: tls.client_auth_mode.clone(),
+    })
+}
+
+fn convert_vhost_tls(
+    tls: &ParsedServerTls,
+    server_names: &[String],
+    warnings: &mut Vec<String>,
+) -> Option<ConvertedVhostTls> {
+    let (Some(cert_path), Some(key_path)) = (tls.cert_path.clone(), tls.key_path.clone()) else {
+        return None;
+    };
+    if !tls.versions.is_empty() || tls.client_ca_path.is_some() || tls.client_auth_mode.is_some() {
+        warnings.push(format!(
+            "nginx SSL policy for server_names {} was migrated only as a certificate override; move protocol or client-auth policy onto `server.tls` or `listeners[].tls` manually",
+            ron_string_list(server_names)
+        ));
+    }
+    Some(ConvertedVhostTls { cert_path, key_path })
+}
+
+fn convert_upstream_tls(tls: &ParsedUpstreamTls) -> Option<ConvertedUpstreamTls> {
+    if tls.verify.is_none()
+        && tls.versions.is_empty()
+        && tls.client_cert_path.is_none()
+        && tls.client_key_path.is_none()
+    {
+        return None;
+    }
+    Some(ConvertedUpstreamTls {
+        verify: tls.verify.clone().unwrap_or(ConvertedUpstreamVerify::NativeRoots),
+        versions: tls.versions.clone(),
+        client_cert_path: tls.client_cert_path.clone(),
+        client_key_path: tls.client_key_path.clone(),
+    })
+}
+
+fn merge_converted_upstream_tls(
+    current: &mut Option<ConvertedUpstreamTls>,
+    incoming: &ParsedUpstreamTls,
+    upstream_name: &str,
+    warnings: &mut Vec<String>,
+) {
+    let mut parsed = ParsedUpstreamTls::default();
+    if let Some(existing) = current.as_ref() {
+        parsed.verify = Some(existing.verify.clone());
+        parsed.versions = existing.versions.clone();
+        parsed.client_cert_path = existing.client_cert_path.clone();
+        parsed.client_key_path = existing.client_key_path.clone();
+    }
+    merge_upstream_tls(&mut parsed, incoming, upstream_name, warnings);
+    *current = convert_upstream_tls(&parsed);
+}
+
+fn merge_upstream_tls(
+    current: &mut ParsedUpstreamTls,
+    incoming: &ParsedUpstreamTls,
+    upstream_name: &str,
+    warnings: &mut Vec<String>,
+) {
+    if let Some(verify) = incoming.verify.as_ref() {
+        match current.verify.as_ref() {
+            Some(existing) if existing != verify => warnings.push(format!(
+                "conflicting nginx `proxy_ssl_verify` settings were found for upstream `{upstream_name}`; keeping the first migrated value"
+            )),
+            None => current.verify = Some(verify.clone()),
+            _ => {}
+        }
+    }
+
+    if !incoming.versions.is_empty() {
+        if current.versions.is_empty() {
+            current.versions = incoming.versions.clone();
+        } else if current.versions != incoming.versions {
+            warnings.push(format!(
+                "conflicting nginx `proxy_ssl_protocols` values were found for upstream `{upstream_name}`; keeping the first migrated value"
+            ));
+        }
+    }
+
+    merge_optional_string(
+        &mut current.client_cert_path,
+        incoming.client_cert_path.as_ref(),
+        upstream_name,
+        "proxy_ssl_certificate",
+        warnings,
+    );
+    merge_optional_string(
+        &mut current.client_key_path,
+        incoming.client_key_path.as_ref(),
+        upstream_name,
+        "proxy_ssl_certificate_key",
+        warnings,
+    );
+}
+
+fn merge_optional_string(
+    current: &mut Option<String>,
+    incoming: Option<&String>,
+    upstream_name: &str,
+    directive: &str,
+    warnings: &mut Vec<String>,
+) {
+    let Some(incoming) = incoming else {
+        return;
+    };
+    match current.as_ref() {
+        Some(existing) if existing != incoming => warnings.push(format!(
+            "conflicting nginx `{directive}` values were found for upstream `{upstream_name}`; keeping the first migrated value"
+        )),
+        None => *current = Some(incoming.clone()),
+        _ => {}
+    }
+}
+
+fn merge_optional_bool(
+    current: &mut Option<bool>,
+    incoming: Option<bool>,
+    upstream_name: &str,
+    directive: &str,
+    warnings: &mut Vec<String>,
+) {
+    let Some(incoming) = incoming else {
+        return;
+    };
+    match current {
+        Some(existing) if *existing != incoming => warnings.push(format!(
+            "conflicting nginx `{directive}` values were found for upstream `{upstream_name}`; keeping the first migrated value"
+        )),
+        None => *current = Some(incoming),
+        _ => {}
+    }
+}
+
 #[derive(Debug)]
 struct ConvertedConfig {
     listeners: Vec<ConvertedListener>,
@@ -580,6 +844,7 @@ struct ConvertedConfig {
 struct ConvertedListener {
     name: String,
     listen: String,
+    tls: Option<ConvertedServerTls>,
 }
 
 #[derive(Debug)]
@@ -587,12 +852,14 @@ struct ConvertedServer {
     listen: Option<String>,
     server_names: Vec<String>,
     max_request_body_bytes: Option<u64>,
+    tls: Option<ConvertedServerTls>,
     locations: Vec<ConvertedLocation>,
 }
 
 #[derive(Debug)]
 struct ConvertedVhost {
     server_names: Vec<String>,
+    tls: Option<ConvertedVhostTls>,
     locations: Vec<ConvertedLocation>,
 }
 
@@ -600,6 +867,9 @@ struct ConvertedVhost {
 struct ConvertedUpstream {
     name: String,
     peers: Vec<ConvertedPeer>,
+    tls: Option<ConvertedUpstreamTls>,
+    server_name: Option<bool>,
+    server_name_override: Option<String>,
 }
 
 #[derive(Debug)]
@@ -628,6 +898,39 @@ struct PendingUpstream {
     name: String,
     peers: Vec<ParsedUpstreamPeer>,
     resolved_scheme: Option<String>,
+    tls: ParsedUpstreamTls,
+    server_name: Option<bool>,
+    server_name_override: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ConvertedServerTls {
+    cert_path: String,
+    key_path: String,
+    versions: Vec<String>,
+    client_ca_path: Option<String>,
+    client_auth_mode: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ConvertedVhostTls {
+    cert_path: String,
+    key_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ConvertedUpstreamVerify {
+    NativeRoots,
+    CustomCa(String),
+    Insecure,
+}
+
+#[derive(Debug, Clone)]
+struct ConvertedUpstreamTls {
+    verify: ConvertedUpstreamVerify,
+    versions: Vec<String>,
+    client_cert_path: Option<String>,
+    client_key_path: Option<String>,
 }
 
 impl ConvertedConfig {
@@ -643,6 +946,9 @@ impl ConvertedConfig {
                         name: upstream.name,
                         peers: upstream.peers,
                         resolved_scheme: None,
+                        tls: ParsedUpstreamTls::default(),
+                        server_name: None,
+                        server_name_override: None,
                     },
                 )
             })
@@ -690,9 +996,11 @@ impl ConvertedConfig {
             );
         }
 
+        let server_count = parsed.servers.len();
         let mut servers = parsed.servers.into_iter();
         let default_server =
             servers.next().expect("parsed config should contain at least one server block");
+        let default_server_tls = default_server.tls.clone();
         let default_locations = convert_locations(
             default_server.locations,
             &mut pending_upstreams,
@@ -702,8 +1010,10 @@ impl ConvertedConfig {
         )?;
         let vhosts = servers
             .map(|server| {
+                let tls = convert_vhost_tls(&server.tls, &server.server_names, &mut warnings);
                 Ok(ConvertedVhost {
                     server_names: server.server_names,
+                    tls,
                     locations: convert_locations(
                         server.locations,
                         &mut pending_upstreams,
@@ -721,14 +1031,29 @@ impl ConvertedConfig {
             unique_listens
                 .into_iter()
                 .enumerate()
-                .map(|(index, listen)| ConvertedListener {
-                    name: listener_name(index, &listen.address),
-                    listen: listen.address,
+                .map(|(index, listen)| {
+                    let tls = if listen.ssl && server_count == 1 {
+                        convert_server_tls(&default_server_tls, &mut warnings)
+                    } else {
+                        None
+                    };
+                    if listen.ssl && server_count > 1 {
+                        warnings.push(
+                            "nginx SSL settings across multiple server/listen combinations require manual placement on `listeners[].tls` after migration"
+                                .to_string(),
+                        );
+                    }
+                    ConvertedListener {
+                        name: listener_name(index, &listen.address),
+                        listen: listen.address,
+                        tls,
+                    }
                 })
                 .collect()
         } else {
             Vec::new()
         };
+        let listeners_empty = listeners.is_empty();
 
         let listen = if listeners.is_empty() {
             Some(
@@ -748,6 +1073,11 @@ impl ConvertedConfig {
                 listen,
                 server_names: default_server.server_names,
                 max_request_body_bytes,
+                tls: if listeners_empty {
+                    convert_server_tls(&default_server_tls, &mut warnings)
+                } else {
+                    None
+                },
                 locations: default_locations,
             },
             vhosts,
@@ -783,6 +1113,7 @@ impl ConvertedConfig {
                 let _ = writeln!(out, "        ListenerConfig(");
                 let _ = writeln!(out, "            name: {},", ron_string(&listener.name));
                 let _ = writeln!(out, "            listen: {},", ron_string(&listener.listen));
+                render_listener_tls(&mut out, "            ", listener.tls.as_ref());
                 let _ = writeln!(out, "        ),");
             }
             let _ = writeln!(out, "    ],");
@@ -850,11 +1181,53 @@ fn convert_locations(
                                 weight: 1,
                                 backup: false,
                             }],
+                            tls: None,
+                            server_name: None,
+                            server_name_override: None,
                         },
                     );
                     name
                 }
             };
+
+            if let Some(upstream) = pending_upstreams.get_mut(&upstream_name) {
+                merge_upstream_tls(&mut upstream.tls, &location.upstream_tls, &upstream.name, warnings);
+                merge_optional_bool(
+                    &mut upstream.server_name,
+                    location.upstream_tls.server_name,
+                    &upstream.name,
+                    "proxy_ssl_server_name",
+                    warnings,
+                );
+                merge_optional_string(
+                    &mut upstream.server_name_override,
+                    location.upstream_tls.server_name_override.as_ref(),
+                    &upstream.name,
+                    "proxy_ssl_name",
+                    warnings,
+                );
+            } else if let Some(upstream) = implicit_upstreams.get_mut(&upstream_name) {
+                merge_converted_upstream_tls(
+                    &mut upstream.tls,
+                    &location.upstream_tls,
+                    &upstream.name,
+                    warnings,
+                );
+                merge_optional_bool(
+                    &mut upstream.server_name,
+                    location.upstream_tls.server_name,
+                    &upstream.name,
+                    "proxy_ssl_server_name",
+                    warnings,
+                );
+                merge_optional_string(
+                    &mut upstream.server_name_override,
+                    location.upstream_tls.server_name_override.as_ref(),
+                    &upstream.name,
+                    "proxy_ssl_name",
+                    warnings,
+                );
+            }
 
             Ok(ConvertedLocation {
                 matcher: match location.matcher {
@@ -896,7 +1269,13 @@ fn finalize_upstreams(
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        upstreams.push(ConvertedUpstream { name: pending.name, peers });
+        upstreams.push(ConvertedUpstream {
+            name: pending.name,
+            peers,
+            tls: convert_upstream_tls(&pending.tls),
+            server_name: pending.server_name,
+            server_name_override: pending.server_name_override,
+        });
     }
 
     upstreams.extend(implicit_upstreams.into_values());
@@ -1003,6 +1382,7 @@ fn render_server(out: &mut String, server: &ConvertedServer) {
     if let Some(limit) = server.max_request_body_bytes {
         let _ = writeln!(out, "        max_request_body_bytes: Some({limit}),");
     }
+    render_server_tls(out, "        ", server.tls.as_ref());
     let _ = writeln!(out, "    ),");
 }
 
@@ -1024,6 +1404,19 @@ fn render_upstreams(out: &mut String, upstreams: &[ConvertedUpstream]) {
             let _ = writeln!(out, "                ),");
         }
         let _ = writeln!(out, "            ],");
+        if let Some(tls) = upstream.tls.as_ref() {
+            render_upstream_tls(out, "            ", tls);
+        }
+        if let Some(server_name) = upstream.server_name {
+            let _ = writeln!(out, "            server_name: Some({server_name}),");
+        }
+        if let Some(server_name_override) = upstream.server_name_override.as_ref() {
+            let _ = writeln!(
+                out,
+                "            server_name_override: Some({}),",
+                ron_string(server_name_override)
+            );
+        }
         let _ = writeln!(out, "        ),");
     }
     let _ = writeln!(out, "    ],");
@@ -1070,6 +1463,12 @@ fn render_vhosts(out: &mut String, vhosts: &[ConvertedVhost]) {
         let _ = writeln!(out, "        VirtualHostConfig(");
         let _ =
             writeln!(out, "            server_names: {},", ron_string_list(&vhost.server_names));
+        if let Some(tls) = vhost.tls.as_ref() {
+            let _ = writeln!(out, "            tls: Some(VirtualHostTlsConfig(");
+            let _ = writeln!(out, "                cert_path: {},", ron_string(&tls.cert_path));
+            let _ = writeln!(out, "                key_path: {},", ron_string(&tls.key_path));
+            let _ = writeln!(out, "            )),");
+        }
         render_locations(out, "            locations", &vhost.locations);
         let _ = writeln!(out, "        ),");
     }
@@ -1083,6 +1482,76 @@ fn ron_string(value: &str) -> String {
 fn ron_string_list(values: &[String]) -> String {
     let entries = values.iter().map(|value| ron_string(value)).collect::<Vec<_>>().join(", ");
     format!("[{entries}]")
+}
+
+fn ron_enum_list(values: &[String]) -> String {
+    format!("[{}]", values.join(", "))
+}
+
+fn render_listener_tls(out: &mut String, indent: &str, tls: Option<&ConvertedServerTls>) {
+    if let Some(tls) = tls {
+        let _ = writeln!(out, "{indent}tls: Some(ServerTlsConfig(");
+        render_server_tls_body(out, &format!("{indent}    "), tls);
+        let _ = writeln!(out, "{indent})),");
+    }
+}
+
+fn render_server_tls(out: &mut String, indent: &str, tls: Option<&ConvertedServerTls>) {
+    if let Some(tls) = tls {
+        let _ = writeln!(out, "{indent}tls: Some(ServerTlsConfig(");
+        render_server_tls_body(out, &format!("{indent}    "), tls);
+        let _ = writeln!(out, "{indent})),");
+    }
+}
+
+fn render_server_tls_body(out: &mut String, indent: &str, tls: &ConvertedServerTls) {
+    let _ = writeln!(out, "{indent}cert_path: {},", ron_string(&tls.cert_path));
+    let _ = writeln!(out, "{indent}key_path: {},", ron_string(&tls.key_path));
+    if !tls.versions.is_empty() {
+        let _ = writeln!(out, "{indent}versions: Some({}),", ron_enum_list(&tls.versions));
+    }
+    if let (Some(ca_path), Some(mode)) = (&tls.client_ca_path, &tls.client_auth_mode) {
+        let _ = writeln!(out, "{indent}client_auth: Some(ServerClientAuthConfig(");
+        let _ = writeln!(out, "{indent}    mode: {mode},");
+        let _ = writeln!(out, "{indent}    ca_cert_path: {},", ron_string(ca_path));
+        let _ = writeln!(out, "{indent})),");
+    }
+}
+
+fn render_upstream_tls(out: &mut String, indent: &str, tls: &ConvertedUpstreamTls) {
+    let shorthand = matches!(tls.verify, ConvertedUpstreamVerify::Insecure)
+        && tls.versions.is_empty()
+        && tls.client_cert_path.is_none()
+        && tls.client_key_path.is_none();
+    if shorthand {
+        let _ = writeln!(out, "{indent}tls: Some(Insecure),");
+        return;
+    }
+
+    let _ = writeln!(out, "{indent}tls: Some(UpstreamTlsConfig(");
+    match &tls.verify {
+        ConvertedUpstreamVerify::NativeRoots => {
+            let _ = writeln!(out, "{indent}    verify: NativeRoots,");
+        }
+        ConvertedUpstreamVerify::Insecure => {
+            let _ = writeln!(out, "{indent}    verify: Insecure,");
+        }
+        ConvertedUpstreamVerify::CustomCa(path) => {
+            let _ = writeln!(out, "{indent}    verify: CustomCa(");
+            let _ = writeln!(out, "{indent}        ca_cert_path: {},", ron_string(path));
+            let _ = writeln!(out, "{indent}    ),");
+        }
+    }
+    if !tls.versions.is_empty() {
+        let _ = writeln!(out, "{indent}    versions: Some({}),", ron_enum_list(&tls.versions));
+    }
+    if let Some(path) = tls.client_cert_path.as_ref() {
+        let _ = writeln!(out, "{indent}    client_cert_path: Some({}),", ron_string(path));
+    }
+    if let Some(path) = tls.client_key_path.as_ref() {
+        let _ = writeln!(out, "{indent}    client_key_path: Some({}),", ron_string(path));
+    }
+    let _ = writeln!(out, "{indent})),");
 }
 
 #[cfg(test)]

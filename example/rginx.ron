@@ -58,6 +58,12 @@ Config(
             "www.example.com",
         ],
 
+        // Certificate used when a TLS client does not send SNI.
+        // This should point to a TLS-enabled server_name.
+        // 当 TLS 客户端不发送 SNI 时使用的默认证书。
+        // 这里应填写某个已经启用 TLS 的 server_name。
+        default_certificate: None,
+
         // Trusted upstream proxies or load balancers.
         // Each item can be a single IP or a CIDR.
         // 可信上游代理或负载均衡器。
@@ -131,6 +137,40 @@ Config(
         //     // PEM private key path.
         //     // PEM 私钥文件路径。
         //     key_path: "/etc/rginx/certs/default.key",
+        //
+        //     // Optional TLS protocol versions.
+        //     // 可选 TLS 版本限制。
+        //     versions: Some([Tls12, Tls13]),
+        //
+        //     // Optional TLS cipher suite policy.
+        //     // 可选 TLS cipher suite 策略。
+        //     cipher_suites: Some([Tls13Aes256GcmSha384, Tls13Aes128GcmSha256]),
+        //
+        //     // Optional key exchange group policy.
+        //     // 可选密钥交换组策略。
+        //     key_exchange_groups: Some([X25519, Secp256r1, Secp384r1]),
+        //
+        //     // Optional ALPN list.
+        //     // 可选 ALPN 列表。
+        //     alpn_protocols: Some(["h2", "http/1.1"]),
+        //
+        //     // Optional static OCSP staple file.
+        //     // 可选静态 OCSP staple 文件。
+        //     ocsp_staple_path: None,
+        //
+        //     // Optional session policy.
+        //     // 可选会话恢复策略。
+        //     session_resumption: Some(true),
+        //     session_tickets: Some(false),
+        //
+        //     // Optional downstream client certificate verification.
+        //     // 可选下游客户端证书校验。
+        //     // 示例：
+        //     // client_auth: Some(ServerClientAuthConfig(
+        //     //     mode: Required,
+        //     //     ca_cert_path: "/etc/rginx/certs/client-ca.crt",
+        //     // )),
+        //     client_auth: None,
         // )),
     ),
 
@@ -207,6 +247,13 @@ Config(
             // 覆盖 TLS 的 SNI / 主机名校验目标。
             // 仅在 TLS 上游时有意义。
             server_name_override: None,
+
+            // Toggle upstream TLS SNI extension.
+            // Default is true. When false, rustls still keeps the resolved name for
+            // certificate validation, but does not send SNI.
+            // 是否启用上游 TLS SNI 扩展。
+            // 默认是 true。关闭后，rustls 仍会保留解析后的名称用于证书校验，但不会发送 SNI。
+            server_name: Some(true),
 
             // Legacy coarse request timeout.
             // If set, it acts as fallback for connect/read/write/idle when those are not set.
@@ -449,8 +496,21 @@ Config(
         //         // 用于信任该上游的 CA PEM 文件路径。
         //         ca_cert_path: "/etc/rginx/certs/internal-ca.pem",
         //     )),
+        //
+        //     // Structured form with upstream TLS policy.
+        //     // 带上游 TLS 策略的结构化写法。
+        //     //
+        //     // tls: Some(UpstreamTlsConfig(
+        //     //     verify: CustomCa(
+        //     //         ca_cert_path: "/etc/rginx/certs/internal-ca.pem",
+        //     //     ),
+        //     //     versions: Some([Tls13]),
+        //     //     client_cert_path: Some("/etc/rginx/certs/upstream-client.crt"),
+        //     //     client_key_path: Some("/etc/rginx/certs/upstream-client.key"),
+        //     // )),
         //     protocol: Http2,
         //     load_balance: RoundRobin,
+        //     server_name: Some(true),
         //     server_name_override: Some("internal.example.com"),
         //     request_timeout_secs: Some(30),
         //     connect_timeout_secs: Some(5),
@@ -716,7 +776,7 @@ Config(
             // Enable when this vhost should terminate TLS with its own certificate.
             // 如果这个虚拟主机需要使用自己的证书终止 TLS，可以启用下面这个块。
             //
-            // tls: Some(ServerTlsConfig(
+            // tls: Some(VirtualHostTlsConfig(
             //     cert_path: "/etc/rginx/certs/api.example.com.crt",
             //     key_path: "/etc/rginx/certs/api.example.com.key",
             // )),

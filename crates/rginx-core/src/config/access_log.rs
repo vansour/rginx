@@ -31,8 +31,13 @@ enum AccessLogVariable {
     Route,
     Scheme,
     HttpVersion,
+    TlsVersion,
+    TlsAlpn,
     UserAgent,
     Referer,
+    TlsClientAuthenticated,
+    TlsClientSubject,
+    TlsClientSanDnsNames,
     GrpcProtocol,
     GrpcService,
     GrpcMethod,
@@ -57,8 +62,13 @@ pub struct AccessLogValues<'a> {
     pub route: &'a str,
     pub scheme: &'a str,
     pub http_version: &'a str,
+    pub tls_version: Option<&'a str>,
+    pub tls_alpn: Option<&'a str>,
     pub user_agent: Option<&'a str>,
     pub referer: Option<&'a str>,
+    pub tls_client_authenticated: bool,
+    pub tls_client_subject: Option<&'a str>,
+    pub tls_client_san_dns_names: Option<&'a str>,
     pub grpc_protocol: Option<&'a str>,
     pub grpc_service: Option<&'a str>,
     pub grpc_method: Option<&'a str>,
@@ -172,12 +182,25 @@ impl AccessLogFormat {
                     AccessLogVariable::Route => rendered.push_str(values.route),
                     AccessLogVariable::Scheme => rendered.push_str(values.scheme),
                     AccessLogVariable::HttpVersion => rendered.push_str(values.http_version),
+                    AccessLogVariable::TlsVersion => {
+                        rendered.push_str(fallback_access_log_option(values.tls_version))
+                    }
+                    AccessLogVariable::TlsAlpn => {
+                        rendered.push_str(fallback_access_log_option(values.tls_alpn))
+                    }
                     AccessLogVariable::UserAgent => {
                         rendered.push_str(fallback_access_log_option(values.user_agent))
                     }
                     AccessLogVariable::Referer => {
                         rendered.push_str(fallback_access_log_option(values.referer))
                     }
+                    AccessLogVariable::TlsClientAuthenticated => rendered
+                        .push_str(if values.tls_client_authenticated { "true" } else { "false" }),
+                    AccessLogVariable::TlsClientSubject => {
+                        rendered.push_str(fallback_access_log_option(values.tls_client_subject))
+                    }
+                    AccessLogVariable::TlsClientSanDnsNames => rendered
+                        .push_str(fallback_access_log_option(values.tls_client_san_dns_names)),
                     AccessLogVariable::GrpcProtocol => {
                         rendered.push_str(fallback_access_log_option(values.grpc_protocol))
                     }
@@ -218,8 +241,13 @@ fn parse_access_log_variable(name: &str) -> Result<AccessLogVariable> {
         "route" => Ok(AccessLogVariable::Route),
         "scheme" => Ok(AccessLogVariable::Scheme),
         "http_version" | "server_protocol" => Ok(AccessLogVariable::HttpVersion),
+        "tls_version" | "ssl_protocol" => Ok(AccessLogVariable::TlsVersion),
+        "tls_alpn" => Ok(AccessLogVariable::TlsAlpn),
         "http_user_agent" | "user_agent" => Ok(AccessLogVariable::UserAgent),
         "http_referer" | "referer" => Ok(AccessLogVariable::Referer),
+        "tls_client_authenticated" => Ok(AccessLogVariable::TlsClientAuthenticated),
+        "tls_client_subject" => Ok(AccessLogVariable::TlsClientSubject),
+        "tls_client_san_dns_names" => Ok(AccessLogVariable::TlsClientSanDnsNames),
         "grpc_protocol" => Ok(AccessLogVariable::GrpcProtocol),
         "grpc_service" => Ok(AccessLogVariable::GrpcService),
         "grpc_method" => Ok(AccessLogVariable::GrpcMethod),
@@ -234,7 +262,11 @@ fn is_access_log_variable_char(byte: u8) -> bool {
 }
 
 fn fallback_access_log_value(value: &str) -> &str {
-    if value.is_empty() { "-" } else { value }
+    if value.is_empty() {
+        "-"
+    } else {
+        value
+    }
 }
 
 fn fallback_access_log_option(value: Option<&str>) -> &str {

@@ -16,6 +16,83 @@ pub struct HttpCountersSnapshot {
     pub downstream_responses_3xx: u64,
     pub downstream_responses_4xx: u64,
     pub downstream_responses_5xx: u64,
+    pub downstream_mtls_authenticated_connections: u64,
+    pub downstream_mtls_authenticated_requests: u64,
+    pub downstream_mtls_anonymous_requests: u64,
+    pub downstream_tls_handshake_failures: u64,
+    pub downstream_tls_handshake_failures_missing_client_cert: u64,
+    pub downstream_tls_handshake_failures_unknown_ca: u64,
+    pub downstream_tls_handshake_failures_bad_certificate: u64,
+    pub downstream_tls_handshake_failures_other: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct MtlsStatusSnapshot {
+    pub configured_listeners: usize,
+    pub optional_listeners: usize,
+    pub required_listeners: usize,
+    pub authenticated_connections: u64,
+    pub authenticated_requests: u64,
+    pub anonymous_requests: u64,
+    pub handshake_failures_total: u64,
+    pub handshake_failures_missing_client_cert: u64,
+    pub handshake_failures_unknown_ca: u64,
+    pub handshake_failures_bad_certificate: u64,
+    pub handshake_failures_other: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TlsReloadBoundarySnapshot {
+    pub reloadable_fields: Vec<String>,
+    pub restart_required_fields: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TlsListenerStatusSnapshot {
+    pub listener_id: String,
+    pub listener_name: String,
+    pub listen_addr: std::net::SocketAddr,
+    pub tls_enabled: bool,
+    pub default_certificate: Option<String>,
+    pub versions: Option<Vec<String>>,
+    pub alpn_protocols: Vec<String>,
+    pub client_auth_mode: Option<String>,
+    pub sni_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TlsCertificateStatusSnapshot {
+    pub scope: String,
+    pub cert_path: PathBuf,
+    pub server_names: Vec<String>,
+    pub subject: Option<String>,
+    pub issuer: Option<String>,
+    pub serial_number: Option<String>,
+    pub san_dns_names: Vec<String>,
+    pub fingerprint_sha256: Option<String>,
+    pub subject_key_identifier: Option<String>,
+    pub authority_key_identifier: Option<String>,
+    pub is_ca: Option<bool>,
+    pub path_len_constraint: Option<u32>,
+    pub key_usage: Option<String>,
+    pub extended_key_usage: Vec<String>,
+    pub not_before_unix_ms: Option<u64>,
+    pub not_after_unix_ms: Option<u64>,
+    pub expires_in_days: Option<i64>,
+    pub chain_length: usize,
+    pub chain_subjects: Vec<String>,
+    pub chain_diagnostics: Vec<String>,
+    pub selected_as_default_for_listeners: Vec<String>,
+    pub ocsp_staple_configured: bool,
+    pub additional_certificate_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TlsRuntimeSnapshot {
+    pub listeners: Vec<TlsListenerStatusSnapshot>,
+    pub certificates: Vec<TlsCertificateStatusSnapshot>,
+    pub reload_boundary: TlsReloadBoundarySnapshot,
+    pub expiring_certificate_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,6 +202,8 @@ pub struct RuntimeStatusSnapshot {
     pub total_routes: usize,
     pub total_upstreams: usize,
     pub tls_enabled: bool,
+    pub tls: TlsRuntimeSnapshot,
+    pub mtls: MtlsStatusSnapshot,
     pub active_connections: usize,
     pub reload: ReloadStatusSnapshot,
 }

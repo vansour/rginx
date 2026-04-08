@@ -1,10 +1,11 @@
 use crate::model::{
     Config, HandlerConfig, ListenerConfig, LocationConfig, MatcherConfig, RuntimeConfig,
-    ServerConfig, ServerTlsConfig, UpstreamConfig, UpstreamLoadBalanceConfig, UpstreamPeerConfig,
-    UpstreamProtocolConfig, VirtualHostConfig,
+    ServerConfig, ServerTlsConfig, TlsCipherSuiteConfig, TlsKeyExchangeGroupConfig, UpstreamConfig,
+    UpstreamLoadBalanceConfig, UpstreamPeerConfig, UpstreamProtocolConfig, VirtualHostConfig,
+    VirtualHostTlsConfig,
 };
 
-use super::{DEFAULT_GRPC_HEALTH_CHECK_PATH, validate};
+use super::{validate, DEFAULT_GRPC_HEALTH_CHECK_PATH};
 
 #[test]
 fn validate_rejects_zero_max_replayable_body_size() {
@@ -118,11 +119,115 @@ fn validate_rejects_invalid_trusted_proxy() {
 #[test]
 fn validate_rejects_empty_server_tls_cert_path() {
     let mut config = base_config();
-    config.server.tls =
-        Some(ServerTlsConfig { cert_path: " ".to_string(), key_path: "server.key".to_string() });
+    config.server.tls = Some(ServerTlsConfig {
+        cert_path: " ".to_string(),
+        key_path: "server.key".to_string(),
+        additional_certificates: None,
+        versions: None,
+        cipher_suites: None,
+        key_exchange_groups: None,
+        alpn_protocols: None,
+        ocsp_staple_path: None,
+        session_resumption: None,
+        session_tickets: None,
+        client_auth: None,
+    });
 
     let error = validate(&config).expect_err("empty cert path should be rejected");
     assert!(error.to_string().contains("server TLS certificate path must not be empty"));
+}
+
+#[test]
+fn validate_rejects_empty_default_certificate_name() {
+    let mut config = base_config();
+    config.server.default_certificate = Some("   ".to_string());
+
+    let error = validate(&config).expect_err("blank default_certificate should be rejected");
+    assert!(error.to_string().contains("server default_certificate must not be empty"));
+}
+
+#[test]
+fn validate_rejects_empty_server_tls_versions_list() {
+    let mut config = base_config();
+    config.server.tls = Some(ServerTlsConfig {
+        cert_path: "server.crt".to_string(),
+        key_path: "server.key".to_string(),
+        additional_certificates: None,
+        versions: Some(Vec::new()),
+        cipher_suites: None,
+        key_exchange_groups: None,
+        alpn_protocols: None,
+        ocsp_staple_path: None,
+        session_resumption: None,
+        session_tickets: None,
+        client_auth: None,
+    });
+
+    let error = validate(&config).expect_err("empty TLS versions should be rejected");
+    assert!(error.to_string().contains("server TLS versions must not be empty"));
+}
+
+#[test]
+fn validate_rejects_empty_server_tls_cipher_suites_list() {
+    let mut config = base_config();
+    config.server.tls = Some(ServerTlsConfig {
+        cert_path: "server.crt".to_string(),
+        key_path: "server.key".to_string(),
+        additional_certificates: None,
+        versions: None,
+        cipher_suites: Some(Vec::new()),
+        key_exchange_groups: None,
+        alpn_protocols: None,
+        ocsp_staple_path: None,
+        session_resumption: None,
+        session_tickets: None,
+        client_auth: None,
+    });
+
+    let error = validate(&config).expect_err("empty TLS cipher_suites should be rejected");
+    assert!(error.to_string().contains("TLS cipher_suites must not be empty"));
+}
+
+#[test]
+fn validate_rejects_incompatible_cipher_suites_and_versions() {
+    let mut config = base_config();
+    config.server.tls = Some(ServerTlsConfig {
+        cert_path: "server.crt".to_string(),
+        key_path: "server.key".to_string(),
+        additional_certificates: None,
+        versions: Some(vec![crate::model::TlsVersionConfig::Tls12]),
+        cipher_suites: Some(vec![TlsCipherSuiteConfig::Tls13Aes128GcmSha256]),
+        key_exchange_groups: None,
+        alpn_protocols: None,
+        ocsp_staple_path: None,
+        session_resumption: None,
+        session_tickets: None,
+        client_auth: None,
+    });
+
+    let error = validate(&config).expect_err("cipher/version mismatch should be rejected");
+    assert!(error.to_string().contains("do not support any configured TLS versions"));
+}
+
+#[test]
+fn validate_rejects_session_tickets_when_resumption_is_disabled() {
+    let mut config = base_config();
+    config.server.tls = Some(ServerTlsConfig {
+        cert_path: "server.crt".to_string(),
+        key_path: "server.key".to_string(),
+        additional_certificates: None,
+        versions: None,
+        cipher_suites: None,
+        key_exchange_groups: Some(vec![TlsKeyExchangeGroupConfig::X25519]),
+        alpn_protocols: None,
+        ocsp_staple_path: None,
+        session_resumption: Some(false),
+        session_tickets: Some(true),
+        client_auth: None,
+    });
+
+    let error = validate(&config).expect_err("tickets require resumption");
+    assert!(error.to_string().contains("session_tickets requires session_resumption"));
 }
 
 #[test]
@@ -185,9 +290,9 @@ fn validate_rejects_zero_server_request_body_read_timeout() {
     config.server.request_body_read_timeout_secs = Some(0);
 
     let error = validate(&config).expect_err("zero request body read timeout should be rejected");
-    assert!(
-        error.to_string().contains("server request_body_read_timeout_secs must be greater than 0")
-    );
+    assert!(error
+        .to_string()
+        .contains("server request_body_read_timeout_secs must be greater than 0"));
 }
 
 #[test]
@@ -196,9 +301,9 @@ fn validate_rejects_zero_server_response_write_timeout() {
     config.server.response_write_timeout_secs = Some(0);
 
     let error = validate(&config).expect_err("zero response write timeout should be rejected");
-    assert!(
-        error.to_string().contains("server response_write_timeout_secs must be greater than 0")
-    );
+    assert!(error
+        .to_string()
+        .contains("server response_write_timeout_secs must be greater than 0"));
 }
 
 #[test]
@@ -243,11 +348,18 @@ fn validate_rejects_default_server_name_with_path_separator() {
     config.server.server_names = vec!["api/example.com".to_string()];
 
     let error = validate(&config).expect_err("invalid default server_name should be rejected");
-    assert!(
-        error
-            .to_string()
-            .contains("server server_name `api/example.com` should not contain path separator")
-    );
+    assert!(error
+        .to_string()
+        .contains("server server_name `api/example.com` should not contain path separator"));
+}
+
+#[test]
+fn validate_rejects_unsupported_server_name_wildcard_syntax() {
+    let mut config = base_config();
+    config.server.server_names = vec!["api.*.example.com".to_string()];
+
+    let error = validate(&config).expect_err("unsupported wildcard syntax should be rejected");
+    assert!(error.to_string().contains("unsupported wildcard syntax"));
 }
 
 #[test]
@@ -257,11 +369,9 @@ fn validate_rejects_duplicate_server_name_between_default_server_and_vhost() {
     config.servers = vec![sample_vhost(vec!["API.EXAMPLE.COM"])];
 
     let error = validate(&config).expect_err("duplicate server_names should be rejected");
-    assert!(
-        error
-            .to_string()
-            .contains("duplicate server_name `API.EXAMPLE.COM` across server and servers")
-    );
+    assert!(error
+        .to_string()
+        .contains("duplicate server_name `API.EXAMPLE.COM` across server and servers"));
 }
 
 #[test]
@@ -277,14 +387,61 @@ fn validate_rejects_vhost_without_server_name() {
 fn validate_rejects_tls_vhost_without_server_name() {
     let mut config = base_config();
     let mut vhost = sample_vhost(Vec::new());
-    vhost.tls = Some(ServerTlsConfig {
+    vhost.tls = Some(VirtualHostTlsConfig {
         cert_path: "server.crt".to_string(),
         key_path: "server.key".to_string(),
+        additional_certificates: None,
+        ocsp_staple_path: None,
     });
     config.servers = vec![vhost];
 
     let error = validate(&config).expect_err("TLS vhost without server_name should be rejected");
     assert!(error.to_string().contains("servers[0] TLS requires at least one server_name"));
+}
+
+#[test]
+fn deserialize_rejects_legacy_vhost_server_tls_with_policy_fields() {
+    let error = ron::from_str::<Config>(
+        r#"Config(
+    runtime: RuntimeConfig(
+        shutdown_timeout_secs: 10,
+    ),
+    server: ServerConfig(
+        listen: "127.0.0.1:8080",
+    ),
+    upstreams: [
+        UpstreamConfig(
+            name: "backend",
+            peers: [UpstreamPeerConfig(url: "http://127.0.0.1:9000")],
+        ),
+    ],
+    locations: [
+        LocationConfig(
+            matcher: Prefix("/"),
+            handler: Proxy(upstream: "backend"),
+        ),
+    ],
+    servers: [
+        VirtualHostConfig(
+            server_names: ["api.example.com"],
+            locations: [
+                LocationConfig(
+                    matcher: Exact("/"),
+                    handler: Return(status: 200, location: "", body: Some("ok\n")),
+                ),
+            ],
+            tls: Some(ServerTlsConfig(
+                cert_path: "server.crt",
+                key_path: "server.key",
+                versions: Some([Tls13]),
+            )),
+        ),
+    ],
+)"#,
+    )
+    .expect_err("legacy vhost ServerTlsConfig with policy fields should be rejected");
+
+    assert!(error.to_string().contains("vhost TLS policy fields are not supported"));
 }
 
 #[test]
@@ -438,11 +595,9 @@ fn validate_rejects_http2_upstream_protocol_for_cleartext_peers() {
 
     let error =
         validate(&config).expect_err("cleartext peers should be rejected for upstream http2");
-    assert!(
-        error
-            .to_string()
-            .contains("protocol `Http2` currently requires all peers to use `https://`")
-    );
+    assert!(error
+        .to_string()
+        .contains("protocol `Http2` currently requires all peers to use `https://`"));
 }
 
 #[test]
@@ -456,6 +611,20 @@ fn validate_rejects_invalid_http2_upstream_peer_uri() {
 }
 
 #[test]
+fn validate_rejects_partial_upstream_mtls_identity() {
+    let mut config = base_config();
+    config.upstreams[0].tls = Some(crate::model::UpstreamTlsConfig {
+        verify: crate::model::UpstreamTlsModeConfig::NativeRoots,
+        versions: None,
+        client_cert_path: Some("client.crt".to_string()),
+        client_key_path: None,
+    });
+
+    let error = validate(&config).expect_err("partial upstream mTLS identity should fail");
+    assert!(error.to_string().contains("requires both client_cert_path and client_key_path"));
+}
+
+#[test]
 fn validate_accepts_explicit_listeners_when_legacy_listener_fields_are_empty() {
     let mut config = base_config();
     config.server.listen = None;
@@ -463,6 +632,7 @@ fn validate_accepts_explicit_listeners_when_legacy_listener_fields_are_empty() {
         ListenerConfig {
             name: "http".to_string(),
             proxy_protocol: None,
+            default_certificate: None,
             listen: "127.0.0.1:8080".to_string(),
             trusted_proxies: Vec::new(),
             keep_alive: Some(true),
@@ -478,6 +648,7 @@ fn validate_accepts_explicit_listeners_when_legacy_listener_fields_are_empty() {
         ListenerConfig {
             name: "https".to_string(),
             proxy_protocol: None,
+            default_certificate: None,
             listen: "127.0.0.1:8443".to_string(),
             trusted_proxies: Vec::new(),
             keep_alive: Some(true),
@@ -491,6 +662,15 @@ fn validate_accepts_explicit_listeners_when_legacy_listener_fields_are_empty() {
             tls: Some(ServerTlsConfig {
                 cert_path: "server.crt".to_string(),
                 key_path: "server.key".to_string(),
+                additional_certificates: None,
+                versions: None,
+                cipher_suites: None,
+                key_exchange_groups: None,
+                alpn_protocols: None,
+                ocsp_staple_path: None,
+                session_resumption: None,
+                session_tickets: None,
+                client_auth: None,
             }),
         },
     ];
@@ -504,6 +684,7 @@ fn validate_rejects_mixing_legacy_listener_fields_with_explicit_listeners() {
     config.listeners = vec![ListenerConfig {
         name: "http".to_string(),
         proxy_protocol: None,
+        default_certificate: None,
         listen: "127.0.0.1:8080".to_string(),
         trusted_proxies: Vec::new(),
         keep_alive: Some(true),
@@ -528,6 +709,7 @@ fn validate_rejects_vhost_tls_without_any_tls_listener() {
     config.listeners = vec![ListenerConfig {
         name: "http".to_string(),
         proxy_protocol: None,
+        default_certificate: None,
         listen: "127.0.0.1:8080".to_string(),
         trusted_proxies: Vec::new(),
         keep_alive: Some(true),
@@ -556,9 +738,11 @@ fn validate_rejects_vhost_tls_without_any_tls_listener() {
             requests_per_sec: None,
             burst: None,
         }],
-        tls: Some(ServerTlsConfig {
+        tls: Some(VirtualHostTlsConfig {
             cert_path: "server.crt".to_string(),
             key_path: "server.key".to_string(),
+            additional_certificates: None,
+            ocsp_staple_path: None,
         }),
     }];
 
@@ -577,6 +761,7 @@ fn base_config() -> Config {
         server: ServerConfig {
             listen: Some("127.0.0.1:8080".to_string()),
             proxy_protocol: None,
+            default_certificate: None,
             server_names: Vec::new(),
             trusted_proxies: Vec::new(),
             keep_alive: None,
@@ -599,6 +784,7 @@ fn base_config() -> Config {
             tls: None,
             protocol: UpstreamProtocolConfig::Auto,
             load_balance: UpstreamLoadBalanceConfig::RoundRobin,
+            server_name: None,
             server_name_override: None,
             request_timeout_secs: None,
             connect_timeout_secs: None,

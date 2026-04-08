@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use serde::{Deserialize, Deserializer};
+use serde::{de, Deserialize, Deserializer};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -28,6 +28,7 @@ pub struct RuntimeConfig {
 pub struct ServerConfig {
     pub listen: Option<String>,
     pub proxy_protocol: Option<bool>,
+    pub default_certificate: Option<String>,
     pub server_names: Vec<String>,
     pub trusted_proxies: Vec<String>,
     pub keep_alive: Option<bool>,
@@ -47,6 +48,8 @@ pub struct ListenerConfig {
     pub listen: String,
     #[serde(default)]
     pub proxy_protocol: Option<bool>,
+    #[serde(default)]
+    pub default_certificate: Option<String>,
     #[serde(default)]
     pub trusted_proxies: Vec<String>,
     #[serde(default)]
@@ -73,6 +76,82 @@ pub struct ListenerConfig {
 pub struct ServerTlsConfig {
     pub cert_path: String,
     pub key_path: String,
+    #[serde(default)]
+    pub additional_certificates: Option<Vec<ServerCertificateBundleConfig>>,
+    #[serde(default)]
+    pub versions: Option<Vec<TlsVersionConfig>>,
+    #[serde(default)]
+    pub cipher_suites: Option<Vec<TlsCipherSuiteConfig>>,
+    #[serde(default)]
+    pub key_exchange_groups: Option<Vec<TlsKeyExchangeGroupConfig>>,
+    #[serde(default)]
+    pub alpn_protocols: Option<Vec<String>>,
+    #[serde(default)]
+    pub ocsp_staple_path: Option<String>,
+    #[serde(default)]
+    pub session_resumption: Option<bool>,
+    #[serde(default)]
+    pub session_tickets: Option<bool>,
+    #[serde(default)]
+    pub client_auth: Option<ServerClientAuthConfig>,
+}
+
+#[derive(Debug, Clone)]
+pub struct VirtualHostTlsConfig {
+    pub cert_path: String,
+    pub key_path: String,
+    pub additional_certificates: Option<Vec<ServerCertificateBundleConfig>>,
+    pub ocsp_staple_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ServerCertificateBundleConfig {
+    pub cert_path: String,
+    pub key_path: String,
+    #[serde(default)]
+    pub ocsp_staple_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Hash)]
+pub enum TlsVersionConfig {
+    Tls12,
+    Tls13,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Hash)]
+pub enum TlsCipherSuiteConfig {
+    Tls13Aes256GcmSha384,
+    Tls13Aes128GcmSha256,
+    Tls13Chacha20Poly1305Sha256,
+    TlsEcdheEcdsaWithAes256GcmSha384,
+    TlsEcdheEcdsaWithAes128GcmSha256,
+    TlsEcdheEcdsaWithChacha20Poly1305Sha256,
+    TlsEcdheRsaWithAes256GcmSha384,
+    TlsEcdheRsaWithAes128GcmSha256,
+    TlsEcdheRsaWithChacha20Poly1305Sha256,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Hash)]
+pub enum TlsKeyExchangeGroupConfig {
+    X25519,
+    Secp256r1,
+    Secp384r1,
+    X25519Mlkem768,
+    Secp256r1Mlkem768,
+    Mlkem768,
+    Mlkem1024,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub enum ServerClientAuthModeConfig {
+    Optional,
+    Required,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ServerClientAuthConfig {
+    pub mode: ServerClientAuthModeConfig,
+    pub ca_cert_path: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -85,6 +164,8 @@ pub struct UpstreamConfig {
     #[serde(default)]
     pub load_balance: UpstreamLoadBalanceConfig,
     #[serde(default)]
+    pub server_name: Option<bool>,
+    #[serde(default, alias = "tls_server_name")]
     pub server_name_override: Option<String>,
     #[serde(default)]
     pub request_timeout_secs: Option<u64>,
@@ -141,11 +222,22 @@ const fn default_upstream_peer_weight() -> u32 {
     1
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub enum UpstreamTlsConfig {
+#[derive(Debug, Clone, Deserialize, Default)]
+pub enum UpstreamTlsModeConfig {
+    #[default]
     NativeRoots,
-    CustomCa { ca_cert_path: String },
+    CustomCa {
+        ca_cert_path: String,
+    },
     Insecure,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpstreamTlsConfig {
+    pub verify: UpstreamTlsModeConfig,
+    pub versions: Option<Vec<TlsVersionConfig>>,
+    pub client_cert_path: Option<String>,
+    pub client_key_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -213,7 +305,7 @@ pub struct VirtualHostConfig {
     pub server_names: Vec<String>,
     pub locations: Vec<LocationConfig>,
     #[serde(default)]
-    pub tls: Option<ServerTlsConfig>,
+    pub tls: Option<VirtualHostTlsConfig>,
 }
 
 impl<'de> Deserialize<'de> for ServerConfig {
@@ -228,6 +320,8 @@ impl<'de> Deserialize<'de> for ServerConfig {
             listen: MaybeString,
             #[serde(default)]
             proxy_protocol: Option<bool>,
+            #[serde(default)]
+            default_certificate: Option<String>,
             #[serde(default)]
             server_names: Vec<String>,
             #[serde(default)]
@@ -256,6 +350,7 @@ impl<'de> Deserialize<'de> for ServerConfig {
         Ok(ServerConfig {
             listen: server.listen.0,
             proxy_protocol: server.proxy_protocol,
+            default_certificate: server.default_certificate,
             server_names: server.server_names,
             trusted_proxies: server.trusted_proxies,
             keep_alive: server.keep_alive,
@@ -268,6 +363,137 @@ impl<'de> Deserialize<'de> for ServerConfig {
             access_log_format: server.access_log_format,
             tls: server.tls,
         })
+    }
+}
+
+impl<'de> Deserialize<'de> for UpstreamTlsConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Debug, Clone, Deserialize)]
+        enum UpstreamTlsConfigDe {
+            NativeRoots,
+            CustomCa {
+                ca_cert_path: String,
+            },
+            Insecure,
+            UpstreamTlsConfig {
+                #[serde(default, alias = "verify")]
+                verify: UpstreamTlsModeConfig,
+                #[serde(default)]
+                versions: Option<Vec<TlsVersionConfig>>,
+                #[serde(default)]
+                client_cert_path: Option<String>,
+                #[serde(default)]
+                client_key_path: Option<String>,
+            },
+        }
+
+        Ok(match UpstreamTlsConfigDe::deserialize(deserializer)? {
+            UpstreamTlsConfigDe::NativeRoots => Self {
+                verify: UpstreamTlsModeConfig::NativeRoots,
+                versions: None,
+                client_cert_path: None,
+                client_key_path: None,
+            },
+            UpstreamTlsConfigDe::CustomCa { ca_cert_path } => Self {
+                verify: UpstreamTlsModeConfig::CustomCa { ca_cert_path },
+                versions: None,
+                client_cert_path: None,
+                client_key_path: None,
+            },
+            UpstreamTlsConfigDe::Insecure => Self {
+                verify: UpstreamTlsModeConfig::Insecure,
+                versions: None,
+                client_cert_path: None,
+                client_key_path: None,
+            },
+            UpstreamTlsConfigDe::UpstreamTlsConfig {
+                verify,
+                versions,
+                client_cert_path,
+                client_key_path,
+            } => Self { verify, versions, client_cert_path, client_key_path },
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for VirtualHostTlsConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Debug, Clone, Deserialize)]
+        enum VirtualHostTlsConfigDe {
+            VirtualHostTlsConfig {
+                cert_path: String,
+                key_path: String,
+                #[serde(default)]
+                additional_certificates: Option<Vec<ServerCertificateBundleConfig>>,
+                #[serde(default)]
+                ocsp_staple_path: Option<String>,
+            },
+            ServerTlsConfig {
+                cert_path: String,
+                key_path: String,
+                #[serde(default)]
+                additional_certificates: Option<Vec<ServerCertificateBundleConfig>>,
+                #[serde(default)]
+                versions: Option<Vec<TlsVersionConfig>>,
+                #[serde(default)]
+                cipher_suites: Option<Vec<TlsCipherSuiteConfig>>,
+                #[serde(default)]
+                key_exchange_groups: Option<Vec<TlsKeyExchangeGroupConfig>>,
+                #[serde(default)]
+                alpn_protocols: Option<Vec<String>>,
+                #[serde(default)]
+                ocsp_staple_path: Option<String>,
+                #[serde(default)]
+                session_resumption: Option<bool>,
+                #[serde(default)]
+                session_tickets: Option<bool>,
+                #[serde(default)]
+                client_auth: Option<ServerClientAuthConfig>,
+            },
+        }
+
+        match VirtualHostTlsConfigDe::deserialize(deserializer)? {
+            VirtualHostTlsConfigDe::VirtualHostTlsConfig {
+                cert_path,
+                key_path,
+                additional_certificates,
+                ocsp_staple_path,
+            } => Ok(Self { cert_path, key_path, additional_certificates, ocsp_staple_path }),
+            VirtualHostTlsConfigDe::ServerTlsConfig {
+                cert_path,
+                key_path,
+                additional_certificates,
+                versions,
+                cipher_suites,
+                key_exchange_groups,
+                alpn_protocols,
+                ocsp_staple_path,
+                session_resumption,
+                session_tickets,
+                client_auth,
+            } => {
+                if versions.is_some()
+                    || cipher_suites.is_some()
+                    || key_exchange_groups.is_some()
+                    || alpn_protocols.is_some()
+                    || session_resumption.is_some()
+                    || session_tickets.is_some()
+                    || client_auth.is_some()
+                {
+                    return Err(de::Error::custom(
+                        "vhost TLS policy fields are not supported in legacy `ServerTlsConfig(...)`; use `VirtualHostTlsConfig(...)` for certificate overrides and keep versions, cipher_suites, key_exchange_groups, ALPN, session settings, and client_auth on server.tls or listeners[].tls",
+                    ));
+                }
+
+                Ok(Self { cert_path, key_path, additional_certificates, ocsp_staple_path })
+            }
+        }
     }
 }
 

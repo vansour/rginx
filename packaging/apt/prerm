@@ -1,0 +1,12 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+    remove|deconfigure|upgrade|failed-upgrade)
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl --no-reload stop rginx.service >/dev/null 2>&1 || true
+        fi
+        ;;
+esac
+
+exit 0

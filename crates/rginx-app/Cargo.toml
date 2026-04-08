@@ -37,5 +37,6 @@ hyper-util.workspace = true
 libc = "0.2"
 rustls.workspace = true
 rustls-pemfile.workspace = true
+rcgen = "0.13"
 serde_json.workspace = true
 tokio-rustls.workspace = true

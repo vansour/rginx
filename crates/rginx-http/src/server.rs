@@ -10,8 +10,11 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::{JoinError, JoinSet};
 use tokio_rustls::TlsAcceptor;
+use x509_parser::extensions::GeneralName;
+use x509_parser::prelude::{FromDer, X509Certificate};
 
-use crate::client_ip::ConnectionPeerAddrs;
+use crate::client_ip::{ConnectionPeerAddrs, TlsClientIdentity};
+use crate::state::TlsHandshakeFailureReason;
 use crate::timeout::WriteTimeoutIo;
 
 const ALPN_H2: &[u8] = b"h2";
@@ -169,12 +172,33 @@ async fn serve_connection(
     } else {
         None
     };
-    let connection_addrs =
-        ConnectionPeerAddrs { socket_peer_addr: remote_addr, proxy_protocol_source_addr };
+    let connection_addrs = ConnectionPeerAddrs {
+        socket_peer_addr: remote_addr,
+        proxy_protocol_source_addr,
+        tls_client_identity: None,
+        tls_version: None,
+        tls_alpn: None,
+    };
 
     if let Some(tls_acceptor) = tls_acceptor {
         match tls_acceptor.accept(stream).await {
             Ok(stream) => {
+                let tls_client_identity = extract_tls_client_identity(&stream);
+                let mtls_configured = current_listener
+                    .server
+                    .tls
+                    .as_ref()
+                    .and_then(|tls| tls.client_auth.as_ref())
+                    .is_some();
+                if mtls_configured {
+                    state.record_mtls_handshake_success(&listener_id, tls_client_identity.is_some());
+                }
+                let connection_addrs = ConnectionPeerAddrs {
+                    tls_client_identity,
+                    tls_version: tls_protocol_version(&stream),
+                    tls_alpn: tls_alpn_protocol(&stream),
+                    ..connection_addrs
+                };
                 if negotiated_h2(&stream) {
                     let stream = WriteTimeoutIo::new(
                         stream,
@@ -207,7 +231,23 @@ async fn serve_connection(
                 }
             }
             Err(error) => {
-                tracing::warn!(remote_addr = %remote_addr, %error, "TLS handshake failed");
+                let reason = classify_tls_handshake_failure(&error);
+                if current_listener
+                    .server
+                    .tls
+                    .as_ref()
+                    .and_then(|tls| tls.client_auth.as_ref())
+                    .is_some()
+                {
+                    state.record_tls_handshake_failure(&listener_id, reason);
+                }
+                tracing::warn!(
+                    remote_addr = %remote_addr,
+                    listener = %listener_id,
+                    tls_handshake_failure = reason.as_str(),
+                    %error,
+                    "TLS handshake failed"
+                );
             }
         }
         return;
@@ -233,6 +273,71 @@ fn negotiated_h2(stream: &tokio_rustls::server::TlsStream<tokio::net::TcpStream>
     stream.get_ref().1.alpn_protocol() == Some(ALPN_H2)
 }
 
+fn extract_tls_client_identity(
+    stream: &tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+) -> Option<TlsClientIdentity> {
+    let certs = stream.get_ref().1.peer_certificates()?;
+    let leaf = certs.first()?;
+    Some(parse_tls_client_identity(leaf.as_ref()))
+}
+
+fn parse_tls_client_identity(der: &[u8]) -> TlsClientIdentity {
+    let mut identity = TlsClientIdentity { subject: None, san_dns_names: Vec::new() };
+
+    if let Ok((_, cert)) = X509Certificate::from_der(der) {
+        identity.subject = Some(format!("{}", cert.subject()));
+        if let Ok(Some(san)) = cert.subject_alternative_name() {
+            identity.san_dns_names = san
+                .value
+                .general_names
+                .iter()
+                .filter_map(|name| match name {
+                    GeneralName::DNSName(dns) => Some(dns.to_string()),
+                    _ => None,
+                })
+                .collect();
+        }
+    }
+
+    identity
+}
+
+fn tls_protocol_version(
+    stream: &tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+) -> Option<String> {
+    stream.get_ref().1.protocol_version().map(|version| match version {
+        rustls::ProtocolVersion::TLSv1_2 => "TLS1.2".to_string(),
+        rustls::ProtocolVersion::TLSv1_3 => "TLS1.3".to_string(),
+        other => format!("{other:?}"),
+    })
+}
+
+fn tls_alpn_protocol(
+    stream: &tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+) -> Option<String> {
+    stream.get_ref().1.alpn_protocol().map(|protocol| String::from_utf8_lossy(protocol).into_owned())
+}
+
+fn classify_tls_handshake_failure(error: &impl std::fmt::Display) -> TlsHandshakeFailureReason {
+    let error = error.to_string().to_ascii_lowercase();
+    if error.contains("certificate required")
+        || error.contains("peer sent no certificates")
+        || error.contains("no certificates presented")
+    {
+        return TlsHandshakeFailureReason::MissingClientCert;
+    }
+    if error.contains("unknown ca") || error.contains("unknown issuer") {
+        return TlsHandshakeFailureReason::UnknownCa;
+    }
+    if error.contains("bad certificate")
+        || error.contains("certificate verify failed")
+        || error.contains("invalid peer certificate")
+    {
+        return TlsHandshakeFailureReason::BadCertificate;
+    }
+    TlsHandshakeFailureReason::Other
+}
+
 async fn serve_h1_connection_io<T>(
     io: TokioIo<T>,
     listener_id: String,
@@ -243,10 +348,11 @@ async fn serve_h1_connection_io<T>(
 ) where
     T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    let service_connection_addrs = connection_addrs.clone();
     let service = service_fn(move |request| {
         let state = state.clone();
         let listener_id = listener_id.clone();
-        let connection_addrs = connection_addrs;
+        let connection_addrs = service_connection_addrs.clone();
         async move {
             Ok::<_, Infallible>(
                 crate::handler::handle(request, state, connection_addrs, &listener_id).await,
@@ -306,10 +412,11 @@ async fn serve_h2_connection_io<T>(
 ) where
     T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    let service_connection_addrs = connection_addrs.clone();
     let service = service_fn(move |request| {
         let state = state.clone();
         let listener_id = listener_id.clone();
-        let connection_addrs = connection_addrs;
+        let connection_addrs = service_connection_addrs.clone();
         async move {
             Ok::<_, Infallible>(
                 crate::handler::handle(request, state, connection_addrs, &listener_id).await,
@@ -479,7 +586,10 @@ fn log_connection_task_result(result: std::result::Result<(), JoinError>) {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_proxy_protocol_v1;
+    use rcgen::{CertificateParams, DnType, KeyPair};
+    use rustls_pemfile::certs;
+
+    use super::{parse_proxy_protocol_v1, parse_tls_client_identity};
 
     #[test]
     fn proxy_protocol_v1_parses_tcp4_source_address() {
@@ -508,5 +618,25 @@ mod tests {
             .expect_err("invalid header should fail");
 
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn parse_tls_client_identity_extracts_subject_and_dns_san() {
+        let mut params = CertificateParams::new(vec!["localhost".to_string()])
+            .expect("certificate params should build");
+        params.distinguished_name.push(DnType::CommonName, "localhost");
+        let key_pair = KeyPair::generate().expect("keypair should generate");
+        let cert = params.self_signed(&key_pair).expect("cert should generate");
+        let pem = cert.pem();
+        let mut reader = std::io::Cursor::new(pem.as_bytes());
+        let cert = certs(&mut reader)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("certificate PEM should parse")
+            .remove(0);
+
+        let identity = parse_tls_client_identity(cert.as_ref());
+
+        assert!(identity.subject.as_deref().is_some_and(|subject| subject.contains("CN=localhost")));
+        assert!(identity.san_dns_names.iter().any(|san| san == "localhost"));
     }
 }

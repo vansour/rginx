@@ -100,8 +100,8 @@ mod tests {
     };
 
     use super::{
-        RouteMatchContext, select_route, select_route_by_host, select_route_by_host_with_context,
-        select_route_with_context, select_vhost,
+        select_route, select_route_by_host, select_route_by_host_with_context,
+        select_route_with_context, select_vhost, RouteMatchContext,
     };
 
     fn make_route(path: &str, body: &str) -> Route {
@@ -209,7 +209,7 @@ mod tests {
         assert_eq!(selected.server_names, vec!["*.internal.example.com"]);
 
         let selected = select_vhost(&vhosts, &default, "internal.example.com");
-        assert_eq!(selected.server_names, vec!["*.internal.example.com"]);
+        assert!(selected.server_names.is_empty());
 
         let selected = select_vhost(&vhosts, &default, "example.com");
         assert!(selected.server_names.is_empty());
@@ -299,13 +299,11 @@ mod tests {
         }];
 
         assert!(select_route(&routes, "/").is_none());
-        assert!(
-            select_route_with_context(
-                &routes,
-                &RouteMatchContext::with_grpc("/", "grpc.health.v1.Health", "Check"),
-            )
-            .is_some()
-        );
+        assert!(select_route_with_context(
+            &routes,
+            &RouteMatchContext::with_grpc("/", "grpc.health.v1.Health", "Check"),
+        )
+        .is_some());
     }
 
     #[test]

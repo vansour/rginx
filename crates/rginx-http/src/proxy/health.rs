@@ -32,6 +32,9 @@ pub async fn probe_upstream_peer(
             tracing::warn!(
                 upstream = %upstream.name,
                 peer = %peer.url,
+                upstream_sni_enabled = upstream.server_name,
+                upstream_server_name = upstream.server_name_override.as_deref().unwrap_or("-"),
+                upstream_verify = super::upstream_tls_verify_label(&upstream.tls),
                 %error,
                 state = level,
                 "active health check could not acquire a proxy client"
@@ -49,6 +52,9 @@ pub async fn probe_upstream_peer(
                 upstream = %upstream.name,
                 peer = %peer.url,
                 path = %check.path,
+                upstream_sni_enabled = upstream.server_name,
+                upstream_server_name = upstream.server_name_override.as_deref().unwrap_or("-"),
+                upstream_verify = super::upstream_tls_verify_label(&upstream.tls),
                 %error,
                 state = level,
                 "active health check request could not be built"
@@ -91,6 +97,9 @@ pub async fn probe_upstream_peer(
                         peer = %peer.url,
                         path = %check.path,
                         grpc_service = check.grpc_service.as_deref().unwrap_or(""),
+                        upstream_sni_enabled = upstream.server_name,
+                        upstream_server_name = upstream.server_name_override.as_deref().unwrap_or("-"),
+                        upstream_verify = super::upstream_tls_verify_label(&upstream.tls),
                         status = http_status.as_u16(),
                         grpc_status = grpc_status.as_deref().unwrap_or("-"),
                         serving_status = serving_status.map_or("-", grpc_health_serving_status_label),
@@ -106,6 +115,9 @@ pub async fn probe_upstream_peer(
                         peer = %peer.url,
                         path = %check.path,
                         grpc_service = check.grpc_service.as_deref().unwrap_or(""),
+                        upstream_sni_enabled = upstream.server_name,
+                        upstream_server_name = upstream.server_name_override.as_deref().unwrap_or("-"),
+                        upstream_verify = super::upstream_tls_verify_label(&upstream.tls),
                         %error,
                         state = if transitioned { "unhealthy" } else { "still unhealthy" },
                         "active gRPC health check response could not be parsed"
@@ -119,6 +131,9 @@ pub async fn probe_upstream_peer(
                         peer = %peer.url,
                         path = %check.path,
                         grpc_service = check.grpc_service.as_deref().unwrap_or(""),
+                        upstream_sni_enabled = upstream.server_name,
+                        upstream_server_name = upstream.server_name_override.as_deref().unwrap_or("-"),
+                        upstream_verify = super::upstream_tls_verify_label(&upstream.tls),
                         timeout_ms = check.timeout.as_millis() as u64,
                         state = if transitioned { "unhealthy" } else { "still unhealthy" },
                         "active gRPC health check timed out while reading response"
@@ -148,6 +163,9 @@ pub async fn probe_upstream_peer(
                 upstream = %upstream.name,
                 peer = %peer.url,
                 path = %check.path,
+                upstream_sni_enabled = upstream.server_name,
+                upstream_server_name = upstream.server_name_override.as_deref().unwrap_or("-"),
+                upstream_verify = super::upstream_tls_verify_label(&upstream.tls),
                 status = response.status().as_u16(),
                 state = if transitioned { "unhealthy" } else { "still unhealthy" },
                 "active health check returned an unhealthy status"
@@ -159,6 +177,9 @@ pub async fn probe_upstream_peer(
                 upstream = %upstream.name,
                 peer = %peer.url,
                 path = %check.path,
+                upstream_sni_enabled = upstream.server_name,
+                upstream_server_name = upstream.server_name_override.as_deref().unwrap_or("-"),
+                upstream_verify = super::upstream_tls_verify_label(&upstream.tls),
                 %error,
                 state = if transitioned { "unhealthy" } else { "still unhealthy" },
                 "active health check request failed"
@@ -170,6 +191,9 @@ pub async fn probe_upstream_peer(
                 upstream = %upstream.name,
                 peer = %peer.url,
                 path = %check.path,
+                upstream_sni_enabled = upstream.server_name,
+                upstream_server_name = upstream.server_name_override.as_deref().unwrap_or("-"),
+                upstream_verify = super::upstream_tls_verify_label(&upstream.tls),
                 timeout_ms = check.timeout.as_millis() as u64,
                 state = if transitioned { "unhealthy" } else { "still unhealthy" },
                 "active health check timed out"

@@ -136,7 +136,7 @@ VirtualHostConfig(
     // Enable this when the site has its own certificate.
     // 当这个站点需要自己的证书时，可以启用下面的块。
     //
-    // tls: Some(ServerTlsConfig(
+    // tls: Some(VirtualHostTlsConfig(
     //     cert_path: "/etc/rginx/certs/app.example.com.crt",
     //     key_path: "/etc/rginx/certs/app.example.com.key",
     // )),

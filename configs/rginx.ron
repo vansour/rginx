@@ -4,6 +4,8 @@ Config(
     ),
     server: ServerConfig(
         listen: "0.0.0.0:80",
+        // TLS examples live in `example/rginx.ron`.
+        // If you enable HTTPS here, run `rginx check` and the TLS release gate from README before deploying.
     ),
     upstreams: [
         UpstreamConfig(
