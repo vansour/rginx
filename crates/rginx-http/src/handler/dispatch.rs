@@ -75,13 +75,7 @@ pub async fn handle(
         .unwrap_or_else(|| "__unmatched__".to_string());
     let selected_route_id = selected_route.as_ref().map(|route| route.id.clone());
     state.record_downstream_request(listener_id, &selected_vhost_id, selected_route_id.as_deref());
-    if listener
-        .server
-        .tls
-        .as_ref()
-        .and_then(|tls| tls.client_auth.as_ref())
-        .is_some()
-    {
+    if listener.server.tls.as_ref().and_then(|tls| tls.client_auth.as_ref()).is_some() {
         state.record_mtls_request(listener_id, tls_client_identity.is_some());
     }
     if let Some(grpc_request) = grpc_request {

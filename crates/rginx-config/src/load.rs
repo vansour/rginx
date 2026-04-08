@@ -383,10 +383,7 @@ mod tests {
             structured.versions.as_deref(),
             Some([crate::model::TlsVersionConfig::Tls13])
         ));
-        assert!(matches!(
-            structured.verify,
-            crate::model::UpstreamTlsModeConfig::CustomCa { .. }
-        ));
+        assert!(matches!(structured.verify, crate::model::UpstreamTlsModeConfig::CustomCa { .. }));
     }
 
     #[test]

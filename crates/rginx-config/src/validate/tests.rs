@@ -5,7 +5,7 @@ use crate::model::{
     VirtualHostTlsConfig,
 };
 
-use super::{validate, DEFAULT_GRPC_HEALTH_CHECK_PATH};
+use super::{DEFAULT_GRPC_HEALTH_CHECK_PATH, validate};
 
 #[test]
 fn validate_rejects_zero_max_replayable_body_size() {
@@ -290,9 +290,9 @@ fn validate_rejects_zero_server_request_body_read_timeout() {
     config.server.request_body_read_timeout_secs = Some(0);
 
     let error = validate(&config).expect_err("zero request body read timeout should be rejected");
-    assert!(error
-        .to_string()
-        .contains("server request_body_read_timeout_secs must be greater than 0"));
+    assert!(
+        error.to_string().contains("server request_body_read_timeout_secs must be greater than 0")
+    );
 }
 
 #[test]
@@ -301,9 +301,9 @@ fn validate_rejects_zero_server_response_write_timeout() {
     config.server.response_write_timeout_secs = Some(0);
 
     let error = validate(&config).expect_err("zero response write timeout should be rejected");
-    assert!(error
-        .to_string()
-        .contains("server response_write_timeout_secs must be greater than 0"));
+    assert!(
+        error.to_string().contains("server response_write_timeout_secs must be greater than 0")
+    );
 }
 
 #[test]
@@ -348,9 +348,11 @@ fn validate_rejects_default_server_name_with_path_separator() {
     config.server.server_names = vec!["api/example.com".to_string()];
 
     let error = validate(&config).expect_err("invalid default server_name should be rejected");
-    assert!(error
-        .to_string()
-        .contains("server server_name `api/example.com` should not contain path separator"));
+    assert!(
+        error
+            .to_string()
+            .contains("server server_name `api/example.com` should not contain path separator")
+    );
 }
 
 #[test]
@@ -369,9 +371,11 @@ fn validate_rejects_duplicate_server_name_between_default_server_and_vhost() {
     config.servers = vec![sample_vhost(vec!["API.EXAMPLE.COM"])];
 
     let error = validate(&config).expect_err("duplicate server_names should be rejected");
-    assert!(error
-        .to_string()
-        .contains("duplicate server_name `API.EXAMPLE.COM` across server and servers"));
+    assert!(
+        error
+            .to_string()
+            .contains("duplicate server_name `API.EXAMPLE.COM` across server and servers")
+    );
 }
 
 #[test]
@@ -595,9 +599,11 @@ fn validate_rejects_http2_upstream_protocol_for_cleartext_peers() {
 
     let error =
         validate(&config).expect_err("cleartext peers should be rejected for upstream http2");
-    assert!(error
-        .to_string()
-        .contains("protocol `Http2` currently requires all peers to use `https://`"));
+    assert!(
+        error
+            .to_string()
+            .contains("protocol `Http2` currently requires all peers to use `https://`")
+    );
 }
 
 #[test]

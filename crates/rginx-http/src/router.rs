@@ -100,8 +100,8 @@ mod tests {
     };
 
     use super::{
-        select_route, select_route_by_host, select_route_by_host_with_context,
-        select_route_with_context, select_vhost, RouteMatchContext,
+        RouteMatchContext, select_route, select_route_by_host, select_route_by_host_with_context,
+        select_route_with_context, select_vhost,
     };
 
     fn make_route(path: &str, body: &str) -> Route {
@@ -299,11 +299,13 @@ mod tests {
         }];
 
         assert!(select_route(&routes, "/").is_none());
-        assert!(select_route_with_context(
-            &routes,
-            &RouteMatchContext::with_grpc("/", "grpc.health.v1.Health", "Check"),
-        )
-        .is_some());
+        assert!(
+            select_route_with_context(
+                &routes,
+                &RouteMatchContext::with_grpc("/", "grpc.health.v1.Health", "Check"),
+            )
+            .is_some()
+        );
     }
 
     #[test]

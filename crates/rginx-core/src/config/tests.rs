@@ -5,8 +5,9 @@ use std::time::Duration;
 use http::StatusCode;
 
 use super::{
-    match_server_name, AccessLogFormat, AccessLogValues, ConfigSnapshot, Listener, ReturnAction,
-    Route, RouteAccessControl, RouteAction, RouteMatcher, RuntimeSettings, Server, VirtualHost,
+    AccessLogFormat, AccessLogValues, ConfigSnapshot, Listener, ReturnAction, Route,
+    RouteAccessControl, RouteAction, RouteMatcher, RuntimeSettings, Server, VirtualHost,
+    match_server_name,
 };
 
 #[test]

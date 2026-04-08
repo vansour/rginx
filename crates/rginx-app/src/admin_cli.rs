@@ -3,9 +3,9 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::UNIX_EPOCH;
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use rginx_runtime::admin::{
-    admin_socket_path_for_config, AdminRequest, AdminResponse, RevisionSnapshot,
+    AdminRequest, AdminResponse, RevisionSnapshot, admin_socket_path_for_config,
 };
 
 use crate::cli::{Command, DeltaArgs, SnapshotArgs, SnapshotModuleArg, WaitArgs, WindowArgs};

@@ -3,7 +3,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 
 #[derive(Debug)]
 pub struct MigrationOutput {

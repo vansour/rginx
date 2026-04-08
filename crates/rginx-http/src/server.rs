@@ -191,7 +191,8 @@ async fn serve_connection(
                     .and_then(|tls| tls.client_auth.as_ref())
                     .is_some();
                 if mtls_configured {
-                    state.record_mtls_handshake_success(&listener_id, tls_client_identity.is_some());
+                    state
+                        .record_mtls_handshake_success(&listener_id, tls_client_identity.is_some());
                 }
                 let connection_addrs = ConnectionPeerAddrs {
                     tls_client_identity,
@@ -315,7 +316,11 @@ fn tls_protocol_version(
 fn tls_alpn_protocol(
     stream: &tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
 ) -> Option<String> {
-    stream.get_ref().1.alpn_protocol().map(|protocol| String::from_utf8_lossy(protocol).into_owned())
+    stream
+        .get_ref()
+        .1
+        .alpn_protocol()
+        .map(|protocol| String::from_utf8_lossy(protocol).into_owned())
 }
 
 fn classify_tls_handshake_failure(error: &impl std::fmt::Display) -> TlsHandshakeFailureReason {
@@ -636,7 +641,9 @@ mod tests {
 
         let identity = parse_tls_client_identity(cert.as_ref());
 
-        assert!(identity.subject.as_deref().is_some_and(|subject| subject.contains("CN=localhost")));
+        assert!(
+            identity.subject.as_deref().is_some_and(|subject| subject.contains("CN=localhost"))
+        );
         assert!(identity.san_dns_names.iter().any(|san| san == "localhost"));
     }
 }

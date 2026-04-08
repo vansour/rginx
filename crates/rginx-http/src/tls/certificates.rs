@@ -4,8 +4,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use rginx_core::{Error, Result, ServerCertificateBundle, ServerTls, VirtualHostTls};
-use rustls::pki_types::CertificateDer;
 use rustls::RootCertStore;
+use rustls::pki_types::CertificateDer;
 
 pub(crate) fn load_certified_keys(tls: &ServerTls) -> Result<Vec<Arc<rustls::sign::CertifiedKey>>> {
     load_certified_keys_from_material(

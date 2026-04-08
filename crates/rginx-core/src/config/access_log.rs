@@ -262,11 +262,7 @@ fn is_access_log_variable_char(byte: u8) -> bool {
 }
 
 fn fallback_access_log_value(value: &str) -> &str {
-    if value.is_empty() {
-        "-"
-    } else {
-        value
-    }
+    if value.is_empty() { "-" } else { value }
 }
 
 fn fallback_access_log_option(value: Option<&str>) -> &str {

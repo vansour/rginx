@@ -258,8 +258,11 @@ fn check_reports_tls_diagnostics_for_listener_and_vhost_certificates() {
     assert!(stdout.contains("tls_expiring_certificates=-"));
     assert!(stdout.contains("tls_certificate scope=listener:default sha256="));
     assert!(stdout.contains("tls_sni_binding listener=default server_name=api.example.com"));
-    assert!(stdout
-        .contains("tls_default_certificate_binding listener=default server_name=api.example.com"));
+    assert!(
+        stdout.contains(
+            "tls_default_certificate_binding listener=default server_name=api.example.com"
+        )
+    );
     assert!(stdout.contains("tls_sni_conflicts=-"));
 
     let _ = fs::remove_dir_all(temp_dir);

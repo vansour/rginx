@@ -96,11 +96,7 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
 
 pub(super) fn resolve_path(base_dir: &Path, path: String) -> PathBuf {
     let path = PathBuf::from(path);
-    if path.is_absolute() {
-        path
-    } else {
-        base_dir.join(path)
-    }
+    if path.is_absolute() { path } else { base_dir.join(path) }
 }
 
 #[cfg(test)]
@@ -117,11 +113,11 @@ mod tests {
     };
 
     use super::{
-        compile, compile_with_base, DEFAULT_HEALTHY_SUCCESSES_REQUIRED,
         DEFAULT_HEALTH_CHECK_INTERVAL_SECS, DEFAULT_HEALTH_CHECK_TIMEOUT_SECS,
-        DEFAULT_MAX_REPLAYABLE_REQUEST_BODY_BYTES, DEFAULT_UNHEALTHY_AFTER_FAILURES,
-        DEFAULT_UNHEALTHY_COOLDOWN_SECS, DEFAULT_UPSTREAM_HTTP2_KEEP_ALIVE_TIMEOUT_SECS,
-        DEFAULT_UPSTREAM_POOL_IDLE_TIMEOUT_SECS, DEFAULT_UPSTREAM_REQUEST_TIMEOUT_SECS,
+        DEFAULT_HEALTHY_SUCCESSES_REQUIRED, DEFAULT_MAX_REPLAYABLE_REQUEST_BODY_BYTES,
+        DEFAULT_UNHEALTHY_AFTER_FAILURES, DEFAULT_UNHEALTHY_COOLDOWN_SECS,
+        DEFAULT_UPSTREAM_HTTP2_KEEP_ALIVE_TIMEOUT_SECS, DEFAULT_UPSTREAM_POOL_IDLE_TIMEOUT_SECS,
+        DEFAULT_UPSTREAM_REQUEST_TIMEOUT_SECS, compile, compile_with_base,
     };
 
     #[test]

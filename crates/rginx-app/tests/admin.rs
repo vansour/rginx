@@ -12,9 +12,9 @@ use rcgen::CertifiedKey;
 mod support;
 
 use rginx_runtime::admin::{
-    admin_socket_path_for_config, AdminRequest, AdminResponse, RevisionSnapshot,
+    AdminRequest, AdminResponse, RevisionSnapshot, admin_socket_path_for_config,
 };
-use support::{reserve_loopback_addr, ServerHarness, READY_ROUTE_CONFIG};
+use support::{READY_ROUTE_CONFIG, ServerHarness, reserve_loopback_addr};
 
 #[test]
 fn local_admin_socket_serves_revision_snapshot() {
@@ -928,23 +928,25 @@ fn spawn_response_server(body: &'static str) -> std::net::SocketAddr {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("test upstream listener should bind");
     let listen_addr = listener.local_addr().expect("listener addr should be available");
 
-    std::thread::spawn(move || loop {
-        let Ok((mut stream, _)) = listener.accept() else {
-            break;
-        };
+    std::thread::spawn(move || {
+        loop {
+            let Ok((mut stream, _)) = listener.accept() else {
+                break;
+            };
 
-        std::thread::spawn(move || {
-            let mut buffer = [0u8; 1024];
-            let _ = stream.read(&mut buffer);
+            std::thread::spawn(move || {
+                let mut buffer = [0u8; 1024];
+                let _ = stream.read(&mut buffer);
 
-            let response = format!(
+                let response = format!(
                     "HTTP/1.1 200 OK\r\ncontent-type: text/plain; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
                     body.len(),
                     body
                 );
-            let _ = stream.write_all(response.as_bytes());
-            let _ = stream.flush();
-        });
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            });
+        }
     });
 
     listen_addr

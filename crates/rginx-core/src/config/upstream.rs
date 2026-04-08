@@ -144,11 +144,7 @@ impl Upstream {
 
     pub fn next_peers(&self, limit: usize) -> Vec<UpstreamPeer> {
         let primary = self.next_peers_in_pool(limit, false);
-        if primary.is_empty() {
-            self.next_peers_in_pool(limit, true)
-        } else {
-            primary
-        }
+        if primary.is_empty() { self.next_peers_in_pool(limit, true) } else { primary }
     }
 
     pub fn primary_next_peers(&self, limit: usize) -> Vec<UpstreamPeer> {

@@ -242,7 +242,11 @@ fn validate_listener_like(config: ListenerLikeRef<'_>) -> Result<()> {
         )?;
 
         validate_tls_versions(config.owner_label, versions.as_deref())?;
-        validate_tls_cipher_suites(config.owner_label, cipher_suites.as_deref(), versions.as_deref())?;
+        validate_tls_cipher_suites(
+            config.owner_label,
+            cipher_suites.as_deref(),
+            versions.as_deref(),
+        )?;
         validate_tls_key_exchange_groups(config.owner_label, key_exchange_groups.as_deref())?;
         validate_alpn_protocols(config.owner_label, alpn_protocols.as_deref())?;
 
@@ -356,9 +360,7 @@ fn validate_tls_cipher_suites(
     };
 
     if cipher_suites.is_empty() {
-        return Err(Error::Config(format!(
-            "{owner_label} TLS cipher_suites must not be empty"
-        )));
+        return Err(Error::Config(format!("{owner_label} TLS cipher_suites must not be empty")));
     }
 
     let mut seen = HashSet::new();
@@ -371,9 +373,9 @@ fn validate_tls_cipher_suites(
     }
 
     if let Some(versions) = versions
-        && !cipher_suites
-            .iter()
-            .any(|suite| versions.iter().any(|version| cipher_suite_supports_version(*suite, *version)))
+        && !cipher_suites.iter().any(|suite| {
+            versions.iter().any(|version| cipher_suite_supports_version(*suite, *version))
+        })
     {
         return Err(Error::Config(format!(
             "{owner_label} TLS cipher_suites do not support any configured TLS versions"

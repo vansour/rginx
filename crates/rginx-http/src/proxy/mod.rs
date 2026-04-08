@@ -747,10 +747,7 @@ mod tests {
             "no-sni".to_string(),
             vec![peer.clone()],
             UpstreamTls::NativeRoots,
-            UpstreamSettings {
-                server_name: false,
-                ..upstream_settings(UpstreamProtocol::Auto)
-            },
+            UpstreamSettings { server_name: false, ..upstream_settings(UpstreamProtocol::Auto) },
         );
         let duplicate = Upstream::new(
             "duplicate".to_string(),

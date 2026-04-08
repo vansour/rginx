@@ -93,8 +93,8 @@ async fn upstream_server_name_false_suppresses_sni() {
     fs::remove_dir_all(upstream_temp_dir).expect("upstream temp dir should be removed");
 }
 
-async fn spawn_tls_upstream_capture_sni(
-) -> (SocketAddr, oneshot::Receiver<Option<String>>, JoinHandle<()>, PathBuf) {
+async fn spawn_tls_upstream_capture_sni()
+-> (SocketAddr, oneshot::Receiver<Option<String>>, JoinHandle<()>, PathBuf) {
     let temp_dir = temp_dir("rginx-upstream-sni-server");
     fs::create_dir_all(&temp_dir).expect("upstream temp dir should be created");
     let cert_path = temp_dir.join("upstream.crt");
@@ -108,9 +108,8 @@ async fn spawn_tls_upstream_capture_sni(
         certified_key,
         observed_sni: Arc::new(Mutex::new(Some(observed_tx))),
     });
-    let tls_config = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_cert_resolver(resolver);
+    let tls_config =
+        rustls::ServerConfig::builder().with_no_client_auth().with_cert_resolver(resolver);
     let tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));
 
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -120,7 +119,8 @@ async fn spawn_tls_upstream_capture_sni(
 
     let task = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.expect("upstream TLS listener should accept");
-        let tls_stream = tls_acceptor.accept(stream).await.expect("upstream TLS handshake should work");
+        let tls_stream =
+            tls_acceptor.accept(stream).await.expect("upstream TLS handshake should work");
 
         let service = service_fn(move |_request: Request<Incoming>| async move {
             Ok::<_, Infallible>(
@@ -207,11 +207,8 @@ impl fmt::Debug for CapturingResolver {
 
 impl ResolvesServerCert for CapturingResolver {
     fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-        if let Some(sender) = self
-            .observed_sni
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
+        if let Some(sender) =
+            self.observed_sni.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take()
         {
             let _ = sender.send(client_hello.server_name().map(str::to_string));
         }

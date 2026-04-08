@@ -219,10 +219,7 @@ fn print_check_success(config_path: &Path, summary: CheckSummary) {
             .unwrap_or_else(|| "auto".to_string()),
         summary.accept_workers,
     );
-    println!(
-        "reload_requires_restart_for={}",
-        rginx_http::tls_restart_required_fields().join(",")
-    );
+    println!("reload_requires_restart_for={}", rginx_http::tls_restart_required_fields().join(","));
     println!(
         "tls_details=listener_profiles={} vhost_overrides={} sni_names={} certificate_bundles={}",
         summary.tls.listener_tls_profiles,
@@ -239,10 +236,7 @@ fn print_check_success(config_path: &Path, summary: CheckSummary) {
     } else {
         println!("tls_expiring_certificates={}", summary.tls.expiring_certificates.join(","));
     }
-    println!(
-        "tls_restart_required_fields={}",
-        summary.tls.restart_required_fields.join(",")
-    );
+    println!("tls_restart_required_fields={}", summary.tls.restart_required_fields.join(","));
     for certificate in &summary.tls.certificates {
         println!(
             "tls_certificate scope={} sha256={} subject={:?} issuer={:?} serial={:?} chain_length={} diagnostics={} cert_path={}",
@@ -266,11 +260,8 @@ fn print_check_success(config_path: &Path, summary: CheckSummary) {
         } else {
             binding.fingerprints.join(",")
         };
-        let scopes = if binding.scopes.is_empty() {
-            "-".to_string()
-        } else {
-            binding.scopes.join(",")
-        };
+        let scopes =
+            if binding.scopes.is_empty() { "-".to_string() } else { binding.scopes.join(",") };
         println!(
             "tls_sni_binding listener={} server_name={} fingerprints={} scopes={} default_selected={}",
             binding.listener_name,
@@ -299,17 +290,11 @@ fn print_check_success(config_path: &Path, summary: CheckSummary) {
         } else {
             binding.fingerprints.join(",")
         };
-        let scopes = if binding.scopes.is_empty() {
-            "-".to_string()
-        } else {
-            binding.scopes.join(",")
-        };
+        let scopes =
+            if binding.scopes.is_empty() { "-".to_string() } else { binding.scopes.join(",") };
         println!(
             "tls_default_certificate_binding listener={} server_name={} fingerprints={} scopes={}",
-            binding.listener_name,
-            binding.server_name,
-            fingerprints,
-            scopes,
+            binding.listener_name, binding.server_name, fingerprints, scopes,
         );
     }
 }
@@ -331,11 +316,8 @@ fn listener_model(
 
 fn tls_check_details(config: &rginx_config::ConfigSnapshot) -> TlsCheckDetails {
     let tls = rginx_http::tls_runtime_snapshot_for_config(config);
-    let listener_tls_profiles = config
-        .listeners
-        .iter()
-        .filter(|listener| listener.server.tls.is_some())
-        .count();
+    let listener_tls_profiles =
+        config.listeners.iter().filter(|listener| listener.server.tls.is_some()).count();
     let vhost_tls_overrides = std::iter::once(&config.default_vhost)
         .chain(config.vhosts.iter())
         .filter(|vhost| vhost.tls.is_some())
@@ -378,9 +360,9 @@ fn tls_check_details(config: &rginx_config::ConfigSnapshot) -> TlsCheckDetails {
         .certificates
         .iter()
         .filter_map(|certificate| {
-            certificate.expires_in_days.and_then(|days| {
-                (days <= 30).then(|| format!("{}:{}d", certificate.scope, days))
-            })
+            certificate
+                .expires_in_days
+                .and_then(|days| (days <= 30).then(|| format!("{}:{}d", certificate.scope, days)))
         })
         .collect();
     let (sni_bindings, sni_conflicts, default_certificate_bindings) =
@@ -405,11 +387,7 @@ fn tls_check_details(config: &rginx_config::ConfigSnapshot) -> TlsCheckDetails {
 fn tls_sni_diagnostics(
     config: &rginx_config::ConfigSnapshot,
     certificates: &[rginx_http::TlsCertificateStatusSnapshot],
-) -> (
-    Vec<TlsSniBindingCheck>,
-    Vec<TlsSniBindingCheck>,
-    Vec<TlsDefaultCertificateBindingCheck>,
-) {
+) -> (Vec<TlsSniBindingCheck>, Vec<TlsSniBindingCheck>, Vec<TlsDefaultCertificateBindingCheck>) {
     let fingerprint_by_scope = certificates
         .iter()
         .map(|certificate| {
@@ -428,7 +406,8 @@ fn tls_sni_diagnostics(
 
         if listener.server.tls.is_some() {
             let scope = format!("listener:{}", listener.name);
-            let fingerprint = fingerprint_by_scope.get(&scope).cloned().unwrap_or_else(|| "-".to_string());
+            let fingerprint =
+                fingerprint_by_scope.get(&scope).cloned().unwrap_or_else(|| "-".to_string());
             for server_name in &config.default_vhost.server_names {
                 let binding = bindings
                     .entry((listener.name.clone(), server_name.clone()))
@@ -453,7 +432,8 @@ fn tls_sni_diagnostics(
                 continue;
             }
             let scope = format!("vhost:{}", vhost.id);
-            let fingerprint = fingerprint_by_scope.get(&scope).cloned().unwrap_or_else(|| "-".to_string());
+            let fingerprint =
+                fingerprint_by_scope.get(&scope).cloned().unwrap_or_else(|| "-".to_string());
             for server_name in &vhost.server_names {
                 let binding = bindings
                     .entry((listener.name.clone(), server_name.clone()))
@@ -479,7 +459,9 @@ fn tls_sni_diagnostics(
         let Some(default_certificate) = listener.server.default_certificate.as_ref() else {
             continue;
         };
-        if let Some(binding) = bindings.get_mut(&(listener.name.clone(), default_certificate.clone())) {
+        if let Some(binding) =
+            bindings.get_mut(&(listener.name.clone(), default_certificate.clone()))
+        {
             binding.default_selected = true;
             default_certificate_bindings.push(TlsDefaultCertificateBindingCheck {
                 listener_name: listener.name.clone(),
@@ -492,9 +474,7 @@ fn tls_sni_diagnostics(
 
     let mut sni_bindings = bindings.into_values().collect::<Vec<_>>();
     sni_bindings.sort_by(|left, right| {
-        left.listener_name
-            .cmp(&right.listener_name)
-            .then(left.server_name.cmp(&right.server_name))
+        left.listener_name.cmp(&right.listener_name).then(left.server_name.cmp(&right.server_name))
     });
     let sni_conflicts = sni_bindings
         .iter()

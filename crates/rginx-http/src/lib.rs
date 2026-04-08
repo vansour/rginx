@@ -9,9 +9,9 @@ pub mod state;
 mod timeout;
 mod tls;
 
+pub use client_ip::TlsClientIdentity;
 pub use proxy::{PeerHealthSnapshot, UpstreamHealthSnapshot};
 pub use server::serve;
-pub use client_ip::TlsClientIdentity;
 pub use state::{
     GrpcTrafficSnapshot, HttpCountersSnapshot, ListenerStatsSnapshot, MtlsStatusSnapshot,
     ReloadOutcomeSnapshot, ReloadResultSnapshot, ReloadStatusSnapshot, RouteStatsSnapshot,

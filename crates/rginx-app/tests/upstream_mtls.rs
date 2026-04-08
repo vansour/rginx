@@ -91,10 +91,11 @@ async fn spawn_mtls_upstream(
     let certs = load_certs(&cert_path);
     let key = load_private_key(&key_path);
     let verifier = Arc::new(RequireAnyClientCertVerifier::new());
-    let tls_config = rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
-        .with_client_cert_verifier(verifier)
-        .with_single_cert(certs, key)
-        .expect("test upstream TLS config should build");
+    let tls_config =
+        rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(certs, key)
+            .expect("test upstream TLS config should build");
     let tls_acceptor = TlsAcceptor::from(Arc::new(tls_config));
 
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -108,11 +109,8 @@ async fn spawn_mtls_upstream(
         let (stream, _) = listener.accept().await.expect("upstream mTLS listener should accept");
         let tls_stream =
             tls_acceptor.accept(stream).await.expect("upstream TLS handshake should work");
-        let peer_certificates_present = tls_stream
-            .get_ref()
-            .1
-            .peer_certificates()
-            .is_some_and(|certs| !certs.is_empty());
+        let peer_certificates_present =
+            tls_stream.get_ref().1.peer_certificates().is_some_and(|certs| !certs.is_empty());
         let protocol_version = tls_stream.get_ref().1.protocol_version();
 
         let service = service_fn(move |_request: Request<Incoming>| {
@@ -122,10 +120,8 @@ async fn spawn_mtls_upstream(
                 if let Some(sender) =
                     observed_tx.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take()
                 {
-                    let _ = sender.send(ObservedMtlsRequest {
-                        peer_certificates_present,
-                        protocol_version,
-                    });
+                    let _ = sender
+                        .send(ObservedMtlsRequest { peer_certificates_present, protocol_version });
                 }
 
                 Ok::<_, Infallible>(

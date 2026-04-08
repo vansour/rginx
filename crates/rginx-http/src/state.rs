@@ -1107,7 +1107,9 @@ impl SharedState {
         let mut required_listeners = 0usize;
 
         for listener in &config.listeners {
-            let Some(client_auth) = listener.server.tls.as_ref().and_then(|tls| tls.client_auth.as_ref()) else {
+            let Some(client_auth) =
+                listener.server.tls.as_ref().and_then(|tls| tls.client_auth.as_ref())
+            else {
                 continue;
             };
             configured_listeners += 1;
@@ -1366,7 +1368,10 @@ pub fn tls_runtime_snapshot_for_config(config: &ConfigSnapshot) -> TlsRuntimeSna
                 default_certificate: listener.server.default_certificate.clone(),
                 versions: tls.and_then(|tls| {
                     tls.versions.as_ref().map(|versions| {
-                        versions.iter().map(|version| tls_version_label(*version).to_string()).collect()
+                        versions
+                            .iter()
+                            .map(|version| tls_version_label(*version).to_string())
+                            .collect()
                     })
                 }),
                 alpn_protocols: tls
@@ -1392,11 +1397,15 @@ pub fn tls_runtime_snapshot_for_config(config: &ConfigSnapshot) -> TlsRuntimeSna
     if let Some(snapshot) = build_vhost_certificate_snapshot(config, &config.default_vhost) {
         certificates.push(snapshot);
     }
-    certificates.extend(config.vhosts.iter().filter_map(|vhost| build_vhost_certificate_snapshot(config, vhost)));
+    certificates.extend(
+        config.vhosts.iter().filter_map(|vhost| build_vhost_certificate_snapshot(config, vhost)),
+    );
 
     let expiring_certificate_count = certificates
         .iter()
-        .filter(|certificate| certificate.expires_in_days.is_some_and(|days| days <= TLS_EXPIRY_WARNING_DAYS))
+        .filter(|certificate| {
+            certificate.expires_in_days.is_some_and(|days| days <= TLS_EXPIRY_WARNING_DAYS)
+        })
         .count();
 
     TlsRuntimeSnapshot {
@@ -1473,13 +1482,17 @@ fn build_listener_certificate_snapshot(
             .as_ref()
             .and_then(|certificate| certificate.authority_key_identifier.clone()),
         is_ca: inspected.as_ref().and_then(|certificate| certificate.is_ca),
-        path_len_constraint: inspected.as_ref().and_then(|certificate| certificate.path_len_constraint),
+        path_len_constraint: inspected
+            .as_ref()
+            .and_then(|certificate| certificate.path_len_constraint),
         key_usage: inspected.as_ref().and_then(|certificate| certificate.key_usage.clone()),
         extended_key_usage: inspected
             .as_ref()
             .map(|certificate| certificate.extended_key_usage.clone())
             .unwrap_or_default(),
-        not_before_unix_ms: inspected.as_ref().and_then(|certificate| certificate.not_before_unix_ms),
+        not_before_unix_ms: inspected
+            .as_ref()
+            .and_then(|certificate| certificate.not_before_unix_ms),
         not_after_unix_ms: inspected.as_ref().and_then(|certificate| certificate.not_after_unix_ms),
         expires_in_days: inspected.as_ref().and_then(|certificate| certificate.expires_in_days),
         chain_length: inspected.as_ref().map(|certificate| certificate.chain_length).unwrap_or(0),
@@ -1494,8 +1507,7 @@ fn build_listener_certificate_snapshot(
         selected_as_default_for_listeners: if listener.server.default_certificate.is_none()
             || listener.server.default_certificate.as_ref().is_some_and(|default_name| {
                 config.default_vhost.server_names.iter().any(|name| name == default_name)
-            })
-        {
+            }) {
             vec![listener.name.clone()]
         } else {
             Vec::new()
@@ -1532,13 +1544,17 @@ fn build_vhost_certificate_snapshot(
             .as_ref()
             .and_then(|certificate| certificate.authority_key_identifier.clone()),
         is_ca: inspected.as_ref().and_then(|certificate| certificate.is_ca),
-        path_len_constraint: inspected.as_ref().and_then(|certificate| certificate.path_len_constraint),
+        path_len_constraint: inspected
+            .as_ref()
+            .and_then(|certificate| certificate.path_len_constraint),
         key_usage: inspected.as_ref().and_then(|certificate| certificate.key_usage.clone()),
         extended_key_usage: inspected
             .as_ref()
             .map(|certificate| certificate.extended_key_usage.clone())
             .unwrap_or_default(),
-        not_before_unix_ms: inspected.as_ref().and_then(|certificate| certificate.not_before_unix_ms),
+        not_before_unix_ms: inspected
+            .as_ref()
+            .and_then(|certificate| certificate.not_before_unix_ms),
         not_after_unix_ms: inspected.as_ref().and_then(|certificate| certificate.not_after_unix_ms),
         expires_in_days: inspected.as_ref().and_then(|certificate| certificate.expires_in_days),
         chain_length: inspected.as_ref().map(|certificate| certificate.chain_length).unwrap_or(0),
@@ -1558,7 +1574,9 @@ fn build_vhost_certificate_snapshot(
                     .server
                     .default_certificate
                     .as_ref()
-                    .filter(|default_name| vhost.server_names.iter().any(|name| name == *default_name))
+                    .filter(|default_name| {
+                        vhost.server_names.iter().any(|name| name == *default_name)
+                    })
                     .map(|_| listener.name.clone())
             })
             .collect(),
@@ -1643,19 +1661,17 @@ fn inspect_certificate(path: &std::path::Path) -> Option<InspectedCertificate> {
                 {
                     chain_diagnostics.push("leaf_missing_server_auth_eku".to_string());
                 }
-                if index > 0 && !basic_constraints.as_ref().is_some_and(|extension| extension.value.ca) {
-                    chain_diagnostics.push(format!(
-                        "cert[{index}] intermediate_or_root_not_marked_as_ca"
-                    ));
+                if index > 0
+                    && !basic_constraints.as_ref().is_some_and(|extension| extension.value.ca)
+                {
+                    chain_diagnostics
+                        .push(format!("cert[{index}] intermediate_or_root_not_marked_as_ca"));
                 }
                 if index > 0
-                    && key_usage
-                        .as_ref()
-                        .is_some_and(|extension| !extension.value.key_cert_sign())
+                    && key_usage.as_ref().is_some_and(|extension| !extension.value.key_cert_sign())
                 {
-                    chain_diagnostics.push(format!(
-                        "cert[{index}] intermediate_or_root_missing_key_cert_sign"
-                    ));
+                    chain_diagnostics
+                        .push(format!("cert[{index}] intermediate_or_root_missing_key_cert_sign"));
                 }
                 chain_subjects.push(subject.clone());
                 chain_entries.push(InspectedCertificate {
@@ -1724,16 +1740,13 @@ fn inspect_certificate(path: &std::path::Path) -> Option<InspectedCertificate> {
             chain_entries[index + 1].subject_key_identifier.as_deref(),
         ) && aki != ski
         {
-            chain_diagnostics.push(format!(
-                "chain_aki_ski_mismatch cert[{index}]_to_cert[{}]",
-                index + 1
-            ));
+            chain_diagnostics
+                .push(format!("chain_aki_ski_mismatch cert[{index}]_to_cert[{}]", index + 1));
         }
         if let Some(path_len_constraint) = chain_entries[index + 1].path_len_constraint {
-            let remaining_ca_certs = chain_entries[index + 2..]
-                .iter()
-                .filter(|entry| entry.is_ca == Some(true))
-                .count() as u32;
+            let remaining_ca_certs =
+                chain_entries[index + 2..].iter().filter(|entry| entry.is_ca == Some(true)).count()
+                    as u32;
             if remaining_ca_certs > path_len_constraint {
                 chain_diagnostics.push(format!(
                     "cert[{}] path_len_constraint_exceeded remaining_ca_certs={} path_len_constraint={}",
@@ -1748,7 +1761,8 @@ fn inspect_certificate(path: &std::path::Path) -> Option<InspectedCertificate> {
     if let Some(leaf) = chain_entries.first() {
         if certs.len() == 1 {
             if leaf.subject != leaf.issuer {
-                chain_diagnostics.push("chain_incomplete_single_non_self_signed_certificate".to_string());
+                chain_diagnostics
+                    .push("chain_incomplete_single_non_self_signed_certificate".to_string());
             }
         } else if let Some(last) = chain_entries.last()
             && last.subject != last.issuer
@@ -1771,9 +1785,7 @@ fn load_certificate_chain_der(path: &std::path::Path) -> std::io::Result<Vec<Vec
     let mut reader = BufReader::new(file);
     let certs = rustls_pemfile::certs(&mut reader)
         .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|error| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, error)
-    })?;
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     if !certs.is_empty() {
         return Ok(certs.into_iter().map(|cert| cert.as_ref().to_vec()).collect());
     }
@@ -1787,7 +1799,9 @@ fn fingerprint_sha256(bytes: &[u8]) -> String {
 
 fn extension_key_identifier(cert: &X509Certificate<'_>, subject: bool) -> Option<String> {
     cert.iter_extensions().find_map(|extension| match extension.parsed_extension() {
-        ParsedExtension::SubjectKeyIdentifier(identifier) if subject => Some(format!("{identifier:x}")),
+        ParsedExtension::SubjectKeyIdentifier(identifier) if subject => {
+            Some(format!("{identifier:x}"))
+        }
         ParsedExtension::AuthorityKeyIdentifier(identifier) if !subject => {
             identifier.key_identifier.as_ref().map(|identifier| format!("{identifier:x}"))
         }
@@ -1796,7 +1810,9 @@ fn extension_key_identifier(cert: &X509Certificate<'_>, subject: bool) -> Option
 }
 
 fn describe_extended_key_usage(
-    extension: Option<&x509_parser::certificate::BasicExtension<&x509_parser::extensions::ExtendedKeyUsage<'_>>>,
+    extension: Option<
+        &x509_parser::certificate::BasicExtension<&x509_parser::extensions::ExtendedKeyUsage<'_>>,
+    >,
 ) -> Vec<String> {
     let Some(extension) = extension else {
         return Vec::new();
@@ -1856,8 +1872,7 @@ mod tests {
 
     use super::{
         ConfigSnapshot, ReloadOutcomeSnapshot, SharedState, TlsHandshakeFailureReason,
-        inspect_certificate,
-        validate_config_transition,
+        inspect_certificate, validate_config_transition,
     };
 
     fn snapshot(listen: &str) -> ConfigSnapshot {
@@ -2055,12 +2070,14 @@ mod tests {
 
     #[test]
     fn counters_snapshot_tracks_mtls_activity() {
-        let shared = SharedState::from_config(snapshot("127.0.0.1:8080")).expect("shared state should build");
+        let shared = SharedState::from_config(snapshot("127.0.0.1:8080"))
+            .expect("shared state should build");
 
         shared.record_mtls_handshake_success("default", true);
         shared.record_mtls_request("default", true);
         shared.record_mtls_request("default", false);
-        shared.record_tls_handshake_failure("default", TlsHandshakeFailureReason::MissingClientCert);
+        shared
+            .record_tls_handshake_failure("default", TlsHandshakeFailureReason::MissingClientCert);
         shared.record_tls_handshake_failure("default", TlsHandshakeFailureReason::UnknownCa);
         shared.record_tls_handshake_failure("default", TlsHandshakeFailureReason::BadCertificate);
         shared.record_tls_handshake_failure("default", TlsHandshakeFailureReason::Other);
@@ -2107,12 +2124,9 @@ mod tests {
         assert!(!inspected.san_dns_names.is_empty());
         assert!(inspected.fingerprint_sha256.as_ref().is_some_and(|value| value.len() == 64));
         assert_eq!(inspected.chain_length, 1);
-        assert!(
-            inspected
-                .chain_diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.contains("chain_incomplete_single_non_self_signed_certificate"))
-        );
+        assert!(inspected.chain_diagnostics.iter().any(|diagnostic| {
+            diagnostic.contains("chain_incomplete_single_non_self_signed_certificate")
+        }));
 
         fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
     }
@@ -2131,8 +2145,8 @@ mod tests {
         let ca_cert = ca_params.self_signed(&ca_key).expect("CA should self-sign");
         let ca = CertifiedKey { cert: ca_cert, key_pair: ca_key };
 
-        let mut leaf_params =
-            CertificateParams::new(vec!["client-only.example.com".to_string()]).expect("leaf params");
+        let mut leaf_params = CertificateParams::new(vec!["client-only.example.com".to_string()])
+            .expect("leaf params");
         leaf_params.distinguished_name.push(DnType::CommonName, "client-only.example.com");
         leaf_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
         let leaf_key = KeyPair::generate().expect("leaf key should generate");

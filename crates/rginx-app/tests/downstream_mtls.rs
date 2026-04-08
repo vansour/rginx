@@ -3,22 +3,22 @@ use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedKey, DnType, ExtendedKeyUsagePurpose, IsCa,
     KeyPair,
 };
-use rginx_runtime::admin::{admin_socket_path_for_config, AdminRequest, AdminResponse};
+use rginx_runtime::admin::{AdminRequest, AdminResponse, admin_socket_path_for_config};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{ClientConfig, ClientConnection, DigitallySignedStruct, SignatureScheme, StreamOwned};
 
 mod support;
 
-use support::{reserve_loopback_addr, ServerHarness, READY_ROUTE_CONFIG};
+use support::{READY_ROUTE_CONFIG, ServerHarness, reserve_loopback_addr};
 
 #[test]
 fn required_client_cert_rejects_anonymous_clients_and_accepts_authenticated_clients() {
