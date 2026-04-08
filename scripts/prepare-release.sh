@@ -106,12 +106,22 @@ fi
 LOCAL_HEAD="$(git rev-parse HEAD)"
 
 if [[ "${SKIP_FETCH}" -ne 1 ]]; then
-    run_step git fetch --no-tags origin main
+    RELEASE_BRANCH="release/${TAG}"
+    run_step git fetch --no-tags origin main "+refs/heads/${RELEASE_BRANCH}:refs/remotes/origin/${RELEASE_BRANCH}"
 
     REMOTE_HEAD="$(git rev-parse origin/main)"
     if [[ "${PRERELEASE}" -eq 1 ]]; then
-        if ! git merge-base --is-ancestor "${LOCAL_HEAD}" origin/main; then
-            die "prerelease tag ${TAG} must point to a commit reachable from origin/main (${REMOTE_HEAD}), got ${LOCAL_HEAD}"
+        if git show-ref --verify --quiet "refs/remotes/origin/${RELEASE_BRANCH}"; then
+            RELEASE_BRANCH_HEAD="$(git rev-parse "origin/${RELEASE_BRANCH}")"
+            if git merge-base --is-ancestor "${LOCAL_HEAD}" origin/main; then
+                :
+            elif git merge-base --is-ancestor "${LOCAL_HEAD}" "origin/${RELEASE_BRANCH}"; then
+                :
+            else
+                die "prerelease tag ${TAG} must point to a commit reachable from origin/main (${REMOTE_HEAD}) or origin/${RELEASE_BRANCH} (${RELEASE_BRANCH_HEAD}), got ${LOCAL_HEAD}"
+            fi
+        elif ! git merge-base --is-ancestor "${LOCAL_HEAD}" origin/main; then
+            die "prerelease tag ${TAG} must point to a commit reachable from origin/main (${REMOTE_HEAD}); release branch origin/${RELEASE_BRANCH} was not found, got ${LOCAL_HEAD}"
         fi
     else
         [[ "${LOCAL_HEAD}" == "${REMOTE_HEAD}" ]] || die "HEAD (${LOCAL_HEAD}) does not match origin/main (${REMOTE_HEAD})"

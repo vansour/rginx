@@ -70,16 +70,27 @@ jobs:
           TAG="${{ steps.meta.outputs.tag }}"
           COMMIT_SHA="${{ steps.meta.outputs.commit_sha }}"
           PRERELEASE="${{ steps.meta.outputs.prerelease }}"
+          RELEASE_BRANCH="release/${TAG}"
 
-          git fetch --no-tags origin main
+          git fetch --no-tags origin main "+refs/heads/${RELEASE_BRANCH}:refs/remotes/origin/${RELEASE_BRANCH}"
           MAIN_SHA="$(git rev-parse origin/main)"
 
-          if ! git merge-base --is-ancestor "${COMMIT_SHA}" origin/main; then
-            echo "Release tag ${TAG} points to ${COMMIT_SHA}, which is not reachable from origin/main (${MAIN_SHA})." >&2
-            exit 1
-          fi
-
-          if [[ "${PRERELEASE}" != "true" && "${COMMIT_SHA}" != "${MAIN_SHA}" ]]; then
+          if [[ "${PRERELEASE}" == "true" ]]; then
+            if git show-ref --verify --quiet "refs/remotes/origin/${RELEASE_BRANCH}"; then
+              RELEASE_BRANCH_SHA="$(git rev-parse "origin/${RELEASE_BRANCH}")"
+              if git merge-base --is-ancestor "${COMMIT_SHA}" origin/main; then
+                :
+              elif git merge-base --is-ancestor "${COMMIT_SHA}" "origin/${RELEASE_BRANCH}"; then
+                :
+              else
+                echo "Prerelease tag ${TAG} points to ${COMMIT_SHA}, which is not reachable from origin/main (${MAIN_SHA}) or origin/${RELEASE_BRANCH} (${RELEASE_BRANCH_SHA})." >&2
+                exit 1
+              fi
+            elif ! git merge-base --is-ancestor "${COMMIT_SHA}" origin/main; then
+              echo "Prerelease tag ${TAG} points to ${COMMIT_SHA}, which is not reachable from origin/main (${MAIN_SHA}) and release branch origin/${RELEASE_BRANCH} does not exist." >&2
+              exit 1
+            fi
+          elif [[ "${COMMIT_SHA}" != "${MAIN_SHA}" ]]; then
             echo "Stable release tag ${TAG} must point to origin/main HEAD (${MAIN_SHA}), got ${COMMIT_SHA}." >&2
             exit 1
           fi
