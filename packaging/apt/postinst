@@ -17,7 +17,7 @@ create_rginx_user() {
         --home /var/lib/rginx \
         --no-create-home \
         --shell "$shell" \
-        rginx >/dev/null 2>&1 || true
+        rginx >/dev/null 2>&1
 }
 
 case "$1" in

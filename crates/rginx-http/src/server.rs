@@ -1,5 +1,6 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use hyper::server::conn::{http1, http2};
 use hyper::service::service_fn;
@@ -200,6 +201,7 @@ async fn serve_connection(
                     tls_alpn: tls_alpn_protocol(&stream),
                     ..connection_addrs
                 };
+                let connection_addrs = Arc::new(connection_addrs);
                 if negotiated_h2(&stream) {
                     let stream = WriteTimeoutIo::new(
                         stream,
@@ -233,15 +235,7 @@ async fn serve_connection(
             }
             Err(error) => {
                 let reason = classify_tls_handshake_failure(&error);
-                if current_listener
-                    .server
-                    .tls
-                    .as_ref()
-                    .and_then(|tls| tls.client_auth.as_ref())
-                    .is_some()
-                {
-                    state.record_tls_handshake_failure(&listener_id, reason);
-                }
+                state.record_tls_handshake_failure(&listener_id, reason);
                 tracing::warn!(
                     remote_addr = %remote_addr,
                     listener = %listener_id,
@@ -259,6 +253,7 @@ async fn serve_connection(
         http1.response_write_timeout,
         format!("downstream response to {remote_addr}"),
     );
+    let connection_addrs = Arc::new(connection_addrs);
     serve_h1_connection_io(
         TokioIo::new(stream),
         listener_id,
@@ -347,7 +342,7 @@ async fn serve_h1_connection_io<T>(
     io: TokioIo<T>,
     listener_id: String,
     state: crate::state::SharedState,
-    connection_addrs: ConnectionPeerAddrs,
+    connection_addrs: Arc<ConnectionPeerAddrs>,
     mut shutdown: watch::Receiver<bool>,
     options: Http1ConnectionOptions,
 ) where
@@ -412,7 +407,7 @@ async fn serve_h2_connection_io<T>(
     io: TokioIo<T>,
     listener_id: String,
     state: crate::state::SharedState,
-    connection_addrs: ConnectionPeerAddrs,
+    connection_addrs: Arc<ConnectionPeerAddrs>,
     mut shutdown: watch::Receiver<bool>,
 ) where
     T: AsyncRead + AsyncWrite + Unpin + Send + 'static,

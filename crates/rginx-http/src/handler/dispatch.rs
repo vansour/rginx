@@ -6,6 +6,7 @@ use super::grpc::{
 use super::response::{forbidden_response, full_body, text_response, too_many_requests_response};
 use super::*;
 use crate::client_ip::{ConnectionPeerAddrs, TlsClientIdentity};
+use std::sync::Arc;
 
 #[derive(Clone, Copy)]
 struct ListenerRequestContext<'a> {
@@ -18,11 +19,11 @@ struct ListenerRequestContext<'a> {
 pub async fn handle(
     request: Request<Incoming>,
     state: SharedState,
-    connection: ConnectionPeerAddrs,
+    connection: Arc<ConnectionPeerAddrs>,
     listener_id: &str,
 ) -> HttpResponse {
     let mut request = request;
-    super::attach_connection_metadata(&mut request, &connection);
+    super::attach_connection_metadata(&mut request, connection.as_ref());
     let active = state.snapshot().await;
     let config = active.config.clone();
     let listener = config
@@ -58,7 +59,8 @@ pub async fn handle(
     let started = Instant::now();
     let tls_version = connection.tls_version.clone();
     let tls_alpn = connection.tls_alpn.clone();
-    let client_address = resolve_client_address(request.headers(), &listener.server, connection);
+    let client_address =
+        resolve_client_address(request.headers(), &listener.server, connection.as_ref());
     let downstream_scheme = if listener.tls_enabled() { "https" } else { "http" };
     let (selected_vhost_id, selected_route) = {
         let selected_vhost =

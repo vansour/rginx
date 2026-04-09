@@ -184,7 +184,10 @@ install_doc_if_exists "${ROOT_DIR}/LICENSE" "${STAGE_DIR}/usr/share/doc/${PACKAG
 install_doc_if_exists "${ROOT_DIR}/LICENSE-APACHE" "${STAGE_DIR}/usr/share/doc/${PACKAGE_NAME}"
 install_doc_if_exists "${ROOT_DIR}/LICENSE-MIT" "${STAGE_DIR}/usr/share/doc/${PACKAGE_NAME}"
 
-INSTALLED_SIZE="$(du -sk "${STAGE_DIR}" | awk '{print $1}')"
+INSTALLED_SIZE="$(
+    find "${STAGE_DIR}" -mindepth 1 -maxdepth 1 ! -name DEBIAN -exec du -sk {} + |
+        awk '{sum += $1} END {print sum + 0}'
+)"
 
 render_control \
     "${ROOT_DIR}/packaging/apt/control.in" \

@@ -44,7 +44,7 @@ pub struct ConnectionPeerAddrs {
 pub fn resolve_client_address(
     headers: &HeaderMap,
     server: &Server,
-    connection: ConnectionPeerAddrs,
+    connection: &ConnectionPeerAddrs,
 ) -> ClientAddress {
     if !server.is_trusted_proxy(connection.socket_peer_addr.ip()) {
         return direct_peer(connection.socket_peer_addr);
@@ -157,7 +157,7 @@ mod tests {
         let client = resolve_client_address(
             &headers,
             &server,
-            ConnectionPeerAddrs {
+            &ConnectionPeerAddrs {
                 socket_peer_addr: "192.0.2.10:4000".parse().unwrap(),
                 proxy_protocol_source_addr: None,
                 tls_client_identity: None,
@@ -193,7 +193,7 @@ mod tests {
         let client = resolve_client_address(
             &headers,
             &server,
-            ConnectionPeerAddrs {
+            &ConnectionPeerAddrs {
                 socket_peer_addr: "10.2.3.4:4000".parse().unwrap(),
                 proxy_protocol_source_addr: None,
                 tls_client_identity: None,
@@ -229,7 +229,7 @@ mod tests {
         let client = resolve_client_address(
             &headers,
             &server,
-            ConnectionPeerAddrs {
+            &ConnectionPeerAddrs {
                 socket_peer_addr: "10.3.4.5:4000".parse().unwrap(),
                 proxy_protocol_source_addr: None,
                 tls_client_identity: None,
@@ -264,7 +264,7 @@ mod tests {
         let client = resolve_client_address(
             &headers,
             &server,
-            ConnectionPeerAddrs {
+            &ConnectionPeerAddrs {
                 socket_peer_addr: "10.2.3.4:4000".parse().unwrap(),
                 proxy_protocol_source_addr: None,
                 tls_client_identity: None,
@@ -299,7 +299,7 @@ mod tests {
         let client = resolve_client_address(
             &headers,
             &server,
-            ConnectionPeerAddrs {
+            &ConnectionPeerAddrs {
                 socket_peer_addr: "10.2.3.4:4000".parse().unwrap(),
                 proxy_protocol_source_addr: None,
                 tls_client_identity: None,
@@ -332,7 +332,7 @@ mod tests {
         let client = resolve_client_address(
             &HeaderMap::new(),
             &server,
-            ConnectionPeerAddrs {
+            &ConnectionPeerAddrs {
                 socket_peer_addr: "10.2.3.4:4000".parse().unwrap(),
                 proxy_protocol_source_addr: Some("198.51.100.9:1234".parse().unwrap()),
                 tls_client_identity: None,

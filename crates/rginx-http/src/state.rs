@@ -1105,6 +1105,10 @@ impl SharedState {
         let mut configured_listeners = 0usize;
         let mut optional_listeners = 0usize;
         let mut required_listeners = 0usize;
+        let mut authenticated_connections = 0u64;
+        let mut authenticated_requests = 0u64;
+        let mut anonymous_requests = 0u64;
+        let mut handshake_failures_total = 0u64;
 
         for listener in &config.listeners {
             let Some(client_auth) =
@@ -1117,6 +1121,17 @@ impl SharedState {
                 rginx_core::ServerClientAuthMode::Optional => optional_listeners += 1,
                 rginx_core::ServerClientAuthMode::Required => required_listeners += 1,
             }
+
+            if let Some(counters) = self.listener_traffic_counters(&listener.id) {
+                authenticated_connections +=
+                    counters.downstream_mtls_authenticated_connections.load(Ordering::Relaxed);
+                authenticated_requests +=
+                    counters.downstream_mtls_authenticated_requests.load(Ordering::Relaxed);
+                anonymous_requests +=
+                    counters.downstream_mtls_anonymous_requests.load(Ordering::Relaxed);
+                handshake_failures_total +=
+                    counters.downstream_tls_handshake_failures.load(Ordering::Relaxed);
+            }
         }
 
         let counters = self.counters_snapshot();
@@ -1124,10 +1139,10 @@ impl SharedState {
             configured_listeners,
             optional_listeners,
             required_listeners,
-            authenticated_connections: counters.downstream_mtls_authenticated_connections,
-            authenticated_requests: counters.downstream_mtls_authenticated_requests,
-            anonymous_requests: counters.downstream_mtls_anonymous_requests,
-            handshake_failures_total: counters.downstream_tls_handshake_failures,
+            authenticated_connections,
+            authenticated_requests,
+            anonymous_requests,
+            handshake_failures_total,
             handshake_failures_missing_client_cert: counters
                 .downstream_tls_handshake_failures_missing_client_cert,
             handshake_failures_unknown_ca: counters.downstream_tls_handshake_failures_unknown_ca,
@@ -2091,6 +2106,22 @@ mod tests {
         assert_eq!(counters.downstream_tls_handshake_failures_unknown_ca, 1);
         assert_eq!(counters.downstream_tls_handshake_failures_bad_certificate, 1);
         assert_eq!(counters.downstream_tls_handshake_failures_other, 1);
+    }
+
+    #[tokio::test]
+    async fn mtls_status_snapshot_excludes_non_mtls_listener_handshake_failures() {
+        let shared = SharedState::from_config(snapshot("127.0.0.1:8080"))
+            .expect("shared state should build");
+
+        shared
+            .record_tls_handshake_failure("default", TlsHandshakeFailureReason::MissingClientCert);
+
+        let status = shared.status_snapshot().await;
+        let counters = shared.counters_snapshot();
+
+        assert_eq!(counters.downstream_tls_handshake_failures, 1);
+        assert_eq!(status.mtls.configured_listeners, 0);
+        assert_eq!(status.mtls.handshake_failures_total, 0);
     }
 
     #[test]
