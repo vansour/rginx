@@ -30,6 +30,13 @@ pub fn build_ocsp_request_for_certificate(path: &std::path::Path) -> Result<Vec<
     certificates::build_ocsp_request_for_certificate(path)
 }
 
+pub fn validate_ocsp_response_for_certificate(
+    path: &std::path::Path,
+    response_der: &[u8],
+) -> Result<()> {
+    certificates::validate_ocsp_response_for_certificate(path, response_der)
+}
+
 /// SNI 证书解析器，支持基于域名选择证书
 #[derive(Debug)]
 pub struct SniCertificateResolver {

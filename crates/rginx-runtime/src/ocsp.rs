@@ -81,13 +81,38 @@ async fn refresh_ocsp_staples(state: &SharedState, client: &OcspClient) -> Resul
         let request_body = match rginx_http::build_ocsp_request_for_certificate(&ocsp.cert_path) {
             Ok(request_body) => request_body,
             Err(error) => {
-                state.record_ocsp_refresh_failure(&ocsp.scope, error.to_string());
+                let (message, cache_cleared) = handle_ocsp_refresh_failure(
+                    &ocsp.cert_path,
+                    &ocsp_staple_path,
+                    error.to_string(),
+                )
+                .await;
+                if cache_cleared {
+                    tls_acceptors_changed = true;
+                }
+                state.record_ocsp_refresh_failure(&ocsp.scope, message);
                 continue;
             }
         };
 
         match fetch_ocsp_response(client, &ocsp.responder_urls, request_body).await {
             Ok(response_body) => {
+                if let Err(error) = rginx_http::validate_ocsp_response_for_certificate(
+                    &ocsp.cert_path,
+                    &response_body,
+                ) {
+                    let (message, cache_cleared) = handle_ocsp_refresh_failure(
+                        &ocsp.cert_path,
+                        &ocsp_staple_path,
+                        error.to_string(),
+                    )
+                    .await;
+                    if cache_cleared {
+                        tls_acceptors_changed = true;
+                    }
+                    state.record_ocsp_refresh_failure(&ocsp.scope, message);
+                    continue;
+                }
                 match write_ocsp_cache_file(&ocsp_staple_path, &response_body).await {
                     Ok(changed) => {
                         if changed {
@@ -95,10 +120,25 @@ async fn refresh_ocsp_staples(state: &SharedState, client: &OcspClient) -> Resul
                         }
                         state.record_ocsp_refresh_success(&ocsp.scope);
                     }
-                    Err(error) => state.record_ocsp_refresh_failure(&ocsp.scope, error),
+                    Err(error) => {
+                        let (message, cache_cleared) =
+                            handle_ocsp_refresh_failure(&ocsp.cert_path, &ocsp_staple_path, error)
+                                .await;
+                        if cache_cleared {
+                            tls_acceptors_changed = true;
+                        }
+                        state.record_ocsp_refresh_failure(&ocsp.scope, message);
+                    }
                 }
             }
-            Err(error) => state.record_ocsp_refresh_failure(&ocsp.scope, error),
+            Err(error) => {
+                let (message, cache_cleared) =
+                    handle_ocsp_refresh_failure(&ocsp.cert_path, &ocsp_staple_path, error).await;
+                if cache_cleared {
+                    tls_acceptors_changed = true;
+                }
+                state.record_ocsp_refresh_failure(&ocsp.scope, message);
+            }
         }
     }
 
@@ -197,6 +237,71 @@ async fn write_ocsp_cache_file(path: &Path, body: &[u8]) -> Result<bool, String>
     })?;
     tokio::fs::rename(&temp_path, path).await.map_err(|error| {
         format!("failed to replace OCSP cache file `{}`: {error}", path.display())
+    })?;
+    Ok(true)
+}
+
+async fn handle_ocsp_refresh_failure(
+    cert_path: &Path,
+    cache_path: &Path,
+    error: String,
+) -> (String, bool) {
+    match clear_invalid_ocsp_cache_file(cert_path, cache_path).await {
+        Ok(true) => (format!("{error}; cleared stale OCSP cache"), true),
+        Ok(false) => (error, false),
+        Err(clear_error) => (
+            format!("{error}; additionally failed to clear stale OCSP cache: {clear_error}"),
+            false,
+        ),
+    }
+}
+
+async fn clear_invalid_ocsp_cache_file(
+    cert_path: &Path,
+    cache_path: &Path,
+) -> Result<bool, String> {
+    let body = match tokio::fs::read(cache_path).await {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(format!(
+                "failed to read OCSP cache file `{}`: {error}",
+                cache_path.display()
+            ));
+        }
+    };
+    if body.is_empty() {
+        return Ok(false);
+    }
+
+    if rginx_http::validate_ocsp_response_for_certificate(cert_path, &body).is_ok() {
+        return Ok(false);
+    }
+
+    clear_ocsp_cache_file(cache_path).await
+}
+
+async fn clear_ocsp_cache_file(path: &Path) -> Result<bool, String> {
+    if tokio::fs::read(path).await.ok().is_some_and(|body| body.is_empty()) {
+        return Ok(false);
+    }
+
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(|error| {
+            format!("failed to create OCSP cache directory `{}`: {error}", parent.display())
+        })?;
+    }
+
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let temp_path = path.with_extension(format!("ocsp-clear-{unique}.tmp"));
+    tokio::fs::write(&temp_path, []).await.map_err(|error| {
+        format!("failed to clear OCSP cache file `{}`: {error}", temp_path.display())
+    })?;
+    tokio::fs::rename(&temp_path, path).await.map_err(|error| {
+        format!("failed to replace cleared OCSP cache file `{}`: {error}", path.display())
     })?;
     Ok(true)
 }

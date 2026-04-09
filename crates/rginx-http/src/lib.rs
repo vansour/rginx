@@ -22,4 +22,4 @@ pub use state::{
     UpstreamStatsSnapshot, UpstreamTlsStatusSnapshot, VhostStatsSnapshot, tls_reloadable_fields,
     tls_restart_required_fields, tls_runtime_snapshot_for_config,
 };
-pub use tls::build_ocsp_request_for_certificate;
+pub use tls::{build_ocsp_request_for_certificate, validate_ocsp_response_for_certificate};
