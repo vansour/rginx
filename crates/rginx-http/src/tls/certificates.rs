@@ -510,7 +510,7 @@ mod tests {
     }
 
     fn build_ocsp_response_for_certificate(cert_path: &Path) -> Vec<u8> {
-        build_ocsp_response_for_certificate_with_times(cert_path, 2030, 2031)
+        build_ocsp_response_for_certificate_with_times(cert_path, 2025, 2030)
     }
 
     fn build_ocsp_response_for_certificate_with_times(
