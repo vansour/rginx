@@ -19,7 +19,9 @@ use x509_parser::prelude::{FromDer, X509Certificate};
 use crate::proxy::{HealthChangeNotifier, ProxyClients, UpstreamHealthSnapshot};
 use crate::rate_limit::RateLimiters;
 use crate::tls::build_tls_acceptor;
-use crate::tls::certificates::ocsp_responder_urls_for_certificate;
+use crate::tls::certificates::{
+    ocsp_responder_urls_for_certificate, validate_ocsp_response_for_certificate,
+};
 
 const RECENT_WINDOW_SECS: u64 = 60;
 const MAX_RECENT_WINDOW_SECS: u64 = 300;
@@ -2002,11 +2004,11 @@ fn build_tls_ocsp_status_snapshot(
         return None;
     }
 
-    let (cache_loaded, cache_size_bytes, cache_modified_unix_ms) = bundle
+    let (cache_loaded, cache_size_bytes, cache_modified_unix_ms, cache_error) = bundle
         .ocsp_staple_path
         .as_ref()
-        .map(inspect_ocsp_cache_file)
-        .unwrap_or((false, None, None));
+        .map(|path| inspect_ocsp_cache_file(&bundle.cert_path, path))
+        .unwrap_or((false, None, None, None));
     let runtime = runtime_statuses.and_then(|statuses| statuses.get(&bundle.scope));
     let ocsp_request_result = if bundle.ocsp_staple_path.is_some() && !responder_urls.is_empty() {
         Some(crate::build_ocsp_request_for_certificate(&bundle.cert_path))
@@ -2020,7 +2022,7 @@ fn build_tls_ocsp_status_snapshot(
         && !responder_urls.is_empty()
         && responder_error.is_none()
         && request_error.is_none();
-    let static_error = responder_error.or_else(|| {
+    let static_error = cache_error.or(responder_error).or_else(|| {
         if bundle.ocsp_staple_path.is_some() && responder_urls.is_empty() {
             Some("certificate does not expose an OCSP responder URL".to_string())
         } else {
@@ -2044,14 +2046,63 @@ fn build_tls_ocsp_status_snapshot(
     })
 }
 
-fn inspect_ocsp_cache_file(path: &PathBuf) -> (bool, Option<usize>, Option<u64>) {
+fn inspect_ocsp_cache_file(
+    cert_path: &std::path::Path,
+    path: &PathBuf,
+) -> (bool, Option<usize>, Option<u64>, Option<String>) {
     let metadata = match std::fs::metadata(path) {
         Ok(metadata) => metadata,
-        Err(_) => return (false, None, None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return (false, None, None, None);
+        }
+        Err(error) => {
+            return (
+                false,
+                None,
+                None,
+                Some(format!("failed to stat OCSP cache file `{}`: {error}", path.display())),
+            );
+        }
     };
     let size = usize::try_from(metadata.len()).ok();
     let modified = metadata.modified().ok().map(unix_time_ms);
-    (size.is_some_and(|bytes| bytes > 0), size, modified)
+    let Some(size_bytes) = size else {
+        return (
+            false,
+            size,
+            modified,
+            Some("OCSP cache file size exceeds platform limits".to_string()),
+        );
+    };
+    if size_bytes == 0 {
+        return (false, Some(0), modified, None);
+    }
+    if size_bytes > crate::MAX_OCSP_RESPONSE_BYTES {
+        return (
+            false,
+            Some(size_bytes),
+            modified,
+            Some(format!("OCSP cache file exceeds {} bytes", crate::MAX_OCSP_RESPONSE_BYTES)),
+        );
+    }
+
+    let cache_error = match std::fs::File::open(path).and_then(|file| {
+        use std::io::Read;
+
+        let mut reader = file.take(crate::MAX_OCSP_RESPONSE_BYTES as u64 + 1);
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }) {
+        Ok(bytes) if bytes.len() > crate::MAX_OCSP_RESPONSE_BYTES => {
+            Some(format!("OCSP cache file exceeds {} bytes", crate::MAX_OCSP_RESPONSE_BYTES))
+        }
+        Ok(bytes) => validate_ocsp_response_for_certificate(cert_path, &bytes)
+            .err()
+            .map(|error| error.to_string()),
+        Err(error) => Some(format!("failed to read OCSP cache file `{}`: {error}", path.display())),
+    };
+    (cache_error.is_none(), Some(size_bytes), modified, cache_error)
 }
 
 #[derive(Debug, Clone)]

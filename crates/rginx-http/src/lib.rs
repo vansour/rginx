@@ -9,6 +9,8 @@ pub mod state;
 mod timeout;
 mod tls;
 
+pub const MAX_OCSP_RESPONSE_BYTES: usize = 128 * 1024;
+
 pub use client_ip::TlsClientIdentity;
 pub use proxy::{PeerHealthSnapshot, UpstreamHealthSnapshot};
 pub use server::serve;
@@ -22,4 +24,4 @@ pub use state::{
     UpstreamStatsSnapshot, UpstreamTlsStatusSnapshot, VhostStatsSnapshot, tls_reloadable_fields,
     tls_restart_required_fields, tls_runtime_snapshot_for_config,
 };
-pub use tls::build_ocsp_request_for_certificate;
+pub use tls::{build_ocsp_request_for_certificate, validate_ocsp_response_for_certificate};
