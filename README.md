@@ -2,7 +2,7 @@
 
 `rginx` 是一个面向中小规模部署的 Rust 入口反向代理。
 
-当前版本：`v0.1.3-rc.2`
+当前版本：`v0.1.3-rc.3`
 
 它的目标很收口：
 
@@ -36,10 +36,11 @@
 - 下游 TLS 版本控制（`TLS1.2` / `TLS1.3`）
 - 下游 ALPN 控制
 - 无 SNI 客户端的默认证书回退
-- 静态 OCSP staple 文件装载
+- 动态 OCSP 拉取、缓存与刷新（基于证书 AIA + `ocsp_staple_path` 缓存文件）
 - 下游 mTLS 客户端证书校验（`Optional` / `Required`）
 - 上游 mTLS 客户端证书
 - 上游 TLS 版本控制
+- 上游证书校验深度和静态 CRL
 - 上游 HTTP/2（HTTPS / TLS / ALPN）
 - 基础 gRPC over HTTP/2 代理
 - 基础 grpc-web binary / text 转换
@@ -92,8 +93,8 @@
 
 补充设计文档：
 
-- TLS / 证书补齐路线图：`docs/tls-roadmap.md`
-- TLS / nginx 对齐矩阵：`docs/tls-compat-matrix.md`
+- SSL / TLS 完善计划：`docs/ssl-plan.md`
+- SSL / TLS 兼容矩阵：`docs/ssl-compat-matrix.md`
 
 ## 快速开始
 
@@ -280,7 +281,7 @@ sudo apt install rginx
 
 当前约定：
 
-- 预发布 tag，例如 `v0.1.3-rc.2`：发布 GitHub Release 资产，但不更新 APT 仓库
+- 预发布 tag，例如 `v0.1.3-rc.3`：发布 GitHub Release 资产，但不更新 APT 仓库
 - 稳定 tag，例如 `v0.1.3`：同时发布 GitHub Release 和 GitHub Pages APT 仓库
 
 要让稳定版自动发布 APT 仓库，还需要一次性配置：
@@ -376,6 +377,8 @@ Config(
                 key_exchange_groups: Some([X25519, Secp256r1]),
                 session_resumption: Some(true),
                 session_tickets: Some(false),
+                session_cache_size: Some(256),
+                session_ticket_count: Some(2),
             )),
         ),
     ],
@@ -557,7 +560,7 @@ python3 scripts/run-benchmark-matrix.py \
 当前建议至少用下面两条命令把工作区收口成可继续迭代的稳定基线：
 
 ```bash
-cargo test --workspace --locked
+cargo test --workspace --locked -- --test-threads=1
 ./scripts/run-soak.sh --iterations 1
 ```
 
@@ -566,8 +569,8 @@ cargo test --workspace --locked
 每次改动 TLS 相关逻辑，发布前至少确认：
 
 ```bash
-cargo test --workspace --locked
-cargo test -p rginx --test tls_policy --test downstream_mtls --test upstream_mtls --test upstream_http2 --test upstream_server_name --test access_log --test admin --test check --test reload --test migrate
+cargo test --workspace --locked -- --test-threads=1
+./scripts/run-tls-gate.sh
 ./scripts/run-soak.sh --iterations 1
 rginx check --config /etc/rginx/rginx.ron
 ```

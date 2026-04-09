@@ -37,7 +37,11 @@ enum AccessLogVariable {
     Referer,
     TlsClientAuthenticated,
     TlsClientSubject,
+    TlsClientIssuer,
+    TlsClientSerial,
     TlsClientSanDnsNames,
+    TlsClientChainLength,
+    TlsClientChainSubjects,
     GrpcProtocol,
     GrpcService,
     GrpcMethod,
@@ -68,7 +72,11 @@ pub struct AccessLogValues<'a> {
     pub referer: Option<&'a str>,
     pub tls_client_authenticated: bool,
     pub tls_client_subject: Option<&'a str>,
+    pub tls_client_issuer: Option<&'a str>,
+    pub tls_client_serial: Option<&'a str>,
     pub tls_client_san_dns_names: Option<&'a str>,
+    pub tls_client_chain_length: Option<u64>,
+    pub tls_client_chain_subjects: Option<&'a str>,
     pub grpc_protocol: Option<&'a str>,
     pub grpc_service: Option<&'a str>,
     pub grpc_method: Option<&'a str>,
@@ -199,8 +207,23 @@ impl AccessLogFormat {
                     AccessLogVariable::TlsClientSubject => {
                         rendered.push_str(fallback_access_log_option(values.tls_client_subject))
                     }
+                    AccessLogVariable::TlsClientIssuer => {
+                        rendered.push_str(fallback_access_log_option(values.tls_client_issuer))
+                    }
+                    AccessLogVariable::TlsClientSerial => {
+                        rendered.push_str(fallback_access_log_option(values.tls_client_serial))
+                    }
                     AccessLogVariable::TlsClientSanDnsNames => rendered
                         .push_str(fallback_access_log_option(values.tls_client_san_dns_names)),
+                    AccessLogVariable::TlsClientChainLength => {
+                        if let Some(chain_length) = values.tls_client_chain_length {
+                            let _ = write!(rendered, "{chain_length}");
+                        } else {
+                            rendered.push('-');
+                        }
+                    }
+                    AccessLogVariable::TlsClientChainSubjects => rendered
+                        .push_str(fallback_access_log_option(values.tls_client_chain_subjects)),
                     AccessLogVariable::GrpcProtocol => {
                         rendered.push_str(fallback_access_log_option(values.grpc_protocol))
                     }
@@ -247,7 +270,11 @@ fn parse_access_log_variable(name: &str) -> Result<AccessLogVariable> {
         "http_referer" | "referer" => Ok(AccessLogVariable::Referer),
         "tls_client_authenticated" => Ok(AccessLogVariable::TlsClientAuthenticated),
         "tls_client_subject" => Ok(AccessLogVariable::TlsClientSubject),
+        "tls_client_issuer" => Ok(AccessLogVariable::TlsClientIssuer),
+        "tls_client_serial" => Ok(AccessLogVariable::TlsClientSerial),
         "tls_client_san_dns_names" => Ok(AccessLogVariable::TlsClientSanDnsNames),
+        "tls_client_chain_length" => Ok(AccessLogVariable::TlsClientChainLength),
+        "tls_client_chain_subjects" => Ok(AccessLogVariable::TlsClientChainSubjects),
         "grpc_protocol" => Ok(AccessLogVariable::GrpcProtocol),
         "grpc_service" => Ok(AccessLogVariable::GrpcService),
         "grpc_method" => Ok(AccessLogVariable::GrpcMethod),

@@ -12,10 +12,17 @@ rust-version.workspace = true
 description = "Runtime orchestration, reload, shutdown, and health checks for rginx."
 
 [dependencies]
+bytes.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-rustls.workspace = true
+hyper-util.workspace = true
 libc = "0.2"
 rginx-config = { path = "../rginx-config" }
 rginx-core = { path = "../rginx-core" }
 rginx-http = { path = "../rginx-http" }
+rustls.workspace = true
+rustls-native-certs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["io-util", "process"] }

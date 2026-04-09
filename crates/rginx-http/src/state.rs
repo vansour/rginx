@@ -19,6 +19,7 @@ use x509_parser::prelude::{FromDer, X509Certificate};
 use crate::proxy::{HealthChangeNotifier, ProxyClients, UpstreamHealthSnapshot};
 use crate::rate_limit::RateLimiters;
 use crate::tls::build_tls_acceptor;
+use crate::tls::certificates::ocsp_responder_urls_for_certificate;
 
 const RECENT_WINDOW_SECS: u64 = 60;
 const MAX_RECENT_WINDOW_SECS: u64 = 300;
@@ -53,6 +54,7 @@ pub struct SharedState {
     upstream_component_versions: Arc<StdRwLock<HashMap<String, u64>>>,
     peer_health_component_versions: Arc<StdRwLock<HashMap<String, u64>>>,
     reload_history: Arc<Mutex<ReloadHistory>>,
+    ocsp_statuses: Arc<StdRwLock<HashMap<String, OcspRuntimeStatusEntry>>>,
     request_ids: Arc<AtomicU64>,
     config_path: Option<Arc<PathBuf>>,
 }
@@ -71,6 +73,14 @@ struct TrafficCounterRefs {
     listener: Option<Arc<ListenerTrafficCounters>>,
     vhost: Option<Arc<RequestTrafficCounters>>,
     route: Option<Arc<RouteTrafficCounters>>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct OcspRuntimeStatusEntry {
+    last_refresh_unix_ms: Option<u64>,
+    refreshes_total: u64,
+    failures_total: u64,
+    last_error: Option<String>,
 }
 
 impl Drop for ActiveConnectionGuard {
@@ -132,6 +142,7 @@ impl SharedState {
             Arc::new(StdRwLock::new(build_upstream_name_versions(prepared.config.as_ref(), None)));
         *peer_health_component_versions.write().unwrap_or_else(|poisoned| poisoned.into_inner()) =
             build_upstream_name_versions(prepared.config.as_ref(), None);
+        let ocsp_statuses = Arc::new(StdRwLock::new(HashMap::new()));
 
         Ok(Self {
             inner: Arc::new(RwLock::new(ActiveState {
@@ -155,6 +166,7 @@ impl SharedState {
             upstream_component_versions,
             peer_health_component_versions,
             reload_history: Arc::new(Mutex::new(ReloadHistory::default())),
+            ocsp_statuses,
             request_ids: Arc::new(AtomicU64::new(1)),
             config_path: config_path.map(Arc::new),
         })
@@ -325,7 +337,12 @@ impl SharedState {
     pub async fn status_snapshot(&self) -> RuntimeStatusSnapshot {
         let state = self.inner.read().await;
         let mtls = self.mtls_status_snapshot(state.config.as_ref());
-        let tls = tls_runtime_snapshot_for_config(state.config.as_ref());
+        let ocsp_statuses =
+            self.ocsp_statuses.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+        let tls = tls_runtime_snapshot_for_config_with_ocsp_statuses(
+            state.config.as_ref(),
+            Some(&ocsp_statuses),
+        );
         RuntimeStatusSnapshot {
             revision: state.revision,
             config_path: self.config_path.as_deref().cloned(),
@@ -338,6 +355,7 @@ impl SharedState {
             tls_enabled: state.config.tls_enabled(),
             tls,
             mtls,
+            upstream_tls: upstream_tls_status_snapshots(state.config.as_ref()),
             active_connections: self.active_connection_count(),
             reload: self.reload_status_snapshot(),
         }
@@ -379,7 +397,8 @@ impl SharedState {
                     .collect::<Vec<_>>();
 
                 Some(UpstreamStatsSnapshot {
-                    upstream_name,
+                    upstream_name: upstream_name.clone(),
+                    tls: upstream_tls_status_snapshot(entry.upstream.as_ref()),
                     downstream_requests_total: entry
                         .counters
                         .downstream_requests_total
@@ -419,6 +438,22 @@ impl SharedState {
                     no_healthy_peers_total: entry
                         .counters
                         .no_healthy_peers_total
+                        .load(Ordering::Relaxed),
+                    tls_failures_unknown_ca_total: entry
+                        .counters
+                        .tls_failures_unknown_ca_total
+                        .load(Ordering::Relaxed),
+                    tls_failures_bad_certificate_total: entry
+                        .counters
+                        .tls_failures_bad_certificate_total
+                        .load(Ordering::Relaxed),
+                    tls_failures_certificate_revoked_total: entry
+                        .counters
+                        .tls_failures_certificate_revoked_total
+                        .load(Ordering::Relaxed),
+                    tls_failures_verify_depth_exceeded_total: entry
+                        .counters
+                        .tls_failures_verify_depth_exceeded_total
                         .load(Ordering::Relaxed),
                     recent_60s: entry.counters.recent_60s.snapshot(),
                     recent_window: window_secs.map(|window_secs| {
@@ -657,6 +692,16 @@ impl SharedState {
             TlsHandshakeFailureReason::BadCertificate => {
                 self.counters
                     .downstream_tls_handshake_failures_bad_certificate
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            TlsHandshakeFailureReason::CertificateRevoked => {
+                self.counters
+                    .downstream_tls_handshake_failures_certificate_revoked
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            TlsHandshakeFailureReason::VerifyDepthExceeded => {
+                self.counters
+                    .downstream_tls_handshake_failures_verify_depth_exceeded
                     .fetch_add(1, Ordering::Relaxed);
             }
             TlsHandshakeFailureReason::Other => {
@@ -1017,7 +1062,38 @@ impl SharedState {
         );
     }
 
-    pub fn record_reload_success(&self, revision: u64) {
+    pub(crate) fn record_upstream_peer_failure_class(
+        &self,
+        upstream_name: &str,
+        failure_class: &str,
+    ) {
+        let Some(counters) = self.upstream_stats_counters(upstream_name) else {
+            return;
+        };
+        match failure_class {
+            "unknown_ca" => {
+                counters.tls_failures_unknown_ca_total.fetch_add(1, Ordering::Relaxed);
+            }
+            "bad_certificate" => {
+                counters.tls_failures_bad_certificate_total.fetch_add(1, Ordering::Relaxed);
+            }
+            "certificate_revoked" => {
+                counters.tls_failures_certificate_revoked_total.fetch_add(1, Ordering::Relaxed);
+            }
+            "verify_depth_exceeded" => {
+                counters.tls_failures_verify_depth_exceeded_total.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => return,
+        }
+        let version = self.mark_snapshot_changed_components(false, false, false, false, true);
+        self.mark_named_component_target_changed(
+            &self.upstream_component_versions,
+            upstream_name,
+            version,
+        );
+    }
+
+    pub fn record_reload_success(&self, revision: u64, tls_certificate_changes: Vec<String>) {
         let mut history =
             self.reload_history.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         history.attempts_total += 1;
@@ -1025,11 +1101,14 @@ impl SharedState {
         history.last_result = Some(ReloadResultSnapshot {
             finished_at_unix_ms: unix_time_ms(SystemTime::now()),
             outcome: ReloadOutcomeSnapshot::Success { revision },
+            tls_certificate_changes,
+            active_revision: revision,
+            rollback_preserved_revision: None,
         });
         self.mark_snapshot_changed_components(true, false, false, false, false);
     }
 
-    pub fn record_reload_failure(&self, error: impl Into<String>) {
+    pub fn record_reload_failure(&self, error: impl Into<String>, active_revision: u64) {
         let mut history =
             self.reload_history.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         history.attempts_total += 1;
@@ -1037,7 +1116,29 @@ impl SharedState {
         history.last_result = Some(ReloadResultSnapshot {
             finished_at_unix_ms: unix_time_ms(SystemTime::now()),
             outcome: ReloadOutcomeSnapshot::Failure { error: error.into() },
+            tls_certificate_changes: Vec::new(),
+            active_revision,
+            rollback_preserved_revision: Some(active_revision),
         });
+        self.mark_snapshot_changed_components(true, false, false, false, false);
+    }
+
+    pub fn record_ocsp_refresh_success(&self, scope: &str) {
+        let mut statuses =
+            self.ocsp_statuses.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let entry = statuses.entry(scope.to_string()).or_default();
+        entry.last_refresh_unix_ms = Some(unix_time_ms(SystemTime::now()));
+        entry.refreshes_total += 1;
+        entry.last_error = None;
+        self.mark_snapshot_changed_components(true, false, false, false, false);
+    }
+
+    pub fn record_ocsp_refresh_failure(&self, scope: &str, error: impl Into<String>) {
+        let mut statuses =
+            self.ocsp_statuses.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let entry = statuses.entry(scope.to_string()).or_default();
+        entry.failures_total += 1;
+        entry.last_error = Some(error.into());
         self.mark_snapshot_changed_components(true, false, false, false, false);
     }
 
@@ -1048,6 +1149,14 @@ impl SharedState {
     pub async fn replace(&self, config: ConfigSnapshot) -> Result<Arc<ConfigSnapshot>> {
         let prepared = self.prepare_replacement(config).await?;
         Ok(self.commit_prepared(prepared).await)
+    }
+
+    pub async fn refresh_tls_acceptors_from_current_config(&self) -> Result<()> {
+        let config = self.current_config().await;
+        let listener_tls_acceptors = prepare_listener_tls_acceptors(config.as_ref())?;
+        *self.listener_tls_acceptors.write().await = listener_tls_acceptors;
+        self.mark_snapshot_changed_components(true, false, false, false, false);
+        Ok(())
     }
 
     async fn prepare_replacement(&self, config: ConfigSnapshot) -> Result<PreparedState> {
@@ -1148,6 +1257,10 @@ impl SharedState {
             handshake_failures_unknown_ca: counters.downstream_tls_handshake_failures_unknown_ca,
             handshake_failures_bad_certificate: counters
                 .downstream_tls_handshake_failures_bad_certificate,
+            handshake_failures_certificate_revoked: counters
+                .downstream_tls_handshake_failures_certificate_revoked,
+            handshake_failures_verify_depth_exceeded: counters
+                .downstream_tls_handshake_failures_verify_depth_exceeded,
             handshake_failures_other: counters.downstream_tls_handshake_failures_other,
         }
     }
@@ -1369,6 +1482,13 @@ impl SharedState {
 }
 
 pub fn tls_runtime_snapshot_for_config(config: &ConfigSnapshot) -> TlsRuntimeSnapshot {
+    tls_runtime_snapshot_for_config_with_ocsp_statuses(config, None)
+}
+
+fn tls_runtime_snapshot_for_config_with_ocsp_statuses(
+    config: &ConfigSnapshot,
+    ocsp_statuses: Option<&HashMap<String, OcspRuntimeStatusEntry>>,
+) -> TlsRuntimeSnapshot {
     let listeners = config
         .listeners
         .iter()
@@ -1392,12 +1512,37 @@ pub fn tls_runtime_snapshot_for_config(config: &ConfigSnapshot) -> TlsRuntimeSna
                 alpn_protocols: tls
                     .and_then(|tls| tls.alpn_protocols.clone())
                     .unwrap_or_else(|| vec!["h2".to_string(), "http/1.1".to_string()]),
+                session_resumption_enabled: tls.map(|tls| tls.session_resumption != Some(false)),
+                session_tickets_enabled: tls.map(|tls| {
+                    tls.session_resumption != Some(false) && tls.session_tickets != Some(false)
+                }),
+                session_cache_size: tls.map(|tls| {
+                    if tls.session_resumption == Some(false) {
+                        0
+                    } else {
+                        tls.session_cache_size.unwrap_or(256)
+                    }
+                }),
+                session_ticket_count: tls.map(|tls| {
+                    if tls.session_resumption == Some(false) || tls.session_tickets == Some(false) {
+                        0
+                    } else {
+                        tls.session_ticket_count.unwrap_or(2)
+                    }
+                }),
                 client_auth_mode: tls.and_then(|tls| {
                     tls.client_auth.as_ref().map(|client_auth| match client_auth.mode {
                         rginx_core::ServerClientAuthMode::Optional => "optional".to_string(),
                         rginx_core::ServerClientAuthMode::Required => "required".to_string(),
                     })
                 }),
+                client_auth_verify_depth: tls
+                    .and_then(|tls| tls.client_auth.as_ref())
+                    .and_then(|client_auth| client_auth.verify_depth),
+                client_auth_crl_configured: tls
+                    .and_then(|tls| tls.client_auth.as_ref())
+                    .and_then(|client_auth| client_auth.crl_path.as_ref())
+                    .is_some(),
                 sni_names,
             }
         })
@@ -1422,15 +1567,51 @@ pub fn tls_runtime_snapshot_for_config(config: &ConfigSnapshot) -> TlsRuntimeSna
             certificate.expires_in_days.is_some_and(|days| days <= TLS_EXPIRY_WARNING_DAYS)
         })
         .count();
+    let ocsp = tls_ocsp_status_snapshots(config, ocsp_statuses);
+    let (vhost_bindings, sni_bindings, sni_conflicts, default_certificate_bindings) =
+        tls_binding_snapshots(config, &certificates);
 
     TlsRuntimeSnapshot {
         listeners,
         certificates,
+        ocsp,
+        vhost_bindings,
+        sni_bindings,
+        sni_conflicts,
+        default_certificate_bindings,
         reload_boundary: TlsReloadBoundarySnapshot {
             reloadable_fields: tls_reloadable_fields(),
             restart_required_fields: tls_restart_required_fields(),
         },
         expiring_certificate_count,
+    }
+}
+
+fn upstream_tls_status_snapshots(config: &ConfigSnapshot) -> Vec<UpstreamTlsStatusSnapshot> {
+    let mut upstreams = config.upstreams.values().collect::<Vec<_>>();
+    upstreams.sort_by(|left, right| left.name.cmp(&right.name));
+    upstreams.into_iter().map(|upstream| upstream_tls_status_snapshot(upstream.as_ref())).collect()
+}
+
+fn upstream_tls_status_snapshot(upstream: &rginx_core::Upstream) -> UpstreamTlsStatusSnapshot {
+    UpstreamTlsStatusSnapshot {
+        upstream_name: upstream.name.clone(),
+        protocol: upstream.protocol.as_str().to_string(),
+        verify_mode: crate::proxy::upstream_tls_verify_label(&upstream.tls).to_string(),
+        tls_versions: upstream.tls_versions.as_ref().map(|versions| {
+            versions
+                .iter()
+                .map(|version| match version {
+                    rginx_core::TlsVersion::Tls12 => "TLS1.2".to_string(),
+                    rginx_core::TlsVersion::Tls13 => "TLS1.3".to_string(),
+                })
+                .collect()
+        }),
+        server_name_enabled: upstream.server_name,
+        server_name_override: upstream.server_name_override.clone(),
+        verify_depth: upstream.server_verify_depth,
+        crl_configured: upstream.server_crl_path.is_some(),
+        client_identity_configured: upstream.client_identity.is_some(),
     }
 }
 
@@ -1598,6 +1779,268 @@ fn build_vhost_certificate_snapshot(
         ocsp_staple_configured: tls.ocsp_staple_path.is_some(),
         additional_certificate_count: tls.additional_certificates.len(),
     })
+}
+
+fn tls_binding_snapshots(
+    config: &ConfigSnapshot,
+    certificates: &[TlsCertificateStatusSnapshot],
+) -> (
+    Vec<TlsVhostBindingSnapshot>,
+    Vec<TlsSniBindingSnapshot>,
+    Vec<TlsSniBindingSnapshot>,
+    Vec<TlsDefaultCertificateBindingSnapshot>,
+) {
+    let fingerprint_by_scope = certificates
+        .iter()
+        .map(|certificate| {
+            (
+                certificate.scope.clone(),
+                certificate.fingerprint_sha256.clone().unwrap_or_else(|| "-".to_string()),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    let mut vhost_bindings = Vec::new();
+    let mut sni_bindings =
+        std::collections::BTreeMap::<(String, String), TlsSniBindingSnapshot>::new();
+    let mut default_certificate_bindings = Vec::new();
+
+    for listener in &config.listeners {
+        if !listener.tls_enabled() {
+            continue;
+        }
+
+        for vhost in std::iter::once(&config.default_vhost).chain(config.vhosts.iter()) {
+            let Some(certificate_scope) = tls_certificate_scope_for_listener_vhost(listener, vhost)
+            else {
+                continue;
+            };
+            let fingerprint = fingerprint_by_scope
+                .get(&certificate_scope)
+                .cloned()
+                .unwrap_or_else(|| "-".to_string());
+            let default_selected = listener.server.default_certificate.is_none()
+                || listener.server.default_certificate.as_ref().is_some_and(|default_name| {
+                    vhost.server_names.iter().any(|name| name == default_name)
+                });
+            vhost_bindings.push(TlsVhostBindingSnapshot {
+                listener_name: listener.name.clone(),
+                vhost_id: vhost.id.clone(),
+                server_names: vhost.server_names.clone(),
+                certificate_scopes: vec![certificate_scope.clone()],
+                fingerprints: vec![fingerprint.clone()],
+                default_selected,
+            });
+
+            for server_name in &vhost.server_names {
+                let binding = sni_bindings
+                    .entry((listener.name.clone(), server_name.clone()))
+                    .or_insert_with(|| TlsSniBindingSnapshot {
+                        listener_name: listener.name.clone(),
+                        server_name: server_name.clone(),
+                        certificate_scopes: Vec::new(),
+                        fingerprints: Vec::new(),
+                        default_selected,
+                    });
+                if !binding.certificate_scopes.iter().any(|scope| scope == &certificate_scope) {
+                    binding.certificate_scopes.push(certificate_scope.clone());
+                }
+                if !binding.fingerprints.iter().any(|value| value == &fingerprint) {
+                    binding.fingerprints.push(fingerprint.clone());
+                }
+                binding.default_selected = binding.default_selected || default_selected;
+            }
+        }
+
+        let Some(default_certificate) = listener.server.default_certificate.as_ref() else {
+            continue;
+        };
+        let Some(vhost) =
+            std::iter::once(&config.default_vhost).chain(config.vhosts.iter()).find(|vhost| {
+                vhost.server_names.iter().any(|server_name| server_name == default_certificate)
+            })
+        else {
+            continue;
+        };
+        let Some(certificate_scope) = tls_certificate_scope_for_listener_vhost(listener, vhost)
+        else {
+            continue;
+        };
+        let fingerprint = fingerprint_by_scope
+            .get(&certificate_scope)
+            .cloned()
+            .unwrap_or_else(|| "-".to_string());
+        default_certificate_bindings.push(TlsDefaultCertificateBindingSnapshot {
+            listener_name: listener.name.clone(),
+            server_name: default_certificate.clone(),
+            certificate_scopes: vec![certificate_scope],
+            fingerprints: vec![fingerprint],
+        });
+    }
+
+    vhost_bindings.sort_by(|left, right| {
+        left.listener_name
+            .cmp(&right.listener_name)
+            .then_with(|| left.vhost_id.cmp(&right.vhost_id))
+    });
+    let mut sni_bindings = sni_bindings.into_values().collect::<Vec<_>>();
+    sni_bindings.sort_by(|left, right| {
+        left.listener_name
+            .cmp(&right.listener_name)
+            .then_with(|| left.server_name.cmp(&right.server_name))
+    });
+    let sni_conflicts = sni_bindings
+        .iter()
+        .filter(|binding| binding.fingerprints.len() > 1)
+        .cloned()
+        .collect::<Vec<_>>();
+    default_certificate_bindings.sort_by(|left, right| {
+        left.listener_name
+            .cmp(&right.listener_name)
+            .then_with(|| left.server_name.cmp(&right.server_name))
+    });
+
+    (vhost_bindings, sni_bindings, sni_conflicts, default_certificate_bindings)
+}
+
+fn tls_certificate_scope_for_listener_vhost(
+    listener: &Listener,
+    vhost: &rginx_core::VirtualHost,
+) -> Option<String> {
+    if vhost.tls.is_some() {
+        Some(format!("vhost:{}", vhost.id))
+    } else if listener.server.tls.is_some() {
+        Some(format!("listener:{}", listener.name))
+    } else {
+        None
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TlsOcspBundleSpec {
+    scope: String,
+    cert_path: PathBuf,
+    ocsp_staple_path: Option<PathBuf>,
+}
+
+fn tls_ocsp_status_snapshots(
+    config: &ConfigSnapshot,
+    runtime_statuses: Option<&HashMap<String, OcspRuntimeStatusEntry>>,
+) -> Vec<TlsOcspStatusSnapshot> {
+    let mut statuses = tls_ocsp_bundle_specs(config)
+        .into_iter()
+        .filter_map(|bundle| build_tls_ocsp_status_snapshot(&bundle, runtime_statuses))
+        .collect::<Vec<_>>();
+    statuses.sort_by(|left, right| left.scope.cmp(&right.scope));
+    statuses
+}
+
+fn tls_ocsp_bundle_specs(config: &ConfigSnapshot) -> Vec<TlsOcspBundleSpec> {
+    let mut bundles = Vec::new();
+    for listener in &config.listeners {
+        if let Some(tls) = listener.server.tls.as_ref() {
+            bundles.push(TlsOcspBundleSpec {
+                scope: format!("listener:{}", listener.name),
+                cert_path: tls.cert_path.clone(),
+                ocsp_staple_path: tls.ocsp_staple_path.clone(),
+            });
+            bundles.extend(tls.additional_certificates.iter().enumerate().map(
+                |(index, bundle)| TlsOcspBundleSpec {
+                    scope: format!("listener:{}/additional[{index}]", listener.name),
+                    cert_path: bundle.cert_path.clone(),
+                    ocsp_staple_path: bundle.ocsp_staple_path.clone(),
+                },
+            ));
+        }
+    }
+
+    if let Some(tls) = config.default_vhost.tls.as_ref() {
+        bundles.push(TlsOcspBundleSpec {
+            scope: format!("vhost:{}", config.default_vhost.id),
+            cert_path: tls.cert_path.clone(),
+            ocsp_staple_path: tls.ocsp_staple_path.clone(),
+        });
+        bundles.extend(tls.additional_certificates.iter().enumerate().map(|(index, bundle)| {
+            TlsOcspBundleSpec {
+                scope: format!("vhost:{}/additional[{index}]", config.default_vhost.id),
+                cert_path: bundle.cert_path.clone(),
+                ocsp_staple_path: bundle.ocsp_staple_path.clone(),
+            }
+        }));
+    }
+
+    for vhost in &config.vhosts {
+        if let Some(tls) = vhost.tls.as_ref() {
+            bundles.push(TlsOcspBundleSpec {
+                scope: format!("vhost:{}", vhost.id),
+                cert_path: tls.cert_path.clone(),
+                ocsp_staple_path: tls.ocsp_staple_path.clone(),
+            });
+            bundles.extend(tls.additional_certificates.iter().enumerate().map(
+                |(index, bundle)| TlsOcspBundleSpec {
+                    scope: format!("vhost:{}/additional[{index}]", vhost.id),
+                    cert_path: bundle.cert_path.clone(),
+                    ocsp_staple_path: bundle.ocsp_staple_path.clone(),
+                },
+            ));
+        }
+    }
+
+    bundles
+}
+
+fn build_tls_ocsp_status_snapshot(
+    bundle: &TlsOcspBundleSpec,
+    runtime_statuses: Option<&HashMap<String, OcspRuntimeStatusEntry>>,
+) -> Option<TlsOcspStatusSnapshot> {
+    let responder_urls = ocsp_responder_urls_for_certificate(&bundle.cert_path).unwrap_or_default();
+    if bundle.ocsp_staple_path.is_none() && responder_urls.is_empty() {
+        return None;
+    }
+
+    let (cache_loaded, cache_size_bytes, cache_modified_unix_ms) = bundle
+        .ocsp_staple_path
+        .as_ref()
+        .map(inspect_ocsp_cache_file)
+        .unwrap_or((false, None, None));
+    let runtime = runtime_statuses.and_then(|statuses| statuses.get(&bundle.scope));
+    let auto_refresh_enabled = bundle.ocsp_staple_path.is_some() && !responder_urls.is_empty();
+    let static_error = if bundle.ocsp_staple_path.is_some() && responder_urls.is_empty() {
+        Some("certificate does not expose an OCSP responder URL".to_string())
+    } else if bundle.ocsp_staple_path.is_some()
+        && crate::build_ocsp_request_for_certificate(&bundle.cert_path).is_err()
+    {
+        crate::build_ocsp_request_for_certificate(&bundle.cert_path)
+            .err()
+            .map(|error| error.to_string())
+    } else {
+        None
+    };
+
+    Some(TlsOcspStatusSnapshot {
+        scope: bundle.scope.clone(),
+        cert_path: bundle.cert_path.clone(),
+        ocsp_staple_path: bundle.ocsp_staple_path.clone(),
+        responder_urls,
+        cache_loaded,
+        cache_size_bytes,
+        cache_modified_unix_ms,
+        auto_refresh_enabled,
+        last_refresh_unix_ms: runtime.and_then(|entry| entry.last_refresh_unix_ms),
+        refreshes_total: runtime.map(|entry| entry.refreshes_total).unwrap_or(0),
+        failures_total: runtime.map(|entry| entry.failures_total).unwrap_or(0),
+        last_error: runtime.and_then(|entry| entry.last_error.clone()).or(static_error),
+    })
+}
+
+fn inspect_ocsp_cache_file(path: &PathBuf) -> (bool, Option<usize>, Option<u64>) {
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(_) => return (false, None, None),
+    };
+    let size = usize::try_from(metadata.len()).ok();
+    let modified = metadata.modified().ok().map(unix_time_ms);
+    (size.is_some_and(|bytes| bytes > 0), size, modified)
 }
 
 #[derive(Debug, Clone)]
@@ -1950,6 +2393,8 @@ mod tests {
                     server_name: true,
                     server_name_override: None,
                     tls_versions: None,
+                    server_verify_depth: None,
+                    server_crl_path: None,
                     client_identity: None,
                     request_timeout: Duration::from_secs(30),
                     connect_timeout: Duration::from_secs(30),
@@ -2050,6 +2495,10 @@ mod tests {
         assert_eq!(status.total_upstreams, 0);
         assert!(!status.tls_enabled);
         assert_eq!(status.tls.listeners.len(), 1);
+        assert_eq!(status.tls.listeners[0].session_resumption_enabled, None);
+        assert_eq!(status.tls.listeners[0].session_tickets_enabled, None);
+        assert_eq!(status.tls.listeners[0].session_cache_size, None);
+        assert_eq!(status.tls.listeners[0].session_ticket_count, None);
         assert_eq!(status.tls.certificates.len(), 0);
         assert_eq!(status.tls.expiring_certificate_count, 0);
         assert_eq!(status.mtls.configured_listeners, 0);
@@ -2204,7 +2653,7 @@ mod tests {
         let shared = SharedState::from_config(snapshot("127.0.0.1:8080"))
             .expect("shared state should build");
 
-        shared.record_reload_success(2);
+        shared.record_reload_success(2, Vec::new());
         let first = shared.reload_status_snapshot();
         assert_eq!(first.attempts_total, 1);
         assert_eq!(first.successes_total, 1);
@@ -2214,7 +2663,7 @@ mod tests {
             Some(ReloadOutcomeSnapshot::Success { revision: 2 })
         ));
 
-        shared.record_reload_failure("bad config");
+        shared.record_reload_failure("bad config", 2);
         let second = shared.reload_status_snapshot();
         assert_eq!(second.attempts_total, 2);
         assert_eq!(second.successes_total, 1);
@@ -2223,6 +2672,11 @@ mod tests {
             second.last_result.as_ref().map(|result| &result.outcome),
             Some(ReloadOutcomeSnapshot::Failure { error }) if error == "bad config"
         ));
+        assert_eq!(second.last_result.as_ref().map(|result| result.active_revision), Some(2));
+        assert_eq!(
+            second.last_result.as_ref().and_then(|result| result.rollback_preserved_revision),
+            Some(2)
+        );
     }
 
     #[test]

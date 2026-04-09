@@ -182,6 +182,8 @@ struct TlsCheckDetails {
     reloadable_fields: Vec<String>,
     restart_required_fields: Vec<String>,
     certificates: Vec<rginx_http::TlsCertificateStatusSnapshot>,
+    ocsp: Vec<rginx_http::TlsOcspStatusSnapshot>,
+    vhost_bindings: Vec<rginx_http::TlsVhostBindingSnapshot>,
     sni_bindings: Vec<TlsSniBindingCheck>,
     sni_conflicts: Vec<TlsSniBindingCheck>,
     default_certificate_bindings: Vec<TlsDefaultCertificateBindingCheck>,
@@ -252,6 +254,57 @@ fn print_check_success(config_path: &Path, summary: CheckSummary) {
                 certificate.chain_diagnostics.join("|")
             },
             certificate.cert_path.display(),
+        );
+    }
+    for ocsp in &summary.tls.ocsp {
+        println!(
+            "tls_ocsp scope={} cert_path={} staple_path={} responder_urls={} cache_loaded={} cache_size_bytes={} cache_modified_unix_ms={} auto_refresh_enabled={} last_refresh_unix_ms={} refreshes_total={} failures_total={} last_error={}",
+            ocsp.scope,
+            ocsp.cert_path.display(),
+            ocsp.ocsp_staple_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            if ocsp.responder_urls.is_empty() {
+                "-".to_string()
+            } else {
+                ocsp.responder_urls.join(",")
+            },
+            ocsp.cache_loaded,
+            ocsp.cache_size_bytes.map(|value| value.to_string()).unwrap_or_else(|| "-".to_string()),
+            ocsp.cache_modified_unix_ms
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            ocsp.auto_refresh_enabled,
+            ocsp.last_refresh_unix_ms
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            ocsp.refreshes_total,
+            ocsp.failures_total,
+            ocsp.last_error.as_deref().unwrap_or("-"),
+        );
+    }
+    for binding in &summary.tls.vhost_bindings {
+        println!(
+            "tls_vhost_binding listener={} vhost={} server_names={} certificate_scopes={} fingerprints={} default_selected={}",
+            binding.listener_name,
+            binding.vhost_id,
+            if binding.server_names.is_empty() {
+                "-".to_string()
+            } else {
+                binding.server_names.join(",")
+            },
+            if binding.certificate_scopes.is_empty() {
+                "-".to_string()
+            } else {
+                binding.certificate_scopes.join(",")
+            },
+            if binding.fingerprints.is_empty() {
+                "-".to_string()
+            } else {
+                binding.fingerprints.join(",")
+            },
+            binding.default_selected,
         );
     }
     for binding in &summary.tls.sni_bindings {
@@ -377,6 +430,8 @@ fn tls_check_details(config: &rginx_config::ConfigSnapshot) -> TlsCheckDetails {
         expiring_certificates,
         reloadable_fields: tls.reload_boundary.reloadable_fields,
         restart_required_fields: tls.reload_boundary.restart_required_fields,
+        vhost_bindings: tls.vhost_bindings,
+        ocsp: tls.ocsp,
         certificates: tls.certificates,
         sni_bindings,
         sni_conflicts,

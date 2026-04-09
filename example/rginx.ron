@@ -108,6 +108,11 @@ Config(
         // $request_id $remote_addr $peer_addr $method $host $path
         // $request $status $body_bytes_sent $request_time_ms
         // $client_ip_source $vhost $route $scheme $http_version
+        // $tls_version $tls_alpn
+        // $tls_client_authenticated $tls_client_subject
+        // $tls_client_issuer $tls_client_serial
+        // $tls_client_san_dns_names $tls_client_chain_length
+        // $tls_client_chain_subjects
         // $user_agent $referer $grpc_protocol $grpc_service
         // $grpc_method $grpc_status $grpc_message
         //
@@ -116,6 +121,11 @@ Config(
         // $request_id $remote_addr $peer_addr $method $host $path
         // $request $status $body_bytes_sent $request_time_ms
         // $client_ip_source $vhost $route $scheme $http_version
+        // $tls_version $tls_alpn
+        // $tls_client_authenticated $tls_client_subject
+        // $tls_client_issuer $tls_client_serial
+        // $tls_client_san_dns_names $tls_client_chain_length
+        // $tls_client_chain_subjects
         // $user_agent $referer $grpc_protocol $grpc_service
         // $grpc_method $grpc_status $grpc_message
         access_log_format: Some("reqid=$request_id remote=$remote_addr peer=$peer_addr host=$host method=$method path=$path status=$status bytes=$body_bytes_sent elapsed_ms=$request_time_ms vhost=$vhost route=$route scheme=$scheme proto=$http_version ua=$user_agent referer=$referer grpc_service=$grpc_service grpc_method=$grpc_method grpc_status=$grpc_status"),
@@ -154,14 +164,21 @@ Config(
         //     // 可选 ALPN 列表。
         //     alpn_protocols: Some(["h2", "http/1.1"]),
         //
-        //     // Optional static OCSP staple file.
-        //     // 可选静态 OCSP staple 文件。
+        //     // Optional OCSP staple cache file.
+        //     // When the certificate exposes an OCSP responder URL via AIA,
+        //     // rginx will fetch, cache, refresh, and serve stapled responses
+        //     // through this path automatically.
+        //     // 可选 OCSP staple 缓存文件。
+        //     // 当证书通过 AIA 暴露 OCSP responder URL 时，
+        //     // rginx 会自动拉取、缓存、刷新并通过该路径提供 stapled response。
         //     ocsp_staple_path: None,
         //
         //     // Optional session policy.
         //     // 可选会话恢复策略。
         //     session_resumption: Some(true),
         //     session_tickets: Some(false),
+        //     session_cache_size: Some(256),
+        //     session_ticket_count: Some(2),
         //
         //     // Optional downstream client certificate verification.
         //     // 可选下游客户端证书校验。
@@ -169,6 +186,8 @@ Config(
         //     // client_auth: Some(ServerClientAuthConfig(
         //     //     mode: Required,
         //     //     ca_cert_path: "/etc/rginx/certs/client-ca.crt",
+        //     //     verify_depth: Some(2),
+        //     //     crl_path: Some("/etc/rginx/certs/client-auth.crl.pem"),
         //     // )),
         //     client_auth: None,
         // )),
@@ -505,6 +524,8 @@ Config(
         //     //         ca_cert_path: "/etc/rginx/certs/internal-ca.pem",
         //     //     ),
         //     //     versions: Some([Tls13]),
+        //     //     verify_depth: Some(3),
+        //     //     crl_path: Some("/etc/rginx/certs/internal-upstream.crl.pem"),
         //     //     client_cert_path: Some("/etc/rginx/certs/upstream-client.crt"),
         //     //     client_key_path: Some("/etc/rginx/certs/upstream-client.key"),
         //     // )),

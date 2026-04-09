@@ -143,7 +143,8 @@ WORKSPACE_VERSION="$(workspace_version)"
 [[ "${WORKSPACE_VERSION}" == "${VERSION}" ]] || die "workspace version ${WORKSPACE_VERSION} does not match tag ${TAG}"
 
 run_step cargo fmt --all --check
-run_step cargo test --workspace --locked
+run_step cargo test --workspace --locked -- --test-threads=1
+run_step ./scripts/run-tls-gate.sh
 run_step cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
 log "running: cargo run -p rginx -- --version"

@@ -6,6 +6,15 @@ Config(
         listen: "0.0.0.0:80",
         // TLS examples live in `example/rginx.ron`.
         // If you enable HTTPS here, run `rginx check` and the TLS release gate from README before deploying.
+        // Example:
+        // tls: Some(ServerTlsConfig(
+        //     cert_path: "/etc/rginx/certs/default.crt",
+        //     key_path: "/etc/rginx/certs/default.key",
+        //     versions: Some([Tls12, Tls13]),
+        //     ocsp_staple_path: Some("/var/cache/rginx/default.ocsp"),
+        //     session_tickets: Some(false),
+        // )),
+        // For per-vhost certificate overrides, see `configs/conf.d/default.ron`.
     ),
     upstreams: [
         UpstreamConfig(

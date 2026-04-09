@@ -7,6 +7,7 @@ use tokio::sync::watch;
 
 use crate::admin;
 use crate::health;
+use crate::ocsp;
 use crate::reload;
 use crate::restart::{self, ListenerHandle};
 use crate::shutdown;
@@ -58,6 +59,7 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
         shutdown_tx.subscribe(),
     ));
     let mut health_task = tokio::spawn(health::run(state.http.clone(), shutdown_tx.subscribe()));
+    let mut ocsp_task = tokio::spawn(ocsp::run(state.http.clone(), shutdown_tx.subscribe()));
     restart::notify_ready_if_requested()?;
 
     loop {
@@ -114,6 +116,9 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
         (&mut health_task).await.map_err(|error| {
             Error::Server(format!("active health task failed to join: {error}"))
         })?;
+        (&mut ocsp_task)
+            .await
+            .map_err(|error| Error::Server(format!("OCSP refresh task failed to join: {error}")))?;
         state.http.drain_background_tasks().await;
         Ok::<(), Error>(())
     })
@@ -129,6 +134,7 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
             abort_server_tasks(&server_tasks);
             admin_task.abort();
             health_task.abort();
+            ocsp_task.abort();
 
             join_aborted_server_tasks(server_tasks).await;
 
@@ -142,6 +148,12 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
                 && !error.is_cancelled()
             {
                 tracing::warn!(%error, "active health task failed after abort");
+            }
+
+            if let Err(error) = ocsp_task.await
+                && !error.is_cancelled()
+            {
+                tracing::warn!(%error, "OCSP refresh task failed after abort");
             }
 
             state.http.abort_background_tasks().await;

@@ -26,8 +26,10 @@ pin-project-lite.workspace = true
 rginx-config = { path = "../rginx-config" }
 rginx-core = { path = "../rginx-core" }
 rustls.workspace = true
+rustls-native-certs.workspace = true
 rustls-pemfile.workspace = true
 serde.workspace = true
+sha1.workspace = true
 sha2.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util"] }
 tokio-rustls.workspace = true

@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::future::Future;
 use std::io::BufReader;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,9 +16,7 @@ use http::{Method, Request, Response, StatusCode, Uri, Version};
 use http_body_util::BodyExt;
 use hyper::body::{Body as _, Frame, Incoming, SizeHint};
 use hyper::upgrade::OnUpgrade;
-use hyper_rustls::{
-    ConfigBuilderExt, FixedServerNameResolver, HttpsConnector, HttpsConnectorBuilder,
-};
+use hyper_rustls::{FixedServerNameResolver, HttpsConnector, HttpsConnectorBuilder};
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
@@ -71,6 +68,27 @@ pub(super) fn upstream_tls_verify_label(tls: &UpstreamTls) -> &'static str {
         UpstreamTls::CustomCa { .. } => "custom_ca",
         UpstreamTls::Insecure => "insecure",
     }
+}
+
+pub(super) fn classify_upstream_tls_failure(error: &impl std::fmt::Display) -> &'static str {
+    let error = error.to_string().to_ascii_lowercase();
+    if error.contains("unknown ca") || error.contains("unknown issuer") {
+        return "unknown_ca";
+    }
+    if error.contains("revoked") {
+        return "certificate_revoked";
+    }
+    if error.contains("verify_depth") || error.contains("exceeds configured verify_depth") {
+        return "verify_depth_exceeded";
+    }
+    if error.contains("certificate verify failed")
+        || error.contains("invalid certificate")
+        || error.contains("bad certificate")
+        || error.contains("not valid for name")
+    {
+        return "bad_certificate";
+    }
+    "-"
 }
 
 #[cfg(test)]
@@ -1749,6 +1767,8 @@ mod tests {
             server_name: true,
             server_name_override: None,
             tls_versions: None,
+            server_verify_depth: None,
+            server_crl_path: None,
             client_identity: None,
             request_timeout: Duration::from_secs(30),
             connect_timeout: Duration::from_secs(30),

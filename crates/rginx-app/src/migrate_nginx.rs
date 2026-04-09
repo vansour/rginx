@@ -228,14 +228,20 @@ struct ParsedServerTls {
     cert_path: Option<String>,
     key_path: Option<String>,
     versions: Vec<String>,
+    ocsp_staple_path: Option<String>,
+    session_tickets: Option<bool>,
     client_ca_path: Option<String>,
     client_auth_mode: Option<String>,
+    client_auth_verify_depth: Option<u32>,
+    client_auth_crl_path: Option<String>,
 }
 
 #[derive(Debug, Default, Clone)]
 struct ParsedUpstreamTls {
     verify: Option<ConvertedUpstreamVerify>,
     versions: Vec<String>,
+    verify_depth: Option<u32>,
+    crl_path: Option<String>,
     client_cert_path: Option<String>,
     client_key_path: Option<String>,
     server_name: Option<bool>,
@@ -411,6 +417,15 @@ fn parse_server_block(
             Statement::Directive { name, args } if name == "ssl_client_certificate" => {
                 tls.client_ca_path = args.first().cloned();
             }
+            Statement::Directive { name, args } if name == "ssl_verify_depth" => {
+                let value = args
+                    .first()
+                    .ok_or_else(|| anyhow!("ssl_verify_depth requires a value"))?;
+                tls.client_auth_verify_depth = Some(parse_verify_depth(value, "ssl_verify_depth")?);
+            }
+            Statement::Directive { name, args } if name == "ssl_crl" => {
+                tls.client_auth_crl_path = args.first().cloned();
+            }
             Statement::Directive { name, args } if name == "ssl_verify_client" => {
                 let value = args
                     .first()
@@ -429,6 +444,24 @@ fn parse_server_block(
             }
             Statement::Directive { name, args } if name == "ssl_protocols" => {
                 tls.versions = parse_tls_versions(&args, "ssl_protocols", warnings);
+            }
+            Statement::Directive { name, args } if name == "ssl_session_tickets" => {
+                let value = args
+                    .first()
+                    .ok_or_else(|| anyhow!("ssl_session_tickets requires a value"))?;
+                tls.session_tickets = Some(parse_nginx_on_off(value, "ssl_session_tickets", warnings));
+            }
+            Statement::Directive { name, args } if name == "ssl_stapling_file" => {
+                tls.ocsp_staple_path = args.first().cloned();
+            }
+            Statement::Directive { name, args } if name == "ssl_stapling" => {
+                let value = args.first().ok_or_else(|| anyhow!("ssl_stapling requires a value"))?;
+                if !matches!(value.as_str(), "off" | "false" | "0") {
+                    warnings.push(
+                        "nginx `ssl_stapling on` was detected; rginx can auto-refresh OCSP when the certificate exposes an AIA responder and `ocsp_staple_path` is configured, but this migration helper only maps `ssl_stapling_file` directly"
+                            .to_string(),
+                    );
+                }
             }
             Statement::Block { name, args, children } if name == "location" => {
                 locations.push(parse_location(&args, children, warnings)?);
@@ -607,6 +640,15 @@ fn parse_location(
             Statement::Directive { name, args } if name == "proxy_ssl_protocols" => {
                 upstream_tls.versions = parse_tls_versions(&args, "proxy_ssl_protocols", warnings);
             }
+            Statement::Directive { name, args } if name == "proxy_ssl_verify_depth" => {
+                let value = args
+                    .first()
+                    .ok_or_else(|| anyhow!("proxy_ssl_verify_depth requires a value"))?;
+                upstream_tls.verify_depth = Some(parse_verify_depth(value, "proxy_ssl_verify_depth")?);
+            }
+            Statement::Directive { name, args } if name == "proxy_ssl_crl" => {
+                upstream_tls.crl_path = args.first().cloned();
+            }
             Statement::Directive { name, args } if name == "proxy_ssl_name" => {
                 upstream_tls.server_name_override = args.first().cloned();
             }
@@ -674,6 +716,28 @@ fn parse_tls_versions(args: &[String], directive: &str, warnings: &mut Vec<Strin
     versions
 }
 
+fn parse_verify_depth(raw: &str, directive: &str) -> Result<u32> {
+    let depth =
+        raw.parse::<u32>().with_context(|| format!("invalid `{directive}` value `{raw}`"))?;
+    if depth == 0 {
+        bail!("`{directive}` must be greater than 0");
+    }
+    Ok(depth)
+}
+
+fn parse_nginx_on_off(raw: &str, directive: &str, warnings: &mut Vec<String>) -> bool {
+    match raw {
+        "on" | "true" | "1" => true,
+        "off" | "false" | "0" => false,
+        other => {
+            warnings.push(format!(
+                "nginx `{directive} {other}` is not migrated exactly; keeping the default equivalent behavior"
+            ));
+            true
+        }
+    }
+}
+
 fn convert_server_tls(
     tls: &ParsedServerTls,
     warnings: &mut Vec<String>,
@@ -682,7 +746,11 @@ fn convert_server_tls(
         if tls.cert_path.is_some()
             || tls.key_path.is_some()
             || !tls.versions.is_empty()
+            || tls.ocsp_staple_path.is_some()
+            || tls.session_tickets.is_some()
             || tls.client_auth_mode.is_some()
+            || tls.client_auth_verify_depth.is_some()
+            || tls.client_auth_crl_path.is_some()
         {
             warnings.push(
                 "nginx downstream SSL directives were detected but certificate/key were incomplete; review `server.tls` manually after migration"
@@ -696,8 +764,12 @@ fn convert_server_tls(
         cert_path,
         key_path,
         versions: tls.versions.clone(),
+        ocsp_staple_path: tls.ocsp_staple_path.clone(),
+        session_tickets: tls.session_tickets,
         client_ca_path: tls.client_ca_path.clone(),
         client_auth_mode: tls.client_auth_mode.clone(),
+        client_auth_verify_depth: tls.client_auth_verify_depth,
+        client_auth_crl_path: tls.client_auth_crl_path.clone(),
     })
 }
 
@@ -709,7 +781,14 @@ fn convert_vhost_tls(
     let (Some(cert_path), Some(key_path)) = (tls.cert_path.clone(), tls.key_path.clone()) else {
         return None;
     };
-    if !tls.versions.is_empty() || tls.client_ca_path.is_some() || tls.client_auth_mode.is_some() {
+    if !tls.versions.is_empty()
+        || tls.ocsp_staple_path.is_some()
+        || tls.session_tickets.is_some()
+        || tls.client_ca_path.is_some()
+        || tls.client_auth_mode.is_some()
+        || tls.client_auth_verify_depth.is_some()
+        || tls.client_auth_crl_path.is_some()
+    {
         warnings.push(format!(
             "nginx SSL policy for server_names {} was migrated only as a certificate override; move protocol or client-auth policy onto `server.tls` or `listeners[].tls` manually",
             ron_string_list(server_names)
@@ -729,6 +808,8 @@ fn convert_upstream_tls(tls: &ParsedUpstreamTls) -> Option<ConvertedUpstreamTls>
     Some(ConvertedUpstreamTls {
         verify: tls.verify.clone().unwrap_or(ConvertedUpstreamVerify::NativeRoots),
         versions: tls.versions.clone(),
+        verify_depth: tls.verify_depth,
+        crl_path: tls.crl_path.clone(),
         client_cert_path: tls.client_cert_path.clone(),
         client_key_path: tls.client_key_path.clone(),
     })
@@ -744,6 +825,8 @@ fn merge_converted_upstream_tls(
     if let Some(existing) = current.as_ref() {
         parsed.verify = Some(existing.verify.clone());
         parsed.versions = existing.versions.clone();
+        parsed.verify_depth = existing.verify_depth;
+        parsed.crl_path = existing.crl_path.clone();
         parsed.client_cert_path = existing.client_cert_path.clone();
         parsed.client_key_path = existing.client_key_path.clone();
     }
@@ -776,6 +859,24 @@ fn merge_upstream_tls(
             ));
         }
     }
+
+    if let Some(verify_depth) = incoming.verify_depth {
+        match current.verify_depth {
+            Some(existing) if existing != verify_depth => warnings.push(format!(
+                "conflicting nginx `proxy_ssl_verify_depth` values were found for upstream `{upstream_name}`; keeping the first migrated value"
+            )),
+            None => current.verify_depth = Some(verify_depth),
+            _ => {}
+        }
+    }
+
+    merge_optional_string(
+        &mut current.crl_path,
+        incoming.crl_path.as_ref(),
+        upstream_name,
+        "proxy_ssl_crl",
+        warnings,
+    );
 
     merge_optional_string(
         &mut current.client_cert_path,
@@ -908,8 +1009,12 @@ struct ConvertedServerTls {
     cert_path: String,
     key_path: String,
     versions: Vec<String>,
+    ocsp_staple_path: Option<String>,
+    session_tickets: Option<bool>,
     client_ca_path: Option<String>,
     client_auth_mode: Option<String>,
+    client_auth_verify_depth: Option<u32>,
+    client_auth_crl_path: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -929,6 +1034,8 @@ enum ConvertedUpstreamVerify {
 struct ConvertedUpstreamTls {
     verify: ConvertedUpstreamVerify,
     versions: Vec<String>,
+    verify_depth: Option<u32>,
+    crl_path: Option<String>,
     client_cert_path: Option<String>,
     client_key_path: Option<String>,
 }
@@ -1510,10 +1617,22 @@ fn render_server_tls_body(out: &mut String, indent: &str, tls: &ConvertedServerT
     if !tls.versions.is_empty() {
         let _ = writeln!(out, "{indent}versions: Some({}),", ron_enum_list(&tls.versions));
     }
+    if let Some(path) = tls.ocsp_staple_path.as_ref() {
+        let _ = writeln!(out, "{indent}ocsp_staple_path: Some({}),", ron_string(path));
+    }
+    if let Some(enabled) = tls.session_tickets {
+        let _ = writeln!(out, "{indent}session_tickets: Some({enabled}),");
+    }
     if let (Some(ca_path), Some(mode)) = (&tls.client_ca_path, &tls.client_auth_mode) {
         let _ = writeln!(out, "{indent}client_auth: Some(ServerClientAuthConfig(");
         let _ = writeln!(out, "{indent}    mode: {mode},");
         let _ = writeln!(out, "{indent}    ca_cert_path: {},", ron_string(ca_path));
+        if let Some(depth) = tls.client_auth_verify_depth {
+            let _ = writeln!(out, "{indent}    verify_depth: Some({depth}),");
+        }
+        if let Some(path) = tls.client_auth_crl_path.as_ref() {
+            let _ = writeln!(out, "{indent}    crl_path: Some({}),", ron_string(path));
+        }
         let _ = writeln!(out, "{indent})),");
     }
 }
@@ -1544,6 +1663,12 @@ fn render_upstream_tls(out: &mut String, indent: &str, tls: &ConvertedUpstreamTl
     }
     if !tls.versions.is_empty() {
         let _ = writeln!(out, "{indent}    versions: Some({}),", ron_enum_list(&tls.versions));
+    }
+    if let Some(depth) = tls.verify_depth {
+        let _ = writeln!(out, "{indent}    verify_depth: Some({depth}),");
+    }
+    if let Some(path) = tls.crl_path.as_ref() {
+        let _ = writeln!(out, "{indent}    crl_path: Some({}),", ron_string(path));
     }
     if let Some(path) = tls.client_cert_path.as_ref() {
         let _ = writeln!(out, "{indent}    client_cert_path: Some({}),", ron_string(path));

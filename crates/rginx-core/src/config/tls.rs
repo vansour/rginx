@@ -47,6 +47,8 @@ pub enum ServerClientAuthMode {
 pub struct ServerClientAuthPolicy {
     pub mode: ServerClientAuthMode,
     pub ca_cert_path: PathBuf,
+    pub verify_depth: Option<u32>,
+    pub crl_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -75,5 +77,7 @@ pub struct ServerTls {
     pub ocsp_staple_path: Option<PathBuf>,
     pub session_resumption: Option<bool>,
     pub session_tickets: Option<bool>,
+    pub session_cache_size: Option<usize>,
+    pub session_ticket_count: Option<usize>,
     pub client_auth: Option<ServerClientAuthPolicy>,
 }

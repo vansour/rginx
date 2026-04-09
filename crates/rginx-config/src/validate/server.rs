@@ -230,6 +230,8 @@ fn validate_listener_like(config: ListenerLikeRef<'_>) -> Result<()> {
         ocsp_staple_path,
         session_resumption,
         session_tickets,
+        session_cache_size,
+        session_ticket_count,
         client_auth,
     }) = config.tls
     {
@@ -257,10 +259,54 @@ fn validate_listener_like(config: ListenerLikeRef<'_>) -> Result<()> {
             )));
         }
 
-        if let Some(ServerClientAuthConfig { ca_cert_path, .. }) = client_auth {
+        if matches!(session_resumption, Some(false)) && session_cache_size.is_some() {
+            return Err(Error::Config(format!(
+                "{} TLS session_cache_size cannot be set when session_resumption is disabled",
+                config.owner_label
+            )));
+        }
+
+        if matches!(session_resumption, Some(false)) && session_ticket_count.is_some() {
+            return Err(Error::Config(format!(
+                "{} TLS session_ticket_count cannot be set when session_resumption is disabled",
+                config.owner_label
+            )));
+        }
+
+        if matches!(session_tickets, Some(false)) && session_ticket_count.is_some() {
+            return Err(Error::Config(format!(
+                "{} TLS session_ticket_count cannot be set when session_tickets is disabled",
+                config.owner_label
+            )));
+        }
+
+        if session_ticket_count.is_some_and(|count| count == 0) {
+            return Err(Error::Config(format!(
+                "{} TLS session_ticket_count must be greater than 0",
+                config.owner_label
+            )));
+        }
+
+        if let Some(ServerClientAuthConfig { ca_cert_path, verify_depth, crl_path, .. }) =
+            client_auth
+        {
             if ca_cert_path.trim().is_empty() {
                 return Err(Error::Config(format!(
                     "{} TLS client auth CA path must not be empty",
+                    config.owner_label
+                )));
+            }
+
+            if verify_depth.is_some_and(|depth| depth == 0) {
+                return Err(Error::Config(format!(
+                    "{} TLS client auth verify_depth must be greater than 0",
+                    config.owner_label
+                )));
+            }
+
+            if crl_path.as_ref().is_some_and(|path| path.trim().is_empty()) {
+                return Err(Error::Config(format!(
+                    "{} TLS client auth CRL path must not be empty",
                     config.owner_label
                 )));
             }

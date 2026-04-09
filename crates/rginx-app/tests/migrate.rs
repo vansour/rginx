@@ -120,10 +120,18 @@ fn migrate_nginx_recognizes_common_ssl_directives() {
                 ssl_certificate /etc/nginx/certs/app.crt;
                 ssl_certificate_key /etc/nginx/certs/app.key;
                 ssl_protocols TLSv1.2 TLSv1.3;
+                ssl_stapling_file /var/cache/nginx/app.ocsp;
+                ssl_session_tickets off;
+                ssl_client_certificate /etc/nginx/certs/client-ca.crt;
+                ssl_verify_client on;
+                ssl_verify_depth 3;
+                ssl_crl /etc/nginx/certs/client-auth.crl.pem;
 
                 location / {
                     proxy_pass https://backend;
                     proxy_ssl_verify off;
+                    proxy_ssl_verify_depth 2;
+                    proxy_ssl_crl /etc/nginx/certs/upstream.crl.pem;
                     proxy_ssl_name backend.internal;
                     proxy_ssl_server_name off;
                     proxy_ssl_protocols TLSv1.3;
@@ -153,11 +161,58 @@ fn migrate_nginx_recognizes_common_ssl_directives() {
     assert!(generated.contains("cert_path: \"/etc/nginx/certs/app.crt\""));
     assert!(generated.contains("key_path: \"/etc/nginx/certs/app.key\""));
     assert!(generated.contains("versions: Some([Tls12, Tls13])"));
+    assert!(generated.contains("ocsp_staple_path: Some(\"/var/cache/nginx/app.ocsp\")"));
+    assert!(generated.contains("session_tickets: Some(false)"));
+    assert!(generated.contains("client_auth: Some(ServerClientAuthConfig("));
+    assert!(generated.contains("ca_cert_path: \"/etc/nginx/certs/client-ca.crt\""));
+    assert!(generated.contains("verify_depth: Some(3)"));
+    assert!(generated.contains("crl_path: Some(\"/etc/nginx/certs/client-auth.crl.pem\")"));
     assert!(generated.contains("tls: Some(UpstreamTlsConfig("));
     assert!(generated.contains("verify: Insecure"));
     assert!(generated.contains("versions: Some([Tls13])"));
+    assert!(generated.contains("verify_depth: Some(2)"));
+    assert!(generated.contains("crl_path: Some(\"/etc/nginx/certs/upstream.crl.pem\")"));
     assert!(generated.contains("server_name: Some(false)"));
     assert!(generated.contains("server_name_override: Some(\"backend.internal\")"));
+
+    let _ = fs::remove_dir_all(temp_dir);
+}
+
+#[test]
+fn migrate_nginx_warns_when_ssl_stapling_is_enabled_without_a_cache_file_mapping() {
+    let temp_dir = temp_dir("rginx-migrate-ssl-warning-test");
+    fs::create_dir_all(&temp_dir).expect("temp dir should exist");
+    let nginx_path = temp_dir.join("nginx.conf");
+
+    fs::write(
+        &nginx_path,
+        r#"
+        http {
+            server {
+                listen 443 ssl;
+                server_name app.example.com;
+                ssl_certificate /etc/nginx/certs/app.crt;
+                ssl_certificate_key /etc/nginx/certs/app.key;
+                ssl_stapling on;
+
+                location / {
+                    proxy_pass http://127.0.0.1:18080;
+                }
+            }
+        }
+        "#,
+    )
+    .expect("nginx config should be written");
+
+    let migrate_output = run_rginx(["migrate-nginx", "--input", nginx_path.to_str().unwrap()]);
+    assert!(
+        migrate_output.status.success(),
+        "migration should succeed: {}",
+        render_output(&migrate_output)
+    );
+    let stdout = String::from_utf8_lossy(&migrate_output.stdout);
+    assert!(stdout.contains("ssl_stapling on"));
+    assert!(stdout.contains("ssl_stapling_file"));
 
     let _ = fs::remove_dir_all(temp_dir);
 }

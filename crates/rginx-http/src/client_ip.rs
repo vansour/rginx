@@ -29,7 +29,11 @@ pub struct ClientAddress {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TlsClientIdentity {
     pub subject: Option<String>,
+    pub issuer: Option<String>,
+    pub serial_number: Option<String>,
     pub san_dns_names: Vec<String>,
+    pub chain_length: usize,
+    pub chain_subjects: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

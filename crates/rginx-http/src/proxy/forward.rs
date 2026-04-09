@@ -65,6 +65,7 @@ pub async fn forward_request(
                 upstream_sni_enabled = target.upstream.server_name,
                 upstream_server_name = target.upstream.server_name_override.as_deref().unwrap_or("-"),
                 upstream_verify = super::upstream_tls_verify_label(&target.upstream.tls),
+                upstream_tls_failure = super::classify_upstream_tls_failure(&error),
                 %error,
                 "failed to select proxy client"
             );
@@ -263,6 +264,8 @@ pub async fn forward_request(
             }
             Ok(Err(error)) if can_retry_peer_request(&prepared_request, &peers, attempt_index) => {
                 state.record_upstream_peer_failure(&target.upstream_name, &peer.url);
+                let tls_failure = super::classify_upstream_tls_failure(&error);
+                state.record_upstream_peer_failure_class(&target.upstream_name, tls_failure);
                 state.record_upstream_failover(&target.upstream_name);
                 let failure = clients.record_peer_failure(&target.upstream_name, &peer.url);
                 let next_peer = &peers[attempt_index + 1];
@@ -275,6 +278,7 @@ pub async fn forward_request(
                     upstream_sni_enabled = target.upstream.server_name,
                     upstream_server_name = target.upstream.server_name_override.as_deref().unwrap_or("-"),
                     upstream_verify = super::upstream_tls_verify_label(&target.upstream.tls),
+                    upstream_tls_failure = super::classify_upstream_tls_failure(&error),
                     consecutive_failures = failure.consecutive_failures,
                     entered_cooldown = failure.entered_cooldown,
                     %error,
@@ -290,6 +294,7 @@ pub async fn forward_request(
                         upstream_sni_enabled = target.upstream.server_name,
                         upstream_server_name = target.upstream.server_name_override.as_deref().unwrap_or("-"),
                         upstream_verify = super::upstream_tls_verify_label(&target.upstream.tls),
+                        upstream_tls_failure = super::classify_upstream_tls_failure(&error),
                         %error,
                         "downstream request body was invalid while proxying upstream request"
                     );
@@ -300,6 +305,8 @@ pub async fn forward_request(
                     );
                 }
                 state.record_upstream_peer_failure(&target.upstream_name, &peer.url);
+                let tls_failure = super::classify_upstream_tls_failure(&error);
+                state.record_upstream_peer_failure_class(&target.upstream_name, tls_failure);
                 let failure = clients.record_peer_failure(&target.upstream_name, &peer.url);
                 tracing::warn!(
                     request_id = %downstream.request_id,
@@ -308,6 +315,7 @@ pub async fn forward_request(
                     upstream_sni_enabled = target.upstream.server_name,
                     upstream_server_name = target.upstream.server_name_override.as_deref().unwrap_or("-"),
                     upstream_verify = super::upstream_tls_verify_label(&target.upstream.tls),
+                    upstream_tls_failure = super::classify_upstream_tls_failure(&error),
                     consecutive_failures = failure.consecutive_failures,
                     entered_cooldown = failure.entered_cooldown,
                     %error,
@@ -334,6 +342,7 @@ pub async fn forward_request(
                     upstream_sni_enabled = target.upstream.server_name,
                     upstream_server_name = target.upstream.server_name_override.as_deref().unwrap_or("-"),
                     upstream_verify = super::upstream_tls_verify_label(&target.upstream.tls),
+                    upstream_tls_failure = super::classify_upstream_tls_failure(&error),
                     consecutive_failures = failure.consecutive_failures,
                     entered_cooldown = failure.entered_cooldown,
                     %error,
