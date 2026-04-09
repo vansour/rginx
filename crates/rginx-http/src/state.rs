@@ -2086,7 +2086,17 @@ fn inspect_ocsp_cache_file(
         );
     }
 
-    let cache_error = match std::fs::read(path) {
+    let cache_error = match std::fs::File::open(path).and_then(|file| {
+        use std::io::Read;
+
+        let mut reader = file.take(crate::MAX_OCSP_RESPONSE_BYTES as u64 + 1);
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }) {
+        Ok(bytes) if bytes.len() > crate::MAX_OCSP_RESPONSE_BYTES => {
+            Some(format!("OCSP cache file exceeds {} bytes", crate::MAX_OCSP_RESPONSE_BYTES))
+        }
         Ok(bytes) => validate_ocsp_response_for_certificate(cert_path, &bytes)
             .err()
             .map(|error| error.to_string()),
