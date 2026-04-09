@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use der::asn1::{BitString, OctetString};
 use der::{Decode, Encode};
@@ -167,7 +167,11 @@ fn expired_ocsp_cache_is_cleared_when_refresh_fails() {
         fs::write(&key_path, leaf.key_pair.serialize_pem()).expect("private key should be written");
         fs::write(
             &ocsp_path,
-            build_ocsp_response_for_certificate_with_times(&cert_path, 2024, 2025),
+            build_ocsp_response_for_certificate_with_offsets(
+                &cert_path,
+                TimeOffset::Before(Duration::from_secs(2 * 24 * 60 * 60)),
+                TimeOffset::Before(Duration::from_secs(24 * 60 * 60)),
+            ),
         )
         .expect("expired OCSP cache file should be written");
 
@@ -335,21 +339,24 @@ fn der_length(length: usize) -> Vec<u8> {
 }
 
 fn build_ocsp_response_for_certificate(cert_path: &Path) -> Vec<u8> {
-    build_ocsp_response_for_certificate_with_times(cert_path, 2025, 2030)
+    build_ocsp_response_for_certificate_with_offsets(
+        cert_path,
+        TimeOffset::Before(Duration::from_secs(24 * 60 * 60)),
+        TimeOffset::After(Duration::from_secs(24 * 60 * 60)),
+    )
 }
 
-fn build_ocsp_response_for_certificate_with_times(
+fn build_ocsp_response_for_certificate_with_offsets(
     cert_path: &Path,
-    this_update_year: u16,
-    next_update_year: u16,
+    this_update_offset: TimeOffset,
+    next_update_offset: TimeOffset,
 ) -> Vec<u8> {
     let request = rginx_http::build_ocsp_request_for_certificate(cert_path)
         .expect("OCSP request should build for certificate chain");
     let cert_id = extract_ocsp_cert_id_from_request(&request);
-    let this_update =
-        OcspGeneralizedTime::from(der::DateTime::new(this_update_year, 1, 1, 0, 0, 0).unwrap());
-    let next_update =
-        OcspGeneralizedTime::from(der::DateTime::new(next_update_year, 1, 1, 0, 0, 0).unwrap());
+    let now = SystemTime::now();
+    let this_update = ocsp_time_with_offset(now, this_update_offset);
+    let next_update = ocsp_time_with_offset(now, next_update_offset);
     let basic = BasicOcspResponse {
         tbs_response_data: ResponseData {
             version: Version::V1,
@@ -366,6 +373,7 @@ fn build_ocsp_response_for_certificate_with_times(
             }],
             response_extensions: None,
         },
+        // sha256WithRSAEncryption AlgorithmIdentifier (OID 1.2.840.113549.1.1.11 with NULL params)
         signature_algorithm: AlgorithmIdentifierOwned::from_der(&[
             0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b, 0x05,
             0x00,
@@ -389,4 +397,19 @@ fn extract_ocsp_cert_id_from_request(request_der: &[u8]) -> CertId {
         .first()
         .map(|request| request.req_cert.clone())
         .expect("OCSP request should contain a CertId")
+}
+
+enum TimeOffset {
+    Before(Duration),
+    After(Duration),
+}
+
+fn ocsp_time_with_offset(base: SystemTime, offset: TimeOffset) -> OcspGeneralizedTime {
+    let time = match offset {
+        TimeOffset::Before(duration) => {
+            base.checked_sub(duration).expect("time offset should stay after unix epoch")
+        }
+        TimeOffset::After(duration) => base + duration,
+    };
+    OcspGeneralizedTime::try_from(time).expect("OCSP test time should be encodable")
 }

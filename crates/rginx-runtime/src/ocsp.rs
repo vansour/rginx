@@ -17,7 +17,6 @@ use rginx_http::SharedState;
 
 const OCSP_REFRESH_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 const OCSP_FETCH_TIMEOUT: Duration = Duration::from_secs(15);
-const OCSP_MAX_RESPONSE_BYTES: usize = 128 * 1024;
 
 type OcspClient = Client<HttpsConnector<HttpConnector>, Full<Bytes>>;
 
@@ -204,8 +203,11 @@ async fn fetch_ocsp_response_from_url(
         let Some(chunk) = frame.data_ref() else {
             continue;
         };
-        if payload.len().saturating_add(chunk.len()) > OCSP_MAX_RESPONSE_BYTES {
-            return Err(format!("OCSP response exceeded {} bytes", OCSP_MAX_RESPONSE_BYTES));
+        if payload.len().saturating_add(chunk.len()) > rginx_http::MAX_OCSP_RESPONSE_BYTES {
+            return Err(format!(
+                "OCSP response exceeded {} bytes",
+                rginx_http::MAX_OCSP_RESPONSE_BYTES
+            ));
         }
         payload.extend_from_slice(chunk);
     }
@@ -260,6 +262,23 @@ async fn clear_invalid_ocsp_cache_file(
     cert_path: &Path,
     cache_path: &Path,
 ) -> Result<bool, String> {
+    let metadata = match tokio::fs::metadata(cache_path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(format!(
+                "failed to stat OCSP cache file `{}`: {error}",
+                cache_path.display()
+            ));
+        }
+    };
+    if metadata.len() == 0 {
+        return Ok(false);
+    }
+    if metadata.len() > rginx_http::MAX_OCSP_RESPONSE_BYTES as u64 {
+        return clear_ocsp_cache_file(cache_path).await;
+    }
+
     let body = match tokio::fs::read(cache_path).await {
         Ok(body) => body,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -282,7 +301,14 @@ async fn clear_invalid_ocsp_cache_file(
 }
 
 async fn clear_ocsp_cache_file(path: &Path) -> Result<bool, String> {
-    if tokio::fs::read(path).await.ok().is_some_and(|body| body.is_empty()) {
+    let metadata = match tokio::fs::metadata(path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(format!("failed to stat OCSP cache file `{}`: {error}", path.display()));
+        }
+    };
+    if metadata.len() == 0 {
         return Ok(false);
     }
 

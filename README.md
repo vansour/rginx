@@ -82,7 +82,6 @@
 | `crates/rginx-runtime` | 运行时编排、reload、restart、admin、active health |
 | `crates/rginx-observability` | tracing / logging 初始化 |
 | `configs/` | 默认活跃配置目录镜像 |
-| `docs/` | 补充设计文档与路线图 |
 | `example/` | 更完整的配置参考 |
 | `deploy/` | systemd / supervisor 示例 |
 | `scripts/` | 安装、卸载、`.deb` 打包、APT 仓库发布、benchmark、soak、release 脚本 |
@@ -90,11 +89,6 @@
 主路径大致是：
 
 `CLI -> load_and_compile -> ConfigSnapshot -> SharedState -> accept loop -> handler::dispatch -> route action -> access log`
-
-补充设计文档：
-
-- SSL / TLS 完善计划：`docs/ssl-plan.md`
-- SSL / TLS 兼容矩阵：`docs/ssl-compat-matrix.md`
 
 ## 快速开始
 

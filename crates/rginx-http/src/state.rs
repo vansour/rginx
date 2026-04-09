@@ -2067,6 +2067,14 @@ fn inspect_ocsp_cache_file(
     if size_bytes == 0 {
         return (false, Some(0), modified, None);
     }
+    if size_bytes > crate::MAX_OCSP_RESPONSE_BYTES {
+        return (
+            false,
+            Some(size_bytes),
+            modified,
+            Some(format!("OCSP cache file exceeds {} bytes", crate::MAX_OCSP_RESPONSE_BYTES)),
+        );
+    }
 
     let cache_error = match std::fs::read(path) {
         Ok(bytes) => validate_ocsp_response_for_certificate(cert_path, &bytes)

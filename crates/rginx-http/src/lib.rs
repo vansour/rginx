@@ -9,6 +9,8 @@ pub mod state;
 mod timeout;
 mod tls;
 
+pub const MAX_OCSP_RESPONSE_BYTES: usize = 128 * 1024;
+
 pub use client_ip::TlsClientIdentity;
 pub use proxy::{PeerHealthSnapshot, UpstreamHealthSnapshot};
 pub use server::serve;

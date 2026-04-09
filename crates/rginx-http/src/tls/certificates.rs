@@ -397,7 +397,7 @@ mod tests {
     use std::env;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use der::asn1::{BitString, OctetString};
     use rcgen::{
@@ -435,7 +435,11 @@ mod tests {
         let ca = generate_ca_cert("ocsp-test-ca");
         let leaf = generate_leaf_cert("localhost", &ca);
         let cert_path = write_cert_chain(&temp_dir, "server", &leaf, &ca);
-        let response = build_ocsp_response_for_certificate_with_times(&cert_path, 2024, 2025);
+        let response = build_ocsp_response_for_certificate_with_offsets(
+            &cert_path,
+            TimeOffset::Before(Duration::from_secs(2 * 24 * 60 * 60)),
+            TimeOffset::Before(Duration::from_secs(24 * 60 * 60)),
+        );
 
         let error = validate_ocsp_response_for_certificate(&cert_path, &response)
             .expect_err("expired OCSP response should be rejected");
@@ -510,13 +514,17 @@ mod tests {
     }
 
     fn build_ocsp_response_for_certificate(cert_path: &Path) -> Vec<u8> {
-        build_ocsp_response_for_certificate_with_times(cert_path, 2025, 2030)
+        build_ocsp_response_for_certificate_with_offsets(
+            cert_path,
+            TimeOffset::Before(Duration::from_secs(24 * 60 * 60)),
+            TimeOffset::After(Duration::from_secs(24 * 60 * 60)),
+        )
     }
 
-    fn build_ocsp_response_for_certificate_with_times(
+    fn build_ocsp_response_for_certificate_with_offsets(
         cert_path: &Path,
-        this_update_year: u16,
-        next_update_year: u16,
+        this_update_offset: TimeOffset,
+        next_update_offset: TimeOffset,
     ) -> Vec<u8> {
         let certs =
             load_certificate_chain_from_path(cert_path).expect("certificate chain should load");
@@ -524,10 +532,9 @@ mod tests {
             &build_ocsp_cert_id_from_chain(&certs, cert_path).expect("CertId should build"),
         )
         .expect("CertId should decode");
-        let this_update =
-            OcspGeneralizedTime::from(der::DateTime::new(this_update_year, 1, 1, 0, 0, 0).unwrap());
-        let next_update =
-            OcspGeneralizedTime::from(der::DateTime::new(next_update_year, 1, 1, 0, 0, 0).unwrap());
+        let now = SystemTime::now();
+        let this_update = ocsp_time_with_offset(now, this_update_offset);
+        let next_update = ocsp_time_with_offset(now, next_update_offset);
         let basic = BasicOcspResponse {
             tbs_response_data: ResponseData {
                 version: Version::V1,
@@ -556,6 +563,21 @@ mod tests {
             .expect("OCSP response should build")
             .to_der()
             .expect("OCSP response should encode")
+    }
+
+    enum TimeOffset {
+        Before(Duration),
+        After(Duration),
+    }
+
+    fn ocsp_time_with_offset(base: SystemTime, offset: TimeOffset) -> OcspGeneralizedTime {
+        let time = match offset {
+            TimeOffset::Before(duration) => {
+                base.checked_sub(duration).expect("time offset should stay after unix epoch")
+            }
+            TimeOffset::After(duration) => base + duration,
+        };
+        OcspGeneralizedTime::try_from(time).expect("OCSP test time should be encodable")
     }
 
     fn temp_dir(prefix: &str) -> PathBuf {
