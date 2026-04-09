@@ -93,6 +93,10 @@ pub struct ServerTlsConfig {
     #[serde(default)]
     pub session_tickets: Option<bool>,
     #[serde(default)]
+    pub session_cache_size: Option<u64>,
+    #[serde(default)]
+    pub session_ticket_count: Option<u64>,
+    #[serde(default)]
     pub client_auth: Option<ServerClientAuthConfig>,
 }
 
@@ -152,6 +156,10 @@ pub enum ServerClientAuthModeConfig {
 pub struct ServerClientAuthConfig {
     pub mode: ServerClientAuthModeConfig,
     pub ca_cert_path: String,
+    #[serde(default)]
+    pub verify_depth: Option<u32>,
+    #[serde(default)]
+    pub crl_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -236,6 +244,8 @@ pub enum UpstreamTlsModeConfig {
 pub struct UpstreamTlsConfig {
     pub verify: UpstreamTlsModeConfig,
     pub versions: Option<Vec<TlsVersionConfig>>,
+    pub verify_depth: Option<u32>,
+    pub crl_path: Option<String>,
     pub client_cert_path: Option<String>,
     pub client_key_path: Option<String>,
 }
@@ -384,6 +394,10 @@ impl<'de> Deserialize<'de> for UpstreamTlsConfig {
                 #[serde(default)]
                 versions: Option<Vec<TlsVersionConfig>>,
                 #[serde(default)]
+                verify_depth: Option<u32>,
+                #[serde(default)]
+                crl_path: Option<String>,
+                #[serde(default)]
                 client_cert_path: Option<String>,
                 #[serde(default)]
                 client_key_path: Option<String>,
@@ -394,27 +408,37 @@ impl<'de> Deserialize<'de> for UpstreamTlsConfig {
             UpstreamTlsConfigDe::NativeRoots => Self {
                 verify: UpstreamTlsModeConfig::NativeRoots,
                 versions: None,
+                verify_depth: None,
+                crl_path: None,
                 client_cert_path: None,
                 client_key_path: None,
             },
             UpstreamTlsConfigDe::CustomCa { ca_cert_path } => Self {
                 verify: UpstreamTlsModeConfig::CustomCa { ca_cert_path },
                 versions: None,
+                verify_depth: None,
+                crl_path: None,
                 client_cert_path: None,
                 client_key_path: None,
             },
             UpstreamTlsConfigDe::Insecure => Self {
                 verify: UpstreamTlsModeConfig::Insecure,
                 versions: None,
+                verify_depth: None,
+                crl_path: None,
                 client_cert_path: None,
                 client_key_path: None,
             },
             UpstreamTlsConfigDe::UpstreamTlsConfig {
                 verify,
                 versions,
+                verify_depth,
+                crl_path,
                 client_cert_path,
                 client_key_path,
-            } => Self { verify, versions, client_cert_path, client_key_path },
+            } => {
+                Self { verify, versions, verify_depth, crl_path, client_cert_path, client_key_path }
+            }
         })
     }
 }
@@ -454,6 +478,10 @@ impl<'de> Deserialize<'de> for VirtualHostTlsConfig {
                 #[serde(default)]
                 session_tickets: Option<bool>,
                 #[serde(default)]
+                session_cache_size: Option<u64>,
+                #[serde(default)]
+                session_ticket_count: Option<u64>,
+                #[serde(default)]
                 client_auth: Option<ServerClientAuthConfig>,
             },
         }
@@ -476,6 +504,8 @@ impl<'de> Deserialize<'de> for VirtualHostTlsConfig {
                 ocsp_staple_path,
                 session_resumption,
                 session_tickets,
+                session_cache_size,
+                session_ticket_count,
                 client_auth,
             } => {
                 if versions.is_some()
@@ -484,10 +514,12 @@ impl<'de> Deserialize<'de> for VirtualHostTlsConfig {
                     || alpn_protocols.is_some()
                     || session_resumption.is_some()
                     || session_tickets.is_some()
+                    || session_cache_size.is_some()
+                    || session_ticket_count.is_some()
                     || client_auth.is_some()
                 {
                     return Err(de::Error::custom(
-                        "vhost TLS policy fields are not supported in legacy `ServerTlsConfig(...)`; use `VirtualHostTlsConfig(...)` for certificate overrides and keep versions, cipher_suites, key_exchange_groups, ALPN, session settings, and client_auth on server.tls or listeners[].tls",
+                        "vhost TLS policy fields are not supported in legacy `ServerTlsConfig(...)`; use `VirtualHostTlsConfig(...)` for certificate overrides and keep versions, cipher_suites, key_exchange_groups, ALPN, session settings, session cache settings, and client_auth on server.tls or listeners[].tls",
                     ));
                 }
 

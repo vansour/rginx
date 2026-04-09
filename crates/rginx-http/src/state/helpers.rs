@@ -5,7 +5,15 @@ fn prepare_state(
     let config = Arc::new(config);
     let clients =
         ProxyClients::from_config_with_health_notifier(config.as_ref(), peer_health_notifier)?;
-    let listener_tls_acceptors = config
+    let listener_tls_acceptors = prepare_listener_tls_acceptors(config.as_ref())?;
+
+    Ok(PreparedState { config, clients, listener_tls_acceptors })
+}
+
+fn prepare_listener_tls_acceptors(
+    config: &ConfigSnapshot,
+) -> Result<HashMap<String, Option<TlsAcceptor>>> {
+    config
         .listeners
         .iter()
         .map(|listener| {
@@ -18,9 +26,7 @@ fn prepare_state(
             )?;
             Ok((listener.id.clone(), tls_acceptor))
         })
-        .collect::<Result<HashMap<_, _>>>()?;
-
-    Ok(PreparedState { config, clients, listener_tls_acceptors })
+        .collect::<Result<HashMap<_, _>>>()
 }
 
 fn build_peer_health_notifier(

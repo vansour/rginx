@@ -72,21 +72,26 @@ jobs:
           PRERELEASE="${{ steps.meta.outputs.prerelease }}"
           RELEASE_BRANCH="release/${TAG}"
 
-          git fetch --no-tags origin main "+refs/heads/${RELEASE_BRANCH}:refs/remotes/origin/${RELEASE_BRANCH}"
+          git fetch --no-tags origin main
           MAIN_SHA="$(git rev-parse origin/main)"
+          RELEASE_BRANCH_EXISTS=false
+          RELEASE_BRANCH_SHA=""
+
+          if git ls-remote --exit-code --heads origin "${RELEASE_BRANCH}" >/dev/null 2>&1; then
+            git fetch --no-tags origin "+refs/heads/${RELEASE_BRANCH}:refs/remotes/origin/${RELEASE_BRANCH}"
+            RELEASE_BRANCH_EXISTS=true
+            RELEASE_BRANCH_SHA="$(git rev-parse "origin/${RELEASE_BRANCH}")"
+          fi
 
           if [[ "${PRERELEASE}" == "true" ]]; then
-            if git show-ref --verify --quiet "refs/remotes/origin/${RELEASE_BRANCH}"; then
-              RELEASE_BRANCH_SHA="$(git rev-parse "origin/${RELEASE_BRANCH}")"
-              if git merge-base --is-ancestor "${COMMIT_SHA}" origin/main; then
-                :
-              elif git merge-base --is-ancestor "${COMMIT_SHA}" "origin/${RELEASE_BRANCH}"; then
-                :
-              else
-                echo "Prerelease tag ${TAG} points to ${COMMIT_SHA}, which is not reachable from origin/main (${MAIN_SHA}) or origin/${RELEASE_BRANCH} (${RELEASE_BRANCH_SHA})." >&2
-                exit 1
-              fi
-            elif ! git merge-base --is-ancestor "${COMMIT_SHA}" origin/main; then
+            if git merge-base --is-ancestor "${COMMIT_SHA}" origin/main; then
+              :
+            elif [[ "${RELEASE_BRANCH_EXISTS}" == "true" ]] && git merge-base --is-ancestor "${COMMIT_SHA}" "origin/${RELEASE_BRANCH}"; then
+              :
+            elif [[ "${RELEASE_BRANCH_EXISTS}" == "true" ]]; then
+              echo "Prerelease tag ${TAG} points to ${COMMIT_SHA}, which is not reachable from origin/main (${MAIN_SHA}) or origin/${RELEASE_BRANCH} (${RELEASE_BRANCH_SHA})." >&2
+              exit 1
+            else
               echo "Prerelease tag ${TAG} points to ${COMMIT_SHA}, which is not reachable from origin/main (${MAIN_SHA}) and release branch origin/${RELEASE_BRANCH} does not exist." >&2
               exit 1
             fi
@@ -107,7 +112,10 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Run Workspace Tests
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked -- --test-threads=1
+
+      - name: Run TLS Release Gate
+        run: ./scripts/run-tls-gate.sh
 
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
@@ -510,7 +518,7 @@ jobs:
           fi
 
           if gh release view "${TAG}" >/dev/null 2>&1; then
-            gh release edit "${TAG}" "${edit_args[@]}"
+            gh release edit "${TAG}" --draft=false "${edit_args[@]}"
             gh release upload "${TAG}" dist/*.tar.gz dist/*.deb dist/SHA256SUMS.txt --clobber
           else
             gh release create "${TAG}" dist/*.tar.gz dist/*.deb dist/SHA256SUMS.txt "${release_args[@]}"

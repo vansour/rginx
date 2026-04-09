@@ -273,25 +273,42 @@ fn extract_tls_client_identity(
     stream: &tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
 ) -> Option<TlsClientIdentity> {
     let certs = stream.get_ref().1.peer_certificates()?;
-    let leaf = certs.first()?;
-    Some(parse_tls_client_identity(leaf.as_ref()))
+    Some(parse_tls_client_identity(certs.iter().map(|cert| cert.as_ref())))
 }
 
-fn parse_tls_client_identity(der: &[u8]) -> TlsClientIdentity {
-    let mut identity = TlsClientIdentity { subject: None, san_dns_names: Vec::new() };
+fn parse_tls_client_identity<'a>(
+    der_chain: impl IntoIterator<Item = &'a [u8]>,
+) -> TlsClientIdentity {
+    let mut identity = TlsClientIdentity {
+        subject: None,
+        issuer: None,
+        serial_number: None,
+        san_dns_names: Vec::new(),
+        chain_length: 0,
+        chain_subjects: Vec::new(),
+    };
 
-    if let Ok((_, cert)) = X509Certificate::from_der(der) {
-        identity.subject = Some(format!("{}", cert.subject()));
-        if let Ok(Some(san)) = cert.subject_alternative_name() {
-            identity.san_dns_names = san
-                .value
-                .general_names
-                .iter()
-                .filter_map(|name| match name {
-                    GeneralName::DNSName(dns) => Some(dns.to_string()),
-                    _ => None,
-                })
-                .collect();
+    for (index, der) in der_chain.into_iter().enumerate() {
+        identity.chain_length += 1;
+        if let Ok((_, cert)) = X509Certificate::from_der(der) {
+            let subject = format!("{}", cert.subject());
+            identity.chain_subjects.push(subject.clone());
+            if index == 0 {
+                identity.subject = Some(subject);
+                identity.issuer = Some(format!("{}", cert.issuer()));
+                identity.serial_number = Some(cert.tbs_certificate.raw_serial_as_string());
+                if let Ok(Some(san)) = cert.subject_alternative_name() {
+                    identity.san_dns_names = san
+                        .value
+                        .general_names
+                        .iter()
+                        .filter_map(|name| match name {
+                            GeneralName::DNSName(dns) => Some(dns.to_string()),
+                            _ => None,
+                        })
+                        .collect();
+                }
+            }
         }
     }
 
@@ -328,6 +345,12 @@ fn classify_tls_handshake_failure(error: &impl std::fmt::Display) -> TlsHandshak
     }
     if error.contains("unknown ca") || error.contains("unknown issuer") {
         return TlsHandshakeFailureReason::UnknownCa;
+    }
+    if error.contains("revoked") {
+        return TlsHandshakeFailureReason::CertificateRevoked;
+    }
+    if error.contains("verify_depth") || error.contains("chain exceeds configured verify_depth") {
+        return TlsHandshakeFailureReason::VerifyDepthExceeded;
     }
     if error.contains("bad certificate")
         || error.contains("certificate verify failed")
@@ -634,11 +657,15 @@ mod tests {
             .expect("certificate PEM should parse")
             .remove(0);
 
-        let identity = parse_tls_client_identity(cert.as_ref());
+        let identity = parse_tls_client_identity(std::iter::once(cert.as_ref()));
 
         assert!(
             identity.subject.as_deref().is_some_and(|subject| subject.contains("CN=localhost"))
         );
+        assert!(identity.issuer.as_deref().is_some_and(|issuer| issuer.contains("CN=localhost")));
+        assert!(identity.serial_number.is_some());
         assert!(identity.san_dns_names.iter().any(|san| san == "localhost"));
+        assert_eq!(identity.chain_length, 1);
+        assert_eq!(identity.chain_subjects.len(), 1);
     }
 }

@@ -33,15 +33,17 @@ fn tls12_only_listener_negotiates_tls12() {
     wait_for_https_policy_response(
         &mut server,
         listen_addr,
-        "localhost",
-        "/",
-        "localhost",
-        true,
-        &[b"http/1.1".as_slice()],
-        200,
-        "tls12 only\n",
-        Some(ProtocolVersion::TLSv1_2),
-        Some("http/1.1"),
+        TlsPolicyCase {
+            host: "localhost",
+            path: "/",
+            server_name: "localhost",
+            enable_sni: true,
+            alpn_protocols: &[b"http/1.1".as_slice()],
+            expected_status: 200,
+            expected_body: "tls12 only\n",
+            expected_protocol_version: Some(ProtocolVersion::TLSv1_2),
+            expected_alpn: Some("http/1.1"),
+        },
     );
 
     server.shutdown_and_wait(Duration::from_secs(5));
@@ -62,15 +64,17 @@ fn custom_alpn_protocols_disable_h2_negotiation() {
     wait_for_https_policy_response(
         &mut server,
         listen_addr,
-        "localhost",
-        "/",
-        "localhost",
-        true,
-        &[b"h2".as_slice(), b"http/1.1".as_slice()],
-        200,
-        "http11 alpn\n",
-        None,
-        Some("http/1.1"),
+        TlsPolicyCase {
+            host: "localhost",
+            path: "/",
+            server_name: "localhost",
+            enable_sni: true,
+            alpn_protocols: &[b"h2".as_slice(), b"http/1.1".as_slice()],
+            expected_status: 200,
+            expected_body: "http11 alpn\n",
+            expected_protocol_version: None,
+            expected_alpn: Some("http/1.1"),
+        },
     );
 
     server.shutdown_and_wait(Duration::from_secs(5));
@@ -95,15 +99,17 @@ fn default_certificate_supports_sniless_clients_with_multiple_vhost_certs() {
     wait_for_https_policy_response(
         &mut server,
         listen_addr,
-        "api.example.com",
-        "/",
-        "localhost",
-        false,
-        &[b"http/1.1".as_slice()],
-        200,
-        "api root\n",
-        None,
-        Some("http/1.1"),
+        TlsPolicyCase {
+            host: "api.example.com",
+            path: "/",
+            server_name: "localhost",
+            enable_sni: false,
+            alpn_protocols: &[b"http/1.1".as_slice()],
+            expected_status: 200,
+            expected_body: "api root\n",
+            expected_protocol_version: None,
+            expected_alpn: Some("http/1.1"),
+        },
     );
 
     server.shutdown_and_wait(Duration::from_secs(5));
@@ -116,19 +122,22 @@ struct TlsPolicyResponse {
     alpn_protocol: Option<String>,
 }
 
-#[allow(clippy::too_many_arguments)]
+struct TlsPolicyCase<'a> {
+    host: &'a str,
+    path: &'a str,
+    server_name: &'a str,
+    enable_sni: bool,
+    alpn_protocols: &'a [&'a [u8]],
+    expected_status: u16,
+    expected_body: &'a str,
+    expected_protocol_version: Option<ProtocolVersion>,
+    expected_alpn: Option<&'a str>,
+}
+
 fn wait_for_https_policy_response(
     server: &mut ServerHarness,
     listen_addr: SocketAddr,
-    host: &str,
-    path: &str,
-    server_name: &str,
-    enable_sni: bool,
-    alpn_protocols: &[&[u8]],
-    expected_status: u16,
-    expected_body: &str,
-    expected_protocol_version: Option<ProtocolVersion>,
-    expected_alpn: Option<&str>,
+    case: TlsPolicyCase<'_>,
 ) {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut last_error = String::new();
@@ -138,18 +147,19 @@ fn wait_for_https_policy_response(
 
         match fetch_https_policy_response(
             listen_addr,
-            host,
-            path,
-            server_name,
-            enable_sni,
-            alpn_protocols,
+            case.host,
+            case.path,
+            case.server_name,
+            case.enable_sni,
+            case.alpn_protocols,
         ) {
             Ok(response)
-                if response.status == expected_status
-                    && response.body == expected_body
-                    && expected_protocol_version
+                if response.status == case.expected_status
+                    && response.body == case.expected_body
+                    && case
+                        .expected_protocol_version
                         .is_none_or(|version| response.protocol_version == Some(version))
-                    && expected_alpn.is_none_or(|protocol| {
+                    && case.expected_alpn.is_none_or(|protocol| {
                         response.alpn_protocol.as_deref() == Some(protocol)
                     }) =>
             {
@@ -171,7 +181,8 @@ fn wait_for_https_policy_response(
     }
 
     panic!(
-        "timed out waiting for TLS policy response on https://{listen_addr}{path}; last error: {}\n{}",
+        "timed out waiting for TLS policy response on https://{listen_addr}{}; last error: {}\n{}",
+        case.path,
         last_error,
         server.combined_output()
     );

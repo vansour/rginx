@@ -16,6 +16,8 @@ struct HttpCounters {
     downstream_tls_handshake_failures_missing_client_cert: AtomicU64,
     downstream_tls_handshake_failures_unknown_ca: AtomicU64,
     downstream_tls_handshake_failures_bad_certificate: AtomicU64,
+    downstream_tls_handshake_failures_certificate_revoked: AtomicU64,
+    downstream_tls_handshake_failures_verify_depth_exceeded: AtomicU64,
     downstream_tls_handshake_failures_other: AtomicU64,
 }
 
@@ -42,6 +44,10 @@ struct UpstreamStats {
     payload_too_large_responses_total: AtomicU64,
     unsupported_media_type_responses_total: AtomicU64,
     no_healthy_peers_total: AtomicU64,
+    tls_failures_unknown_ca_total: AtomicU64,
+    tls_failures_bad_certificate_total: AtomicU64,
+    tls_failures_certificate_revoked_total: AtomicU64,
+    tls_failures_verify_depth_exceeded_total: AtomicU64,
     recent_60s: RecentUpstreamStatsCounters,
 }
 
@@ -55,6 +61,7 @@ struct UpstreamPeerStats {
 
 #[derive(Debug)]
 struct UpstreamStatsEntry {
+    upstream: Arc<rginx_core::Upstream>,
     counters: Arc<UpstreamStats>,
     peers: HashMap<String, Arc<UpstreamPeerStats>>,
     peer_order: Vec<String>,
@@ -141,6 +148,8 @@ pub(crate) enum TlsHandshakeFailureReason {
     MissingClientCert,
     UnknownCa,
     BadCertificate,
+    CertificateRevoked,
+    VerifyDepthExceeded,
     Other,
 }
 
@@ -150,6 +159,8 @@ impl TlsHandshakeFailureReason {
             Self::MissingClientCert => "missing_client_cert",
             Self::UnknownCa => "unknown_ca",
             Self::BadCertificate => "bad_certificate",
+            Self::CertificateRevoked => "certificate_revoked",
+            Self::VerifyDepthExceeded => "verify_depth_exceeded",
             Self::Other => "other",
         }
     }
@@ -246,6 +257,12 @@ impl HttpCounters {
                 .load(Ordering::Relaxed),
             downstream_tls_handshake_failures_bad_certificate: self
                 .downstream_tls_handshake_failures_bad_certificate
+                .load(Ordering::Relaxed),
+            downstream_tls_handshake_failures_certificate_revoked: self
+                .downstream_tls_handshake_failures_certificate_revoked
+                .load(Ordering::Relaxed),
+            downstream_tls_handshake_failures_verify_depth_exceeded: self
+                .downstream_tls_handshake_failures_verify_depth_exceeded
                 .load(Ordering::Relaxed),
             downstream_tls_handshake_failures_other: self
                 .downstream_tls_handshake_failures_other
@@ -573,6 +590,7 @@ fn build_upstream_stats_map(
             (
                 upstream.name.clone(),
                 UpstreamStatsEntry {
+                    upstream: upstream.clone(),
                     counters: current
                         .map(|entry| entry.counters.clone())
                         .unwrap_or_else(|| Arc::new(UpstreamStats::default())),

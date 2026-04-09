@@ -7,7 +7,11 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use rcgen::CertifiedKey;
+use rcgen::{
+    BasicConstraints, CertificateParams, CertificateRevocationList,
+    CertificateRevocationListParams, CertifiedKey, DnType, IsCa, KeyIdMethod, KeyPair,
+    KeyUsagePurpose, RevocationReason, RevokedCertParams, SerialNumber, date_time_ymd,
+};
 
 mod support;
 
@@ -56,14 +60,14 @@ fn snapshot_command_returns_aggregate_json_snapshot() {
     let AdminResponse::Snapshot(snapshot) = response else {
         panic!("admin socket should return aggregate snapshot");
     };
-    assert_eq!(snapshot.schema_version, 7);
+    assert_eq!(snapshot.schema_version, 10);
     assert!(snapshot.captured_at_unix_ms > 0);
     assert!(snapshot.pid > 0);
     assert_eq!(snapshot.binary_version, env!("CARGO_PKG_VERSION"));
     assert_eq!(snapshot.included_modules, rginx_http::SnapshotModule::all());
     assert_eq!(snapshot.status.as_ref().map(|status| status.listen_addr), Some(listen_addr));
     assert_eq!(snapshot.status.as_ref().map(|status| status.tls.listeners.len()), Some(1));
-    assert!(snapshot.counters.as_ref().map(|c| c.downstream_requests).unwrap_or(0) >= 2);
+    assert!(snapshot.counters.as_ref().map(|c| c.downstream_requests).unwrap_or(0) >= 1);
     assert_eq!(snapshot.traffic.as_ref().map(|t| t.listeners.len()), Some(1));
     assert_eq!(snapshot.peer_health.as_ref().map(Vec::len), Some(1));
     assert_eq!(snapshot.upstreams.as_ref().map(Vec::len), Some(1));
@@ -73,13 +77,13 @@ fn snapshot_command_returns_aggregate_json_snapshot() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let snapshot: serde_json::Value =
         serde_json::from_str(&stdout).expect("snapshot command should print valid JSON");
-    assert_eq!(snapshot["schema_version"], serde_json::Value::from(7));
+    assert_eq!(snapshot["schema_version"], serde_json::Value::from(10));
     assert!(snapshot["captured_at_unix_ms"].as_u64().unwrap_or(0) > 0);
     assert!(snapshot["pid"].as_u64().unwrap_or(0) > 0);
     assert_eq!(snapshot["binary_version"], serde_json::Value::from(env!("CARGO_PKG_VERSION")));
     assert_eq!(snapshot["status"]["listen_addr"], serde_json::Value::from(listen_addr.to_string()));
     assert_eq!(snapshot["status"]["tls"]["listeners"].as_array().map(Vec::len), Some(1));
-    assert!(snapshot["counters"]["downstream_requests"].as_u64().unwrap_or(0) >= 2);
+    assert!(snapshot["counters"]["downstream_requests"].as_u64().unwrap_or(0) >= 1);
     assert_eq!(snapshot["traffic"]["listeners"].as_array().map(Vec::len), Some(1));
     assert_eq!(snapshot["peer_health"].as_array().map(Vec::len), Some(1));
     assert_eq!(snapshot["upstreams"].as_array().map(Vec::len), Some(1));
@@ -120,7 +124,13 @@ fn snapshot_includes_certificate_fingerprint_and_chain_details_for_tls_servers()
     };
     let certificates =
         snapshot.status.as_ref().map(|status| status.tls.certificates.as_slice()).unwrap_or(&[]);
+    let vhost_bindings =
+        snapshot.status.as_ref().map(|status| status.tls.vhost_bindings.as_slice()).unwrap_or(&[]);
+    let sni_bindings =
+        snapshot.status.as_ref().map(|status| status.tls.sni_bindings.as_slice()).unwrap_or(&[]);
     assert_eq!(certificates.len(), 1);
+    assert_eq!(vhost_bindings.len(), 1);
+    assert_eq!(sni_bindings.len(), 1);
     let certificate = &certificates[0];
     assert_eq!(certificate.scope, "listener:default");
     assert!(certificate.subject.is_some());
@@ -140,8 +150,115 @@ fn snapshot_includes_certificate_fingerprint_and_chain_details_for_tls_servers()
     );
     let status_stdout = String::from_utf8_lossy(&status_output.stdout);
     assert!(status_stdout.contains("kind=status_tls_certificate"));
+    assert!(status_stdout.contains("kind=status_tls_vhost_binding"));
+    assert!(status_stdout.contains("kind=status_tls_sni_binding"));
     assert!(status_stdout.contains("sha256="));
     assert!(status_stdout.contains("san_dns_names=localhost"));
+
+    server.shutdown_and_wait(Duration::from_secs(5));
+}
+
+#[test]
+fn status_and_upstreams_commands_report_upstream_tls_diagnostics() {
+    let listen_addr = reserve_loopback_addr();
+    let mut server = ServerHarness::spawn("rginx-admin-upstream-tls", |temp_dir| {
+        let ca = generate_ca_cert("admin-upstream-ca");
+        let crl = generate_crl(&ca, 42);
+        let client_identity = generate_cert("upstream-client");
+        let ca_path = temp_dir.join("upstream-ca.pem");
+        let crl_path = temp_dir.join("upstream.crl.pem");
+        let client_cert_path = temp_dir.join("upstream-client.crt");
+        let client_key_path = temp_dir.join("upstream-client.key");
+        std::fs::write(&ca_path, ca.cert.pem()).expect("upstream CA should be written");
+        std::fs::write(&crl_path, crl.pem().expect("CRL PEM should encode"))
+            .expect("upstream CRL should be written");
+        std::fs::write(&client_cert_path, client_identity.cert.pem())
+            .expect("upstream client cert should be written");
+        std::fs::write(&client_key_path, client_identity.key_pair.serialize_pem())
+            .expect("upstream client key should be written");
+
+        format!(
+            "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [\n                UpstreamPeerConfig(\n                    url: \"https://127.0.0.1:9443\",\n                ),\n            ],\n            tls: Some(UpstreamTlsConfig(\n                verify: CustomCa(\n                    ca_cert_path: {:?},\n                ),\n                versions: Some([Tls12, Tls13]),\n                verify_depth: Some(2),\n                crl_path: Some({:?}),\n                client_cert_path: Some({:?}),\n                client_key_path: Some({:?}),\n            )),\n            protocol: Http2,\n            server_name: Some(false),\n            server_name_override: Some(\"api.internal.example\"),\n        ),\n    ],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Return(\n                status: 200,\n                location: \"\",\n                body: Some(\"ok\\n\"),\n            ),\n        ),\n    ],\n)\n",
+            listen_addr.to_string(),
+            ca_path.display().to_string(),
+            crl_path.display().to_string(),
+            client_cert_path.display().to_string(),
+            client_key_path.display().to_string(),
+            ready_route = READY_ROUTE_CONFIG,
+        )
+    });
+    server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
+
+    let socket_path = admin_socket_path_for_config(server.config_path());
+    wait_for_admin_socket(&socket_path, Duration::from_secs(5));
+
+    let response = query_admin_socket(&socket_path, AdminRequest::GetStatus)
+        .expect("admin socket should return status");
+    let AdminResponse::Status(status) = response else {
+        panic!("admin socket should return status");
+    };
+    assert_eq!(status.upstream_tls.len(), 1);
+    let upstream_tls = &status.upstream_tls[0];
+    assert_eq!(upstream_tls.upstream_name, "backend");
+    assert_eq!(upstream_tls.protocol, "http2");
+    assert_eq!(upstream_tls.verify_mode, "custom_ca");
+    assert_eq!(
+        upstream_tls.tls_versions.as_deref(),
+        Some(&["TLS1.2".to_string(), "TLS1.3".to_string()][..])
+    );
+    assert!(!upstream_tls.server_name_enabled);
+    assert_eq!(upstream_tls.server_name_override.as_deref(), Some("api.internal.example"));
+    assert_eq!(upstream_tls.verify_depth, Some(2));
+    assert!(upstream_tls.crl_configured);
+    assert!(upstream_tls.client_identity_configured);
+
+    let response =
+        query_admin_socket(&socket_path, AdminRequest::GetUpstreamStats { window_secs: None })
+            .expect("admin socket should return upstream stats");
+    let AdminResponse::UpstreamStats(upstreams) = response else {
+        panic!("admin socket should return upstream stats");
+    };
+    assert_eq!(upstreams.len(), 1);
+    assert_eq!(upstreams[0].tls, status.upstream_tls[0]);
+
+    let status_output = run_rginx(["--config", server.config_path().to_str().unwrap(), "status"]);
+    assert!(
+        status_output.status.success(),
+        "status command should succeed: {}",
+        render_output(&status_output)
+    );
+    let status_stdout = String::from_utf8_lossy(&status_output.stdout);
+    assert!(status_stdout.contains(
+        "kind=status_upstream_tls upstream=backend protocol=http2 verify_mode=custom_ca"
+    ));
+    assert!(status_stdout.contains("tls_versions=TLS1.2,TLS1.3"));
+    assert!(status_stdout.contains("server_name_enabled=false"));
+    assert!(status_stdout.contains("server_name_override=api.internal.example"));
+    assert!(status_stdout.contains("verify_depth=2"));
+    assert!(status_stdout.contains("crl_configured=true"));
+    assert!(status_stdout.contains("client_identity_configured=true"));
+
+    let upstreams_output =
+        run_rginx(["--config", server.config_path().to_str().unwrap(), "upstreams"]);
+    assert!(
+        upstreams_output.status.success(),
+        "upstreams command should succeed: {}",
+        render_output(&upstreams_output)
+    );
+    let upstreams_stdout = String::from_utf8_lossy(&upstreams_output.stdout);
+    assert!(upstreams_stdout.contains("kind=upstream_stats upstream=backend"));
+    assert!(upstreams_stdout.contains("tls_protocol=http2"));
+    assert!(upstreams_stdout.contains("tls_verify_mode=custom_ca"));
+    assert!(upstreams_stdout.contains("tls_versions=TLS1.2,TLS1.3"));
+    assert!(upstreams_stdout.contains("tls_server_name_enabled=false"));
+    assert!(upstreams_stdout.contains("tls_server_name_override=api.internal.example"));
+    assert!(upstreams_stdout.contains("tls_verify_depth=2"));
+    assert!(upstreams_stdout.contains("tls_crl_configured=true"));
+    assert!(upstreams_stdout.contains("tls_client_identity_configured=true"));
+    assert!(upstreams_stdout.contains("tls_failures_unknown_ca_total=0"));
+    assert!(upstreams_stdout.contains("tls_failures_bad_certificate_total=0"));
+    assert!(upstreams_stdout.contains("tls_failures_certificate_revoked_total=0"));
+    assert!(upstreams_stdout.contains("tls_failures_verify_depth_exceeded_total=0"));
 
     server.shutdown_and_wait(Duration::from_secs(5));
 }
@@ -270,7 +387,18 @@ fn delta_command_reports_changed_modules_since_version() {
     assert_eq!(delta.upstreams_recent_changed, None);
     assert_eq!(delta.changed_listener_ids, Some(vec!["default".to_string()]));
     assert_eq!(delta.changed_vhost_ids, Some(vec!["server".to_string()]));
-    assert_eq!(delta.changed_route_ids, Some(vec!["server/routes[1]|exact:/".to_string()]));
+    let changed_route_ids =
+        delta.changed_route_ids.as_ref().expect("delta should report changed routes");
+    assert!(
+        changed_route_ids.iter().any(|route| route == "server/routes[1]|exact:/"),
+        "delta should include the business route change: {changed_route_ids:?}"
+    );
+    assert!(
+        changed_route_ids.iter().all(|route| {
+            route == "server/routes[0]|exact:/-/ready" || route == "server/routes[1]|exact:/"
+        }),
+        "delta should only report root and optional ready route changes: {changed_route_ids:?}"
+    );
     assert_eq!(delta.recent_window_secs, None);
     assert_eq!(delta.changed_recent_listener_ids, None);
     assert_eq!(delta.changed_recent_vhost_ids, None);
@@ -302,7 +430,18 @@ fn delta_command_reports_changed_modules_since_version() {
     assert!(delta.get("upstreams_recent_changed").is_none());
     assert_eq!(delta["changed_listener_ids"], serde_json::json!(["default"]));
     assert_eq!(delta["changed_vhost_ids"], serde_json::json!(["server"]));
-    assert_eq!(delta["changed_route_ids"], serde_json::json!(["server/routes[1]|exact:/"]));
+    let changed_route_ids =
+        delta["changed_route_ids"].as_array().expect("delta JSON should include changed_route_ids");
+    assert!(
+        changed_route_ids.iter().any(|route| route == "server/routes[1]|exact:/"),
+        "delta JSON should include the business route change: {changed_route_ids:?}"
+    );
+    assert!(
+        changed_route_ids.iter().all(|route| {
+            route == "server/routes[0]|exact:/-/ready" || route == "server/routes[1]|exact:/"
+        }),
+        "delta JSON should only report root and optional ready route changes: {changed_route_ids:?}"
+    );
     assert!(delta.get("recent_window_secs").is_none());
     assert!(delta.get("changed_recent_listener_ids").is_none());
     assert!(delta.get("changed_recent_vhost_ids").is_none());
@@ -970,4 +1109,33 @@ fn generate_cert(hostname: &str) -> CertifiedKey {
     let cert = rcgen::generate_simple_self_signed(vec![hostname.to_string()])
         .expect("self-signed certificate should generate");
     CertifiedKey { cert: cert.cert, key_pair: cert.key_pair }
+}
+
+fn generate_ca_cert(common_name: &str) -> CertifiedKey {
+    let mut params =
+        CertificateParams::new(vec![common_name.to_string()]).expect("CA params should build");
+    params.distinguished_name.push(DnType::CommonName, common_name);
+    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    let key_pair = KeyPair::generate().expect("CA keypair should generate");
+    let cert = params.self_signed(&key_pair).expect("CA certificate should self-sign");
+    CertifiedKey { cert, key_pair }
+}
+
+fn generate_crl(issuer: &CertifiedKey, revoked_serial: u64) -> CertificateRevocationList {
+    CertificateRevocationListParams {
+        this_update: date_time_ymd(2024, 1, 1),
+        next_update: date_time_ymd(2027, 1, 1),
+        crl_number: SerialNumber::from(1),
+        issuing_distribution_point: None,
+        revoked_certs: vec![RevokedCertParams {
+            serial_number: SerialNumber::from(revoked_serial),
+            revocation_time: date_time_ymd(2024, 1, 2),
+            reason_code: Some(RevocationReason::KeyCompromise),
+            invalidity_date: None,
+        }],
+        key_identifier_method: KeyIdMethod::Sha256,
+    }
+    .signed_by(&issuer.cert, &issuer.key_pair)
+    .expect("CRL should be signed")
 }

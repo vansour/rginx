@@ -1,6 +1,11 @@
 VirtualHostConfig(
     server_names: ["app.example.com"],
     // For per-vhost certificate overrides, see the commented TLS examples in `example/conf.d/default.ron`.
+    // Example:
+    // tls: Some(VirtualHostTlsConfig(
+    //     cert_path: "/etc/rginx/certs/app.example.com.crt",
+    //     key_path: "/etc/rginx/certs/app.example.com.key",
+    // )),
     locations: [
         LocationConfig(
             matcher: Exact("/"),

@@ -107,20 +107,26 @@ LOCAL_HEAD="$(git rev-parse HEAD)"
 
 if [[ "${SKIP_FETCH}" -ne 1 ]]; then
     RELEASE_BRANCH="release/${TAG}"
-    run_step git fetch --no-tags origin main "+refs/heads/${RELEASE_BRANCH}:refs/remotes/origin/${RELEASE_BRANCH}"
+    run_step git fetch --no-tags origin main
 
     REMOTE_HEAD="$(git rev-parse origin/main)"
+    RELEASE_BRANCH_EXISTS=0
+    RELEASE_BRANCH_HEAD=""
+
+    if git ls-remote --exit-code --heads origin "${RELEASE_BRANCH}" >/dev/null 2>&1; then
+        run_step git fetch --no-tags origin "+refs/heads/${RELEASE_BRANCH}:refs/remotes/origin/${RELEASE_BRANCH}"
+        RELEASE_BRANCH_EXISTS=1
+        RELEASE_BRANCH_HEAD="$(git rev-parse "origin/${RELEASE_BRANCH}")"
+    fi
+
     if [[ "${PRERELEASE}" -eq 1 ]]; then
-        if git show-ref --verify --quiet "refs/remotes/origin/${RELEASE_BRANCH}"; then
-            RELEASE_BRANCH_HEAD="$(git rev-parse "origin/${RELEASE_BRANCH}")"
-            if git merge-base --is-ancestor "${LOCAL_HEAD}" origin/main; then
-                :
-            elif git merge-base --is-ancestor "${LOCAL_HEAD}" "origin/${RELEASE_BRANCH}"; then
-                :
-            else
-                die "prerelease tag ${TAG} must point to a commit reachable from origin/main (${REMOTE_HEAD}) or origin/${RELEASE_BRANCH} (${RELEASE_BRANCH_HEAD}), got ${LOCAL_HEAD}"
-            fi
-        elif ! git merge-base --is-ancestor "${LOCAL_HEAD}" origin/main; then
+        if git merge-base --is-ancestor "${LOCAL_HEAD}" origin/main; then
+            :
+        elif [[ "${RELEASE_BRANCH_EXISTS}" -eq 1 ]] && git merge-base --is-ancestor "${LOCAL_HEAD}" "origin/${RELEASE_BRANCH}"; then
+            :
+        elif [[ "${RELEASE_BRANCH_EXISTS}" -eq 1 ]]; then
+            die "prerelease tag ${TAG} must point to a commit reachable from origin/main (${REMOTE_HEAD}) or origin/${RELEASE_BRANCH} (${RELEASE_BRANCH_HEAD}), got ${LOCAL_HEAD}"
+        else
             die "prerelease tag ${TAG} must point to a commit reachable from origin/main (${REMOTE_HEAD}); release branch origin/${RELEASE_BRANCH} was not found, got ${LOCAL_HEAD}"
         fi
     else
@@ -143,7 +149,8 @@ WORKSPACE_VERSION="$(workspace_version)"
 [[ "${WORKSPACE_VERSION}" == "${VERSION}" ]] || die "workspace version ${WORKSPACE_VERSION} does not match tag ${TAG}"
 
 run_step cargo fmt --all --check
-run_step cargo test --workspace --locked
+run_step cargo test --workspace --locked -- --test-threads=1
+run_step ./scripts/run-tls-gate.sh
 run_step cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
 log "running: cargo run -p rginx -- --version"

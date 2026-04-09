@@ -130,6 +130,8 @@ fn validate_rejects_empty_server_tls_cert_path() {
         ocsp_staple_path: None,
         session_resumption: None,
         session_tickets: None,
+        session_cache_size: None,
+        session_ticket_count: None,
         client_auth: None,
     });
 
@@ -160,6 +162,8 @@ fn validate_rejects_empty_server_tls_versions_list() {
         ocsp_staple_path: None,
         session_resumption: None,
         session_tickets: None,
+        session_cache_size: None,
+        session_ticket_count: None,
         client_auth: None,
     });
 
@@ -181,6 +185,8 @@ fn validate_rejects_empty_server_tls_cipher_suites_list() {
         ocsp_staple_path: None,
         session_resumption: None,
         session_tickets: None,
+        session_cache_size: None,
+        session_ticket_count: None,
         client_auth: None,
     });
 
@@ -202,6 +208,8 @@ fn validate_rejects_incompatible_cipher_suites_and_versions() {
         ocsp_staple_path: None,
         session_resumption: None,
         session_tickets: None,
+        session_cache_size: None,
+        session_ticket_count: None,
         client_auth: None,
     });
 
@@ -223,11 +231,86 @@ fn validate_rejects_session_tickets_when_resumption_is_disabled() {
         ocsp_staple_path: None,
         session_resumption: Some(false),
         session_tickets: Some(true),
+        session_cache_size: None,
+        session_ticket_count: None,
         client_auth: None,
     });
 
     let error = validate(&config).expect_err("tickets require resumption");
     assert!(error.to_string().contains("session_tickets requires session_resumption"));
+}
+
+#[test]
+fn validate_rejects_session_cache_size_when_resumption_is_disabled() {
+    let mut config = base_config();
+    config.server.tls = Some(ServerTlsConfig {
+        cert_path: "server.crt".to_string(),
+        key_path: "server.key".to_string(),
+        additional_certificates: None,
+        versions: None,
+        cipher_suites: None,
+        key_exchange_groups: None,
+        alpn_protocols: None,
+        ocsp_staple_path: None,
+        session_resumption: Some(false),
+        session_tickets: None,
+        session_cache_size: Some(128),
+        session_ticket_count: None,
+        client_auth: None,
+    });
+
+    let error = validate(&config).expect_err("cache size requires resumption");
+    assert!(error.to_string().contains("session_cache_size cannot be set"));
+}
+
+#[test]
+fn validate_rejects_session_ticket_count_when_tickets_are_disabled() {
+    let mut config = base_config();
+    config.server.tls = Some(ServerTlsConfig {
+        cert_path: "server.crt".to_string(),
+        key_path: "server.key".to_string(),
+        additional_certificates: None,
+        versions: None,
+        cipher_suites: None,
+        key_exchange_groups: None,
+        alpn_protocols: None,
+        ocsp_staple_path: None,
+        session_resumption: Some(true),
+        session_tickets: Some(false),
+        session_cache_size: None,
+        session_ticket_count: Some(2),
+        client_auth: None,
+    });
+
+    let error = validate(&config).expect_err("ticket count cannot override disabled tickets");
+    assert!(
+        error
+            .to_string()
+            .contains("session_ticket_count cannot be set when session_tickets is disabled")
+    );
+}
+
+#[test]
+fn validate_rejects_zero_session_ticket_count() {
+    let mut config = base_config();
+    config.server.tls = Some(ServerTlsConfig {
+        cert_path: "server.crt".to_string(),
+        key_path: "server.key".to_string(),
+        additional_certificates: None,
+        versions: None,
+        cipher_suites: None,
+        key_exchange_groups: None,
+        alpn_protocols: None,
+        ocsp_staple_path: None,
+        session_resumption: Some(true),
+        session_tickets: Some(true),
+        session_cache_size: None,
+        session_ticket_count: Some(0),
+        client_auth: None,
+    });
+
+    let error = validate(&config).expect_err("zero ticket count should be rejected");
+    assert!(error.to_string().contains("session_ticket_count must be greater than 0"));
 }
 
 #[test]
@@ -622,12 +705,68 @@ fn validate_rejects_partial_upstream_mtls_identity() {
     config.upstreams[0].tls = Some(crate::model::UpstreamTlsConfig {
         verify: crate::model::UpstreamTlsModeConfig::NativeRoots,
         versions: None,
+        verify_depth: None,
+        crl_path: None,
         client_cert_path: Some("client.crt".to_string()),
         client_key_path: None,
     });
 
     let error = validate(&config).expect_err("partial upstream mTLS identity should fail");
     assert!(error.to_string().contains("requires both client_cert_path and client_key_path"));
+}
+
+#[test]
+fn validate_rejects_zero_upstream_verify_depth() {
+    let mut config = base_config();
+    config.upstreams[0].peers[0].url = "https://example.com".to_string();
+    config.upstreams[0].tls = Some(crate::model::UpstreamTlsConfig {
+        verify: crate::model::UpstreamTlsModeConfig::NativeRoots,
+        versions: None,
+        verify_depth: Some(0),
+        crl_path: None,
+        client_cert_path: None,
+        client_key_path: None,
+    });
+
+    let error = validate(&config).expect_err("zero upstream verify_depth should fail");
+    assert!(error.to_string().contains("verify_depth must be greater than 0"));
+}
+
+#[test]
+fn validate_rejects_upstream_crl_when_verification_is_disabled() {
+    let mut config = base_config();
+    config.upstreams[0].peers[0].url = "https://example.com".to_string();
+    config.upstreams[0].tls = Some(crate::model::UpstreamTlsConfig {
+        verify: crate::model::UpstreamTlsModeConfig::Insecure,
+        versions: None,
+        verify_depth: None,
+        crl_path: Some("revocations.pem".to_string()),
+        client_cert_path: None,
+        client_key_path: None,
+    });
+
+    let error = validate(&config).expect_err("upstream CRL should require verification");
+    assert!(
+        error.to_string().contains("verify_depth and crl_path require certificate verification")
+    );
+}
+
+#[test]
+fn validate_accepts_upstream_verify_depth_and_crl_with_custom_ca() {
+    let mut config = base_config();
+    config.upstreams[0].peers[0].url = "https://example.com".to_string();
+    config.upstreams[0].tls = Some(crate::model::UpstreamTlsConfig {
+        verify: crate::model::UpstreamTlsModeConfig::CustomCa {
+            ca_cert_path: "upstream-ca.pem".to_string(),
+        },
+        versions: None,
+        verify_depth: Some(2),
+        crl_path: Some("upstream.crl.pem".to_string()),
+        client_cert_path: None,
+        client_key_path: None,
+    });
+
+    validate(&config).expect("upstream verify_depth and CRL should validate");
 }
 
 #[test]
@@ -676,6 +815,8 @@ fn validate_accepts_explicit_listeners_when_legacy_listener_fields_are_empty() {
                 ocsp_staple_path: None,
                 session_resumption: None,
                 session_tickets: None,
+                session_cache_size: None,
+                session_ticket_count: None,
                 client_auth: None,
             }),
         },

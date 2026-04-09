@@ -35,6 +35,7 @@ pub async fn probe_upstream_peer(
                 upstream_sni_enabled = upstream.server_name,
                 upstream_server_name = upstream.server_name_override.as_deref().unwrap_or("-"),
                 upstream_verify = super::upstream_tls_verify_label(&upstream.tls),
+                upstream_tls_failure = super::classify_upstream_tls_failure(&error),
                 %error,
                 state = level,
                 "active health check could not acquire a proxy client"
@@ -55,6 +56,7 @@ pub async fn probe_upstream_peer(
                 upstream_sni_enabled = upstream.server_name,
                 upstream_server_name = upstream.server_name_override.as_deref().unwrap_or("-"),
                 upstream_verify = super::upstream_tls_verify_label(&upstream.tls),
+                upstream_tls_failure = super::classify_upstream_tls_failure(&error),
                 %error,
                 state = level,
                 "active health check request could not be built"
@@ -118,6 +120,7 @@ pub async fn probe_upstream_peer(
                         upstream_sni_enabled = upstream.server_name,
                         upstream_server_name = upstream.server_name_override.as_deref().unwrap_or("-"),
                         upstream_verify = super::upstream_tls_verify_label(&upstream.tls),
+                        upstream_tls_failure = super::classify_upstream_tls_failure(&error),
                         %error,
                         state = if transitioned { "unhealthy" } else { "still unhealthy" },
                         "active gRPC health check response could not be parsed"
@@ -180,6 +183,7 @@ pub async fn probe_upstream_peer(
                 upstream_sni_enabled = upstream.server_name,
                 upstream_server_name = upstream.server_name_override.as_deref().unwrap_or("-"),
                 upstream_verify = super::upstream_tls_verify_label(&upstream.tls),
+                upstream_tls_failure = super::classify_upstream_tls_failure(&error),
                 %error,
                 state = if transitioned { "unhealthy" } else { "still unhealthy" },
                 "active health check request failed"

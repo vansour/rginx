@@ -9,7 +9,11 @@ on:
 permissions:
   issues: write
   pull-requests: write
-  contents: write
+  contents: read
+
+concurrency:
+  group: pr-agent-${{ github.event.pull_request.number || github.event.issue.number || github.run_id }}
+  cancel-in-progress: true
 
 jobs:
   pr_agent_job:
@@ -17,8 +21,51 @@ jobs:
     runs-on: ubuntu-latest
     name: Run PR Agent
     steps:
+      - name: Check PR-Agent Eligibility
+        id: eligibility
+        uses: actions/github-script@v8
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            let shouldRun = true;
+            let reason = 'eligible event';
+
+            if (context.eventName === 'pull_request') {
+              const isFork = Boolean(context.payload.pull_request?.head?.repo?.fork);
+              shouldRun = !isFork;
+              reason = isFork ? 'fork pull request' : 'same-repository pull request';
+            } else if (context.eventName === 'issue_comment') {
+              if (context.payload.issue?.pull_request) {
+                const { data: pr } = await github.rest.pulls.get({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: context.payload.issue.number,
+                });
+                const isFork = Boolean(pr.head?.repo?.fork);
+                shouldRun = !isFork;
+                reason = isFork ? 'fork pull request comment' : 'same-repository pull request comment';
+              } else {
+                reason = 'issue comment';
+              }
+            }
+
+            core.setOutput('should_run', shouldRun ? 'true' : 'false');
+            core.setOutput('reason', reason);
+            core.notice(`PR-Agent ${shouldRun ? 'enabled' : 'skipped'}: ${reason}`);
+
       - id: pr-agent
-        uses: Codium-ai/pr-agent@main
+        if: ${{ steps.eligibility.outputs.should_run == 'true' }}
+        uses: qodo-ai/pr-agent@v0.31
         env:
           OPENAI_KEY: ${{ secrets.OPENAI_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # PR-Agent's GitHub Action runner reads auto-actions from env vars,
+          # not from repo settings sections like `[github_action_config]`.
+          GITHUB_ACTION_CONFIG.AUTO_DESCRIBE: "false"
+          GITHUB_ACTION_CONFIG.AUTO_REVIEW: "true"
+          GITHUB_ACTION_CONFIG.AUTO_IMPROVE: "false"
+          GITHUB_ACTION_CONFIG.PR_ACTIONS: '["opened", "reopened", "ready_for_review", "review_requested", "synchronize"]'
+
+      - name: Report Skipped PR-Agent
+        if: ${{ steps.eligibility.outputs.should_run != 'true' }}
+        run: 'echo "Skipping PR-Agent: ${{ steps.eligibility.outputs.reason }}"'

@@ -298,6 +298,8 @@ mod tests {
             server_name: true,
             server_name_override: None,
             tls_versions: None,
+            server_verify_depth: None,
+            server_crl_path: None,
             client_identity: None,
             request_timeout: Duration::from_secs(30),
             connect_timeout: Duration::from_secs(30),

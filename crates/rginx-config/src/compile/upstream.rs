@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,6 +14,14 @@ use crate::model::{
     TlsVersionConfig, UpstreamConfig, UpstreamLoadBalanceConfig, UpstreamProtocolConfig,
     UpstreamTlsConfig, UpstreamTlsModeConfig,
 };
+
+struct CompiledUpstreamTls {
+    verify_mode: UpstreamTls,
+    tls_versions: Option<Vec<TlsVersion>>,
+    server_verify_depth: Option<u32>,
+    server_crl_path: Option<PathBuf>,
+    client_identity: Option<ClientIdentity>,
+}
 
 pub(super) fn compile_upstreams(
     raw_upstreams: Vec<UpstreamConfig>,
@@ -56,7 +64,7 @@ pub(super) fn compile_upstreams(
                 .into_iter()
                 .map(|peer| compile_peer(&name, peer.url, peer.weight, peer.backup))
                 .collect::<Result<Vec<_>>>()?;
-            let (tls, tls_versions, client_identity) = compile_tls(&name, tls, base_dir)?;
+            let compiled_tls = compile_tls(&name, tls, base_dir)?;
             let protocol = compile_protocol(&name, protocol, &peers)?;
             let load_balance = compile_load_balance(load_balance);
             let server_name_override = compile_server_name_override(&name, server_name_override)?;
@@ -137,14 +145,16 @@ pub(super) fn compile_upstreams(
             let compiled = Arc::new(Upstream::new(
                 name.clone(),
                 peers,
-                tls,
+                compiled_tls.verify_mode,
                 UpstreamSettings {
                     protocol,
                     load_balance,
                     server_name: server_name.unwrap_or(true),
                     server_name_override,
-                    tls_versions,
-                    client_identity,
+                    tls_versions: compiled_tls.tls_versions,
+                    server_verify_depth: compiled_tls.server_verify_depth,
+                    server_crl_path: compiled_tls.server_crl_path,
+                    client_identity: compiled_tls.client_identity,
                     request_timeout,
                     connect_timeout,
                     write_timeout,
@@ -230,10 +240,12 @@ fn compile_tls(
     upstream_name: &str,
     tls: Option<UpstreamTlsConfig>,
     base_dir: &Path,
-) -> Result<(UpstreamTls, Option<Vec<TlsVersion>>, Option<ClientIdentity>)> {
+) -> Result<CompiledUpstreamTls> {
     let tls = tls.unwrap_or(UpstreamTlsConfig {
         verify: UpstreamTlsModeConfig::NativeRoots,
         versions: None,
+        verify_depth: None,
+        crl_path: None,
         client_cert_path: None,
         client_key_path: None,
     });
@@ -255,6 +267,20 @@ fn compile_tls(
     };
 
     let tls_versions = compile_tls_versions(&tls.versions);
+    let server_verify_depth = tls.verify_depth;
+    let server_crl_path = match tls.crl_path {
+        Some(path) => {
+            let resolved = super::resolve_path(base_dir, path);
+            if !resolved.is_file() {
+                return Err(Error::Config(format!(
+                    "upstream `{upstream_name}` CRL file `{}` does not exist or is not a file",
+                    resolved.display()
+                )));
+            }
+            Some(resolved)
+        }
+        None => None,
+    };
     let client_identity = match (tls.client_cert_path, tls.client_key_path) {
         (None, None) => None,
         (Some(cert_path), Some(key_path)) => {
@@ -283,7 +309,13 @@ fn compile_tls(
         }
     };
 
-    Ok((verify_mode, tls_versions, client_identity))
+    Ok(CompiledUpstreamTls {
+        verify_mode,
+        tls_versions,
+        server_verify_depth,
+        server_crl_path,
+        client_identity,
+    })
 }
 
 fn compile_tls_versions(versions: &Option<Vec<TlsVersionConfig>>) -> Option<Vec<TlsVersion>> {

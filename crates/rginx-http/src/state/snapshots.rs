@@ -23,6 +23,8 @@ pub struct HttpCountersSnapshot {
     pub downstream_tls_handshake_failures_missing_client_cert: u64,
     pub downstream_tls_handshake_failures_unknown_ca: u64,
     pub downstream_tls_handshake_failures_bad_certificate: u64,
+    pub downstream_tls_handshake_failures_certificate_revoked: u64,
+    pub downstream_tls_handshake_failures_verify_depth_exceeded: u64,
     pub downstream_tls_handshake_failures_other: u64,
 }
 
@@ -38,6 +40,8 @@ pub struct MtlsStatusSnapshot {
     pub handshake_failures_missing_client_cert: u64,
     pub handshake_failures_unknown_ca: u64,
     pub handshake_failures_bad_certificate: u64,
+    pub handshake_failures_certificate_revoked: u64,
+    pub handshake_failures_verify_depth_exceeded: u64,
     pub handshake_failures_other: u64,
 }
 
@@ -56,7 +60,13 @@ pub struct TlsListenerStatusSnapshot {
     pub default_certificate: Option<String>,
     pub versions: Option<Vec<String>>,
     pub alpn_protocols: Vec<String>,
+    pub session_resumption_enabled: Option<bool>,
+    pub session_tickets_enabled: Option<bool>,
+    pub session_cache_size: Option<usize>,
+    pub session_ticket_count: Option<usize>,
     pub client_auth_mode: Option<String>,
+    pub client_auth_verify_depth: Option<u32>,
+    pub client_auth_crl_configured: bool,
     pub sni_names: Vec<String>,
 }
 
@@ -88,9 +98,57 @@ pub struct TlsCertificateStatusSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TlsOcspStatusSnapshot {
+    pub scope: String,
+    pub cert_path: PathBuf,
+    pub ocsp_staple_path: Option<PathBuf>,
+    pub responder_urls: Vec<String>,
+    pub cache_loaded: bool,
+    pub cache_size_bytes: Option<usize>,
+    pub cache_modified_unix_ms: Option<u64>,
+    pub auto_refresh_enabled: bool,
+    pub last_refresh_unix_ms: Option<u64>,
+    pub refreshes_total: u64,
+    pub failures_total: u64,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TlsVhostBindingSnapshot {
+    pub listener_name: String,
+    pub vhost_id: String,
+    pub server_names: Vec<String>,
+    pub certificate_scopes: Vec<String>,
+    pub fingerprints: Vec<String>,
+    pub default_selected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TlsSniBindingSnapshot {
+    pub listener_name: String,
+    pub server_name: String,
+    pub certificate_scopes: Vec<String>,
+    pub fingerprints: Vec<String>,
+    pub default_selected: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TlsDefaultCertificateBindingSnapshot {
+    pub listener_name: String,
+    pub server_name: String,
+    pub certificate_scopes: Vec<String>,
+    pub fingerprints: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TlsRuntimeSnapshot {
     pub listeners: Vec<TlsListenerStatusSnapshot>,
     pub certificates: Vec<TlsCertificateStatusSnapshot>,
+    pub ocsp: Vec<TlsOcspStatusSnapshot>,
+    pub vhost_bindings: Vec<TlsVhostBindingSnapshot>,
+    pub sni_bindings: Vec<TlsSniBindingSnapshot>,
+    pub sni_conflicts: Vec<TlsSniBindingSnapshot>,
+    pub default_certificate_bindings: Vec<TlsDefaultCertificateBindingSnapshot>,
     pub reload_boundary: TlsReloadBoundarySnapshot,
     pub expiring_certificate_count: usize,
 }
@@ -105,6 +163,9 @@ pub enum ReloadOutcomeSnapshot {
 pub struct ReloadResultSnapshot {
     pub finished_at_unix_ms: u64,
     pub outcome: ReloadOutcomeSnapshot,
+    pub tls_certificate_changes: Vec<String>,
+    pub active_revision: u64,
+    pub rollback_preserved_revision: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -204,8 +265,22 @@ pub struct RuntimeStatusSnapshot {
     pub tls_enabled: bool,
     pub tls: TlsRuntimeSnapshot,
     pub mtls: MtlsStatusSnapshot,
+    pub upstream_tls: Vec<UpstreamTlsStatusSnapshot>,
     pub active_connections: usize,
     pub reload: ReloadStatusSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpstreamTlsStatusSnapshot {
+    pub upstream_name: String,
+    pub protocol: String,
+    pub verify_mode: String,
+    pub tls_versions: Option<Vec<String>>,
+    pub server_name_enabled: bool,
+    pub server_name_override: Option<String>,
+    pub verify_depth: Option<u32>,
+    pub crl_configured: bool,
+    pub client_identity_configured: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,6 +295,7 @@ pub struct UpstreamPeerStatsSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpstreamStatsSnapshot {
     pub upstream_name: String,
+    pub tls: UpstreamTlsStatusSnapshot,
     pub downstream_requests_total: u64,
     pub peer_attempts_total: u64,
     pub peer_successes_total: u64,
@@ -233,6 +309,10 @@ pub struct UpstreamStatsSnapshot {
     pub payload_too_large_responses_total: u64,
     pub unsupported_media_type_responses_total: u64,
     pub no_healthy_peers_total: u64,
+    pub tls_failures_unknown_ca_total: u64,
+    pub tls_failures_bad_certificate_total: u64,
+    pub tls_failures_certificate_revoked_total: u64,
+    pub tls_failures_verify_depth_exceeded_total: u64,
     pub recent_60s: RecentUpstreamStatsSnapshot,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recent_window: Option<RecentUpstreamStatsSnapshot>,

@@ -970,6 +970,8 @@ mod tests {
                         ca_cert_path: "dev-ca.pem".to_string(),
                     },
                     versions: Some(vec![crate::model::TlsVersionConfig::Tls13]),
+                    verify_depth: None,
+                    crl_path: None,
                     client_cert_path: None,
                     client_key_path: None,
                 }),
@@ -1103,6 +1105,8 @@ mod tests {
                         ca_cert_path: "upstream-ca.pem".to_string(),
                     },
                     versions: Some(vec![crate::model::TlsVersionConfig::Tls13]),
+                    verify_depth: None,
+                    crl_path: None,
                     client_cert_path: Some("client.crt".to_string()),
                     client_key_path: Some("client.key".to_string()),
                 }),
@@ -1297,6 +1301,8 @@ mod tests {
                 tls: Some(crate::model::UpstreamTlsConfig {
                     verify: crate::model::UpstreamTlsModeConfig::Insecure,
                     versions: None,
+                    verify_depth: None,
+                    crl_path: None,
                     client_cert_path: None,
                     client_key_path: None,
                 }),
@@ -1656,6 +1662,8 @@ mod tests {
                     ocsp_staple_path: None,
                     session_resumption: None,
                     session_tickets: None,
+                    session_cache_size: None,
+                    session_ticket_count: None,
                     client_auth: None,
                 }),
             },
@@ -1732,8 +1740,10 @@ mod tests {
                     key_exchange_groups: Some(vec![TlsKeyExchangeGroupConfig::Secp256r1]),
                     alpn_protocols: Some(vec!["http/1.1".to_string()]),
                     ocsp_staple_path: None,
-                    session_resumption: Some(false),
+                    session_resumption: Some(true),
                     session_tickets: Some(false),
+                    session_cache_size: Some(512),
+                    session_ticket_count: None,
                     client_auth: None,
                 }),
             },
@@ -1761,8 +1771,10 @@ mod tests {
         assert_eq!(tls.cipher_suites, Some(vec![rginx_core::TlsCipherSuite::Tls13Aes128GcmSha256]));
         assert_eq!(tls.key_exchange_groups, Some(vec![rginx_core::TlsKeyExchangeGroup::Secp256r1]));
         assert_eq!(tls.alpn_protocols, Some(vec!["http/1.1".to_string()]));
-        assert_eq!(tls.session_resumption, Some(false));
+        assert_eq!(tls.session_resumption, Some(true));
         assert_eq!(tls.session_tickets, Some(false));
+        assert_eq!(tls.session_cache_size, Some(512));
+        assert_eq!(tls.session_ticket_count, None);
 
         fs::remove_file(cert_path).expect("temp cert file should be removed");
         fs::remove_file(key_path).expect("temp key file should be removed");

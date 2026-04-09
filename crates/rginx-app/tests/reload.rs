@@ -8,6 +8,8 @@ use std::process::{Command, Output};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use rcgen::CertifiedKey;
+
 mod support;
 
 use support::{READY_ROUTE_CONFIG, ServerHarness, reserve_loopback_addr};
@@ -139,6 +141,14 @@ fn sighup_status_reports_restart_required_fields_for_startup_boundary_changes() 
     );
     let stdout = String::from_utf8_lossy(&status_output.stdout);
     assert!(stdout.contains("reload_failures=1"), "stdout should report reload failure: {stdout}");
+    assert!(
+        stdout.contains("last_reload_active_revision=0"),
+        "stdout should report the preserved active revision: {stdout}"
+    );
+    assert!(
+        stdout.contains("last_reload_rollback_revision=0"),
+        "stdout should report rollback preservation: {stdout}"
+    );
     assert!(
         stdout.contains("reload requires restart because these startup-boundary fields changed"),
         "stdout should explain restart boundary: {stdout}"
@@ -273,6 +283,54 @@ fn nginx_style_restart_command_keeps_old_process_running_when_replacement_fails(
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!(read_pid_file(&server.pid_path()), old_pid);
     server.wait_for_body(listen_addr, "stable runtime\n", Duration::from_secs(5));
+
+    server.shutdown_and_wait(Duration::from_secs(5));
+}
+
+#[test]
+fn sighup_status_reports_tls_certificate_changes_after_rotation() {
+    let _guard = test_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let listen_addr = reserve_loopback_addr();
+    let initial_cert = generate_cert("localhost");
+    let rotated_cert = generate_cert("localhost");
+    let mut server = ServerHarness::spawn("rginx-reload-tls-rotation", |temp_dir| {
+        let cert_path = temp_dir.join("server.crt");
+        let key_path = temp_dir.join("server.key");
+        fs::write(&cert_path, initial_cert.cert.pem()).expect("initial cert should be written");
+        fs::write(&key_path, initial_cert.key_pair.serialize_pem())
+            .expect("initial key should be written");
+        tls_return_config(listen_addr, &cert_path, &key_path)
+    });
+
+    server.wait_for_https_ready(listen_addr, Duration::from_secs(5));
+
+    let rotated_cert_path = server.temp_dir().join("server-rotated.crt");
+    let rotated_key_path = server.temp_dir().join("server-rotated.key");
+    fs::write(&rotated_cert_path, rotated_cert.cert.pem()).expect("rotated cert should be written");
+    fs::write(&rotated_key_path, rotated_cert.key_pair.serialize_pem())
+        .expect("rotated key should be written");
+    fs::write(
+        server.config_path(),
+        tls_return_config(listen_addr, &rotated_cert_path, &rotated_key_path),
+    )
+    .expect("rotated TLS config should be written");
+    server.send_signal(libc::SIGHUP);
+
+    server.wait_for_https_ready(listen_addr, Duration::from_secs(5));
+    let status_output = run_cli_command(server.config_path(), ["status"]);
+    assert!(
+        status_output.status.success(),
+        "rginx status should succeed after certificate rotation reload: {}",
+        render_output(&status_output)
+    );
+    let stdout = String::from_utf8_lossy(&status_output.stdout);
+    assert!(stdout.contains("reload_successes=1"), "stdout should report reload success: {stdout}");
+    assert!(
+        stdout.contains("last_reload_tls_certificate_changes=")
+            && stdout.contains("listener:default:")
+            && stdout.contains("->"),
+        "stdout should report TLS certificate changes: {stdout}"
+    );
 
     server.shutdown_and_wait(Duration::from_secs(5));
 }
@@ -509,6 +567,31 @@ fn render_output(output: &Output) -> String {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     )
+}
+
+fn generate_cert(hostname: &str) -> CertifiedKey {
+    let cert = rcgen::generate_simple_self_signed(vec![hostname.to_string()])
+        .expect("self-signed certificate should generate");
+    CertifiedKey { cert: cert.cert, key_pair: cert.key_pair }
+}
+
+fn tls_return_config(listen_addr: SocketAddr, cert_path: &Path, key_path: &Path) -> String {
+    format!(
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n        server_names: [\"localhost\"],\n        tls: Some(ServerTlsConfig(\n            cert_path: {:?},\n            key_path: {:?},\n        )),\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Return(\n                status: 200,\n                location: \"\",\n                body: Some(\"tls reload\\n\"),\n            ),\n        ),\n    ],\n)\n",
+        listen_addr.to_string(),
+        cert_path.display().to_string(),
+        key_path.display().to_string(),
+        ready_route = READY_ROUTE_CONFIG,
+    )
+}
+
+fn run_cli_command<'a>(config_path: &Path, args: impl IntoIterator<Item = &'a str>) -> Output {
+    let mut command = Command::new(binary_path());
+    command.arg("--config").arg(config_path);
+    for arg in args {
+        command.arg(arg);
+    }
+    command.output().expect("rginx command should run")
 }
 
 fn test_lock() -> &'static Mutex<()> {

@@ -362,7 +362,11 @@ mod tests {
             proxy_protocol_source_addr: None,
             tls_client_identity: Some(TlsClientIdentity {
                 subject: Some("CN=test-client".to_string()),
+                issuer: Some("CN=test-ca".to_string()),
+                serial_number: Some("01".to_string()),
                 san_dns_names: vec!["client.example.com".to_string()],
+                chain_length: 2,
+                chain_subjects: vec!["CN=test-client".to_string(), "CN=test-ca".to_string()],
             }),
             tls_version: Some("TLS1.3".to_string()),
             tls_alpn: Some("h2".to_string()),

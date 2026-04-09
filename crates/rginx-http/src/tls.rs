@@ -8,16 +8,27 @@ use rginx_core::{
 use rustls::SignatureScheme;
 use rustls::crypto::CryptoProvider;
 use rustls::crypto::SupportedKxGroup;
+use rustls::pki_types::{CertificateDer, UnixTime};
 use rustls::server::ClientHello;
 use rustls::server::NoServerSessionStorage;
+use rustls::server::ProducesTickets;
 use rustls::server::ResolvesServerCert;
+use rustls::server::ServerSessionMemoryCache;
 use rustls::server::WebPkiClientVerifier;
+use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::{ServerConfig, SupportedCipherSuite};
 use tokio_rustls::TlsAcceptor;
 
-mod certificates;
+pub(crate) mod certificates;
 
-use self::certificates::{load_ca_cert_store, load_certified_keys, load_vhost_certified_keys};
+use self::certificates::{
+    load_ca_cert_store, load_certificate_revocation_lists, load_certified_keys,
+    load_vhost_certified_keys,
+};
+
+pub fn build_ocsp_request_for_certificate(path: &std::path::Path) -> Result<Vec<u8>> {
+    certificates::build_ocsp_request_for_certificate(path)
+}
 
 /// SNI 证书解析器，支持基于域名选择证书
 #[derive(Debug)]
@@ -118,25 +129,30 @@ pub fn build_tls_acceptor(
     let mut config = if let Some(client_auth) = default_tls.and_then(|tls| tls.client_auth.as_ref())
     {
         let roots = load_ca_cert_store(&client_auth.ca_cert_path)?;
+        let verifier_builder = if let Some(crl_path) = &client_auth.crl_path {
+            WebPkiClientVerifier::builder(roots.into())
+                .with_crls(load_certificate_revocation_lists(crl_path)?)
+        } else {
+            WebPkiClientVerifier::builder(roots.into())
+        };
         let verifier = match client_auth.mode {
-            ServerClientAuthMode::Optional => WebPkiClientVerifier::builder(roots.into())
-                .allow_unauthenticated()
-                .build()
-                .map_err(|error| {
+            ServerClientAuthMode::Optional => {
+                verifier_builder.allow_unauthenticated().build().map_err(|error| {
                     Error::Server(format!(
                         "failed to build optional client verifier from `{}`: {error}",
                         client_auth.ca_cert_path.display()
                     ))
-                })?,
-            ServerClientAuthMode::Required => {
-                WebPkiClientVerifier::builder(roots.into()).build().map_err(|error| {
-                    Error::Server(format!(
-                        "failed to build client verifier from `{}`: {error}",
-                        client_auth.ca_cert_path.display()
-                    ))
                 })?
             }
+            ServerClientAuthMode::Required => verifier_builder.build().map_err(|error| {
+                Error::Server(format!(
+                    "failed to build client verifier from `{}`: {error}",
+                    client_auth.ca_cert_path.display()
+                ))
+            })?,
         };
+        let verifier =
+            Arc::new(DepthLimitedClientVerifier::new(verifier, client_auth.verify_depth));
         builder.with_client_cert_verifier(verifier).with_cert_resolver(resolver)
     } else {
         builder.with_no_client_auth().with_cert_resolver(resolver)
@@ -197,22 +213,117 @@ fn apply_session_policy(config: &mut ServerConfig, tls: Option<&ServerTls>) -> R
 
     if matches!(tls.session_resumption, Some(false)) {
         config.session_storage = Arc::new(NoServerSessionStorage {});
+        config.ticketer = Arc::new(DisabledTicketProducer {});
         config.send_tls13_tickets = 0;
         return Ok(());
     }
 
-    if matches!(tls.session_tickets, Some(true)) {
+    if let Some(session_cache_size) = tls.session_cache_size {
+        config.session_storage = if session_cache_size == 0 {
+            Arc::new(NoServerSessionStorage {})
+        } else {
+            ServerSessionMemoryCache::new(session_cache_size)
+        };
+    }
+
+    if matches!(tls.session_tickets, Some(false)) {
+        config.ticketer = Arc::new(DisabledTicketProducer {});
+        config.send_tls13_tickets = 0;
+    } else if matches!(tls.session_tickets, Some(true)) || tls.session_ticket_count.is_some() {
         config.ticketer = rustls::crypto::aws_lc_rs::Ticketer::new().map_err(|error| {
             Error::Server(format!("failed to enable server TLS session tickets: {error}"))
         })?;
-        if config.send_tls13_tickets == 0 {
-            config.send_tls13_tickets = 2;
-        }
-    } else if matches!(tls.session_tickets, Some(false)) {
-        config.send_tls13_tickets = 0;
+        config.send_tls13_tickets = tls.session_ticket_count.unwrap_or(2);
     }
 
     Ok(())
+}
+
+#[derive(Debug)]
+struct DisabledTicketProducer {}
+
+impl ProducesTickets for DisabledTicketProducer {
+    fn enabled(&self) -> bool {
+        false
+    }
+
+    fn lifetime(&self) -> u32 {
+        0
+    }
+
+    fn encrypt(&self, _plain: &[u8]) -> Option<Vec<u8>> {
+        None
+    }
+
+    fn decrypt(&self, _cipher: &[u8]) -> Option<Vec<u8>> {
+        None
+    }
+}
+
+#[derive(Debug)]
+struct DepthLimitedClientVerifier {
+    inner: Arc<dyn ClientCertVerifier>,
+    verify_depth: Option<u32>,
+}
+
+impl DepthLimitedClientVerifier {
+    fn new(inner: Arc<dyn ClientCertVerifier>, verify_depth: Option<u32>) -> Self {
+        Self { inner, verify_depth }
+    }
+}
+
+impl ClientCertVerifier for DepthLimitedClientVerifier {
+    fn offer_client_auth(&self) -> bool {
+        self.inner.offer_client_auth()
+    }
+
+    fn client_auth_mandatory(&self) -> bool {
+        self.inner.client_auth_mandatory()
+    }
+
+    fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
+        self.inner.root_hint_subjects()
+    }
+
+    fn verify_client_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        now: UnixTime,
+    ) -> std::result::Result<ClientCertVerified, rustls::Error> {
+        if let Some(max_depth) = self.verify_depth {
+            let presented_chain_depth = 1usize.saturating_add(intermediates.len());
+            if presented_chain_depth > max_depth as usize {
+                return Err(rustls::Error::General(format!(
+                    "client certificate chain exceeds configured verify_depth `{max_depth}`: got {presented_chain_depth} certificate(s)"
+                )));
+            }
+        }
+
+        self.inner.verify_client_cert(end_entity, intermediates, now)
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.inner.supported_verify_schemes()
+    }
 }
 
 fn rustls_versions(versions: &[TlsVersion]) -> Vec<&'static rustls::SupportedProtocolVersion> {
@@ -346,6 +457,8 @@ mod tests {
             ocsp_staple_path: None,
             session_resumption: None,
             session_tickets: None,
+            session_cache_size: None,
+            session_ticket_count: None,
             client_auth: None,
         };
         let default_vhost = VirtualHost {
@@ -399,6 +512,8 @@ mod tests {
             ocsp_staple_path: None,
             session_resumption: None,
             session_tickets: None,
+            session_cache_size: None,
+            session_ticket_count: None,
             client_auth: None,
         };
         let default_vhost = VirtualHost {
@@ -543,6 +658,8 @@ mod tests {
             ocsp_staple_path: None,
             session_resumption: None,
             session_tickets: None,
+            session_cache_size: None,
+            session_ticket_count: None,
             client_auth: None,
         };
         let default_vhost = VirtualHost {
@@ -578,6 +695,8 @@ mod tests {
             ocsp_staple_path: None,
             session_resumption: Some(false),
             session_tickets: Some(false),
+            session_cache_size: Some(0),
+            session_ticket_count: None,
             client_auth: None,
         };
         let default_vhost = VirtualHost {
@@ -611,6 +730,8 @@ mod tests {
             ocsp_staple_path: None,
             session_resumption: Some(true),
             session_tickets: Some(true),
+            session_cache_size: Some(2),
+            session_ticket_count: Some(4),
             client_auth: None,
         };
         let default_vhost = VirtualHost {
@@ -625,7 +746,16 @@ mod tests {
             .expect("TLS acceptor should exist");
         assert!(acceptor.config().session_storage.can_cache());
         assert!(acceptor.config().ticketer.enabled());
-        assert_eq!(acceptor.config().send_tls13_tickets, 2);
+        assert_eq!(acceptor.config().send_tls13_tickets, 4);
+
+        let storage = &acceptor.config().session_storage;
+        assert!(storage.put(vec![0x01], vec![0x0a]));
+        assert!(storage.put(vec![0x02], vec![0x0b]));
+        assert!(storage.put(vec![0x03], vec![0x0c]));
+        let count = storage.get(&[0x01]).iter().count()
+            + storage.get(&[0x02]).iter().count()
+            + storage.get(&[0x03]).iter().count();
+        assert!(count < 3);
 
         remove_test_cert_pair(cert_path, key_path, temp_dir);
     }

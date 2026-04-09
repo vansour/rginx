@@ -142,6 +142,8 @@ pub(super) fn compile_server_tls(
         ocsp_staple_path,
         session_resumption,
         session_tickets,
+        session_cache_size,
+        session_ticket_count,
         client_auth,
     }) = tls
     else {
@@ -167,12 +169,28 @@ pub(super) fn compile_server_tls(
                 )));
             }
 
+            let crl_path = match client_auth.crl_path {
+                Some(path) => {
+                    let resolved = super::resolve_path(base_dir, path);
+                    if !resolved.is_file() {
+                        return Err(Error::Config(format!(
+                            "server TLS client auth CRL file `{}` does not exist or is not a file",
+                            resolved.display()
+                        )));
+                    }
+                    Some(resolved)
+                }
+                None => None,
+            };
+
             Some(ServerClientAuthPolicy {
                 mode: match client_auth.mode {
                     ServerClientAuthModeConfig::Optional => ServerClientAuthMode::Optional,
                     ServerClientAuthModeConfig::Required => ServerClientAuthMode::Required,
                 },
                 ca_cert_path,
+                verify_depth: client_auth.verify_depth,
+                crl_path,
             })
         }
         None => None,
@@ -189,6 +207,8 @@ pub(super) fn compile_server_tls(
         ocsp_staple_path: compiled_identity.ocsp_staple_path,
         session_resumption,
         session_tickets,
+        session_cache_size: compile_session_cache_size(session_cache_size)?,
+        session_ticket_count: compile_session_ticket_count(session_ticket_count)?,
         client_auth,
     }))
 }
@@ -395,6 +415,30 @@ fn compile_alpn_protocols(alpn_protocols: Option<Vec<String>>) -> Option<Vec<Str
     alpn_protocols.map(|protocols| {
         protocols.into_iter().map(|protocol| protocol.trim().to_string()).collect()
     })
+}
+
+fn compile_session_cache_size(session_cache_size: Option<u64>) -> Result<Option<usize>> {
+    session_cache_size
+        .map(|size| {
+            usize::try_from(size).map_err(|_| {
+                Error::Config(format!(
+                    "server TLS session_cache_size `{size}` exceeds platform limits"
+                ))
+            })
+        })
+        .transpose()
+}
+
+fn compile_session_ticket_count(session_ticket_count: Option<u64>) -> Result<Option<usize>> {
+    session_ticket_count
+        .map(|count| {
+            usize::try_from(count).map_err(|_| {
+                Error::Config(format!(
+                    "server TLS session_ticket_count `{count}` exceeds platform limits"
+                ))
+            })
+        })
+        .transpose()
 }
 
 struct CompiledCertificateMaterial {

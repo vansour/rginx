@@ -17,7 +17,7 @@ use tokio::task::{JoinError, JoinSet};
 
 const INSTALLED_CONFIG_PATH: &str = "/etc/rginx/rginx.ron";
 const INSTALLED_ADMIN_SOCKET_PATH: &str = "/run/rginx/admin.sock";
-const ADMIN_SNAPSHOT_SCHEMA_VERSION: u32 = 7;
+const ADMIN_SNAPSHOT_SCHEMA_VERSION: u32 = 10;
 const DEFAULT_RECENT_WINDOW_SECS: u64 = 60;
 const EXTENDED_RECENT_WINDOW_SECS: u64 = 300;
 
