@@ -59,6 +59,12 @@ jobs:
         env:
           OPENAI_KEY: ${{ secrets.OPENAI_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # PR-Agent's GitHub Action runner reads auto-actions from env vars,
+          # not from repo settings sections like `[github_action_config]`.
+          GITHUB_ACTION_CONFIG.AUTO_DESCRIBE: "false"
+          GITHUB_ACTION_CONFIG.AUTO_REVIEW: "true"
+          GITHUB_ACTION_CONFIG.AUTO_IMPROVE: "false"
+          GITHUB_ACTION_CONFIG.PR_ACTIONS: '["opened", "reopened", "ready_for_review", "review_requested", "synchronize"]'
 
       - name: Report Skipped PR-Agent
         if: ${{ steps.eligibility.outputs.should_run != 'true' }}

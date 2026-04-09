@@ -2,12 +2,6 @@
 model = "gpt-5.4"
 fallback_models = ["gpt-5.3-codex"]
 
-[github_action_config]
-auto_review = true
-auto_describe = false
-auto_improve = false
-pr_actions = ["opened", "reopened", "ready_for_review", "review_requested", "synchronize"]
-
 [pr_reviewer]
 extra_instructions = """
 请使用中文回复，并优先给出高信号、可执行的代码审查意见。
