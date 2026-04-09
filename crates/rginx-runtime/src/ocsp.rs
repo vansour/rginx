@@ -251,10 +251,9 @@ async fn handle_ocsp_refresh_failure(
     match clear_invalid_ocsp_cache_file(cert_path, cache_path).await {
         Ok(true) => (format!("{error}; cleared stale OCSP cache"), true),
         Ok(false) => (error, false),
-        Err(clear_error) => (
-            format!("{error}; additionally failed to clear stale OCSP cache: {clear_error}"),
-            false,
-        ),
+        Err(clear_error) => {
+            (format!("{error}; additionally failed to clear stale OCSP cache: {clear_error}"), true)
+        }
     }
 }
 

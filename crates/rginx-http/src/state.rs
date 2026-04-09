@@ -2052,7 +2052,17 @@ fn inspect_ocsp_cache_file(
 ) -> (bool, Option<usize>, Option<u64>, Option<String>) {
     let metadata = match std::fs::metadata(path) {
         Ok(metadata) => metadata,
-        Err(_) => return (false, None, None, None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return (false, None, None, None);
+        }
+        Err(error) => {
+            return (
+                false,
+                None,
+                None,
+                Some(format!("failed to stat OCSP cache file `{}`: {error}", path.display())),
+            );
+        }
     };
     let size = usize::try_from(metadata.len()).ok();
     let modified = metadata.modified().ok().map(unix_time_ms);
