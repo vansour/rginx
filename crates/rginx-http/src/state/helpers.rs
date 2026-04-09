@@ -11,6 +11,7 @@ fn prepare_state(
         .map(|listener| {
             let tls_acceptor = build_tls_acceptor(
                 listener.server.tls.as_ref(),
+                listener.server.default_certificate.as_deref(),
                 listener.tls_enabled(),
                 &config.default_vhost,
                 &config.vhosts,
@@ -58,10 +59,7 @@ pub fn validate_config_transition(current: &ConfigSnapshot, next: &ConfigSnapsho
 
     for (current_listener, next_listener) in current.listeners.iter().zip(next.listeners.iter()) {
         if current_listener.id != next_listener.id {
-            changes.push(format!(
-                "listener id {} -> {}",
-                current_listener.id, next_listener.id
-            ));
+            changes.push(format!("listener id {} -> {}", current_listener.id, next_listener.id));
         }
 
         if current_listener.server.listen_addr != next_listener.server.listen_addr {
@@ -93,7 +91,8 @@ pub fn validate_config_transition(current: &ConfigSnapshot, next: &ConfigSnapsho
     }
 
     Err(Error::Config(format!(
-        "reload requires restart because these startup-boundary fields changed: {}",
+        "reload requires restart because these startup-boundary fields changed (restart-boundary: {}): {}",
+        tls_restart_required_fields().join(", "),
         changes.join("; ")
     )))
 }

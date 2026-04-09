@@ -65,6 +65,14 @@ pub use health::{PeerHealthSnapshot, UpstreamHealthSnapshot};
 use self::common::*;
 use grpc_web::GrpcWebMode;
 
+pub(super) fn upstream_tls_verify_label(tls: &UpstreamTls) -> &'static str {
+    match tls {
+        UpstreamTls::NativeRoots => "native_roots",
+        UpstreamTls::CustomCa { .. } => "custom_ca",
+        UpstreamTls::Insecure => "insecure",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{HashMap, VecDeque};
@@ -86,8 +94,8 @@ mod tests {
     use http_body_util::{BodyExt, StreamBody};
     use hyper::body::Frame;
     use rginx_core::{
-        ActiveHealthCheck, Error, Upstream, UpstreamLoadBalance, UpstreamPeer, UpstreamProtocol,
-        UpstreamSettings, UpstreamTls,
+        ActiveHealthCheck, ClientIdentity, Error, TlsVersion, Upstream, UpstreamLoadBalance,
+        UpstreamPeer, UpstreamProtocol, UpstreamSettings, UpstreamTls,
     };
 
     use super::clients::{ProxyClients, load_custom_ca_store};
@@ -579,6 +587,7 @@ mod tests {
 
         let server = rginx_core::Server {
             listen_addr: "127.0.0.1:8080".parse().unwrap(),
+            default_certificate: None,
             trusted_proxies: Vec::new(),
             keep_alive: true,
             max_headers: None,
@@ -670,6 +679,7 @@ mod tests {
 
         let server = rginx_core::Server {
             listen_addr: "127.0.0.1:8080".parse().unwrap(),
+            default_certificate: None,
             trusted_proxies: Vec::new(),
             keep_alive: true,
             max_headers: None,
@@ -719,6 +729,44 @@ mod tests {
     }
 
     #[test]
+    fn proxy_clients_cache_distinguishes_server_name_toggle() {
+        let peer = UpstreamPeer {
+            url: "https://127.0.0.1:9443".to_string(),
+            scheme: "https".to_string(),
+            authority: "127.0.0.1:9443".to_string(),
+            weight: 1,
+            backup: false,
+        };
+        let default_sni = Upstream::new(
+            "default-sni".to_string(),
+            vec![peer.clone()],
+            UpstreamTls::NativeRoots,
+            upstream_settings(UpstreamProtocol::Auto),
+        );
+        let no_sni = Upstream::new(
+            "no-sni".to_string(),
+            vec![peer.clone()],
+            UpstreamTls::NativeRoots,
+            UpstreamSettings { server_name: false, ..upstream_settings(UpstreamProtocol::Auto) },
+        );
+        let duplicate = Upstream::new(
+            "duplicate".to_string(),
+            vec![peer],
+            UpstreamTls::NativeRoots,
+            upstream_settings(UpstreamProtocol::Auto),
+        );
+
+        let snapshot = snapshot_with_upstreams([
+            ("default-sni".to_string(), Arc::new(default_sni)),
+            ("no-sni".to_string(), Arc::new(no_sni)),
+            ("duplicate".to_string(), Arc::new(duplicate)),
+        ]);
+
+        let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+        assert_eq!(clients.cached_client_count(), 2);
+    }
+
+    #[test]
     fn proxy_clients_cache_distinguishes_upstream_protocol() {
         let peer = UpstreamPeer {
             url: "https://127.0.0.1:9443".to_string(),
@@ -748,6 +796,7 @@ mod tests {
 
         let server = rginx_core::Server {
             listen_addr: "127.0.0.1:8080".parse().unwrap(),
+            default_certificate: None,
             trusted_proxies: Vec::new(),
             keep_alive: true,
             max_headers: None,
@@ -789,6 +838,202 @@ mod tests {
 
         let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
         assert_eq!(clients.cached_client_count(), 3);
+    }
+
+    #[test]
+    fn proxy_clients_cache_distinguishes_tls_versions() {
+        let peer = UpstreamPeer {
+            url: "https://127.0.0.1:9443".to_string(),
+            scheme: "https".to_string(),
+            authority: "127.0.0.1:9443".to_string(),
+            weight: 1,
+            backup: false,
+        };
+        let tls12 = Upstream::new(
+            "tls12".to_string(),
+            vec![peer.clone()],
+            UpstreamTls::NativeRoots,
+            UpstreamSettings {
+                tls_versions: Some(vec![TlsVersion::Tls12]),
+                ..upstream_settings(UpstreamProtocol::Auto)
+            },
+        );
+        let tls13 = Upstream::new(
+            "tls13".to_string(),
+            vec![peer.clone()],
+            UpstreamTls::NativeRoots,
+            UpstreamSettings {
+                tls_versions: Some(vec![TlsVersion::Tls13]),
+                ..upstream_settings(UpstreamProtocol::Auto)
+            },
+        );
+        let duplicate = Upstream::new(
+            "duplicate".to_string(),
+            vec![peer],
+            UpstreamTls::NativeRoots,
+            UpstreamSettings {
+                tls_versions: Some(vec![TlsVersion::Tls12]),
+                ..upstream_settings(UpstreamProtocol::Auto)
+            },
+        );
+
+        let server = rginx_core::Server {
+            listen_addr: "127.0.0.1:8080".parse().unwrap(),
+            default_certificate: None,
+            trusted_proxies: Vec::new(),
+            keep_alive: true,
+            max_headers: None,
+            max_request_body_bytes: None,
+            max_connections: None,
+            header_read_timeout: None,
+            request_body_read_timeout: None,
+            response_write_timeout: None,
+            access_log_format: None,
+            tls: None,
+        };
+        let snapshot = rginx_core::ConfigSnapshot {
+            runtime: rginx_core::RuntimeSettings {
+                shutdown_timeout: std::time::Duration::from_secs(1),
+                worker_threads: None,
+                accept_workers: 1,
+            },
+            server: server.clone(),
+            listeners: vec![rginx_core::Listener {
+                id: "default".to_string(),
+                name: "default".to_string(),
+                server,
+                tls_termination_enabled: false,
+                proxy_protocol_enabled: false,
+            }],
+            default_vhost: rginx_core::VirtualHost {
+                id: "server".to_string(),
+                server_names: Vec::new(),
+                routes: Vec::new(),
+                tls: None,
+            },
+            vhosts: Vec::new(),
+            upstreams: HashMap::from([
+                ("tls12".to_string(), Arc::new(tls12)),
+                ("tls13".to_string(), Arc::new(tls13)),
+                ("duplicate".to_string(), Arc::new(duplicate)),
+            ]),
+        };
+
+        let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+        assert_eq!(clients.cached_client_count(), 2);
+    }
+
+    #[test]
+    fn proxy_clients_cache_distinguishes_client_identity() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("rginx-client-identity-cache-{unique}"));
+        std::fs::create_dir_all(&dir).expect("temp dir should be created");
+        let first_cert = dir.join("first.crt");
+        let first_key = dir.join("first.key");
+        let second_cert = dir.join("second.crt");
+        let second_key = dir.join("second.key");
+        std::fs::write(&first_cert, TEST_SERVER_CERT_PEM).expect("first cert should be written");
+        std::fs::write(&first_key, TEST_SERVER_KEY_PEM).expect("first key should be written");
+        std::fs::write(&second_cert, TEST_SERVER_CERT_PEM).expect("second cert should be written");
+        std::fs::write(&second_key, TEST_SERVER_KEY_PEM).expect("second key should be written");
+
+        let peer = UpstreamPeer {
+            url: "https://127.0.0.1:9443".to_string(),
+            scheme: "https".to_string(),
+            authority: "127.0.0.1:9443".to_string(),
+            weight: 1,
+            backup: false,
+        };
+        let first = Upstream::new(
+            "first".to_string(),
+            vec![peer.clone()],
+            UpstreamTls::NativeRoots,
+            UpstreamSettings {
+                client_identity: Some(ClientIdentity {
+                    cert_path: first_cert.clone(),
+                    key_path: first_key.clone(),
+                }),
+                ..upstream_settings(UpstreamProtocol::Auto)
+            },
+        );
+        let second = Upstream::new(
+            "second".to_string(),
+            vec![peer.clone()],
+            UpstreamTls::NativeRoots,
+            UpstreamSettings {
+                client_identity: Some(ClientIdentity {
+                    cert_path: second_cert.clone(),
+                    key_path: second_key.clone(),
+                }),
+                ..upstream_settings(UpstreamProtocol::Auto)
+            },
+        );
+        let duplicate = Upstream::new(
+            "duplicate".to_string(),
+            vec![peer],
+            UpstreamTls::NativeRoots,
+            UpstreamSettings {
+                client_identity: Some(ClientIdentity {
+                    cert_path: first_cert.clone(),
+                    key_path: first_key.clone(),
+                }),
+                ..upstream_settings(UpstreamProtocol::Auto)
+            },
+        );
+
+        let server = rginx_core::Server {
+            listen_addr: "127.0.0.1:8080".parse().unwrap(),
+            default_certificate: None,
+            trusted_proxies: Vec::new(),
+            keep_alive: true,
+            max_headers: None,
+            max_request_body_bytes: None,
+            max_connections: None,
+            header_read_timeout: None,
+            request_body_read_timeout: None,
+            response_write_timeout: None,
+            access_log_format: None,
+            tls: None,
+        };
+        let snapshot = rginx_core::ConfigSnapshot {
+            runtime: rginx_core::RuntimeSettings {
+                shutdown_timeout: std::time::Duration::from_secs(1),
+                worker_threads: None,
+                accept_workers: 1,
+            },
+            server: server.clone(),
+            listeners: vec![rginx_core::Listener {
+                id: "default".to_string(),
+                name: "default".to_string(),
+                server,
+                tls_termination_enabled: false,
+                proxy_protocol_enabled: false,
+            }],
+            default_vhost: rginx_core::VirtualHost {
+                id: "server".to_string(),
+                server_names: Vec::new(),
+                routes: Vec::new(),
+                tls: None,
+            },
+            vhosts: Vec::new(),
+            upstreams: HashMap::from([
+                ("first".to_string(), Arc::new(first)),
+                ("second".to_string(), Arc::new(second)),
+                ("duplicate".to_string(), Arc::new(duplicate)),
+            ]),
+        };
+
+        let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+        assert_eq!(clients.cached_client_count(), 2);
+
+        std::fs::remove_file(first_cert).expect("first cert should be removed");
+        std::fs::remove_file(first_key).expect("first key should be removed");
+        std::fs::remove_file(second_cert).expect("second cert should be removed");
+        std::fs::remove_file(second_key).expect("second key should be removed");
+        std::fs::remove_dir(dir).expect("temp dir should be removed");
     }
 
     #[tokio::test]
@@ -1353,6 +1598,7 @@ mod tests {
 
         let server = rginx_core::Server {
             listen_addr: "127.0.0.1:8080".parse().unwrap(),
+            default_certificate: None,
             trusted_proxies: Vec::new(),
             keep_alive: true,
             max_headers: None,
@@ -1500,7 +1746,10 @@ mod tests {
         UpstreamSettings {
             protocol,
             load_balance: UpstreamLoadBalance::RoundRobin,
+            server_name: true,
             server_name_override: None,
+            tls_versions: None,
+            client_identity: None,
             request_timeout: Duration::from_secs(30),
             connect_timeout: Duration::from_secs(30),
             write_timeout: Duration::from_secs(30),
@@ -1541,6 +1790,7 @@ mod tests {
     fn snapshot_with_upstream(name: &str, upstream: Arc<Upstream>) -> rginx_core::ConfigSnapshot {
         let server = rginx_core::Server {
             listen_addr: "127.0.0.1:8080".parse().unwrap(),
+            default_certificate: None,
             trusted_proxies: Vec::new(),
             keep_alive: true,
             max_headers: None,
@@ -1577,6 +1827,48 @@ mod tests {
         }
     }
 
+    fn snapshot_with_upstreams(
+        upstreams: impl IntoIterator<Item = (String, Arc<Upstream>)>,
+    ) -> rginx_core::ConfigSnapshot {
+        let server = rginx_core::Server {
+            listen_addr: "127.0.0.1:8080".parse().unwrap(),
+            default_certificate: None,
+            trusted_proxies: Vec::new(),
+            keep_alive: true,
+            max_headers: None,
+            max_request_body_bytes: None,
+            max_connections: None,
+            header_read_timeout: None,
+            request_body_read_timeout: None,
+            response_write_timeout: None,
+            access_log_format: None,
+            tls: None,
+        };
+        rginx_core::ConfigSnapshot {
+            runtime: rginx_core::RuntimeSettings {
+                shutdown_timeout: Duration::from_secs(1),
+                worker_threads: None,
+                accept_workers: 1,
+            },
+            server: server.clone(),
+            listeners: vec![rginx_core::Listener {
+                id: "default".to_string(),
+                name: "default".to_string(),
+                server,
+                tls_termination_enabled: false,
+                proxy_protocol_enabled: false,
+            }],
+            default_vhost: rginx_core::VirtualHost {
+                id: "server".to_string(),
+                server_names: Vec::new(),
+                routes: Vec::new(),
+                tls: None,
+            },
+            vhosts: Vec::new(),
+            upstreams: HashMap::from_iter(upstreams),
+        }
+    }
+
     fn snapshot_with_upstream_policy(
         name: &str,
         peers: Vec<UpstreamPeer>,
@@ -1595,6 +1887,7 @@ mod tests {
         );
         let server = rginx_core::Server {
             listen_addr: "127.0.0.1:8080".parse().unwrap(),
+            default_certificate: None,
             trusted_proxies: Vec::new(),
             keep_alive: true,
             max_headers: None,
@@ -1655,6 +1948,7 @@ mod tests {
         );
         let server = rginx_core::Server {
             listen_addr: "127.0.0.1:8080".parse().unwrap(),
+            default_certificate: None,
             trusted_proxies: Vec::new(),
             keep_alive: true,
             max_headers: None,
@@ -1749,4 +2043,6 @@ mod tests {
     }
 
     const TEST_CA_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\nMIIDXTCCAkWgAwIBAgIJAOIvDiVb18eVMA0GCSqGSIb3DQEBCwUAMEUxCzAJBgNV\nBAYTAkFVMRMwEQYDVQQIDApTb21lLVN0YXRlMSEwHwYDVQQKDBhJbnRlcm5ldCBX\naWRnaXRzIFB0eSBMdGQwHhcNMTYwODE0MTY1NjExWhcNMjYwODEyMTY1NjExWjBF\nMQswCQYDVQQGEwJBVTETMBEGA1UECAwKU29tZS1TdGF0ZTEhMB8GA1UECgwYSW50\nZXJuZXQgV2lkZ2l0cyBQdHkgTHRkMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIB\nCgKCAQEArVHWFn52Lbl1l59exduZntVSZyDYpzDND+S2LUcO6fRBWhV/1Kzox+2G\nZptbuMGmfI3iAnb0CFT4uC3kBkQQlXonGATSVyaFTFR+jq/lc0SP+9Bd7SBXieIV\neIXlY1TvlwIvj3Ntw9zX+scTA4SXxH6M0rKv9gTOub2vCMSHeF16X8DQr4XsZuQr\n7Cp7j1I4aqOJyap5JTl5ijmG8cnu0n+8UcRlBzy99dLWJG0AfI3VRJdWpGTNVZ92\naFff3RpK3F/WI2gp3qV1ynRAKuvmncGC3LDvYfcc2dgsc1N6Ffq8GIrkgRob6eBc\nklDHp1d023Lwre+VaVDSo1//Y72UFwIDAQABo1AwTjAdBgNVHQ4EFgQUbNOlA6sN\nXyzJjYqciKeId7g3/ZowHwYDVR0jBBgwFoAUbNOlA6sNXyzJjYqciKeId7g3/Zow\nDAYDVR0TBAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAVVaR5QWLZIRR4Dw6TSBn\nBQiLpBSXN6oAxdDw6n4PtwW6CzydaA+creiK6LfwEsiifUfQe9f+T+TBSpdIYtMv\nZ2H2tjlFX8VrjUFvPrvn5c28CuLI0foBgY8XGSkR2YMYzWw2jPEq3Th/KM5Catn3\nAFm3bGKWMtGPR4v+90chEN0jzaAmJYRrVUh9vea27bOCn31Nse6XXQPmSI6Gyncy\nOAPUsvPClF3IjeL1tmBotWqSGn1cYxLo+Lwjk22A9h6vjcNQRyZF2VLVvtwYrNU3\nmwJ6GCLsLHpwW/yjyvn8iEltnJvByM/eeRnfXV6WDObyiZsE/n6DxIRJodQzFqy9\nGA==\n-----END CERTIFICATE-----\n";
+    const TEST_SERVER_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\nMIIDCTCCAfGgAwIBAgIUE+LKmhgfKie/YU/anMKv+Xgr5dYwDQYJKoZIhvcNAQEL\nBQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI2MDMyMDE1MzIzMloXDTI2MDMy\nMTE1MzIzMlowFDESMBAGA1UEAwwJbG9jYWxob3N0MIIBIjANBgkqhkiG9w0BAQEF\nAAOCAQ8AMIIBCgKCAQEAvxn1IYqOORs2Ys/6Ou54G3alu+wZOeGkPy/ZLYUuO0pK\nh1WgvPvwGF3w3XZdEPhB0JXhqwqoz60SwGQJtEM9GGRHVnBV+BeE/4L1XO4H6Gz5\npMKFaCcJPwO4IrspjffpKQ217K9l9vbjK31tJKwOGaQ//icyzF13xuUvZms67PNc\nBqhZQchld9s90InnL3fCS+J58s9pjE0qlTr7bodvOXaYBxboDlBh4YV7PW/wjwBo\ngUwcbiJvtrRnY7ZlRi/C/bZUTGJ5kO7vSlAgMh2KL1DyY2Ws06n5KUNgpAuIjmew\nMtuYJ9H2xgRMrMjgWSD8N/RRFut4xnpm7jlRepzvwwIDAQABo1MwUTAdBgNVHQ4EFgQUIezWZPz8VZj6n2znyGWv76RsGMswHwYDVR0jBBgwFoAUIezWZPz8VZj6n2znyGWv76RsGMswDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAbngqp7KT2JaXL8BYQGThBZwRODtqv/jXwc34zE3DPPRb1F3i8/odH7+9ZLse35Hj0/gpqFQ0DNdOuNlrbrvny208P1OcBe2hYWOSsRGyhZpM5Ai+DkuHheZfhNKvWKdbFn8+yfeyN3orSsin9QG0Yx3eqtO/1/6D5TtLsnY2/yPV/j0pv2GCCuB0kcKfygOQTYW6JrmYzeFeR/bnQM/lOM49leURdgC/x7tveNG7KRvD0X85M9iuT9/0+VSu6yAkcEi5x23C/Chzu7FFVxwZRHD+RshbV4QTPewhi17EJwroMYFpjGUHJVUfzo6W6bsWqA59CiiHI87NdBZv4JUCOQ==\n-----END CERTIFICATE-----\n";
+    const TEST_SERVER_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQC/GfUhio45GzZi\nz/o67ngbdqW77Bk54aQ/L9kthS47SkqHVaC8+/AYXfDddl0Q+EHQleGrCqjPrRLA\nZAm0Qz0YZEdWcFX4F4T/gvVc7gfobPmkwoVoJwk/A7giuymN9+kpDbXsr2X29uMr\nfW0krA4ZpD/+JzLMXXfG5S9mazrs81wGqFlByGV32z3Qiecvd8JL4nnyz2mMTSqV\nOvtuh285dpgHFugOUGHhhXs9b/CPAGiBTBxuIm+2tGdjtmVGL8L9tlRMYnmQ7u9K\nUCAyHYovUPJjZazTqfkpQ2CkC4iOZ7Ay25gn0fbGBEysyOBZIPw39FEW63jGembu\nOVF6nO/DAgMBAAECggEAKLC7v80TVHiFX4veQZ8WRu7AAmAWzPrNMMEc8rLZcblz\nXhau956DdITILTevQFZEGUhYuUU3RaUaCYojgNUSVLfBctfPjlhfstItMYDjgSt3\nCox6wH8TWm4NzqNgiUCgzmODeaatROUz4MY/r5/NDsuo7pJlIBvEzb5uFdY+QUZ/\nR5gHRiD2Q3wCODe8zQRfTZGo7jCimAuWTLurWZl6ax/4TjWbXCD6DTuUo81cW3vy\nne6tEetHcABRO7uDoBYXk12pCgqFZzjLMnKJjQM+OYnSj6DoWjOu1drT5YyRLGDj\nfzN8V0aKRkOYoZ5QZOua8pByOyQElJnM16vkPtHgPQKBgQD6SOUNWEghvYIGM/lx\nc22/zjvDjeaGC3qSmlpQYN5MGuDoszeDBZ+rMTmHqJ9FcHYkLQnUI7ZkHhRGt/wQ\n/w3CroJjPBgKk+ipy2cBHSI+z+U20xjYzE8hxArWbXG1G4rDt5AIz68IQPsfkVND\nktkDABDaU+KwBPx8fjeeqtRQxQKBgQDDdxdLB1XcfZMX0KEP5RfA8ar1nW41TUAl\nTCOLaXIQbHZ0BeW7USE9mK8OKnVALZGJ+rpxvYFPZ5MWxchpb/cuIwXjLoN6uZVb\nfx4Hho+2iCfhcEKzs8XZW48duKIfhx13BiILLf/YaHAWFs9UfVcQog4Qx03guyMr\n7k9bFuy25wKBgQDpE48zAT6TJS775dTrAQp4b28aan/93pyz/8gRSFRb3UALlDIi\n8s7BluKzYaWI/fUXNVYM14EX9Sb+wIGdtlezL94+2Yyt9RXbYY8361Cj2+jiSG3A\nH2ulzzIkg+E7Pj3Yi443lmiysAjsWeKHcC5l697F4w6cytfye3wCZ6W23QKBgQC0\n9tX+5aytdSkwnDvxXlVOka+ItBcri/i+Ty59TMOIxxInuqoFcUhIIcq4X8CsCUQ8\nLYBd+2fznt3D8JrqWvnKoiw6N38MqTLJQfgIWaFGCep6QhfPDbo30RfAGYcnj01N\nO8Va+lxq+84B9V5AR8bKpG5HRG4qiLc4XerkV2YSswKBgDt9eerSBZyLVwfku25Y\nfrh+nEjUZy81LdlpJmu/bfa2FfItzBqDZPskkJJW9ON82z/ejGFbsU48RF7PJUMr\nGimE33QeTDToGozHCq0QOd0SMfsVkOQR+EROdmY52UIYAYgQUfI1FQ9lLsw10wlQ\nD11SHTL7b9pefBWfW73I7ttV\n-----END PRIVATE KEY-----\n";
 }

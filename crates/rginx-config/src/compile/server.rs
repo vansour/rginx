@@ -3,9 +3,17 @@ use std::path::Path;
 use std::time::Duration;
 
 use ipnet::IpNet;
-use rginx_core::{AccessLogFormat, Error, Listener, Result, Server, ServerTls};
+use rginx_core::{
+    AccessLogFormat, Error, Listener, Result, Server, ServerCertificateBundle,
+    ServerClientAuthMode, ServerClientAuthPolicy, ServerTls, TlsCipherSuite, TlsKeyExchangeGroup,
+    TlsVersion, VirtualHostTls,
+};
 
-use crate::model::{ListenerConfig, ServerConfig, ServerTlsConfig};
+use crate::model::{
+    ListenerConfig, ServerCertificateBundleConfig, ServerClientAuthModeConfig, ServerConfig,
+    ServerTlsConfig, TlsCipherSuiteConfig, TlsKeyExchangeGroupConfig, TlsVersionConfig,
+    VirtualHostTlsConfig,
+};
 
 pub(super) struct CompiledServer {
     pub listener: Listener,
@@ -20,6 +28,7 @@ pub(super) fn compile_legacy_server(
     let ServerConfig {
         listen,
         proxy_protocol,
+        default_certificate,
         server_names,
         trusted_proxies,
         keep_alive,
@@ -37,6 +46,7 @@ pub(super) fn compile_legacy_server(
     let compiled = compile_server_fields(
         ServerFieldConfig {
             listen,
+            default_certificate,
             trusted_proxies,
             keep_alive,
             max_headers,
@@ -75,6 +85,7 @@ pub(super) fn compile_listeners(
                 name,
                 listen,
                 proxy_protocol,
+                default_certificate,
                 trusted_proxies,
                 keep_alive,
                 max_headers,
@@ -90,6 +101,7 @@ pub(super) fn compile_listeners(
             let compiled = compile_server_fields(
                 ServerFieldConfig {
                     listen,
+                    default_certificate,
                     trusted_proxies,
                     keep_alive,
                     max_headers,
@@ -119,27 +131,97 @@ pub(super) fn compile_server_tls(
     tls: Option<ServerTlsConfig>,
     base_dir: &Path,
 ) -> Result<Option<ServerTls>> {
-    let Some(ServerTlsConfig { cert_path, key_path }) = tls else {
+    let Some(ServerTlsConfig {
+        cert_path,
+        key_path,
+        additional_certificates,
+        versions,
+        cipher_suites,
+        key_exchange_groups,
+        alpn_protocols,
+        ocsp_staple_path,
+        session_resumption,
+        session_tickets,
+        client_auth,
+    }) = tls
+    else {
         return Ok(None);
     };
 
-    let cert_path = super::resolve_path(base_dir, cert_path);
-    if !cert_path.is_file() {
-        return Err(Error::Config(format!(
-            "server TLS certificate file `{}` does not exist or is not a file",
-            cert_path.display()
-        )));
-    }
+    let compiled_identity = compile_certificate_material(
+        base_dir,
+        cert_path,
+        key_path,
+        additional_certificates,
+        ocsp_staple_path,
+        "server TLS",
+    )?;
 
-    let key_path = super::resolve_path(base_dir, key_path);
-    if !key_path.is_file() {
-        return Err(Error::Config(format!(
-            "server TLS private key file `{}` does not exist or is not a file",
-            key_path.display()
-        )));
-    }
+    let client_auth = match client_auth {
+        Some(client_auth) => {
+            let ca_cert_path = super::resolve_path(base_dir, client_auth.ca_cert_path);
+            if !ca_cert_path.is_file() {
+                return Err(Error::Config(format!(
+                    "server TLS client auth CA file `{}` does not exist or is not a file",
+                    ca_cert_path.display()
+                )));
+            }
 
-    Ok(Some(ServerTls { cert_path, key_path }))
+            Some(ServerClientAuthPolicy {
+                mode: match client_auth.mode {
+                    ServerClientAuthModeConfig::Optional => ServerClientAuthMode::Optional,
+                    ServerClientAuthModeConfig::Required => ServerClientAuthMode::Required,
+                },
+                ca_cert_path,
+            })
+        }
+        None => None,
+    };
+
+    Ok(Some(ServerTls {
+        cert_path: compiled_identity.cert_path,
+        key_path: compiled_identity.key_path,
+        additional_certificates: compiled_identity.additional_certificates,
+        versions: compile_tls_versions(versions),
+        cipher_suites: compile_tls_cipher_suites(cipher_suites),
+        key_exchange_groups: compile_tls_key_exchange_groups(key_exchange_groups),
+        alpn_protocols: compile_alpn_protocols(alpn_protocols),
+        ocsp_staple_path: compiled_identity.ocsp_staple_path,
+        session_resumption,
+        session_tickets,
+        client_auth,
+    }))
+}
+
+pub(super) fn compile_virtual_host_tls(
+    tls: Option<VirtualHostTlsConfig>,
+    base_dir: &Path,
+) -> Result<Option<VirtualHostTls>> {
+    let Some(VirtualHostTlsConfig {
+        cert_path,
+        key_path,
+        additional_certificates,
+        ocsp_staple_path,
+    }) = tls
+    else {
+        return Ok(None);
+    };
+
+    let compiled_identity = compile_certificate_material(
+        base_dir,
+        cert_path,
+        key_path,
+        additional_certificates,
+        ocsp_staple_path,
+        "vhost TLS",
+    )?;
+
+    Ok(Some(VirtualHostTls {
+        cert_path: compiled_identity.cert_path,
+        key_path: compiled_identity.key_path,
+        additional_certificates: compiled_identity.additional_certificates,
+        ocsp_staple_path: compiled_identity.ocsp_staple_path,
+    }))
 }
 
 struct CompiledServerFields {
@@ -149,6 +231,7 @@ struct CompiledServerFields {
 
 struct ServerFieldConfig {
     listen: String,
+    default_certificate: Option<String>,
     trusted_proxies: Vec<String>,
     keep_alive: Option<bool>,
     max_headers: Option<u64>,
@@ -167,6 +250,7 @@ fn compile_server_fields(
 ) -> Result<CompiledServerFields> {
     let ServerFieldConfig {
         listen,
+        default_certificate,
         trusted_proxies,
         keep_alive,
         max_headers,
@@ -183,6 +267,7 @@ fn compile_server_fields(
     Ok(CompiledServerFields {
         server: Server {
             listen_addr: listen.parse()?,
+            default_certificate: compile_default_certificate(default_certificate),
             trusted_proxies: compile_trusted_proxies(trusted_proxies)?,
             keep_alive: keep_alive.unwrap_or(true),
             max_headers: compile_max_headers(max_headers)?,
@@ -196,6 +281,10 @@ fn compile_server_fields(
         },
         server_tls,
     })
+}
+
+fn compile_default_certificate(default_certificate: Option<String>) -> Option<String> {
+    default_certificate.map(|name| name.trim().to_lowercase())
 }
 
 fn compile_max_headers(max_headers: Option<u64>) -> Result<Option<usize>> {
@@ -232,6 +321,174 @@ fn compile_max_connections(max_connections: Option<u64>) -> Result<Option<usize>
 
 fn compile_access_log_format(access_log_format: Option<String>) -> Result<Option<AccessLogFormat>> {
     access_log_format.map(AccessLogFormat::parse).transpose()
+}
+
+fn compile_tls_versions(versions: Option<Vec<TlsVersionConfig>>) -> Option<Vec<TlsVersion>> {
+    versions.map(|versions| {
+        versions
+            .into_iter()
+            .map(|version| match version {
+                TlsVersionConfig::Tls12 => TlsVersion::Tls12,
+                TlsVersionConfig::Tls13 => TlsVersion::Tls13,
+            })
+            .collect()
+    })
+}
+
+fn compile_tls_cipher_suites(
+    cipher_suites: Option<Vec<TlsCipherSuiteConfig>>,
+) -> Option<Vec<TlsCipherSuite>> {
+    cipher_suites.map(|cipher_suites| {
+        cipher_suites
+            .into_iter()
+            .map(|suite| match suite {
+                TlsCipherSuiteConfig::Tls13Aes256GcmSha384 => TlsCipherSuite::Tls13Aes256GcmSha384,
+                TlsCipherSuiteConfig::Tls13Aes128GcmSha256 => TlsCipherSuite::Tls13Aes128GcmSha256,
+                TlsCipherSuiteConfig::Tls13Chacha20Poly1305Sha256 => {
+                    TlsCipherSuite::Tls13Chacha20Poly1305Sha256
+                }
+                TlsCipherSuiteConfig::TlsEcdheEcdsaWithAes256GcmSha384 => {
+                    TlsCipherSuite::TlsEcdheEcdsaWithAes256GcmSha384
+                }
+                TlsCipherSuiteConfig::TlsEcdheEcdsaWithAes128GcmSha256 => {
+                    TlsCipherSuite::TlsEcdheEcdsaWithAes128GcmSha256
+                }
+                TlsCipherSuiteConfig::TlsEcdheEcdsaWithChacha20Poly1305Sha256 => {
+                    TlsCipherSuite::TlsEcdheEcdsaWithChacha20Poly1305Sha256
+                }
+                TlsCipherSuiteConfig::TlsEcdheRsaWithAes256GcmSha384 => {
+                    TlsCipherSuite::TlsEcdheRsaWithAes256GcmSha384
+                }
+                TlsCipherSuiteConfig::TlsEcdheRsaWithAes128GcmSha256 => {
+                    TlsCipherSuite::TlsEcdheRsaWithAes128GcmSha256
+                }
+                TlsCipherSuiteConfig::TlsEcdheRsaWithChacha20Poly1305Sha256 => {
+                    TlsCipherSuite::TlsEcdheRsaWithChacha20Poly1305Sha256
+                }
+            })
+            .collect()
+    })
+}
+
+fn compile_tls_key_exchange_groups(
+    groups: Option<Vec<TlsKeyExchangeGroupConfig>>,
+) -> Option<Vec<TlsKeyExchangeGroup>> {
+    groups.map(|groups| {
+        groups
+            .into_iter()
+            .map(|group| match group {
+                TlsKeyExchangeGroupConfig::X25519 => TlsKeyExchangeGroup::X25519,
+                TlsKeyExchangeGroupConfig::Secp256r1 => TlsKeyExchangeGroup::Secp256r1,
+                TlsKeyExchangeGroupConfig::Secp384r1 => TlsKeyExchangeGroup::Secp384r1,
+                TlsKeyExchangeGroupConfig::X25519Mlkem768 => TlsKeyExchangeGroup::X25519Mlkem768,
+                TlsKeyExchangeGroupConfig::Secp256r1Mlkem768 => {
+                    TlsKeyExchangeGroup::Secp256r1Mlkem768
+                }
+                TlsKeyExchangeGroupConfig::Mlkem768 => TlsKeyExchangeGroup::Mlkem768,
+                TlsKeyExchangeGroupConfig::Mlkem1024 => TlsKeyExchangeGroup::Mlkem1024,
+            })
+            .collect()
+    })
+}
+
+fn compile_alpn_protocols(alpn_protocols: Option<Vec<String>>) -> Option<Vec<String>> {
+    alpn_protocols.map(|protocols| {
+        protocols.into_iter().map(|protocol| protocol.trim().to_string()).collect()
+    })
+}
+
+struct CompiledCertificateMaterial {
+    cert_path: std::path::PathBuf,
+    key_path: std::path::PathBuf,
+    additional_certificates: Vec<ServerCertificateBundle>,
+    ocsp_staple_path: Option<std::path::PathBuf>,
+}
+
+fn compile_certificate_material(
+    base_dir: &Path,
+    cert_path: String,
+    key_path: String,
+    additional_certificates: Option<Vec<ServerCertificateBundleConfig>>,
+    ocsp_staple_path: Option<String>,
+    label: &str,
+) -> Result<CompiledCertificateMaterial> {
+    let cert_path = super::resolve_path(base_dir, cert_path);
+    if !cert_path.is_file() {
+        return Err(Error::Config(format!(
+            "{label} certificate file `{}` does not exist or is not a file",
+            cert_path.display()
+        )));
+    }
+
+    let key_path = super::resolve_path(base_dir, key_path);
+    if !key_path.is_file() {
+        return Err(Error::Config(format!(
+            "{label} private key file `{}` does not exist or is not a file",
+            key_path.display()
+        )));
+    }
+
+    let ocsp_staple_path = compile_ocsp_staple_path(base_dir, ocsp_staple_path, label)?;
+    let additional_certificates = additional_certificates
+        .unwrap_or_default()
+        .into_iter()
+        .map(|bundle| {
+            compile_certificate_bundle(base_dir, bundle, &format!("{label} additional certificate"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(CompiledCertificateMaterial {
+        cert_path,
+        key_path,
+        additional_certificates,
+        ocsp_staple_path,
+    })
+}
+
+fn compile_certificate_bundle(
+    base_dir: &Path,
+    bundle: ServerCertificateBundleConfig,
+    label: &str,
+) -> Result<ServerCertificateBundle> {
+    let cert_path = super::resolve_path(base_dir, bundle.cert_path);
+    if !cert_path.is_file() {
+        return Err(Error::Config(format!(
+            "{label} file `{}` does not exist or is not a file",
+            cert_path.display()
+        )));
+    }
+
+    let key_path = super::resolve_path(base_dir, bundle.key_path);
+    if !key_path.is_file() {
+        return Err(Error::Config(format!(
+            "{label} private key file `{}` does not exist or is not a file",
+            key_path.display()
+        )));
+    }
+
+    let ocsp_staple_path = compile_ocsp_staple_path(base_dir, bundle.ocsp_staple_path, label)?;
+
+    Ok(ServerCertificateBundle { cert_path, key_path, ocsp_staple_path })
+}
+
+fn compile_ocsp_staple_path(
+    base_dir: &Path,
+    path: Option<String>,
+    label: &str,
+) -> Result<Option<std::path::PathBuf>> {
+    match path {
+        Some(path) => {
+            let resolved = super::resolve_path(base_dir, path);
+            if !resolved.is_file() {
+                return Err(Error::Config(format!(
+                    "{label} OCSP staple file `{}` does not exist or is not a file",
+                    resolved.display()
+                )));
+            }
+            Ok(Some(resolved))
+        }
+        None => Ok(None),
+    }
 }
 
 fn compile_trusted_proxies(values: Vec<String>) -> Result<Vec<IpNet>> {

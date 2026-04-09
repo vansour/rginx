@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use super::tls::{ClientIdentity, TlsVersion};
+
 #[derive(Debug, Clone)]
 pub struct ActiveHealthCheck {
     pub path: String,
@@ -50,7 +52,10 @@ impl UpstreamLoadBalance {
 pub struct UpstreamSettings {
     pub protocol: UpstreamProtocol,
     pub load_balance: UpstreamLoadBalance,
+    pub server_name: bool,
     pub server_name_override: Option<String>,
+    pub tls_versions: Option<Vec<TlsVersion>>,
+    pub client_identity: Option<ClientIdentity>,
     pub request_timeout: Duration,
     pub connect_timeout: Duration,
     pub write_timeout: Duration,
@@ -75,7 +80,10 @@ pub struct Upstream {
     pub tls: UpstreamTls,
     pub protocol: UpstreamProtocol,
     pub load_balance: UpstreamLoadBalance,
+    pub server_name: bool,
     pub server_name_override: Option<String>,
+    pub tls_versions: Option<Vec<TlsVersion>>,
+    pub client_identity: Option<ClientIdentity>,
     pub request_timeout: Duration,
     pub connect_timeout: Duration,
     pub write_timeout: Duration,
@@ -107,7 +115,10 @@ impl Upstream {
             tls,
             protocol: settings.protocol,
             load_balance: settings.load_balance,
+            server_name: settings.server_name,
             server_name_override: settings.server_name_override,
+            tls_versions: settings.tls_versions,
+            client_identity: settings.client_identity,
             request_timeout: settings.request_timeout,
             connect_timeout: settings.connect_timeout,
             write_timeout: settings.write_timeout,

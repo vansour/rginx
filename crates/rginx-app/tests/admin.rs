@@ -7,6 +7,8 @@ use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use rcgen::CertifiedKey;
+
 mod support;
 
 use rginx_runtime::admin::{
@@ -54,12 +56,13 @@ fn snapshot_command_returns_aggregate_json_snapshot() {
     let AdminResponse::Snapshot(snapshot) = response else {
         panic!("admin socket should return aggregate snapshot");
     };
-    assert_eq!(snapshot.schema_version, 3);
+    assert_eq!(snapshot.schema_version, 7);
     assert!(snapshot.captured_at_unix_ms > 0);
     assert!(snapshot.pid > 0);
     assert_eq!(snapshot.binary_version, env!("CARGO_PKG_VERSION"));
     assert_eq!(snapshot.included_modules, rginx_http::SnapshotModule::all());
     assert_eq!(snapshot.status.as_ref().map(|status| status.listen_addr), Some(listen_addr));
+    assert_eq!(snapshot.status.as_ref().map(|status| status.tls.listeners.len()), Some(1));
     assert!(snapshot.counters.as_ref().map(|c| c.downstream_requests).unwrap_or(0) >= 2);
     assert_eq!(snapshot.traffic.as_ref().map(|t| t.listeners.len()), Some(1));
     assert_eq!(snapshot.peer_health.as_ref().map(Vec::len), Some(1));
@@ -70,15 +73,75 @@ fn snapshot_command_returns_aggregate_json_snapshot() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let snapshot: serde_json::Value =
         serde_json::from_str(&stdout).expect("snapshot command should print valid JSON");
-    assert_eq!(snapshot["schema_version"], serde_json::Value::from(3));
+    assert_eq!(snapshot["schema_version"], serde_json::Value::from(7));
     assert!(snapshot["captured_at_unix_ms"].as_u64().unwrap_or(0) > 0);
     assert!(snapshot["pid"].as_u64().unwrap_or(0) > 0);
     assert_eq!(snapshot["binary_version"], serde_json::Value::from(env!("CARGO_PKG_VERSION")));
     assert_eq!(snapshot["status"]["listen_addr"], serde_json::Value::from(listen_addr.to_string()));
+    assert_eq!(snapshot["status"]["tls"]["listeners"].as_array().map(Vec::len), Some(1));
     assert!(snapshot["counters"]["downstream_requests"].as_u64().unwrap_or(0) >= 2);
     assert_eq!(snapshot["traffic"]["listeners"].as_array().map(Vec::len), Some(1));
     assert_eq!(snapshot["peer_health"].as_array().map(Vec::len), Some(1));
     assert_eq!(snapshot["upstreams"].as_array().map(Vec::len), Some(1));
+
+    server.shutdown_and_wait(Duration::from_secs(5));
+}
+
+#[test]
+fn snapshot_includes_certificate_fingerprint_and_chain_details_for_tls_servers() {
+    let listen_addr = reserve_loopback_addr();
+    let cert = generate_cert("localhost");
+    let mut server = ServerHarness::spawn_with_tls(
+        "rginx-admin-tls-snapshot",
+        &cert.cert.pem(),
+        &cert.key_pair.serialize_pem(),
+        |_, cert_path, key_path| {
+            format!(
+                "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n        server_names: [\"localhost\"],\n        tls: Some(ServerTlsConfig(\n            cert_path: {:?},\n            key_path: {:?},\n        )),\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Return(\n                status: 200,\n                location: \"\",\n                body: Some(\"ok\\n\"),\n            ),\n        ),\n    ],\n)\n",
+                listen_addr.to_string(),
+                cert_path.display().to_string(),
+                key_path.display().to_string(),
+                ready_route = READY_ROUTE_CONFIG,
+            )
+        },
+    );
+    server.wait_for_https_ready(listen_addr, Duration::from_secs(5));
+
+    let socket_path = admin_socket_path_for_config(server.config_path());
+    wait_for_admin_socket(&socket_path, Duration::from_secs(5));
+
+    let response = query_admin_socket(
+        &socket_path,
+        AdminRequest::GetSnapshot { include: None, window_secs: None },
+    )
+    .expect("admin socket should return aggregate snapshot");
+    let AdminResponse::Snapshot(snapshot) = response else {
+        panic!("admin socket should return aggregate snapshot");
+    };
+    let certificates =
+        snapshot.status.as_ref().map(|status| status.tls.certificates.as_slice()).unwrap_or(&[]);
+    assert_eq!(certificates.len(), 1);
+    let certificate = &certificates[0];
+    assert_eq!(certificate.scope, "listener:default");
+    assert!(certificate.subject.is_some());
+    assert_eq!(certificate.san_dns_names, vec!["localhost".to_string()]);
+    assert_eq!(certificate.subject, certificate.issuer);
+    assert!(certificate.fingerprint_sha256.as_ref().is_some_and(|value| value.len() == 64));
+    assert_eq!(certificate.chain_length, 1);
+    assert_eq!(certificate.chain_subjects.len(), 1);
+    assert_eq!(certificate.chain_subjects[0], certificate.subject.clone().unwrap_or_default());
+    assert!(certificate.chain_diagnostics.is_empty());
+
+    let status_output = run_rginx(["--config", server.config_path().to_str().unwrap(), "status"]);
+    assert!(
+        status_output.status.success(),
+        "status command should succeed: {}",
+        render_output(&status_output)
+    );
+    let status_stdout = String::from_utf8_lossy(&status_output.stdout);
+    assert!(status_stdout.contains("kind=status_tls_certificate"));
+    assert!(status_stdout.contains("sha256="));
+    assert!(status_stdout.contains("san_dns_names=localhost"));
 
     server.shutdown_and_wait(Duration::from_secs(5));
 }
@@ -467,7 +530,11 @@ fn status_command_reads_local_admin_socket() {
     assert!(stdout.contains("kind=status"));
     assert!(stdout.contains("revision=0"));
     assert!(stdout.contains(&format!("listen={listen_addr}")));
+    assert!(stdout.contains("tls_listeners=1"));
+    assert!(stdout.contains("tls_certificates=0"));
+    assert!(stdout.contains("tls_expiring_certificates=0"));
     assert!(stdout.contains("active_connections=0"));
+    assert!(stdout.contains("mtls_listeners=0"));
     assert!(stdout.contains("reload_attempts=0"));
     assert!(stdout.contains("last_reload=-"));
 
@@ -489,6 +556,7 @@ fn counters_command_reports_local_connection_and_response_counters() {
     assert!(output.status.success(), "counters command should succeed: {}", render_output(&output));
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("kind=counters"));
+    assert!(stdout.contains("downstream_mtls_authenticated_requests_total=0"));
     let requests = parse_counter(&stdout, "downstream_requests_total");
     let responses_2xx = parse_counter(&stdout, "downstream_responses_2xx_total");
     let responses_4xx = parse_counter(&stdout, "downstream_responses_4xx_total");
@@ -896,4 +964,10 @@ fn render_output(output: &std::process::Output) -> String {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     )
+}
+
+fn generate_cert(hostname: &str) -> CertifiedKey {
+    let cert = rcgen::generate_simple_self_signed(vec![hostname.to_string()])
+        .expect("self-signed certificate should generate");
+    CertifiedKey { cert: cert.cert, key_pair: cert.key_pair }
 }

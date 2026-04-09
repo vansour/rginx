@@ -5,7 +5,9 @@ pub mod validate;
 
 use std::path::Path;
 
-use rginx_core::{ConfigSnapshot, Result};
+use rginx_core::Result;
+
+pub use rginx_core::ConfigSnapshot;
 
 pub fn load_and_compile(path: impl AsRef<Path>) -> Result<ConfigSnapshot> {
     let path = path.as_ref();

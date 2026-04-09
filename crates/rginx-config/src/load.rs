@@ -365,6 +365,28 @@ mod tests {
     }
 
     #[test]
+    fn load_from_str_supports_legacy_and_structured_upstream_tls_config() {
+        let config = load_from_str(
+            "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: \"127.0.0.1:18080\",\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"legacy\",\n            peers: [UpstreamPeerConfig(url: \"https://legacy.example.com\")],\n            tls: Some(Insecure),\n        ),\n        UpstreamConfig(\n            name: \"structured\",\n            peers: [UpstreamPeerConfig(url: \"https://structured.example.com\")],\n            tls: Some(UpstreamTlsConfig(\n                verify: CustomCa(ca_cert_path: \"ca.pem\"),\n                versions: Some([Tls13]),\n                client_cert_path: Some(\"client.crt\"),\n                client_key_path: Some(\"client.key\"),\n            )),\n        ),\n    ],\n    locations: [\n        LocationConfig(\n            matcher: Prefix(\"/\"),\n            handler: Proxy(upstream: \"legacy\"),\n        ),\n    ],\n)\n",
+            Path::new("inline.ron"),
+        )
+        .expect("TLS config variants should deserialize");
+
+        let legacy = config.upstreams[0].tls.as_ref().expect("legacy TLS should exist");
+        assert!(matches!(legacy.verify, crate::model::UpstreamTlsModeConfig::Insecure));
+        assert!(legacy.versions.is_none());
+
+        let structured = config.upstreams[1].tls.as_ref().expect("structured TLS should exist");
+        assert_eq!(structured.client_cert_path.as_deref(), Some("client.crt"));
+        assert_eq!(structured.client_key_path.as_deref(), Some("client.key"));
+        assert!(matches!(
+            structured.versions.as_deref(),
+            Some([crate::model::TlsVersionConfig::Tls13])
+        ));
+        assert!(matches!(structured.verify, crate::model::UpstreamTlsModeConfig::CustomCa { .. }));
+    }
+
+    #[test]
     fn load_from_str_rejects_missing_environment_placeholders() {
         let _guard = env_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         unsafe {

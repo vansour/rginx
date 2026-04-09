@@ -9,11 +9,15 @@ pub mod state;
 mod timeout;
 mod tls;
 
+pub use client_ip::TlsClientIdentity;
 pub use proxy::{PeerHealthSnapshot, UpstreamHealthSnapshot};
 pub use server::serve;
 pub use state::{
-    GrpcTrafficSnapshot, HttpCountersSnapshot, ListenerStatsSnapshot, ReloadOutcomeSnapshot,
-    ReloadResultSnapshot, ReloadStatusSnapshot, RouteStatsSnapshot, RuntimeStatusSnapshot,
-    SharedState, SnapshotDeltaSnapshot, SnapshotModule, TrafficStatsSnapshot,
-    UpstreamPeerStatsSnapshot, UpstreamStatsSnapshot, VhostStatsSnapshot,
+    GrpcTrafficSnapshot, HttpCountersSnapshot, ListenerStatsSnapshot, MtlsStatusSnapshot,
+    ReloadOutcomeSnapshot, ReloadResultSnapshot, ReloadStatusSnapshot, RouteStatsSnapshot,
+    RuntimeStatusSnapshot, SharedState, SnapshotDeltaSnapshot, SnapshotModule,
+    TlsCertificateStatusSnapshot, TlsListenerStatusSnapshot, TlsReloadBoundarySnapshot,
+    TlsRuntimeSnapshot, TrafficStatsSnapshot, UpstreamPeerStatsSnapshot, UpstreamStatsSnapshot,
+    VhostStatsSnapshot, tls_reloadable_fields, tls_restart_required_fields,
+    tls_runtime_snapshot_for_config,
 };

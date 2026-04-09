@@ -1,17 +1,10 @@
 use std::net::IpAddr;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use http::{HeaderName, HeaderValue, StatusCode};
 use ipnet::IpNet;
 
 use super::upstream::Upstream;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ServerTls {
-    pub cert_path: PathBuf,
-    pub key_path: PathBuf,
-}
 
 #[derive(Debug, Clone)]
 pub struct Route {

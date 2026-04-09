@@ -209,7 +209,7 @@ mod tests {
         assert_eq!(selected.server_names, vec!["*.internal.example.com"]);
 
         let selected = select_vhost(&vhosts, &default, "internal.example.com");
-        assert_eq!(selected.server_names, vec!["*.internal.example.com"]);
+        assert!(selected.server_names.is_empty());
 
         let selected = select_vhost(&vhosts, &default, "example.com");
         assert!(selected.server_names.is_empty());

@@ -1,5 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
+use std::io::BufReader;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock as StdRwLock};
@@ -8,9 +9,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use http::StatusCode;
 use rginx_core::{ConfigSnapshot, Error, Listener, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::{Notify, RwLock, watch};
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
+use x509_parser::extensions::{GeneralName, ParsedExtension};
+use x509_parser::prelude::{FromDer, X509Certificate};
 
 use crate::proxy::{HealthChangeNotifier, ProxyClients, UpstreamHealthSnapshot};
 use crate::rate_limit::RateLimiters;
@@ -18,6 +22,7 @@ use crate::tls::build_tls_acceptor;
 
 const RECENT_WINDOW_SECS: u64 = 60;
 const MAX_RECENT_WINDOW_SECS: u64 = 300;
+const TLS_EXPIRY_WARNING_DAYS: i64 = 30;
 
 struct PreparedState {
     config: Arc<ConfigSnapshot>,
@@ -319,6 +324,8 @@ impl SharedState {
 
     pub async fn status_snapshot(&self) -> RuntimeStatusSnapshot {
         let state = self.inner.read().await;
+        let mtls = self.mtls_status_snapshot(state.config.as_ref());
+        let tls = tls_runtime_snapshot_for_config(state.config.as_ref());
         RuntimeStatusSnapshot {
             revision: state.revision,
             config_path: self.config_path.as_deref().cloned(),
@@ -329,6 +336,8 @@ impl SharedState {
             total_routes: state.config.total_route_count(),
             total_upstreams: state.config.upstreams.len(),
             tls_enabled: state.config.tls_enabled(),
+            tls,
+            mtls,
             active_connections: self.active_connection_count(),
             reload: self.reload_status_snapshot(),
         }
@@ -615,6 +624,54 @@ impl SharedState {
         self.mark_traffic_targets_changed(version, Some(listener_id), None, None);
     }
 
+    pub(crate) fn record_mtls_handshake_success(&self, listener_id: &str, authenticated: bool) {
+        if !authenticated {
+            return;
+        }
+
+        self.counters.downstream_mtls_authenticated_connections.fetch_add(1, Ordering::Relaxed);
+        if let Some(counters) = self.listener_traffic_counters(listener_id) {
+            counters.downstream_mtls_authenticated_connections.fetch_add(1, Ordering::Relaxed);
+        }
+        let version = self.mark_snapshot_changed_components(true, true, true, false, false);
+        self.mark_traffic_targets_changed(version, Some(listener_id), None, None);
+    }
+
+    pub(crate) fn record_tls_handshake_failure(
+        &self,
+        listener_id: &str,
+        reason: TlsHandshakeFailureReason,
+    ) {
+        self.counters.downstream_tls_handshake_failures.fetch_add(1, Ordering::Relaxed);
+        match reason {
+            TlsHandshakeFailureReason::MissingClientCert => {
+                self.counters
+                    .downstream_tls_handshake_failures_missing_client_cert
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            TlsHandshakeFailureReason::UnknownCa => {
+                self.counters
+                    .downstream_tls_handshake_failures_unknown_ca
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            TlsHandshakeFailureReason::BadCertificate => {
+                self.counters
+                    .downstream_tls_handshake_failures_bad_certificate
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            TlsHandshakeFailureReason::Other => {
+                self.counters
+                    .downstream_tls_handshake_failures_other
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        if let Some(counters) = self.listener_traffic_counters(listener_id) {
+            counters.downstream_tls_handshake_failures.fetch_add(1, Ordering::Relaxed);
+        }
+        let version = self.mark_snapshot_changed_components(true, true, true, false, false);
+        self.mark_traffic_targets_changed(version, Some(listener_id), None, None);
+    }
+
     pub(crate) fn record_connection_rejected(&self, listener_id: &str) {
         self.counters.downstream_connections_rejected.fetch_add(1, Ordering::Relaxed);
         if let Some(counters) = self.listener_traffic_counters(listener_id) {
@@ -652,6 +709,25 @@ impl SharedState {
         }
         let version = self.mark_snapshot_changed_components(false, true, true, false, false);
         self.mark_traffic_targets_changed(version, Some(listener_id), Some(vhost_id), route_id);
+    }
+
+    pub(crate) fn record_mtls_request(&self, listener_id: &str, authenticated: bool) {
+        if authenticated {
+            self.counters.downstream_mtls_authenticated_requests.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.counters.downstream_mtls_anonymous_requests.fetch_add(1, Ordering::Relaxed);
+        }
+
+        if let Some(counters) = self.listener_traffic_counters(listener_id) {
+            if authenticated {
+                counters.downstream_mtls_authenticated_requests.fetch_add(1, Ordering::Relaxed);
+            } else {
+                counters.downstream_mtls_anonymous_requests.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let version = self.mark_snapshot_changed_components(true, true, true, false, false);
+        self.mark_traffic_targets_changed(version, Some(listener_id), None, None);
     }
 
     pub(crate) fn record_downstream_response(
@@ -1025,6 +1101,57 @@ impl SharedState {
         format!("rginx-{next:016x}")
     }
 
+    fn mtls_status_snapshot(&self, config: &ConfigSnapshot) -> MtlsStatusSnapshot {
+        let mut configured_listeners = 0usize;
+        let mut optional_listeners = 0usize;
+        let mut required_listeners = 0usize;
+        let mut authenticated_connections = 0u64;
+        let mut authenticated_requests = 0u64;
+        let mut anonymous_requests = 0u64;
+        let mut handshake_failures_total = 0u64;
+
+        for listener in &config.listeners {
+            let Some(client_auth) =
+                listener.server.tls.as_ref().and_then(|tls| tls.client_auth.as_ref())
+            else {
+                continue;
+            };
+            configured_listeners += 1;
+            match client_auth.mode {
+                rginx_core::ServerClientAuthMode::Optional => optional_listeners += 1,
+                rginx_core::ServerClientAuthMode::Required => required_listeners += 1,
+            }
+
+            if let Some(counters) = self.listener_traffic_counters(&listener.id) {
+                authenticated_connections +=
+                    counters.downstream_mtls_authenticated_connections.load(Ordering::Relaxed);
+                authenticated_requests +=
+                    counters.downstream_mtls_authenticated_requests.load(Ordering::Relaxed);
+                anonymous_requests +=
+                    counters.downstream_mtls_anonymous_requests.load(Ordering::Relaxed);
+                handshake_failures_total +=
+                    counters.downstream_tls_handshake_failures.load(Ordering::Relaxed);
+            }
+        }
+
+        let counters = self.counters_snapshot();
+        MtlsStatusSnapshot {
+            configured_listeners,
+            optional_listeners,
+            required_listeners,
+            authenticated_connections,
+            authenticated_requests,
+            anonymous_requests,
+            handshake_failures_total,
+            handshake_failures_missing_client_cert: counters
+                .downstream_tls_handshake_failures_missing_client_cert,
+            handshake_failures_unknown_ca: counters.downstream_tls_handshake_failures_unknown_ca,
+            handshake_failures_bad_certificate: counters
+                .downstream_tls_handshake_failures_bad_certificate,
+            handshake_failures_other: counters.downstream_tls_handshake_failures_other,
+        }
+    }
+
     pub async fn drain_background_tasks(&self) {
         for task in take_background_tasks(&self.background_tasks) {
             if let Err(error) = task.await {
@@ -1241,25 +1368,532 @@ impl SharedState {
     }
 }
 
+pub fn tls_runtime_snapshot_for_config(config: &ConfigSnapshot) -> TlsRuntimeSnapshot {
+    let listeners = config
+        .listeners
+        .iter()
+        .map(|listener| {
+            let sni_names = tls_listener_sni_names(config, listener.tls_enabled());
+            let tls = listener.server.tls.as_ref();
+            TlsListenerStatusSnapshot {
+                listener_id: listener.id.clone(),
+                listener_name: listener.name.clone(),
+                listen_addr: listener.server.listen_addr,
+                tls_enabled: listener.tls_enabled(),
+                default_certificate: listener.server.default_certificate.clone(),
+                versions: tls.and_then(|tls| {
+                    tls.versions.as_ref().map(|versions| {
+                        versions
+                            .iter()
+                            .map(|version| tls_version_label(*version).to_string())
+                            .collect()
+                    })
+                }),
+                alpn_protocols: tls
+                    .and_then(|tls| tls.alpn_protocols.clone())
+                    .unwrap_or_else(|| vec!["h2".to_string(), "http/1.1".to_string()]),
+                client_auth_mode: tls.and_then(|tls| {
+                    tls.client_auth.as_ref().map(|client_auth| match client_auth.mode {
+                        rginx_core::ServerClientAuthMode::Optional => "optional".to_string(),
+                        rginx_core::ServerClientAuthMode::Required => "required".to_string(),
+                    })
+                }),
+                sni_names,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let mut certificates = Vec::new();
+    for listener in &config.listeners {
+        if let Some(tls) = listener.server.tls.as_ref() {
+            certificates.push(build_listener_certificate_snapshot(config, listener, tls));
+        }
+    }
+    if let Some(snapshot) = build_vhost_certificate_snapshot(config, &config.default_vhost) {
+        certificates.push(snapshot);
+    }
+    certificates.extend(
+        config.vhosts.iter().filter_map(|vhost| build_vhost_certificate_snapshot(config, vhost)),
+    );
+
+    let expiring_certificate_count = certificates
+        .iter()
+        .filter(|certificate| {
+            certificate.expires_in_days.is_some_and(|days| days <= TLS_EXPIRY_WARNING_DAYS)
+        })
+        .count();
+
+    TlsRuntimeSnapshot {
+        listeners,
+        certificates,
+        reload_boundary: TlsReloadBoundarySnapshot {
+            reloadable_fields: tls_reloadable_fields(),
+            restart_required_fields: tls_restart_required_fields(),
+        },
+        expiring_certificate_count,
+    }
+}
+
+pub fn tls_reloadable_fields() -> Vec<String> {
+    vec![
+        "server.tls".to_string(),
+        "listeners[].tls".to_string(),
+        "servers[].tls".to_string(),
+        "upstreams[].tls".to_string(),
+        "upstreams[].server_name".to_string(),
+        "upstreams[].server_name_override".to_string(),
+    ]
+}
+
+pub fn tls_restart_required_fields() -> Vec<String> {
+    vec![
+        "listen".to_string(),
+        "listeners".to_string(),
+        "runtime.worker_threads".to_string(),
+        "runtime.accept_workers".to_string(),
+    ]
+}
+
+fn tls_listener_sni_names(config: &ConfigSnapshot, listener_has_tls: bool) -> Vec<String> {
+    if !listener_has_tls && !config.vhosts.iter().any(|vhost| vhost.tls.is_some()) {
+        return Vec::new();
+    }
+
+    let mut names = config.default_vhost.server_names.clone();
+    for vhost in &config.vhosts {
+        if vhost.tls.is_some() {
+            names.extend(vhost.server_names.clone());
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn build_listener_certificate_snapshot(
+    config: &ConfigSnapshot,
+    listener: &Listener,
+    tls: &rginx_core::ServerTls,
+) -> TlsCertificateStatusSnapshot {
+    let inspected = inspect_certificate(&tls.cert_path);
+    TlsCertificateStatusSnapshot {
+        scope: format!("listener:{}", listener.name),
+        cert_path: tls.cert_path.clone(),
+        server_names: config.default_vhost.server_names.clone(),
+        subject: inspected.as_ref().and_then(|certificate| certificate.subject.clone()),
+        issuer: inspected.as_ref().and_then(|certificate| certificate.issuer.clone()),
+        serial_number: inspected.as_ref().and_then(|certificate| certificate.serial_number.clone()),
+        san_dns_names: inspected
+            .as_ref()
+            .map(|certificate| certificate.san_dns_names.clone())
+            .unwrap_or_default(),
+        fingerprint_sha256: inspected
+            .as_ref()
+            .and_then(|certificate| certificate.fingerprint_sha256.clone()),
+        subject_key_identifier: inspected
+            .as_ref()
+            .and_then(|certificate| certificate.subject_key_identifier.clone()),
+        authority_key_identifier: inspected
+            .as_ref()
+            .and_then(|certificate| certificate.authority_key_identifier.clone()),
+        is_ca: inspected.as_ref().and_then(|certificate| certificate.is_ca),
+        path_len_constraint: inspected
+            .as_ref()
+            .and_then(|certificate| certificate.path_len_constraint),
+        key_usage: inspected.as_ref().and_then(|certificate| certificate.key_usage.clone()),
+        extended_key_usage: inspected
+            .as_ref()
+            .map(|certificate| certificate.extended_key_usage.clone())
+            .unwrap_or_default(),
+        not_before_unix_ms: inspected
+            .as_ref()
+            .and_then(|certificate| certificate.not_before_unix_ms),
+        not_after_unix_ms: inspected.as_ref().and_then(|certificate| certificate.not_after_unix_ms),
+        expires_in_days: inspected.as_ref().and_then(|certificate| certificate.expires_in_days),
+        chain_length: inspected.as_ref().map(|certificate| certificate.chain_length).unwrap_or(0),
+        chain_subjects: inspected
+            .as_ref()
+            .map(|certificate| certificate.chain_subjects.clone())
+            .unwrap_or_default(),
+        chain_diagnostics: inspected
+            .as_ref()
+            .map(|certificate| certificate.chain_diagnostics.clone())
+            .unwrap_or_default(),
+        selected_as_default_for_listeners: if listener.server.default_certificate.is_none()
+            || listener.server.default_certificate.as_ref().is_some_and(|default_name| {
+                config.default_vhost.server_names.iter().any(|name| name == default_name)
+            }) {
+            vec![listener.name.clone()]
+        } else {
+            Vec::new()
+        },
+        ocsp_staple_configured: tls.ocsp_staple_path.is_some(),
+        additional_certificate_count: tls.additional_certificates.len(),
+    }
+}
+
+fn build_vhost_certificate_snapshot(
+    config: &ConfigSnapshot,
+    vhost: &rginx_core::VirtualHost,
+) -> Option<TlsCertificateStatusSnapshot> {
+    let tls = vhost.tls.as_ref()?;
+    let inspected = inspect_certificate(&tls.cert_path);
+    Some(TlsCertificateStatusSnapshot {
+        scope: format!("vhost:{}", vhost.id),
+        cert_path: tls.cert_path.clone(),
+        server_names: vhost.server_names.clone(),
+        subject: inspected.as_ref().and_then(|certificate| certificate.subject.clone()),
+        issuer: inspected.as_ref().and_then(|certificate| certificate.issuer.clone()),
+        serial_number: inspected.as_ref().and_then(|certificate| certificate.serial_number.clone()),
+        san_dns_names: inspected
+            .as_ref()
+            .map(|certificate| certificate.san_dns_names.clone())
+            .unwrap_or_default(),
+        fingerprint_sha256: inspected
+            .as_ref()
+            .and_then(|certificate| certificate.fingerprint_sha256.clone()),
+        subject_key_identifier: inspected
+            .as_ref()
+            .and_then(|certificate| certificate.subject_key_identifier.clone()),
+        authority_key_identifier: inspected
+            .as_ref()
+            .and_then(|certificate| certificate.authority_key_identifier.clone()),
+        is_ca: inspected.as_ref().and_then(|certificate| certificate.is_ca),
+        path_len_constraint: inspected
+            .as_ref()
+            .and_then(|certificate| certificate.path_len_constraint),
+        key_usage: inspected.as_ref().and_then(|certificate| certificate.key_usage.clone()),
+        extended_key_usage: inspected
+            .as_ref()
+            .map(|certificate| certificate.extended_key_usage.clone())
+            .unwrap_or_default(),
+        not_before_unix_ms: inspected
+            .as_ref()
+            .and_then(|certificate| certificate.not_before_unix_ms),
+        not_after_unix_ms: inspected.as_ref().and_then(|certificate| certificate.not_after_unix_ms),
+        expires_in_days: inspected.as_ref().and_then(|certificate| certificate.expires_in_days),
+        chain_length: inspected.as_ref().map(|certificate| certificate.chain_length).unwrap_or(0),
+        chain_subjects: inspected
+            .as_ref()
+            .map(|certificate| certificate.chain_subjects.clone())
+            .unwrap_or_default(),
+        chain_diagnostics: inspected
+            .as_ref()
+            .map(|certificate| certificate.chain_diagnostics.clone())
+            .unwrap_or_default(),
+        selected_as_default_for_listeners: config
+            .listeners
+            .iter()
+            .filter_map(|listener| {
+                listener
+                    .server
+                    .default_certificate
+                    .as_ref()
+                    .filter(|default_name| {
+                        vhost.server_names.iter().any(|name| name == *default_name)
+                    })
+                    .map(|_| listener.name.clone())
+            })
+            .collect(),
+        ocsp_staple_configured: tls.ocsp_staple_path.is_some(),
+        additional_certificate_count: tls.additional_certificates.len(),
+    })
+}
+
+#[derive(Debug, Clone)]
+struct InspectedCertificate {
+    subject: Option<String>,
+    issuer: Option<String>,
+    serial_number: Option<String>,
+    san_dns_names: Vec<String>,
+    fingerprint_sha256: Option<String>,
+    subject_key_identifier: Option<String>,
+    authority_key_identifier: Option<String>,
+    is_ca: Option<bool>,
+    path_len_constraint: Option<u32>,
+    key_usage: Option<String>,
+    extended_key_usage: Vec<String>,
+    not_before_unix_ms: Option<u64>,
+    not_after_unix_ms: Option<u64>,
+    expires_in_days: Option<i64>,
+    chain_length: usize,
+    chain_subjects: Vec<String>,
+    chain_diagnostics: Vec<String>,
+}
+
+fn inspect_certificate(path: &std::path::Path) -> Option<InspectedCertificate> {
+    let certs = load_certificate_chain_der(path).ok()?;
+    if certs.is_empty() {
+        return None;
+    }
+
+    let now_secs = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs() as i64;
+    let mut chain_subjects = Vec::new();
+    let mut chain_entries = Vec::new();
+    let mut chain_diagnostics = Vec::new();
+    let mut seen_fingerprints = std::collections::HashSet::new();
+
+    for (index, der) in certs.iter().enumerate() {
+        let fingerprint_sha256 = fingerprint_sha256(der.as_ref());
+        if !seen_fingerprints.insert(fingerprint_sha256.clone()) {
+            chain_diagnostics.push(format!(
+                "duplicate_certificate_in_chain cert[{index}] sha256={fingerprint_sha256}"
+            ));
+        }
+
+        match X509Certificate::from_der(der.as_ref()) {
+            Ok((_, cert)) => {
+                let subject = format!("{}", cert.subject());
+                let issuer = format!("{}", cert.issuer());
+                let expires_in_days = (cert.validity().not_after.timestamp() - now_secs) / 86_400;
+                let basic_constraints = cert.basic_constraints().ok().flatten();
+                let key_usage = cert.key_usage().ok().flatten();
+                let extended_key_usage = cert.extended_key_usage().ok().flatten();
+                let subject_key_identifier = extension_key_identifier(&cert, true);
+                let authority_key_identifier = extension_key_identifier(&cert, false);
+                if cert.validity().not_after.timestamp() < now_secs {
+                    chain_diagnostics.push(format!("cert[{index}] expired"));
+                } else if expires_in_days <= TLS_EXPIRY_WARNING_DAYS {
+                    chain_diagnostics.push(format!("cert[{index}] expires_in_{expires_in_days}d"));
+                }
+                if index == 0 && cert.is_ca() {
+                    chain_diagnostics.push("leaf_certificate_is_marked_as_ca".to_string());
+                }
+                if index == 0
+                    && key_usage.as_ref().is_some_and(|extension| {
+                        !extension.value.digital_signature()
+                            && !extension.value.key_encipherment()
+                            && !extension.value.key_agreement()
+                    })
+                {
+                    chain_diagnostics
+                        .push("leaf_key_usage_may_not_allow_tls_server_auth".to_string());
+                }
+                if index == 0
+                    && extended_key_usage.as_ref().is_some_and(|extension| {
+                        !extension.value.any && !extension.value.server_auth
+                    })
+                {
+                    chain_diagnostics.push("leaf_missing_server_auth_eku".to_string());
+                }
+                if index > 0
+                    && !basic_constraints.as_ref().is_some_and(|extension| extension.value.ca)
+                {
+                    chain_diagnostics
+                        .push(format!("cert[{index}] intermediate_or_root_not_marked_as_ca"));
+                }
+                if index > 0
+                    && key_usage.as_ref().is_some_and(|extension| !extension.value.key_cert_sign())
+                {
+                    chain_diagnostics
+                        .push(format!("cert[{index}] intermediate_or_root_missing_key_cert_sign"));
+                }
+                chain_subjects.push(subject.clone());
+                chain_entries.push(InspectedCertificate {
+                    subject: Some(subject),
+                    issuer: Some(issuer),
+                    serial_number: Some(cert.tbs_certificate.raw_serial_as_string()),
+                    san_dns_names: cert
+                        .subject_alternative_name()
+                        .ok()
+                        .flatten()
+                        .map(|san| {
+                            san.value
+                                .general_names
+                                .iter()
+                                .filter_map(|name| match name {
+                                    GeneralName::DNSName(dns) => Some(dns.to_string()),
+                                    _ => None,
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default(),
+                    fingerprint_sha256: Some(fingerprint_sha256),
+                    subject_key_identifier,
+                    authority_key_identifier,
+                    is_ca: basic_constraints.as_ref().map(|extension| extension.value.ca),
+                    path_len_constraint: basic_constraints
+                        .as_ref()
+                        .and_then(|extension| extension.value.path_len_constraint),
+                    key_usage: key_usage.as_ref().map(|extension| extension.value.to_string()),
+                    extended_key_usage: describe_extended_key_usage(extended_key_usage.as_ref()),
+                    not_before_unix_ms: cert
+                        .validity()
+                        .not_before
+                        .timestamp()
+                        .checked_mul(1000)
+                        .and_then(|timestamp| timestamp.try_into().ok()),
+                    not_after_unix_ms: cert
+                        .validity()
+                        .not_after
+                        .timestamp()
+                        .checked_mul(1000)
+                        .and_then(|timestamp| timestamp.try_into().ok()),
+                    expires_in_days: Some(expires_in_days),
+                    chain_length: certs.len(),
+                    chain_subjects: Vec::new(),
+                    chain_diagnostics: Vec::new(),
+                });
+            }
+            Err(_) => {
+                chain_diagnostics.push(format!("cert[{index}] could_not_be_parsed_as_x509"));
+            }
+        }
+    }
+
+    for index in 0..chain_entries.len().saturating_sub(1) {
+        let issuer = chain_entries[index].issuer.as_deref();
+        let next_subject = chain_entries[index + 1].subject.as_deref();
+        if issuer != next_subject {
+            chain_diagnostics.push(format!(
+                "chain_link_mismatch cert[{index}]_issuer_to_cert[{}]_subject",
+                index + 1
+            ));
+        }
+        if let (Some(aki), Some(ski)) = (
+            chain_entries[index].authority_key_identifier.as_deref(),
+            chain_entries[index + 1].subject_key_identifier.as_deref(),
+        ) && aki != ski
+        {
+            chain_diagnostics
+                .push(format!("chain_aki_ski_mismatch cert[{index}]_to_cert[{}]", index + 1));
+        }
+        if let Some(path_len_constraint) = chain_entries[index + 1].path_len_constraint {
+            let remaining_ca_certs =
+                chain_entries[index + 2..].iter().filter(|entry| entry.is_ca == Some(true)).count()
+                    as u32;
+            if remaining_ca_certs > path_len_constraint {
+                chain_diagnostics.push(format!(
+                    "cert[{}] path_len_constraint_exceeded remaining_ca_certs={} path_len_constraint={}",
+                    index + 1,
+                    remaining_ca_certs,
+                    path_len_constraint
+                ));
+            }
+        }
+    }
+
+    if let Some(leaf) = chain_entries.first() {
+        if certs.len() == 1 {
+            if leaf.subject != leaf.issuer {
+                chain_diagnostics
+                    .push("chain_incomplete_single_non_self_signed_certificate".to_string());
+            }
+        } else if let Some(last) = chain_entries.last()
+            && last.subject != last.issuer
+        {
+            chain_diagnostics.push("chain_incomplete_non_self_signed_top_certificate".to_string());
+        }
+    }
+
+    let leaf = chain_entries.into_iter().next()?;
+    Some(InspectedCertificate {
+        chain_length: certs.len(),
+        chain_subjects,
+        chain_diagnostics,
+        ..leaf
+    })
+}
+
+fn load_certificate_chain_der(path: &std::path::Path) -> std::io::Result<Vec<Vec<u8>>> {
+    let file = std::fs::File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let certs = rustls_pemfile::certs(&mut reader)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    if !certs.is_empty() {
+        return Ok(certs.into_iter().map(|cert| cert.as_ref().to_vec()).collect());
+    }
+    Ok(vec![std::fs::read(path)?])
+}
+
+fn fingerprint_sha256(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>()
+}
+
+fn extension_key_identifier(cert: &X509Certificate<'_>, subject: bool) -> Option<String> {
+    cert.iter_extensions().find_map(|extension| match extension.parsed_extension() {
+        ParsedExtension::SubjectKeyIdentifier(identifier) if subject => {
+            Some(format!("{identifier:x}"))
+        }
+        ParsedExtension::AuthorityKeyIdentifier(identifier) if !subject => {
+            identifier.key_identifier.as_ref().map(|identifier| format!("{identifier:x}"))
+        }
+        _ => None,
+    })
+}
+
+fn describe_extended_key_usage(
+    extension: Option<
+        &x509_parser::certificate::BasicExtension<&x509_parser::extensions::ExtendedKeyUsage<'_>>,
+    >,
+) -> Vec<String> {
+    let Some(extension) = extension else {
+        return Vec::new();
+    };
+
+    let mut usages = Vec::new();
+    if extension.value.any {
+        usages.push("any".to_string());
+    }
+    if extension.value.server_auth {
+        usages.push("server_auth".to_string());
+    }
+    if extension.value.client_auth {
+        usages.push("client_auth".to_string());
+    }
+    if extension.value.code_signing {
+        usages.push("code_signing".to_string());
+    }
+    if extension.value.email_protection {
+        usages.push("email_protection".to_string());
+    }
+    if extension.value.time_stamping {
+        usages.push("time_stamping".to_string());
+    }
+    if extension.value.ocsp_signing {
+        usages.push("ocsp_signing".to_string());
+    }
+    usages.extend(extension.value.other.iter().map(|oid| oid.to_id_string()));
+    usages
+}
+
+fn tls_version_label(version: rginx_core::TlsVersion) -> &'static str {
+    match version {
+        rginx_core::TlsVersion::Tls12 => "TLS1.2",
+        rginx_core::TlsVersion::Tls13 => "TLS1.3",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::fs;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Duration;
 
     use http::StatusCode;
+    use rcgen::{
+        BasicConstraints, CertificateParams, CertifiedKey, DnType, ExtendedKeyUsagePurpose, IsCa,
+        KeyPair,
+    };
     use rginx_core::{
         Listener, ReturnAction, Route, RouteAccessControl, RouteAction, RouteMatcher,
         RuntimeSettings, Server, Upstream, UpstreamLoadBalance, UpstreamPeer, UpstreamProtocol,
         UpstreamSettings, UpstreamTls, VirtualHost,
     };
 
-    use super::{ConfigSnapshot, ReloadOutcomeSnapshot, SharedState, validate_config_transition};
+    use super::{
+        ConfigSnapshot, ReloadOutcomeSnapshot, SharedState, TlsHandshakeFailureReason,
+        inspect_certificate, validate_config_transition,
+    };
 
     fn snapshot(listen: &str) -> ConfigSnapshot {
         let server = Server {
             listen_addr: listen.parse().unwrap(),
+            default_certificate: None,
             trusted_proxies: Vec::new(),
             keep_alive: true,
             max_headers: None,
@@ -1313,7 +1947,10 @@ mod tests {
                 UpstreamSettings {
                     protocol: UpstreamProtocol::Auto,
                     load_balance: UpstreamLoadBalance::RoundRobin,
+                    server_name: true,
                     server_name_override: None,
+                    tls_versions: None,
+                    client_identity: None,
                     request_timeout: Duration::from_secs(30),
                     connect_timeout: Duration::from_secs(30),
                     write_timeout: Duration::from_secs(30),
@@ -1412,6 +2049,11 @@ mod tests {
         assert_eq!(status.total_routes, 0);
         assert_eq!(status.total_upstreams, 0);
         assert!(!status.tls_enabled);
+        assert_eq!(status.tls.listeners.len(), 1);
+        assert_eq!(status.tls.certificates.len(), 0);
+        assert_eq!(status.tls.expiring_certificate_count, 0);
+        assert_eq!(status.mtls.configured_listeners, 0);
+        assert_eq!(status.mtls.authenticated_requests, 0);
         assert_eq!(status.active_connections, 0);
         assert_eq!(status.reload.attempts_total, 0);
     }
@@ -1437,6 +2079,124 @@ mod tests {
         assert_eq!(counters.downstream_responses_2xx, 1);
         assert_eq!(counters.downstream_responses_4xx, 1);
         assert_eq!(counters.downstream_responses_5xx, 1);
+        assert_eq!(counters.downstream_mtls_authenticated_requests, 0);
+        assert_eq!(counters.downstream_tls_handshake_failures, 0);
+    }
+
+    #[test]
+    fn counters_snapshot_tracks_mtls_activity() {
+        let shared = SharedState::from_config(snapshot("127.0.0.1:8080"))
+            .expect("shared state should build");
+
+        shared.record_mtls_handshake_success("default", true);
+        shared.record_mtls_request("default", true);
+        shared.record_mtls_request("default", false);
+        shared
+            .record_tls_handshake_failure("default", TlsHandshakeFailureReason::MissingClientCert);
+        shared.record_tls_handshake_failure("default", TlsHandshakeFailureReason::UnknownCa);
+        shared.record_tls_handshake_failure("default", TlsHandshakeFailureReason::BadCertificate);
+        shared.record_tls_handshake_failure("default", TlsHandshakeFailureReason::Other);
+
+        let counters = shared.counters_snapshot();
+        assert_eq!(counters.downstream_mtls_authenticated_connections, 1);
+        assert_eq!(counters.downstream_mtls_authenticated_requests, 1);
+        assert_eq!(counters.downstream_mtls_anonymous_requests, 1);
+        assert_eq!(counters.downstream_tls_handshake_failures, 4);
+        assert_eq!(counters.downstream_tls_handshake_failures_missing_client_cert, 1);
+        assert_eq!(counters.downstream_tls_handshake_failures_unknown_ca, 1);
+        assert_eq!(counters.downstream_tls_handshake_failures_bad_certificate, 1);
+        assert_eq!(counters.downstream_tls_handshake_failures_other, 1);
+    }
+
+    #[tokio::test]
+    async fn mtls_status_snapshot_excludes_non_mtls_listener_handshake_failures() {
+        let shared = SharedState::from_config(snapshot("127.0.0.1:8080"))
+            .expect("shared state should build");
+
+        shared
+            .record_tls_handshake_failure("default", TlsHandshakeFailureReason::MissingClientCert);
+
+        let status = shared.status_snapshot().await;
+        let counters = shared.counters_snapshot();
+
+        assert_eq!(counters.downstream_tls_handshake_failures, 1);
+        assert_eq!(status.mtls.configured_listeners, 0);
+        assert_eq!(status.mtls.handshake_failures_total, 0);
+    }
+
+    #[test]
+    fn inspect_certificate_reports_fingerprint_and_incomplete_chain_diagnostics() {
+        let temp_dir = std::env::temp_dir().join("rginx-cert-inspect-test");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).expect("temp dir should be created");
+        let cert_path = temp_dir.join("leaf.crt");
+
+        let mut ca_params = CertificateParams::default();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.distinguished_name.push(DnType::CommonName, "Test Root CA");
+        let ca_key = KeyPair::generate().expect("CA key should generate");
+        let ca_cert = ca_params.self_signed(&ca_key).expect("CA should self-sign");
+        let ca = CertifiedKey { cert: ca_cert, key_pair: ca_key };
+
+        let mut leaf_params =
+            CertificateParams::new(vec!["leaf.example.com".to_string()]).expect("leaf params");
+        leaf_params.distinguished_name.push(DnType::CommonName, "leaf.example.com");
+        leaf_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        let leaf_key = KeyPair::generate().expect("leaf key should generate");
+        let leaf_cert = leaf_params
+            .signed_by(&leaf_key, &ca.cert, &ca.key_pair)
+            .expect("leaf should be signed by CA");
+
+        fs::write(&cert_path, leaf_cert.pem()).expect("leaf cert should be written");
+
+        let inspected = inspect_certificate(&cert_path).expect("certificate should be inspected");
+        assert_eq!(inspected.subject.as_deref(), Some("CN=leaf.example.com"));
+        assert_eq!(inspected.issuer.as_deref(), Some("CN=Test Root CA"));
+        assert!(!inspected.san_dns_names.is_empty());
+        assert!(inspected.fingerprint_sha256.as_ref().is_some_and(|value| value.len() == 64));
+        assert_eq!(inspected.chain_length, 1);
+        assert!(inspected.chain_diagnostics.iter().any(|diagnostic| {
+            diagnostic.contains("chain_incomplete_single_non_self_signed_certificate")
+        }));
+
+        fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
+    }
+
+    #[test]
+    fn inspect_certificate_reports_aki_ski_and_server_auth_eku_diagnostics() {
+        let temp_dir = std::env::temp_dir().join("rginx-cert-inspect-extensions-test");
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).expect("temp dir should be created");
+        let cert_path = temp_dir.join("leaf.crt");
+
+        let mut ca_params = CertificateParams::default();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.distinguished_name.push(DnType::CommonName, "Extension Root CA");
+        let ca_key = KeyPair::generate().expect("CA key should generate");
+        let ca_cert = ca_params.self_signed(&ca_key).expect("CA should self-sign");
+        let ca = CertifiedKey { cert: ca_cert, key_pair: ca_key };
+
+        let mut leaf_params = CertificateParams::new(vec!["client-only.example.com".to_string()])
+            .expect("leaf params");
+        leaf_params.distinguished_name.push(DnType::CommonName, "client-only.example.com");
+        leaf_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        let leaf_key = KeyPair::generate().expect("leaf key should generate");
+        let leaf_cert = leaf_params
+            .signed_by(&leaf_key, &ca.cert, &ca.key_pair)
+            .expect("leaf should be signed by CA");
+
+        fs::write(&cert_path, leaf_cert.pem()).expect("leaf cert should be written");
+
+        let inspected = inspect_certificate(&cert_path).expect("certificate should be inspected");
+        assert!(inspected.extended_key_usage.iter().any(|usage| usage == "client_auth"));
+        assert!(
+            inspected
+                .chain_diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic == "leaf_missing_server_auth_eku")
+        );
+
+        fs::remove_dir_all(temp_dir).expect("temp dir should be removed");
     }
 
     #[test]

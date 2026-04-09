@@ -31,17 +31,13 @@ pub(super) fn validate_virtual_hosts(
         }
 
         if let Some(tls) = &vhost.tls {
-            if tls.cert_path.trim().is_empty() {
-                return Err(Error::Config(format!(
-                    "{vhost_label} TLS certificate path must not be empty"
-                )));
-            }
-
-            if tls.key_path.trim().is_empty() {
-                return Err(Error::Config(format!(
-                    "{vhost_label} TLS private key path must not be empty"
-                )));
-            }
+            super::server::validate_tls_identity_fields(
+                &vhost_label,
+                &tls.cert_path,
+                &tls.key_path,
+                tls.additional_certificates.as_deref(),
+                tls.ocsp_staple_path.as_deref(),
+            )?;
         }
 
         super::route::validate_locations(Some(&vhost_label), &vhost.locations, upstream_names)?;

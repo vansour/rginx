@@ -1,5 +1,6 @@
 VirtualHostConfig(
     server_names: ["app.example.com"],
+    // For per-vhost certificate overrides, see the commented TLS examples in `example/conf.d/default.ron`.
     locations: [
         LocationConfig(
             matcher: Exact("/"),

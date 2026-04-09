@@ -17,7 +17,7 @@ use tokio::task::{JoinError, JoinSet};
 
 const INSTALLED_CONFIG_PATH: &str = "/etc/rginx/rginx.ron";
 const INSTALLED_ADMIN_SOCKET_PATH: &str = "/run/rginx/admin.sock";
-const ADMIN_SNAPSHOT_SCHEMA_VERSION: u32 = 3;
+const ADMIN_SNAPSHOT_SCHEMA_VERSION: u32 = 7;
 const DEFAULT_RECENT_WINDOW_SECS: u64 = 60;
 const EXTENDED_RECENT_WINDOW_SECS: u64 = 300;
 
@@ -67,6 +67,7 @@ pub struct AdminSnapshot {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
+#[allow(clippy::large_enum_variant)]
 pub enum AdminResponse {
     Snapshot(AdminSnapshot),
     SnapshotVersion(SnapshotVersionSnapshot),

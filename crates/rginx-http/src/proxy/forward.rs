@@ -62,6 +62,9 @@ pub async fn forward_request(
             tracing::warn!(
                 request_id = %downstream.request_id,
                 upstream = %target.upstream_name,
+                upstream_sni_enabled = target.upstream.server_name,
+                upstream_server_name = target.upstream.server_name_override.as_deref().unwrap_or("-"),
+                upstream_verify = super::upstream_tls_verify_label(&target.upstream.tls),
                 %error,
                 "failed to select proxy client"
             );
@@ -172,6 +175,9 @@ pub async fn forward_request(
                     request_id = %downstream.request_id,
                     upstream = %target.upstream_name,
                     peer = %peer.url,
+                    upstream_sni_enabled = target.upstream.server_name,
+                    upstream_server_name = target.upstream.server_name_override.as_deref().unwrap_or("-"),
+                    upstream_verify = super::upstream_tls_verify_label(&target.upstream.tls),
                     %error,
                     "failed to build upstream request"
                 );
@@ -266,6 +272,9 @@ pub async fn forward_request(
                     failed_peer = %peer.url,
                     next_peer = %next_peer.url,
                     attempt = attempt_index + 1,
+                    upstream_sni_enabled = target.upstream.server_name,
+                    upstream_server_name = target.upstream.server_name_override.as_deref().unwrap_or("-"),
+                    upstream_verify = super::upstream_tls_verify_label(&target.upstream.tls),
                     consecutive_failures = failure.consecutive_failures,
                     entered_cooldown = failure.entered_cooldown,
                     %error,
@@ -278,6 +287,9 @@ pub async fn forward_request(
                         request_id = %downstream.request_id,
                         upstream = %target.upstream_name,
                         peer = %peer.url,
+                        upstream_sni_enabled = target.upstream.server_name,
+                        upstream_server_name = target.upstream.server_name_override.as_deref().unwrap_or("-"),
+                        upstream_verify = super::upstream_tls_verify_label(&target.upstream.tls),
                         %error,
                         "downstream request body was invalid while proxying upstream request"
                     );
@@ -293,6 +305,9 @@ pub async fn forward_request(
                     request_id = %downstream.request_id,
                     upstream = %target.upstream_name,
                     peer = %peer.url,
+                    upstream_sni_enabled = target.upstream.server_name,
+                    upstream_server_name = target.upstream.server_name_override.as_deref().unwrap_or("-"),
+                    upstream_verify = super::upstream_tls_verify_label(&target.upstream.tls),
                     consecutive_failures = failure.consecutive_failures,
                     entered_cooldown = failure.entered_cooldown,
                     %error,
@@ -316,6 +331,9 @@ pub async fn forward_request(
                     next_peer = %next_peer.url,
                     attempt = attempt_index + 1,
                     timeout_ms = upstream_request_timeout.as_millis() as u64,
+                    upstream_sni_enabled = target.upstream.server_name,
+                    upstream_server_name = target.upstream.server_name_override.as_deref().unwrap_or("-"),
+                    upstream_verify = super::upstream_tls_verify_label(&target.upstream.tls),
                     consecutive_failures = failure.consecutive_failures,
                     entered_cooldown = failure.entered_cooldown,
                     %error,
@@ -330,6 +348,9 @@ pub async fn forward_request(
                     upstream = %target.upstream_name,
                     peer = %peer.url,
                     timeout_ms = upstream_request_timeout.as_millis() as u64,
+                    upstream_sni_enabled = target.upstream.server_name,
+                    upstream_server_name = target.upstream.server_name_override.as_deref().unwrap_or("-"),
+                    upstream_verify = super::upstream_tls_verify_label(&target.upstream.tls),
                     consecutive_failures = failure.consecutive_failures,
                     entered_cooldown = failure.entered_cooldown,
                     %error,

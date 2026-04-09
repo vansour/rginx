@@ -7,17 +7,28 @@ use ipnet::IpNet;
 
 mod access_log;
 mod route;
+mod tls;
 mod upstream;
 
 pub use access_log::{AccessLogFormat, AccessLogValues};
 pub use route::{
     GrpcRouteMatch, ProxyTarget, ReturnAction, Route, RouteAccessControl, RouteAction,
-    RouteMatcher, RouteRateLimit, ServerTls,
+    RouteMatcher, RouteRateLimit,
+};
+pub use tls::{
+    ClientIdentity, ServerCertificateBundle, ServerClientAuthMode, ServerClientAuthPolicy,
+    ServerTls, TlsCipherSuite, TlsKeyExchangeGroup, TlsVersion, VirtualHostTls,
 };
 pub use upstream::{
     ActiveHealthCheck, Upstream, UpstreamLoadBalance, UpstreamPeer, UpstreamProtocol,
     UpstreamSettings, UpstreamTls,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ServerNameMatch {
+    Exact,
+    Wildcard { suffix_len: usize },
+}
 
 #[derive(Debug, Clone)]
 pub struct ConfigSnapshot {
@@ -72,7 +83,7 @@ pub struct VirtualHost {
     pub id: String,
     pub server_names: Vec<String>,
     pub routes: Vec<Route>,
-    pub tls: Option<ServerTls>,
+    pub tls: Option<VirtualHostTls>,
 }
 
 impl VirtualHost {
@@ -80,16 +91,39 @@ impl VirtualHost {
         if self.server_names.is_empty() {
             return true;
         }
-        let hostname = host.split(':').next().unwrap_or(host).to_lowercase();
-        self.server_names.iter().any(|pattern| {
-            let pattern_lower = pattern.to_lowercase();
-            if let Some(suffix) = pattern_lower.strip_prefix("*.") {
-                hostname.ends_with(&format!(".{suffix}")) || hostname == suffix
-            } else {
-                hostname == pattern_lower
-            }
-        })
+        self.server_names.iter().any(|pattern| match_server_name(pattern, host).is_some())
     }
+}
+
+pub fn match_server_name(pattern: &str, host: &str) -> Option<ServerNameMatch> {
+    let hostname = normalize_host_for_match(host);
+    let pattern = pattern.trim().to_ascii_lowercase();
+
+    if pattern.is_empty() {
+        return None;
+    }
+
+    if let Some(suffix) = pattern.strip_prefix("*.") {
+        if suffix.is_empty() || hostname == suffix {
+            return None;
+        }
+
+        return hostname
+            .ends_with(&format!(".{suffix}"))
+            .then_some(ServerNameMatch::Wildcard { suffix_len: suffix.len() });
+    }
+
+    (hostname == pattern).then_some(ServerNameMatch::Exact)
+}
+
+fn normalize_host_for_match(host: &str) -> String {
+    if let Some(rest) = host.strip_prefix('[')
+        && let Some((addr, _)) = rest.split_once(']')
+    {
+        return addr.to_ascii_lowercase();
+    }
+
+    host.split(':').next().unwrap_or(host).to_ascii_lowercase()
 }
 
 #[derive(Debug, Clone)]
@@ -102,6 +136,7 @@ pub struct RuntimeSettings {
 #[derive(Debug, Clone)]
 pub struct Server {
     pub listen_addr: SocketAddr,
+    pub default_certificate: Option<String>,
     pub trusted_proxies: Vec<IpNet>,
     pub keep_alive: bool,
     pub max_headers: Option<usize>,

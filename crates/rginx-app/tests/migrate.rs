@@ -99,6 +99,69 @@ fn migrate_nginx_rejects_proxy_pass_with_uri_path() {
     let _ = fs::remove_dir_all(temp_dir);
 }
 
+#[test]
+fn migrate_nginx_recognizes_common_ssl_directives() {
+    let temp_dir = temp_dir("rginx-migrate-ssl-test");
+    fs::create_dir_all(&temp_dir).expect("temp dir should exist");
+    let nginx_path = temp_dir.join("nginx.conf");
+    let ron_path = temp_dir.join("rginx.ron");
+
+    fs::write(
+        &nginx_path,
+        r#"
+        http {
+            upstream backend {
+                server 127.0.0.1:19443;
+            }
+
+            server {
+                listen 443 ssl;
+                server_name app.example.com;
+                ssl_certificate /etc/nginx/certs/app.crt;
+                ssl_certificate_key /etc/nginx/certs/app.key;
+                ssl_protocols TLSv1.2 TLSv1.3;
+
+                location / {
+                    proxy_pass https://backend;
+                    proxy_ssl_verify off;
+                    proxy_ssl_name backend.internal;
+                    proxy_ssl_server_name off;
+                    proxy_ssl_protocols TLSv1.3;
+                }
+            }
+        }
+        "#,
+    )
+    .expect("nginx config should be written");
+
+    let migrate_output = run_rginx([
+        "migrate-nginx",
+        "--input",
+        nginx_path.to_str().unwrap(),
+        "--output",
+        ron_path.to_str().unwrap(),
+    ]);
+    assert!(
+        migrate_output.status.success(),
+        "migration should succeed: {}",
+        render_output(&migrate_output)
+    );
+
+    let generated = fs::read_to_string(&ron_path).expect("migrated config should exist");
+    assert!(generated.contains("listen: \"0.0.0.0:443\""));
+    assert!(generated.contains("tls: Some(ServerTlsConfig("));
+    assert!(generated.contains("cert_path: \"/etc/nginx/certs/app.crt\""));
+    assert!(generated.contains("key_path: \"/etc/nginx/certs/app.key\""));
+    assert!(generated.contains("versions: Some([Tls12, Tls13])"));
+    assert!(generated.contains("tls: Some(UpstreamTlsConfig("));
+    assert!(generated.contains("verify: Insecure"));
+    assert!(generated.contains("versions: Some([Tls13])"));
+    assert!(generated.contains("server_name: Some(false)"));
+    assert!(generated.contains("server_name_override: Some(\"backend.internal\")"));
+
+    let _ = fs::remove_dir_all(temp_dir);
+}
+
 fn run_rginx(args: impl IntoIterator<Item = impl AsRef<str>>) -> Output {
     let mut command = Command::new(binary_path());
     for arg in args {

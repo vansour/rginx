@@ -675,7 +675,10 @@ mod tests {
             UpstreamSettings {
                 protocol: UpstreamProtocol::Auto,
                 load_balance: UpstreamLoadBalance::RoundRobin,
+                server_name: true,
                 server_name_override: None,
+                tls_versions: None,
+                client_identity: None,
                 request_timeout: Duration::from_secs(30),
                 connect_timeout: Duration::from_secs(30),
                 write_timeout: Duration::from_secs(30),
@@ -701,6 +704,7 @@ mod tests {
         );
         let server = rginx_core::Server {
             listen_addr: "127.0.0.1:8080".parse().unwrap(),
+            default_certificate: None,
             trusted_proxies: Vec::new(),
             keep_alive: true,
             max_headers: None,

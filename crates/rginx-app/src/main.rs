@@ -5,6 +5,7 @@ mod migrate_nginx;
 #[cfg(not(target_os = "linux"))]
 compile_error!("rginx supports Linux only");
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -67,6 +68,7 @@ fn main() -> anyhow::Result<()> {
                     upstream_count: config.upstreams.len(),
                     worker_threads: config.runtime.worker_threads,
                     accept_workers: config.runtime.accept_workers,
+                    tls: tls_check_details(&config),
                 },
             );
             Ok(())
@@ -91,6 +93,7 @@ fn main() -> anyhow::Result<()> {
                     upstream_count: config.upstreams.len(),
                     worker_threads: config.runtime.worker_threads,
                     accept_workers: config.runtime.accept_workers,
+                    tls: tls_check_details(&config),
                 },
             );
             Ok(())
@@ -166,6 +169,37 @@ struct CheckSummary {
     upstream_count: usize,
     worker_threads: Option<usize>,
     accept_workers: usize,
+    tls: TlsCheckDetails,
+}
+
+struct TlsCheckDetails {
+    listener_tls_profiles: usize,
+    vhost_tls_overrides: usize,
+    sni_name_count: usize,
+    certificate_bundle_count: usize,
+    default_certificates: Vec<String>,
+    expiring_certificates: Vec<String>,
+    reloadable_fields: Vec<String>,
+    restart_required_fields: Vec<String>,
+    certificates: Vec<rginx_http::TlsCertificateStatusSnapshot>,
+    sni_bindings: Vec<TlsSniBindingCheck>,
+    sni_conflicts: Vec<TlsSniBindingCheck>,
+    default_certificate_bindings: Vec<TlsDefaultCertificateBindingCheck>,
+}
+
+struct TlsSniBindingCheck {
+    listener_name: String,
+    server_name: String,
+    fingerprints: Vec<String>,
+    scopes: Vec<String>,
+    default_selected: bool,
+}
+
+struct TlsDefaultCertificateBindingCheck {
+    listener_name: String,
+    server_name: String,
+    fingerprints: Vec<String>,
+    scopes: Vec<String>,
 }
 
 fn print_check_success(config_path: &Path, summary: CheckSummary) {
@@ -185,9 +219,84 @@ fn print_check_success(config_path: &Path, summary: CheckSummary) {
             .unwrap_or_else(|| "auto".to_string()),
         summary.accept_workers,
     );
+    println!("reload_requires_restart_for={}", rginx_http::tls_restart_required_fields().join(","));
     println!(
-        "reload_requires_restart_for=listen,listeners,runtime.worker_threads,runtime.accept_workers"
+        "tls_details=listener_profiles={} vhost_overrides={} sni_names={} certificate_bundles={}",
+        summary.tls.listener_tls_profiles,
+        summary.tls.vhost_tls_overrides,
+        summary.tls.sni_name_count,
+        summary.tls.certificate_bundle_count,
     );
+    println!("reload_tls_updates={}", summary.tls.reloadable_fields.join(","));
+    if !summary.tls.default_certificates.is_empty() {
+        println!("tls_default_certificates={}", summary.tls.default_certificates.join(","));
+    }
+    if summary.tls.expiring_certificates.is_empty() {
+        println!("tls_expiring_certificates=-");
+    } else {
+        println!("tls_expiring_certificates={}", summary.tls.expiring_certificates.join(","));
+    }
+    println!("tls_restart_required_fields={}", summary.tls.restart_required_fields.join(","));
+    for certificate in &summary.tls.certificates {
+        println!(
+            "tls_certificate scope={} sha256={} subject={:?} issuer={:?} serial={:?} chain_length={} diagnostics={} cert_path={}",
+            certificate.scope,
+            certificate.fingerprint_sha256.as_deref().unwrap_or("-"),
+            certificate.subject,
+            certificate.issuer,
+            certificate.serial_number,
+            certificate.chain_length,
+            if certificate.chain_diagnostics.is_empty() {
+                "-".to_string()
+            } else {
+                certificate.chain_diagnostics.join("|")
+            },
+            certificate.cert_path.display(),
+        );
+    }
+    for binding in &summary.tls.sni_bindings {
+        let fingerprints = if binding.fingerprints.is_empty() {
+            "-".to_string()
+        } else {
+            binding.fingerprints.join(",")
+        };
+        let scopes =
+            if binding.scopes.is_empty() { "-".to_string() } else { binding.scopes.join(",") };
+        println!(
+            "tls_sni_binding listener={} server_name={} fingerprints={} scopes={} default_selected={}",
+            binding.listener_name,
+            binding.server_name,
+            fingerprints,
+            scopes,
+            binding.default_selected,
+        );
+    }
+    if summary.tls.sni_conflicts.is_empty() {
+        println!("tls_sni_conflicts=-");
+    } else {
+        for binding in &summary.tls.sni_conflicts {
+            println!(
+                "tls_sni_conflict listener={} server_name={} fingerprints={} scopes={}",
+                binding.listener_name,
+                binding.server_name,
+                binding.fingerprints.join(","),
+                binding.scopes.join(","),
+            );
+        }
+    }
+    for binding in &summary.tls.default_certificate_bindings {
+        let fingerprints = if binding.fingerprints.is_empty() {
+            "-".to_string()
+        } else {
+            binding.fingerprints.join(",")
+        };
+        let scopes =
+            if binding.scopes.is_empty() { "-".to_string() } else { binding.scopes.join(",") };
+        println!(
+            "tls_default_certificate_binding listener={} server_name={} fingerprints={} scopes={}",
+            binding.listener_name, binding.server_name, fingerprints, scopes,
+        );
+    }
 }
 
 fn listener_model(
@@ -203,6 +312,183 @@ fn listener_model(
     } else {
         "explicit"
     }
+}
+
+fn tls_check_details(config: &rginx_config::ConfigSnapshot) -> TlsCheckDetails {
+    let tls = rginx_http::tls_runtime_snapshot_for_config(config);
+    let listener_tls_profiles =
+        config.listeners.iter().filter(|listener| listener.server.tls.is_some()).count();
+    let vhost_tls_overrides = std::iter::once(&config.default_vhost)
+        .chain(config.vhosts.iter())
+        .filter(|vhost| vhost.tls.is_some())
+        .count();
+    let sni_name_count = config
+        .listeners
+        .iter()
+        .filter(|listener| listener.server.tls.is_some())
+        .map(|_| config.default_vhost.server_names.len())
+        .sum::<usize>()
+        + config
+            .vhosts
+            .iter()
+            .filter(|vhost| vhost.tls.is_some())
+            .map(|vhost| vhost.server_names.len())
+            .sum::<usize>();
+    let certificate_bundle_count = config
+        .listeners
+        .iter()
+        .filter_map(|listener| listener.server.tls.as_ref())
+        .map(|tls| 1 + tls.additional_certificates.len())
+        .sum::<usize>()
+        + std::iter::once(&config.default_vhost)
+            .chain(config.vhosts.iter())
+            .filter_map(|vhost| vhost.tls.as_ref())
+            .map(|tls| 1 + tls.additional_certificates.len())
+            .sum::<usize>();
+    let default_certificates = config
+        .listeners
+        .iter()
+        .filter_map(|listener| {
+            listener
+                .server
+                .default_certificate
+                .as_ref()
+                .map(|name| format!("{}={}", listener.name, name))
+        })
+        .collect();
+    let expiring_certificates = tls
+        .certificates
+        .iter()
+        .filter_map(|certificate| {
+            certificate
+                .expires_in_days
+                .and_then(|days| (days <= 30).then(|| format!("{}:{}d", certificate.scope, days)))
+        })
+        .collect();
+    let (sni_bindings, sni_conflicts, default_certificate_bindings) =
+        tls_sni_diagnostics(config, &tls.certificates);
+
+    TlsCheckDetails {
+        listener_tls_profiles,
+        vhost_tls_overrides,
+        sni_name_count,
+        certificate_bundle_count,
+        default_certificates,
+        expiring_certificates,
+        reloadable_fields: tls.reload_boundary.reloadable_fields,
+        restart_required_fields: tls.reload_boundary.restart_required_fields,
+        certificates: tls.certificates,
+        sni_bindings,
+        sni_conflicts,
+        default_certificate_bindings,
+    }
+}
+
+fn tls_sni_diagnostics(
+    config: &rginx_config::ConfigSnapshot,
+    certificates: &[rginx_http::TlsCertificateStatusSnapshot],
+) -> (Vec<TlsSniBindingCheck>, Vec<TlsSniBindingCheck>, Vec<TlsDefaultCertificateBindingCheck>) {
+    let fingerprint_by_scope = certificates
+        .iter()
+        .map(|certificate| {
+            (
+                certificate.scope.clone(),
+                certificate.fingerprint_sha256.clone().unwrap_or_else(|| "-".to_string()),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    let mut bindings = BTreeMap::<(String, String), TlsSniBindingCheck>::new();
+    for listener in &config.listeners {
+        if !listener.tls_enabled() {
+            continue;
+        }
+
+        if listener.server.tls.is_some() {
+            let scope = format!("listener:{}", listener.name);
+            let fingerprint =
+                fingerprint_by_scope.get(&scope).cloned().unwrap_or_else(|| "-".to_string());
+            for server_name in &config.default_vhost.server_names {
+                let binding = bindings
+                    .entry((listener.name.clone(), server_name.clone()))
+                    .or_insert_with(|| TlsSniBindingCheck {
+                        listener_name: listener.name.clone(),
+                        server_name: server_name.clone(),
+                        fingerprints: Vec::new(),
+                        scopes: Vec::new(),
+                        default_selected: false,
+                    });
+                if !binding.fingerprints.iter().any(|value| value == &fingerprint) {
+                    binding.fingerprints.push(fingerprint.clone());
+                }
+                if !binding.scopes.iter().any(|value| value == &scope) {
+                    binding.scopes.push(scope.clone());
+                }
+            }
+        }
+
+        for vhost in &config.vhosts {
+            if vhost.tls.is_none() {
+                continue;
+            }
+            let scope = format!("vhost:{}", vhost.id);
+            let fingerprint =
+                fingerprint_by_scope.get(&scope).cloned().unwrap_or_else(|| "-".to_string());
+            for server_name in &vhost.server_names {
+                let binding = bindings
+                    .entry((listener.name.clone(), server_name.clone()))
+                    .or_insert_with(|| TlsSniBindingCheck {
+                        listener_name: listener.name.clone(),
+                        server_name: server_name.clone(),
+                        fingerprints: Vec::new(),
+                        scopes: Vec::new(),
+                        default_selected: false,
+                    });
+                if !binding.fingerprints.iter().any(|value| value == &fingerprint) {
+                    binding.fingerprints.push(fingerprint.clone());
+                }
+                if !binding.scopes.iter().any(|value| value == &scope) {
+                    binding.scopes.push(scope.clone());
+                }
+            }
+        }
+    }
+
+    let mut default_certificate_bindings = Vec::new();
+    for listener in &config.listeners {
+        let Some(default_certificate) = listener.server.default_certificate.as_ref() else {
+            continue;
+        };
+        if let Some(binding) =
+            bindings.get_mut(&(listener.name.clone(), default_certificate.clone()))
+        {
+            binding.default_selected = true;
+            default_certificate_bindings.push(TlsDefaultCertificateBindingCheck {
+                listener_name: listener.name.clone(),
+                server_name: default_certificate.clone(),
+                fingerprints: binding.fingerprints.clone(),
+                scopes: binding.scopes.clone(),
+            });
+        }
+    }
+
+    let mut sni_bindings = bindings.into_values().collect::<Vec<_>>();
+    sni_bindings.sort_by(|left, right| {
+        left.listener_name.cmp(&right.listener_name).then(left.server_name.cmp(&right.server_name))
+    });
+    let sni_conflicts = sni_bindings
+        .iter()
+        .filter(|binding| binding.fingerprints.len() > 1)
+        .map(|binding| TlsSniBindingCheck {
+            listener_name: binding.listener_name.clone(),
+            server_name: binding.server_name.clone(),
+            fingerprints: binding.fingerprints.clone(),
+            scopes: binding.scopes.clone(),
+            default_selected: binding.default_selected,
+        })
+        .collect();
+
+    (sni_bindings, sni_conflicts, default_certificate_bindings)
 }
 
 struct PidFileGuard {

@@ -4,13 +4,18 @@ use std::net::IpAddr;
 use ipnet::IpNet;
 use rginx_core::{Error, Result};
 
-use crate::model::{ListenerConfig, ServerConfig, ServerTlsConfig, VirtualHostConfig};
+use crate::model::{
+    ListenerConfig, ServerCertificateBundleConfig, ServerClientAuthConfig, ServerConfig,
+    ServerTlsConfig, TlsCipherSuiteConfig, TlsKeyExchangeGroupConfig, TlsVersionConfig,
+    VirtualHostConfig,
+};
 
 pub(super) fn validate_server(server: &ServerConfig) -> Result<()> {
     validate_listener_like(ListenerLikeRef {
         owner_label: "server",
         listen: server.listen.as_deref(),
         proxy_protocol: server.proxy_protocol,
+        default_certificate: server.default_certificate.as_deref(),
         trusted_proxies: &server.trusted_proxies,
         max_headers: server.max_headers,
         max_request_body_bytes: server.max_request_body_bytes,
@@ -65,6 +70,7 @@ pub(super) fn validate_listeners(
             owner_label: &owner,
             listen: Some(listener.listen.as_str()),
             proxy_protocol: listener.proxy_protocol,
+            default_certificate: listener.default_certificate.as_deref(),
             trusted_proxies: &listener.trusted_proxies,
             max_headers: listener.max_headers,
             max_request_body_bytes: listener.max_request_body_bytes,
@@ -100,6 +106,16 @@ pub(super) fn validate_server_names(
             return Err(Error::Config(format!("{owner_label} server_name must not be empty")));
         }
 
+        if normalized.contains('*')
+            && (!normalized.starts_with("*.")
+                || normalized[2..].is_empty()
+                || normalized[2..].contains('*'))
+        {
+            return Err(Error::Config(format!(
+                "{owner_label} server_name `{name}` uses unsupported wildcard syntax; only leading `*.` patterns are supported"
+            )));
+        }
+
         if normalized.contains('/') {
             return Err(Error::Config(format!(
                 "{owner_label} server_name `{name}` should not contain path separator"
@@ -120,6 +136,7 @@ struct ListenerLikeRef<'a> {
     owner_label: &'a str,
     listen: Option<&'a str>,
     proxy_protocol: Option<bool>,
+    default_certificate: Option<&'a str>,
     trusted_proxies: &'a [String],
     max_headers: Option<u64>,
     max_request_body_bytes: Option<u64>,
@@ -141,6 +158,13 @@ fn validate_listener_like(config: ListenerLikeRef<'_>) -> Result<()> {
     }
 
     let _ = config.proxy_protocol;
+
+    if config.default_certificate.is_some_and(|value| value.trim().is_empty()) {
+        return Err(Error::Config(format!(
+            "{} default_certificate must not be empty",
+            config.owner_label
+        )));
+    }
 
     for value in config.trusted_proxies {
         validate_trusted_proxy_with_owner(config.owner_label, value)?;
@@ -195,18 +219,237 @@ fn validate_listener_like(config: ListenerLikeRef<'_>) -> Result<()> {
         )));
     }
 
-    if let Some(ServerTlsConfig { cert_path, key_path }) = config.tls {
-        if cert_path.trim().is_empty() {
+    if let Some(ServerTlsConfig {
+        cert_path,
+        key_path,
+        additional_certificates,
+        versions,
+        cipher_suites,
+        key_exchange_groups,
+        alpn_protocols,
+        ocsp_staple_path,
+        session_resumption,
+        session_tickets,
+        client_auth,
+    }) = config.tls
+    {
+        validate_tls_identity_fields(
+            config.owner_label,
+            cert_path,
+            key_path,
+            additional_certificates.as_deref(),
+            ocsp_staple_path.as_deref(),
+        )?;
+
+        validate_tls_versions(config.owner_label, versions.as_deref())?;
+        validate_tls_cipher_suites(
+            config.owner_label,
+            cipher_suites.as_deref(),
+            versions.as_deref(),
+        )?;
+        validate_tls_key_exchange_groups(config.owner_label, key_exchange_groups.as_deref())?;
+        validate_alpn_protocols(config.owner_label, alpn_protocols.as_deref())?;
+
+        if matches!(session_resumption, Some(false)) && matches!(session_tickets, Some(true)) {
             return Err(Error::Config(format!(
-                "{} TLS certificate path must not be empty",
+                "{} TLS session_tickets requires session_resumption to remain enabled",
                 config.owner_label
             )));
         }
 
-        if key_path.trim().is_empty() {
+        if let Some(ServerClientAuthConfig { ca_cert_path, .. }) = client_auth {
+            if ca_cert_path.trim().is_empty() {
+                return Err(Error::Config(format!(
+                    "{} TLS client auth CA path must not be empty",
+                    config.owner_label
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub(super) fn validate_tls_identity_fields(
+    owner_label: &str,
+    cert_path: &str,
+    key_path: &str,
+    additional_certificates: Option<&[ServerCertificateBundleConfig]>,
+    ocsp_staple_path: Option<&str>,
+) -> Result<()> {
+    if cert_path.trim().is_empty() {
+        return Err(Error::Config(format!("{owner_label} TLS certificate path must not be empty")));
+    }
+
+    if key_path.trim().is_empty() {
+        return Err(Error::Config(format!("{owner_label} TLS private key path must not be empty")));
+    }
+
+    if ocsp_staple_path.is_some_and(|path| path.trim().is_empty()) {
+        return Err(Error::Config(format!("{owner_label} TLS OCSP staple path must not be empty")));
+    }
+
+    if let Some(additional_certificates) = additional_certificates {
+        if additional_certificates.is_empty() {
             return Err(Error::Config(format!(
-                "{} TLS private key path must not be empty",
-                config.owner_label
+                "{owner_label} TLS additional_certificates must not be empty"
+            )));
+        }
+
+        for bundle in additional_certificates {
+            validate_certificate_bundle(owner_label, bundle)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_certificate_bundle(
+    owner_label: &str,
+    bundle: &ServerCertificateBundleConfig,
+) -> Result<()> {
+    if bundle.cert_path.trim().is_empty() {
+        return Err(Error::Config(format!(
+            "{owner_label} TLS additional certificate path must not be empty"
+        )));
+    }
+
+    if bundle.key_path.trim().is_empty() {
+        return Err(Error::Config(format!(
+            "{owner_label} TLS additional private key path must not be empty"
+        )));
+    }
+
+    if bundle.ocsp_staple_path.as_ref().is_some_and(|path| path.trim().is_empty()) {
+        return Err(Error::Config(format!(
+            "{owner_label} TLS additional OCSP staple path must not be empty"
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_tls_versions(owner_label: &str, versions: Option<&[TlsVersionConfig]>) -> Result<()> {
+    let Some(versions) = versions else {
+        return Ok(());
+    };
+
+    if versions.is_empty() {
+        return Err(Error::Config(format!("{owner_label} TLS versions must not be empty")));
+    }
+
+    let mut seen = HashSet::new();
+    for version in versions {
+        if !seen.insert(version) {
+            return Err(Error::Config(format!(
+                "{owner_label} TLS versions must not contain duplicates"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_tls_cipher_suites(
+    owner_label: &str,
+    cipher_suites: Option<&[TlsCipherSuiteConfig]>,
+    versions: Option<&[TlsVersionConfig]>,
+) -> Result<()> {
+    let Some(cipher_suites) = cipher_suites else {
+        return Ok(());
+    };
+
+    if cipher_suites.is_empty() {
+        return Err(Error::Config(format!("{owner_label} TLS cipher_suites must not be empty")));
+    }
+
+    let mut seen = HashSet::new();
+    for suite in cipher_suites {
+        if !seen.insert(*suite) {
+            return Err(Error::Config(format!(
+                "{owner_label} TLS cipher_suites must not contain duplicates"
+            )));
+        }
+    }
+
+    if let Some(versions) = versions
+        && !cipher_suites.iter().any(|suite| {
+            versions.iter().any(|version| cipher_suite_supports_version(*suite, *version))
+        })
+    {
+        return Err(Error::Config(format!(
+            "{owner_label} TLS cipher_suites do not support any configured TLS versions"
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_tls_key_exchange_groups(
+    owner_label: &str,
+    key_exchange_groups: Option<&[TlsKeyExchangeGroupConfig]>,
+) -> Result<()> {
+    let Some(key_exchange_groups) = key_exchange_groups else {
+        return Ok(());
+    };
+
+    if key_exchange_groups.is_empty() {
+        return Err(Error::Config(format!(
+            "{owner_label} TLS key_exchange_groups must not be empty"
+        )));
+    }
+
+    let mut seen = HashSet::new();
+    for group in key_exchange_groups {
+        if !seen.insert(*group) {
+            return Err(Error::Config(format!(
+                "{owner_label} TLS key_exchange_groups must not contain duplicates"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn cipher_suite_supports_version(suite: TlsCipherSuiteConfig, version: TlsVersionConfig) -> bool {
+    match suite {
+        TlsCipherSuiteConfig::Tls13Aes256GcmSha384
+        | TlsCipherSuiteConfig::Tls13Aes128GcmSha256
+        | TlsCipherSuiteConfig::Tls13Chacha20Poly1305Sha256 => version == TlsVersionConfig::Tls13,
+        TlsCipherSuiteConfig::TlsEcdheEcdsaWithAes256GcmSha384
+        | TlsCipherSuiteConfig::TlsEcdheEcdsaWithAes128GcmSha256
+        | TlsCipherSuiteConfig::TlsEcdheEcdsaWithChacha20Poly1305Sha256
+        | TlsCipherSuiteConfig::TlsEcdheRsaWithAes256GcmSha384
+        | TlsCipherSuiteConfig::TlsEcdheRsaWithAes128GcmSha256
+        | TlsCipherSuiteConfig::TlsEcdheRsaWithChacha20Poly1305Sha256 => {
+            version == TlsVersionConfig::Tls12
+        }
+    }
+}
+
+fn validate_alpn_protocols(owner_label: &str, alpn_protocols: Option<&[String]>) -> Result<()> {
+    let Some(alpn_protocols) = alpn_protocols else {
+        return Ok(());
+    };
+
+    if alpn_protocols.is_empty() {
+        return Err(Error::Config(format!(
+            "{owner_label} TLS ALPN protocol list must not be empty"
+        )));
+    }
+
+    let mut seen = HashSet::new();
+    for protocol in alpn_protocols {
+        let normalized = protocol.trim();
+        if normalized.is_empty() {
+            return Err(Error::Config(format!(
+                "{owner_label} TLS ALPN protocol entries must not be empty"
+            )));
+        }
+
+        if !seen.insert(normalized.to_ascii_lowercase()) {
+            return Err(Error::Config(format!(
+                "{owner_label} TLS ALPN protocol list must not contain duplicates"
             )));
         }
     }
@@ -218,6 +461,7 @@ fn legacy_server_listener_fields(server: &ServerConfig) -> Option<()> {
     (server.listen.is_some()
         || !server.trusted_proxies.is_empty()
         || server.keep_alive.is_some()
+        || server.default_certificate.is_some()
         || server.max_headers.is_some()
         || server.max_request_body_bytes.is_some()
         || server.max_connections.is_some()

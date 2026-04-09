@@ -1,0 +1,14 @@
+Package: @PACKAGE@
+Version: @VERSION@
+Section: net
+Priority: optional
+Architecture: @ARCH@
+Maintainer: @MAINTAINER@
+Depends: adduser
+Recommends: systemd
+Installed-Size: @INSTALLED_SIZE@
+Homepage: @HOMEPAGE@
+Description: Rust edge reverse proxy for small and medium deployments
+ rginx is a Rust edge reverse proxy focused on HTTP/HTTPS ingress,
+ API gateway fronting, gRPC ingress, hot reload, graceful restart,
+ health checking, rate limiting, and local observability.

@@ -16,7 +16,7 @@ use rginx_core::{
     AccessLogFormat, AccessLogValues, ConfigSnapshot, Route, RouteAction, VirtualHost,
 };
 
-use crate::client_ip::{ClientAddress, resolve_client_address};
+use crate::client_ip::{ClientAddress, ConnectionPeerAddrs, resolve_client_address};
 use crate::router;
 use crate::state::{ActiveState, SharedState};
 
@@ -33,6 +33,15 @@ pub use dispatch::handle;
 pub(crate) use grpc::{GrpcStatusCode, grpc_error_response};
 pub(crate) use response::{full_body, text_response};
 
+pub(crate) fn attach_connection_metadata<B>(
+    request: &mut Request<B>,
+    connection: &ConnectionPeerAddrs,
+) {
+    if let Some(identity) = connection.tls_client_identity.clone() {
+        request.extensions_mut().insert(identity);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -40,7 +49,7 @@ mod tests {
 
     use base64::Engine as _;
     use bytes::BytesMut;
-    use http::{HeaderMap, HeaderValue, StatusCode, header::HOST};
+    use http::{HeaderMap, HeaderValue, Request, StatusCode, header::HOST};
     use http_body_util::BodyExt;
     use rginx_core::{
         AccessLogFormat, ConfigSnapshot, GrpcRouteMatch, ReturnAction, Route, RouteAccessControl,
@@ -53,8 +62,8 @@ mod tests {
         GrpcObservability, GrpcWebObservabilityParser, decode_grpc_web_text_observability_final,
         grpc_observability, grpc_request_metadata,
     };
-    use super::{GrpcStatusCode, grpc_error_response, text_response};
-    use crate::client_ip::{ClientAddress, ClientIpSource};
+    use super::{GrpcStatusCode, attach_connection_metadata, grpc_error_response, text_response};
+    use crate::client_ip::{ClientAddress, ClientIpSource, ConnectionPeerAddrs, TlsClientIdentity};
 
     #[test]
     fn authorize_route_rejects_disallowed_remote_addr() {
@@ -331,7 +340,10 @@ mod tests {
                 status: 200,
                 elapsed_ms: 12,
                 downstream_scheme: "https",
+                tls_version: Some("TLS1.3"),
+                tls_alpn: Some("h2"),
                 body_bytes_sent: Some(3),
+                tls_client_identity: None,
                 grpc: Some(&grpc),
             },
         );
@@ -340,6 +352,30 @@ mod tests {
             rendered,
             "ACCESS reqid=client-log-42 status=200 request=\"GET /demo?x=1 HTTP/1.1\" grpc=grpc-web svc=grpc.health.v1.Health rpc=Check grpc_status=0 grpc_message=\"ok\" bytes=3 ua=\"curl/8.7.1\" source=x_forwarded_for route=servers[0]/routes[0]|exact:/demo"
         );
+    }
+
+    #[test]
+    fn attach_connection_metadata_inserts_tls_client_identity_extension() {
+        let mut request = Request::builder().uri("http://example.com/").body(()).unwrap();
+        let connection = ConnectionPeerAddrs {
+            socket_peer_addr: "127.0.0.1:44321".parse().unwrap(),
+            proxy_protocol_source_addr: None,
+            tls_client_identity: Some(TlsClientIdentity {
+                subject: Some("CN=test-client".to_string()),
+                san_dns_names: vec!["client.example.com".to_string()],
+            }),
+            tls_version: Some("TLS1.3".to_string()),
+            tls_alpn: Some("h2".to_string()),
+        };
+
+        attach_connection_metadata(&mut request, &connection);
+
+        let identity = request
+            .extensions()
+            .get::<TlsClientIdentity>()
+            .expect("TLS client identity should be attached");
+        assert_eq!(identity.subject.as_deref(), Some("CN=test-client"));
+        assert_eq!(identity.san_dns_names, vec!["client.example.com"]);
     }
 
     #[test]
@@ -554,6 +590,7 @@ mod tests {
     fn test_config(default_vhost: VirtualHost, vhosts: Vec<VirtualHost>) -> ConfigSnapshot {
         let server = Server {
             listen_addr: "127.0.0.1:8080".parse().unwrap(),
+            default_certificate: None,
             trusted_proxies: Vec::new(),
             keep_alive: true,
             max_headers: None,

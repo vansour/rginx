@@ -16,6 +16,7 @@ env:
   CARGO_TERM_COLOR: always
   BIN_NAME: rginx
   CARGO_PACKAGE: rginx
+  PAGES_APT_SUBDIR: apt
 
 jobs:
   verify:
@@ -69,16 +70,27 @@ jobs:
           TAG="${{ steps.meta.outputs.tag }}"
           COMMIT_SHA="${{ steps.meta.outputs.commit_sha }}"
           PRERELEASE="${{ steps.meta.outputs.prerelease }}"
+          RELEASE_BRANCH="release/${TAG}"
 
-          git fetch --no-tags origin main
+          git fetch --no-tags origin main "+refs/heads/${RELEASE_BRANCH}:refs/remotes/origin/${RELEASE_BRANCH}"
           MAIN_SHA="$(git rev-parse origin/main)"
 
-          if ! git merge-base --is-ancestor "${COMMIT_SHA}" origin/main; then
-            echo "Release tag ${TAG} points to ${COMMIT_SHA}, which is not reachable from origin/main (${MAIN_SHA})." >&2
-            exit 1
-          fi
-
-          if [[ "${PRERELEASE}" != "true" && "${COMMIT_SHA}" != "${MAIN_SHA}" ]]; then
+          if [[ "${PRERELEASE}" == "true" ]]; then
+            if git show-ref --verify --quiet "refs/remotes/origin/${RELEASE_BRANCH}"; then
+              RELEASE_BRANCH_SHA="$(git rev-parse "origin/${RELEASE_BRANCH}")"
+              if git merge-base --is-ancestor "${COMMIT_SHA}" origin/main; then
+                :
+              elif git merge-base --is-ancestor "${COMMIT_SHA}" "origin/${RELEASE_BRANCH}"; then
+                :
+              else
+                echo "Prerelease tag ${TAG} points to ${COMMIT_SHA}, which is not reachable from origin/main (${MAIN_SHA}) or origin/${RELEASE_BRANCH} (${RELEASE_BRANCH_SHA})." >&2
+                exit 1
+              fi
+            elif ! git merge-base --is-ancestor "${COMMIT_SHA}" origin/main; then
+              echo "Prerelease tag ${TAG} points to ${COMMIT_SHA}, which is not reachable from origin/main (${MAIN_SHA}) and release branch origin/${RELEASE_BRANCH} does not exist." >&2
+              exit 1
+            fi
+          elif [[ "${COMMIT_SHA}" != "${MAIN_SHA}" ]]; then
             echo "Stable release tag ${TAG} must point to origin/main HEAD (${MAIN_SHA}), got ${COMMIT_SHA}." >&2
             exit 1
           fi
@@ -101,7 +113,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
   build:
-    name: Build ${{ matrix.asset_name }}
+    name: Build ${{ matrix.asset_name }} Assets
     needs: verify
     runs-on: ${{ matrix.runner }}
     permissions:
@@ -171,18 +183,191 @@ jobs:
 
           echo "archive_name=${ARCHIVE_NAME}" >> "${GITHUB_OUTPUT}"
 
-      - name: Upload Release Archive
+      - name: Build Debian Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/build-deb.sh \
+            --skip-build \
+            --binary "target/${{ matrix.target }}/release/${BIN_NAME}" \
+            --out-dir dist/debian
+
+      - name: Upload Release Assets
         uses: actions/upload-artifact@v7.0.0
         with:
           name: release-${{ matrix.asset_name }}
-          path: dist/${{ steps.package.outputs.archive_name }}
+          path: |
+            dist/${{ steps.package.outputs.archive_name }}
+            dist/debian/*.deb
           if-no-files-found: error
+
+  build_apt_repo:
+    name: Build APT Repository
+    needs:
+      - verify
+      - build
+    if: ${{ needs.verify.outputs.prerelease != 'true' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Check Out Source
+        uses: actions/checkout@v6.0.2
+        with:
+          fetch-depth: 0
+          ref: ${{ needs.verify.outputs.tag }}
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Download Build Artifacts
+        uses: actions/download-artifact@v8.0.1
+        with:
+          path: dist/artifacts
+
+      - name: Collect Debian Packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/debian
+          find dist/artifacts -type f -name '*.deb' -exec mv {} dist/debian/ \;
+          ls -1 dist/debian/*.deb >/dev/null
+
+      - name: Import APT Signing Key
+        shell: bash
+        env:
+          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${APT_GPG_PRIVATE_KEY}" ]]; then
+            echo "APT_GPG_PRIVATE_KEY secret is required for stable release publishing." >&2
+            exit 1
+          fi
+
+          export GNUPGHOME="$(mktemp -d)"
+          printf '%s' "${APT_GPG_PRIVATE_KEY}" | gpg --batch --import
+          echo "GNUPGHOME=${GNUPGHOME}" >> "${GITHUB_ENV}"
+
+      - name: Build GitHub Pages Site
+        shell: bash
+        env:
+          APT_GPG_KEY_ID: ${{ secrets.APT_GPG_KEY_ID }}
+          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
+          REPO_NAME: ${{ github.event.repository.name }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${APT_GPG_KEY_ID}" ]]; then
+            echo "APT_GPG_KEY_ID secret is required for stable release publishing." >&2
+            exit 1
+          fi
+
+          SITE_ROOT="_site"
+          REPO_ROOT="${SITE_ROOT}/${PAGES_APT_SUBDIR}"
+          DEFAULT_REPO_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}/${PAGES_APT_SUBDIR}"
+
+          mkdir -p "${SITE_ROOT}"
+          touch "${SITE_ROOT}/.nojekyll"
+
+          ./scripts/publish-apt-repo.sh \
+            --repo-root "${REPO_ROOT}" \
+            --deb-dir dist/debian \
+            --gpg-key "${APT_GPG_KEY_ID}" \
+            --export-key "${REPO_ROOT}/rginx-archive-keyring.gpg"
+
+          cat > "${SITE_ROOT}/index.html" <<EOF
+          <!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>rginx Packages</title>
+            <style>
+              body { font-family: sans-serif; max-width: 860px; margin: 3rem auto; padding: 0 1rem; line-height: 1.6; }
+              pre { background: #f6f8fa; padding: 1rem; overflow-x: auto; }
+              code { font-family: ui-monospace, SFMono-Regular, monospace; }
+            </style>
+          </head>
+          <body>
+            <h1>rginx Packages</h1>
+            <p>This GitHub Pages site publishes the latest stable APT repository for <code>rginx</code>.</p>
+            <p>The repository root is the <code>${PAGES_APT_SUBDIR}/</code> subdirectory of this site.</p>
+            <p>Default GitHub Pages URL:</p>
+            <pre><code>${DEFAULT_REPO_URL}</code></pre>
+            <p>Repository signing key:</p>
+            <pre><code>curl -fsSL ${DEFAULT_REPO_URL}/rginx-archive-keyring.gpg | sudo tee /usr/share/keyrings/rginx-archive-keyring.gpg >/dev/null</code></pre>
+            <p>APT source:</p>
+            <pre><code>echo "deb [signed-by=/usr/share/keyrings/rginx-archive-keyring.gpg] ${DEFAULT_REPO_URL} stable main" | sudo tee /etc/apt/sources.list.d/rginx.list
+            sudo apt update
+            sudo apt install rginx</code></pre>
+          </body>
+          </html>
+          EOF
+
+          cat > "${REPO_ROOT}/index.html" <<EOF
+          <!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>rginx APT Repository</title>
+            <style>
+              body { font-family: sans-serif; max-width: 860px; margin: 3rem auto; padding: 0 1rem; line-height: 1.6; }
+              pre { background: #f6f8fa; padding: 1rem; overflow-x: auto; }
+              code { font-family: ui-monospace, SFMono-Regular, monospace; }
+            </style>
+          </head>
+          <body>
+            <h1>rginx APT Repository</h1>
+            <p>This directory is a static APT repository signed by the release workflow.</p>
+            <p>Key file:</p>
+            <pre><code>rginx-archive-keyring.gpg</code></pre>
+            <p>Suite and component:</p>
+            <pre><code>stable main</code></pre>
+          </body>
+          </html>
+          EOF
+
+      - name: Upload GitHub Pages Artifact
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: _site
+
+      - name: Clean Up Imported GnuPG Home
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${GNUPGHOME:-}" && -d "${GNUPGHOME}" ]]; then
+            rm -rf "${GNUPGHOME}"
+          fi
+
+  deploy_apt_repo:
+    name: Deploy APT Repository
+    needs: build_apt_repo
+    if: ${{ needs.build_apt_repo.result == 'success' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
 
   publish:
     name: Publish GitHub Release
     needs:
       - verify
       - build
+      - build_apt_repo
+      - deploy_apt_repo
+    if: ${{ always() && needs.verify.result == 'success' && needs.build.result == 'success' && (needs.build_apt_repo.result == 'success' || needs.build_apt_repo.result == 'skipped') && (needs.deploy_apt_repo.result == 'success' || needs.deploy_apt_repo.result == 'skipped') }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -198,35 +383,24 @@ jobs:
         with:
           path: dist/artifacts
 
-      - name: Collect Archives
+      - name: Collect Release Assets
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist
-          find dist/artifacts -type f -name '*.tar.gz' -exec mv {} dist/ \;
+          find dist/artifacts -type f \( -name '*.tar.gz' -o -name '*.deb' \) -exec mv {} dist/ \;
           ls -1 dist/*.tar.gz >/dev/null
+          ls -1 dist/*.deb >/dev/null
 
       - name: Generate Checksums
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import hashlib
-          from pathlib import Path
-
-          dist = Path("dist")
-          archives = sorted(dist.glob("*.tar.gz"))
-          if not archives:
-              raise SystemExit("no release archives found")
-
-          with (dist / "SHA256SUMS.txt").open("w", encoding="utf-8") as fh:
-              for archive in archives:
-                  digest = hashlib.sha256()
-                  with archive.open("rb") as infile:
-                      for chunk in iter(lambda: infile.read(1024 * 1024), b""):
-                          digest.update(chunk)
-                  fh.write(f"{digest.hexdigest()}  {archive.name}\n")
-          PY
+          find dist -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.deb' \) -printf '%f\n' \
+            | sort \
+            | while IFS= read -r asset; do
+                sha256sum "dist/${asset}"
+              done > dist/SHA256SUMS.txt
 
       - name: Build Release Notes
         shell: bash
@@ -272,11 +446,19 @@ jobs:
             fi
             echo
             echo "## Assets"
-            for archive in dist/*.tar.gz; do
-              echo "- \`$(basename "${archive}")\`"
-            done
-            echo "- \`SHA256SUMS.txt\`"
+            find dist -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.deb' -o -name 'SHA256SUMS.txt' \) -printf '%f\n' \
+              | sort \
+              | while IFS= read -r asset; do
+                  echo "- \`${asset}\`"
+                done
             echo
+            if [[ "${{ needs.verify.outputs.prerelease }}" != "true" ]]; then
+              echo "## APT Repository"
+              echo
+              echo "- Stable tags also publish a signed GitHub Pages APT repository."
+              echo "- Configure Pages once in the repository settings and add the signing secrets documented in the README."
+              echo
+            fi
             echo "## Changelog"
             echo "${CHANGELOG_TITLE}"
             echo
@@ -329,7 +511,7 @@ jobs:
 
           if gh release view "${TAG}" >/dev/null 2>&1; then
             gh release edit "${TAG}" "${edit_args[@]}"
-            gh release upload "${TAG}" dist/*.tar.gz dist/SHA256SUMS.txt --clobber
+            gh release upload "${TAG}" dist/*.tar.gz dist/*.deb dist/SHA256SUMS.txt --clobber
           else
-            gh release create "${TAG}" dist/*.tar.gz dist/SHA256SUMS.txt "${release_args[@]}"
+            gh release create "${TAG}" dist/*.tar.gz dist/*.deb dist/SHA256SUMS.txt "${release_args[@]}"
           fi

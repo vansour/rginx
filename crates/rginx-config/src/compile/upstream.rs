@@ -5,13 +5,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rginx_core::{
-    ActiveHealthCheck, Error, Result, Upstream, UpstreamLoadBalance, UpstreamPeer,
-    UpstreamProtocol, UpstreamSettings, UpstreamTls,
+    ActiveHealthCheck, ClientIdentity, Error, Result, TlsVersion, Upstream, UpstreamLoadBalance,
+    UpstreamPeer, UpstreamProtocol, UpstreamSettings, UpstreamTls,
 };
 use rustls::pki_types::ServerName;
 
 use crate::model::{
-    UpstreamConfig, UpstreamLoadBalanceConfig, UpstreamProtocolConfig, UpstreamTlsConfig,
+    TlsVersionConfig, UpstreamConfig, UpstreamLoadBalanceConfig, UpstreamProtocolConfig,
+    UpstreamTlsConfig, UpstreamTlsModeConfig,
 };
 
 pub(super) fn compile_upstreams(
@@ -27,6 +28,7 @@ pub(super) fn compile_upstreams(
                 tls,
                 protocol,
                 load_balance,
+                server_name,
                 server_name_override,
                 request_timeout_secs,
                 connect_timeout_secs,
@@ -54,7 +56,7 @@ pub(super) fn compile_upstreams(
                 .into_iter()
                 .map(|peer| compile_peer(&name, peer.url, peer.weight, peer.backup))
                 .collect::<Result<Vec<_>>>()?;
-            let tls = compile_tls(&name, tls, base_dir)?;
+            let (tls, tls_versions, client_identity) = compile_tls(&name, tls, base_dir)?;
             let protocol = compile_protocol(&name, protocol, &peers)?;
             let load_balance = compile_load_balance(load_balance);
             let server_name_override = compile_server_name_override(&name, server_name_override)?;
@@ -139,7 +141,10 @@ pub(super) fn compile_upstreams(
                 UpstreamSettings {
                     protocol,
                     load_balance,
+                    server_name: server_name.unwrap_or(true),
                     server_name_override,
+                    tls_versions,
+                    client_identity,
                     request_timeout,
                     connect_timeout,
                     write_timeout,
@@ -225,11 +230,18 @@ fn compile_tls(
     upstream_name: &str,
     tls: Option<UpstreamTlsConfig>,
     base_dir: &Path,
-) -> Result<UpstreamTls> {
-    match tls.unwrap_or(UpstreamTlsConfig::NativeRoots) {
-        UpstreamTlsConfig::NativeRoots => Ok(UpstreamTls::NativeRoots),
-        UpstreamTlsConfig::Insecure => Ok(UpstreamTls::Insecure),
-        UpstreamTlsConfig::CustomCa { ca_cert_path } => {
+) -> Result<(UpstreamTls, Option<Vec<TlsVersion>>, Option<ClientIdentity>)> {
+    let tls = tls.unwrap_or(UpstreamTlsConfig {
+        verify: UpstreamTlsModeConfig::NativeRoots,
+        versions: None,
+        client_cert_path: None,
+        client_key_path: None,
+    });
+
+    let verify_mode = match tls.verify {
+        UpstreamTlsModeConfig::NativeRoots => UpstreamTls::NativeRoots,
+        UpstreamTlsModeConfig::Insecure => UpstreamTls::Insecure,
+        UpstreamTlsModeConfig::CustomCa { ca_cert_path } => {
             let resolved = super::resolve_path(base_dir, ca_cert_path);
             if !resolved.is_file() {
                 return Err(Error::Config(format!(
@@ -238,9 +250,52 @@ fn compile_tls(
                 )));
             }
 
-            Ok(UpstreamTls::CustomCa { ca_cert_path: resolved })
+            UpstreamTls::CustomCa { ca_cert_path: resolved }
         }
-    }
+    };
+
+    let tls_versions = compile_tls_versions(&tls.versions);
+    let client_identity = match (tls.client_cert_path, tls.client_key_path) {
+        (None, None) => None,
+        (Some(cert_path), Some(key_path)) => {
+            let cert_path = super::resolve_path(base_dir, cert_path);
+            if !cert_path.is_file() {
+                return Err(Error::Config(format!(
+                    "upstream `{upstream_name}` client certificate file `{}` does not exist or is not a file",
+                    cert_path.display()
+                )));
+            }
+
+            let key_path = super::resolve_path(base_dir, key_path);
+            if !key_path.is_file() {
+                return Err(Error::Config(format!(
+                    "upstream `{upstream_name}` client private key file `{}` does not exist or is not a file",
+                    key_path.display()
+                )));
+            }
+
+            Some(ClientIdentity { cert_path, key_path })
+        }
+        _ => {
+            return Err(Error::Config(format!(
+                "upstream `{upstream_name}` mTLS identity requires both client_cert_path and client_key_path"
+            )));
+        }
+    };
+
+    Ok((verify_mode, tls_versions, client_identity))
+}
+
+fn compile_tls_versions(versions: &Option<Vec<TlsVersionConfig>>) -> Option<Vec<TlsVersion>> {
+    versions.as_ref().map(|versions| {
+        versions
+            .iter()
+            .map(|version| match version {
+                TlsVersionConfig::Tls12 => TlsVersion::Tls12,
+                TlsVersionConfig::Tls13 => TlsVersion::Tls13,
+            })
+            .collect()
+    })
 }
 
 fn compile_protocol(

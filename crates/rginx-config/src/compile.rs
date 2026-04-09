@@ -45,32 +45,30 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
     } = raw;
     let runtime = runtime::compile_runtime_settings(runtime)?;
     let any_vhost_tls = raw_servers.iter().any(|vhost| vhost.tls.is_some());
-    let (listeners, primary_server, default_server_names, default_server_tls) =
-        if raw_listeners.is_empty() {
-            let compiled_server = server::compile_legacy_server(server, base_dir, any_vhost_tls)?;
-            (
-                vec![compiled_server.listener.clone()],
-                compiled_server.listener.server.clone(),
-                compiled_server.server_names,
-                compiled_server.listener.server.tls.clone(),
-            )
-        } else {
-            let default_server_names = server.server_names;
-            let listeners = server::compile_listeners(raw_listeners, base_dir)?;
-            let primary_server = listeners
-                .first()
-                .expect("at least one explicit listener should be compiled")
-                .server
-                .clone();
-            (listeners, primary_server, default_server_names, None)
-        };
+    let (listeners, primary_server, default_server_names) = if raw_listeners.is_empty() {
+        let compiled_server = server::compile_legacy_server(server, base_dir, any_vhost_tls)?;
+        (
+            vec![compiled_server.listener.clone()],
+            compiled_server.listener.server.clone(),
+            compiled_server.server_names,
+        )
+    } else {
+        let default_server_names = server.server_names;
+        let listeners = server::compile_listeners(raw_listeners, base_dir)?;
+        let primary_server = listeners
+            .first()
+            .expect("at least one explicit listener should be compiled")
+            .server
+            .clone();
+        (listeners, primary_server, default_server_names)
+    };
     let upstreams = upstream::compile_upstreams(raw_upstreams, base_dir)?;
 
     let default_vhost = VirtualHost {
         id: DEFAULT_VHOST_ID.to_string(),
         server_names: default_server_names,
         routes: route::compile_routes(locations, &upstreams, DEFAULT_VHOST_ID)?,
-        tls: default_server_tls,
+        tls: None,
     };
 
     let vhosts = raw_servers
@@ -109,8 +107,9 @@ mod tests {
 
     use crate::model::{
         Config, HandlerConfig, ListenerConfig, LocationConfig, MatcherConfig, RuntimeConfig,
-        ServerConfig, ServerTlsConfig, UpstreamConfig, UpstreamLoadBalanceConfig,
-        UpstreamPeerConfig, UpstreamProtocolConfig, UpstreamTlsConfig, VirtualHostConfig,
+        ServerConfig, ServerTlsConfig, TlsCipherSuiteConfig, TlsKeyExchangeGroupConfig,
+        UpstreamConfig, UpstreamLoadBalanceConfig, UpstreamPeerConfig, UpstreamProtocolConfig,
+        UpstreamTlsConfig, VirtualHostConfig,
     };
 
     use super::{
@@ -133,6 +132,7 @@ mod tests {
             server: ServerConfig {
                 listen: Some("127.0.0.1:8080".to_string()),
                 proxy_protocol: None,
+                default_certificate: None,
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -155,6 +155,7 @@ mod tests {
                 tls: None,
                 protocol: UpstreamProtocolConfig::Auto,
                 load_balance: UpstreamLoadBalanceConfig::IpHash,
+                server_name: None,
                 server_name_override: None,
                 request_timeout_secs: None,
                 connect_timeout_secs: None,
@@ -246,6 +247,7 @@ mod tests {
             server: ServerConfig {
                 listen: Some("127.0.0.1:8080".to_string()),
                 proxy_protocol: None,
+                default_certificate: None,
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -268,6 +270,7 @@ mod tests {
                 tls: None,
                 protocol: UpstreamProtocolConfig::Auto,
                 load_balance: UpstreamLoadBalanceConfig::RoundRobin,
+                server_name: None,
                 server_name_override: None,
                 request_timeout_secs: None,
                 connect_timeout_secs: None,
@@ -337,6 +340,7 @@ mod tests {
             server: ServerConfig {
                 listen: Some("127.0.0.1:8080".to_string()),
                 proxy_protocol: None,
+                default_certificate: None,
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -359,6 +363,7 @@ mod tests {
                 tls: None,
                 protocol: UpstreamProtocolConfig::Auto,
                 load_balance: UpstreamLoadBalanceConfig::IpHash,
+                server_name: None,
                 server_name_override: None,
                 request_timeout_secs: None,
                 connect_timeout_secs: Some(3),
@@ -433,6 +438,7 @@ mod tests {
             server: ServerConfig {
                 listen: Some("127.0.0.1:8080".to_string()),
                 proxy_protocol: None,
+                default_certificate: None,
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -462,6 +468,7 @@ mod tests {
                 tls: None,
                 protocol: UpstreamProtocolConfig::Auto,
                 load_balance: UpstreamLoadBalanceConfig::LeastConn,
+                server_name: None,
                 server_name_override: None,
                 request_timeout_secs: None,
                 connect_timeout_secs: None,
@@ -525,6 +532,7 @@ mod tests {
             server: ServerConfig {
                 listen: Some("127.0.0.1:8080".to_string()),
                 proxy_protocol: None,
+                default_certificate: None,
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -554,6 +562,7 @@ mod tests {
                 tls: None,
                 protocol: UpstreamProtocolConfig::Auto,
                 load_balance: UpstreamLoadBalanceConfig::RoundRobin,
+                server_name: None,
                 server_name_override: None,
                 request_timeout_secs: None,
                 connect_timeout_secs: None,
@@ -632,6 +641,7 @@ mod tests {
             server: ServerConfig {
                 listen: Some("127.0.0.1:8080".to_string()),
                 proxy_protocol: None,
+                default_certificate: None,
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -661,6 +671,7 @@ mod tests {
                 tls: None,
                 protocol: UpstreamProtocolConfig::Auto,
                 load_balance: UpstreamLoadBalanceConfig::RoundRobin,
+                server_name: None,
                 server_name_override: None,
                 request_timeout_secs: None,
                 connect_timeout_secs: None,
@@ -739,6 +750,7 @@ mod tests {
             server: ServerConfig {
                 listen: Some("127.0.0.1:8080".to_string()),
                 proxy_protocol: None,
+                default_certificate: None,
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -761,6 +773,7 @@ mod tests {
                 tls: None,
                 protocol: UpstreamProtocolConfig::Auto,
                 load_balance: UpstreamLoadBalanceConfig::RoundRobin,
+                server_name: None,
                 server_name_override: None,
                 request_timeout_secs: Some(12),
                 connect_timeout_secs: None,
@@ -833,6 +846,7 @@ mod tests {
             server: ServerConfig {
                 listen: Some("127.0.0.1:8080".to_string()),
                 proxy_protocol: None,
+                default_certificate: None,
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -855,6 +869,7 @@ mod tests {
                 tls: None,
                 protocol: UpstreamProtocolConfig::Auto,
                 load_balance: UpstreamLoadBalanceConfig::RoundRobin,
+                server_name: None,
                 server_name_override: None,
                 request_timeout_secs: None,
                 connect_timeout_secs: None,
@@ -930,6 +945,7 @@ mod tests {
             server: ServerConfig {
                 listen: Some("127.0.0.1:8080".to_string()),
                 proxy_protocol: None,
+                default_certificate: None,
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -949,9 +965,17 @@ mod tests {
                     weight: 1,
                     backup: false,
                 }],
-                tls: Some(UpstreamTlsConfig::CustomCa { ca_cert_path: "dev-ca.pem".to_string() }),
+                tls: Some(UpstreamTlsConfig {
+                    verify: crate::model::UpstreamTlsModeConfig::CustomCa {
+                        ca_cert_path: "dev-ca.pem".to_string(),
+                    },
+                    versions: Some(vec![crate::model::TlsVersionConfig::Tls13]),
+                    client_cert_path: None,
+                    client_key_path: None,
+                }),
                 protocol: UpstreamProtocolConfig::Http2,
                 load_balance: UpstreamLoadBalanceConfig::RoundRobin,
+                server_name: None,
                 server_name_override: Some("dev.internal".to_string()),
                 request_timeout_secs: Some(5),
                 connect_timeout_secs: None,
@@ -1027,6 +1051,131 @@ mod tests {
     }
 
     #[test]
+    fn compile_resolves_upstream_mtls_identity_and_tls_versions_relative_to_config_base() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        let base_dir =
+            std::env::temp_dir().join(format!("rginx-upstream-mtls-config-test-{unique}"));
+        fs::create_dir_all(&base_dir).expect("temp base dir should be created");
+        let ca_path = base_dir.join("upstream-ca.pem");
+        let client_cert_path = base_dir.join("client.crt");
+        let client_key_path = base_dir.join("client.key");
+        fs::write(&ca_path, b"placeholder").expect("temp CA file should be written");
+        fs::write(&client_cert_path, b"placeholder")
+            .expect("temp client cert file should be written");
+        fs::write(&client_key_path, b"placeholder")
+            .expect("temp client key file should be written");
+
+        let config = Config {
+            runtime: RuntimeConfig {
+                shutdown_timeout_secs: 10,
+                worker_threads: None,
+                accept_workers: None,
+            },
+            listeners: Vec::new(),
+            server: ServerConfig {
+                listen: Some("127.0.0.1:8080".to_string()),
+                proxy_protocol: None,
+                default_certificate: None,
+                server_names: Vec::new(),
+                trusted_proxies: Vec::new(),
+                keep_alive: None,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout_secs: None,
+                request_body_read_timeout_secs: None,
+                response_write_timeout_secs: None,
+                access_log_format: None,
+                tls: None,
+            },
+            upstreams: vec![UpstreamConfig {
+                name: "mtls-backend".to_string(),
+                peers: vec![UpstreamPeerConfig {
+                    url: "https://localhost:9443".to_string(),
+                    weight: 1,
+                    backup: false,
+                }],
+                tls: Some(UpstreamTlsConfig {
+                    verify: crate::model::UpstreamTlsModeConfig::CustomCa {
+                        ca_cert_path: "upstream-ca.pem".to_string(),
+                    },
+                    versions: Some(vec![crate::model::TlsVersionConfig::Tls13]),
+                    client_cert_path: Some("client.crt".to_string()),
+                    client_key_path: Some("client.key".to_string()),
+                }),
+                protocol: UpstreamProtocolConfig::Auto,
+                load_balance: UpstreamLoadBalanceConfig::RoundRobin,
+                server_name: None,
+                server_name_override: Some("localhost".to_string()),
+                request_timeout_secs: None,
+                connect_timeout_secs: None,
+                read_timeout_secs: None,
+                write_timeout_secs: None,
+                idle_timeout_secs: None,
+                pool_idle_timeout_secs: None,
+                pool_max_idle_per_host: None,
+                tcp_keepalive_secs: None,
+                tcp_nodelay: None,
+                http2_keep_alive_interval_secs: None,
+                http2_keep_alive_timeout_secs: None,
+                http2_keep_alive_while_idle: None,
+                max_replayable_request_body_bytes: None,
+                unhealthy_after_failures: None,
+                unhealthy_cooldown_secs: None,
+                health_check_path: None,
+                health_check_grpc_service: None,
+                health_check_interval_secs: None,
+                health_check_timeout_secs: None,
+                healthy_successes_required: None,
+            }],
+            locations: vec![LocationConfig {
+                matcher: MatcherConfig::Prefix("/".to_string()),
+                handler: HandlerConfig::Proxy {
+                    upstream: "mtls-backend".to_string(),
+                    preserve_host: None,
+                    strip_prefix: None,
+                    proxy_set_headers: std::collections::HashMap::new(),
+                },
+                grpc_service: None,
+                grpc_method: None,
+                allow_cidrs: Vec::new(),
+                deny_cidrs: Vec::new(),
+                requests_per_sec: None,
+                burst: None,
+            }],
+            servers: Vec::new(),
+        };
+
+        let snapshot =
+            compile_with_base(config, &base_dir).expect("upstream mTLS config should compile");
+        let proxy = match &snapshot.default_vhost.routes[0].action {
+            rginx_core::RouteAction::Proxy(proxy) => proxy,
+            _ => panic!("expected proxy route"),
+        };
+
+        assert!(matches!(
+            &proxy.upstream.tls,
+            rginx_core::UpstreamTls::CustomCa { ca_cert_path } if ca_cert_path == &ca_path
+        ));
+        assert!(matches!(
+            proxy.upstream.tls_versions.as_deref(),
+            Some([rginx_core::TlsVersion::Tls13])
+        ));
+        let client_identity =
+            proxy.upstream.client_identity.as_ref().expect("client identity should compile");
+        assert_eq!(client_identity.cert_path, client_cert_path);
+        assert_eq!(client_identity.key_path, client_key_path);
+
+        fs::remove_file(&ca_path).expect("temp CA file should be removed");
+        fs::remove_file(&client_cert_path).expect("temp client cert should be removed");
+        fs::remove_file(&client_key_path).expect("temp client key should be removed");
+        fs::remove_dir(&base_dir).expect("temp base dir should be removed");
+    }
+
+    #[test]
     fn compile_normalizes_server_name_override() {
         let config = Config {
             runtime: RuntimeConfig {
@@ -1038,6 +1187,7 @@ mod tests {
             server: ServerConfig {
                 listen: Some("127.0.0.1:8080".to_string()),
                 proxy_protocol: None,
+                default_certificate: None,
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -1060,6 +1210,7 @@ mod tests {
                 tls: None,
                 protocol: UpstreamProtocolConfig::Auto,
                 load_balance: UpstreamLoadBalanceConfig::RoundRobin,
+                server_name: None,
                 server_name_override: Some("[::1]".to_string()),
                 request_timeout_secs: None,
                 connect_timeout_secs: None,
@@ -1112,6 +1263,97 @@ mod tests {
     }
 
     #[test]
+    fn compile_preserves_upstream_server_name_toggle() {
+        let config = Config {
+            runtime: RuntimeConfig {
+                shutdown_timeout_secs: 10,
+                worker_threads: None,
+                accept_workers: None,
+            },
+            listeners: Vec::new(),
+            server: ServerConfig {
+                listen: Some("127.0.0.1:8080".to_string()),
+                proxy_protocol: None,
+                default_certificate: None,
+                server_names: Vec::new(),
+                trusted_proxies: Vec::new(),
+                keep_alive: None,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout_secs: None,
+                request_body_read_timeout_secs: None,
+                response_write_timeout_secs: None,
+                access_log_format: None,
+                tls: None,
+            },
+            upstreams: vec![UpstreamConfig {
+                name: "secure-backend".to_string(),
+                peers: vec![UpstreamPeerConfig {
+                    url: "https://127.0.0.1:9443".to_string(),
+                    weight: 1,
+                    backup: false,
+                }],
+                tls: Some(crate::model::UpstreamTlsConfig {
+                    verify: crate::model::UpstreamTlsModeConfig::Insecure,
+                    versions: None,
+                    client_cert_path: None,
+                    client_key_path: None,
+                }),
+                protocol: UpstreamProtocolConfig::Auto,
+                load_balance: UpstreamLoadBalanceConfig::RoundRobin,
+                server_name: Some(false),
+                server_name_override: Some("localhost".to_string()),
+                request_timeout_secs: None,
+                connect_timeout_secs: None,
+                read_timeout_secs: None,
+                write_timeout_secs: None,
+                idle_timeout_secs: None,
+                pool_idle_timeout_secs: None,
+                pool_max_idle_per_host: None,
+                tcp_keepalive_secs: None,
+                tcp_nodelay: None,
+                http2_keep_alive_interval_secs: None,
+                http2_keep_alive_timeout_secs: None,
+                http2_keep_alive_while_idle: None,
+                max_replayable_request_body_bytes: None,
+                unhealthy_after_failures: None,
+                unhealthy_cooldown_secs: None,
+                health_check_path: None,
+                health_check_grpc_service: None,
+                health_check_interval_secs: None,
+                health_check_timeout_secs: None,
+                healthy_successes_required: None,
+            }],
+            locations: vec![LocationConfig {
+                matcher: MatcherConfig::Prefix("/".to_string()),
+                handler: HandlerConfig::Proxy {
+                    upstream: "secure-backend".to_string(),
+                    preserve_host: None,
+                    strip_prefix: None,
+                    proxy_set_headers: std::collections::HashMap::new(),
+                },
+                grpc_service: None,
+                grpc_method: None,
+                allow_cidrs: Vec::new(),
+                deny_cidrs: Vec::new(),
+                requests_per_sec: None,
+                burst: None,
+            }],
+            servers: Vec::new(),
+        };
+
+        let snapshot = compile(config).expect("upstream server_name toggle should compile");
+        let proxy = match &snapshot.default_vhost.routes[0].action {
+            rginx_core::RouteAction::Proxy(proxy) => proxy,
+            _ => panic!("expected proxy route"),
+        };
+
+        assert!(!proxy.upstream.server_name);
+        assert_eq!(proxy.upstream.server_name_override.as_deref(), Some("localhost"));
+    }
+
+    #[test]
     fn compile_rejects_invalid_server_name_override() {
         let config = Config {
             runtime: RuntimeConfig {
@@ -1123,6 +1365,7 @@ mod tests {
             server: ServerConfig {
                 listen: Some("127.0.0.1:8080".to_string()),
                 proxy_protocol: None,
+                default_certificate: None,
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -1145,6 +1388,7 @@ mod tests {
                 tls: None,
                 protocol: UpstreamProtocolConfig::Auto,
                 load_balance: UpstreamLoadBalanceConfig::RoundRobin,
+                server_name: None,
                 server_name_override: Some("bad name".to_string()),
                 request_timeout_secs: None,
                 connect_timeout_secs: None,
@@ -1203,6 +1447,7 @@ mod tests {
             server: ServerConfig {
                 listen: Some("127.0.0.1:8080".to_string()),
                 proxy_protocol: None,
+                default_certificate: None,
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -1252,6 +1497,7 @@ mod tests {
             server: ServerConfig {
                 listen: Some("127.0.0.1:8080".to_string()),
                 proxy_protocol: None,
+                default_certificate: None,
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -1303,6 +1549,7 @@ mod tests {
             server: ServerConfig {
                 listen: Some("127.0.0.1:8080".to_string()),
                 proxy_protocol: None,
+                default_certificate: None,
                 server_names: vec!["default.example.com".to_string()],
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -1387,6 +1634,7 @@ mod tests {
             server: ServerConfig {
                 listen: Some("127.0.0.1:8080".to_string()),
                 proxy_protocol: None,
+                default_certificate: None,
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -1400,6 +1648,15 @@ mod tests {
                 tls: Some(ServerTlsConfig {
                     cert_path: "server.crt".to_string(),
                     key_path: "server.key".to_string(),
+                    additional_certificates: None,
+                    versions: None,
+                    cipher_suites: None,
+                    key_exchange_groups: None,
+                    alpn_protocols: None,
+                    ocsp_staple_path: None,
+                    session_resumption: None,
+                    session_tickets: None,
+                    client_auth: None,
                 }),
             },
             upstreams: Vec::new(),
@@ -1433,6 +1690,86 @@ mod tests {
     }
 
     #[test]
+    fn compile_preserves_server_tls_policy_fields() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        let base_dir = std::env::temp_dir().join(format!("rginx-server-tls-policy-test-{unique}"));
+        fs::create_dir_all(&base_dir).expect("temp base dir should be created");
+        let cert_path = base_dir.join("server.crt");
+        let key_path = base_dir.join("server.key");
+        fs::write(&cert_path, b"placeholder").expect("temp cert file should be written");
+        fs::write(&key_path, b"placeholder").expect("temp key file should be written");
+
+        let config = Config {
+            runtime: RuntimeConfig {
+                shutdown_timeout_secs: 10,
+                worker_threads: None,
+                accept_workers: None,
+            },
+            listeners: Vec::new(),
+            server: ServerConfig {
+                listen: Some("127.0.0.1:8080".to_string()),
+                proxy_protocol: None,
+                default_certificate: None,
+                server_names: Vec::new(),
+                trusted_proxies: Vec::new(),
+                keep_alive: None,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout_secs: None,
+                request_body_read_timeout_secs: None,
+                response_write_timeout_secs: None,
+                access_log_format: None,
+                tls: Some(ServerTlsConfig {
+                    cert_path: "server.crt".to_string(),
+                    key_path: "server.key".to_string(),
+                    additional_certificates: None,
+                    versions: Some(vec![crate::model::TlsVersionConfig::Tls13]),
+                    cipher_suites: Some(vec![TlsCipherSuiteConfig::Tls13Aes128GcmSha256]),
+                    key_exchange_groups: Some(vec![TlsKeyExchangeGroupConfig::Secp256r1]),
+                    alpn_protocols: Some(vec!["http/1.1".to_string()]),
+                    ocsp_staple_path: None,
+                    session_resumption: Some(false),
+                    session_tickets: Some(false),
+                    client_auth: None,
+                }),
+            },
+            upstreams: Vec::new(),
+            locations: vec![LocationConfig {
+                matcher: MatcherConfig::Exact("/".to_string()),
+                handler: HandlerConfig::Return {
+                    status: 200,
+                    location: String::new(),
+                    body: Some("ok\n".to_string()),
+                },
+                grpc_service: None,
+                grpc_method: None,
+                allow_cidrs: Vec::new(),
+                deny_cidrs: Vec::new(),
+                requests_per_sec: None,
+                burst: None,
+            }],
+            servers: Vec::new(),
+        };
+
+        let snapshot = compile_with_base(config, &base_dir).expect("server TLS should compile");
+        let tls = snapshot.server.tls.expect("compiled server TLS should exist");
+        assert_eq!(tls.versions, Some(vec![rginx_core::TlsVersion::Tls13]));
+        assert_eq!(tls.cipher_suites, Some(vec![rginx_core::TlsCipherSuite::Tls13Aes128GcmSha256]));
+        assert_eq!(tls.key_exchange_groups, Some(vec![rginx_core::TlsKeyExchangeGroup::Secp256r1]));
+        assert_eq!(tls.alpn_protocols, Some(vec!["http/1.1".to_string()]));
+        assert_eq!(tls.session_resumption, Some(false));
+        assert_eq!(tls.session_tickets, Some(false));
+
+        fs::remove_file(cert_path).expect("temp cert file should be removed");
+        fs::remove_file(key_path).expect("temp key file should be removed");
+        fs::remove_dir(base_dir).expect("temp base dir should be removed");
+    }
+
+    #[test]
     fn compile_normalizes_trusted_proxy_ips_and_cidrs() {
         let config = Config {
             runtime: RuntimeConfig {
@@ -1444,6 +1781,7 @@ mod tests {
             server: ServerConfig {
                 listen: Some("127.0.0.1:8080".to_string()),
                 proxy_protocol: None,
+                default_certificate: None,
                 server_names: Vec::new(),
                 trusted_proxies: vec!["10.0.0.0/8".to_string(), "127.0.0.1".to_string()],
                 keep_alive: None,
@@ -1494,6 +1832,7 @@ mod tests {
             server: ServerConfig {
                 listen: Some("127.0.0.1:8080".to_string()),
                 proxy_protocol: None,
+                default_certificate: None,
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: Some(false),
@@ -1553,6 +1892,7 @@ mod tests {
             server: ServerConfig {
                 listen: Some("127.0.0.1:8080".to_string()),
                 proxy_protocol: None,
+                default_certificate: None,
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -1626,6 +1966,7 @@ mod tests {
             server: ServerConfig {
                 listen: Some("127.0.0.1:8080".to_string()),
                 proxy_protocol: None,
+                default_certificate: None,
                 server_names: Vec::new(),
                 trusted_proxies: Vec::new(),
                 keep_alive: None,
@@ -1674,6 +2015,7 @@ mod tests {
                 ListenerConfig {
                     name: "http".to_string(),
                     proxy_protocol: None,
+                    default_certificate: None,
                     listen: "127.0.0.1:8080".to_string(),
                     trusted_proxies: Vec::new(),
                     keep_alive: Some(true),
@@ -1689,6 +2031,7 @@ mod tests {
                 ListenerConfig {
                     name: "https".to_string(),
                     proxy_protocol: None,
+                    default_certificate: None,
                     listen: "127.0.0.1:8443".to_string(),
                     trusted_proxies: Vec::new(),
                     keep_alive: Some(true),
@@ -1705,6 +2048,7 @@ mod tests {
             server: ServerConfig {
                 listen: None,
                 proxy_protocol: None,
+                default_certificate: None,
                 server_names: vec!["example.com".to_string()],
                 trusted_proxies: Vec::new(),
                 keep_alive: None,

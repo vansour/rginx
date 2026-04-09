@@ -3,6 +3,7 @@ use super::health::{
     UpstreamHealthSnapshot,
 };
 use super::*;
+use rginx_core::{ClientIdentity, TlsVersion};
 
 pub type ProxyClient = Client<HttpsConnector<HttpConnector>, HttpBody>;
 pub(crate) type HealthChangeNotifier = Arc<dyn Fn(&str) + Send + Sync + 'static>;
@@ -10,7 +11,10 @@ pub(crate) type HealthChangeNotifier = Arc<dyn Fn(&str) + Send + Sync + 'static>
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct UpstreamClientProfile {
     tls: UpstreamTls,
+    tls_versions: Option<Vec<TlsVersion>>,
+    client_identity: Option<ClientIdentity>,
     protocol: UpstreamProtocol,
+    server_name: bool,
     server_name_override: Option<String>,
     connect_timeout: Duration,
     pool_idle_timeout: Option<Duration>,
@@ -26,7 +30,10 @@ impl UpstreamClientProfile {
     fn from_upstream(upstream: &Upstream) -> Self {
         Self {
             tls: upstream.tls.clone(),
+            tls_versions: upstream.tls_versions.clone(),
+            client_identity: upstream.client_identity.clone(),
             protocol: upstream.protocol,
+            server_name: upstream.server_name,
             server_name_override: upstream.server_name_override.clone(),
             connect_timeout: upstream.connect_timeout,
             pool_idle_timeout: upstream.pool_idle_timeout,
@@ -145,7 +152,12 @@ fn build_client_for_profile(profile: &UpstreamClientProfile) -> Result<ProxyClie
     connector.set_keepalive(profile.tcp_keepalive);
     connector.set_nodelay(profile.tcp_nodelay);
 
-    let tls_config = build_tls_config(&profile.tls)?;
+    let tls_config = build_tls_config(
+        &profile.tls,
+        profile.tls_versions.as_deref(),
+        profile.client_identity.as_ref(),
+        profile.server_name,
+    )?;
     let builder = HttpsConnectorBuilder::new().with_tls_config(tls_config).https_or_http();
     let builder = if let Some(server_name_override) = &profile.server_name_override {
         let server_name = ServerName::try_from(server_name_override.clone()).map_err(|error| {
@@ -181,51 +193,71 @@ fn build_client_for_profile(profile: &UpstreamClientProfile) -> Result<ProxyClie
     Ok(client_builder.build(connector))
 }
 
-fn build_tls_config(tls: &UpstreamTls) -> Result<ClientConfig, Error> {
-    match tls {
+fn build_tls_config(
+    tls: &UpstreamTls,
+    versions: Option<&[TlsVersion]>,
+    client_identity: Option<&ClientIdentity>,
+    server_name: bool,
+) -> Result<ClientConfig, Error> {
+    let builder = build_client_config_builder(versions);
+    let mut config = match tls {
         UpstreamTls::NativeRoots => {
-            let builder = ClientConfig::builder().with_native_roots().map_err(|error| {
+            let builder = builder.with_native_roots().map_err(|error| {
                 Error::Server(format!("failed to load native TLS roots: {error}"))
             })?;
-            Ok(builder.with_no_client_auth())
+            build_client_config_with_identity(builder, client_identity)
         }
         UpstreamTls::CustomCa { ca_cert_path } => {
             let roots = load_custom_ca_store(ca_cert_path)?;
-            Ok(ClientConfig::builder().with_root_certificates(roots).with_no_client_auth())
+            build_client_config_with_identity(
+                builder.with_root_certificates(roots),
+                client_identity,
+            )
         }
         UpstreamTls::Insecure => {
             let verifier = Arc::new(InsecureServerCertVerifier::new());
-            Ok(ClientConfig::builder()
-                .dangerous()
-                .with_custom_certificate_verifier(verifier)
-                .with_no_client_auth())
+            build_client_config_with_identity(
+                builder.dangerous().with_custom_certificate_verifier(verifier),
+                client_identity,
+            )
         }
+    }?;
+    config.enable_sni = server_name;
+    Ok(config)
+}
+
+fn build_client_config_builder(
+    versions: Option<&[TlsVersion]>,
+) -> rustls::ConfigBuilder<ClientConfig, rustls::WantsVerifier> {
+    match versions {
+        Some(versions) => ClientConfig::builder_with_protocol_versions(&rustls_versions(versions)),
+        None => ClientConfig::builder(),
+    }
+}
+
+fn build_client_config_with_identity(
+    builder: rustls::ConfigBuilder<ClientConfig, rustls::client::WantsClientCert>,
+    client_identity: Option<&ClientIdentity>,
+) -> Result<ClientConfig, Error> {
+    match client_identity {
+        Some(client_identity) => {
+            let cert_chain = load_certificate_chain(&client_identity.cert_path)?;
+            let key_der = load_private_key(&client_identity.key_path)?;
+            builder.with_client_auth_cert(cert_chain, key_der).map_err(|error| {
+                Error::Server(format!(
+                    "failed to configure upstream mTLS identity from `{}` and `{}`: {error}",
+                    client_identity.cert_path.display(),
+                    client_identity.key_path.display()
+                ))
+            })
+        }
+        None => Ok(builder.with_no_client_auth()),
     }
 }
 
 pub(super) fn load_custom_ca_store(path: &Path) -> Result<RootCertStore, Error> {
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
-    let certs =
-        rustls_pemfile::certs(&mut reader).collect::<Result<Vec<_>, _>>().map_err(|error| {
-            Error::Server(format!(
-                "failed to parse custom CA certificates from `{}`: {error}",
-                path.display()
-            ))
-        })?;
-
+    let certs = load_certificate_chain(path)?;
     let mut roots = RootCertStore::empty();
-    if certs.is_empty() {
-        let der = std::fs::read(path)?;
-        roots.add(CertificateDer::from(der)).map_err(|error| {
-            Error::Server(format!(
-                "failed to add DER custom CA certificate `{}`: {error}",
-                path.display()
-            ))
-        })?;
-        return Ok(roots);
-    }
-
     let (added, _ignored) = roots.add_parsable_certificates(certs);
     if added == 0 || roots.is_empty() {
         return Err(Error::Server(format!(
@@ -235,6 +267,50 @@ pub(super) fn load_custom_ca_store(path: &Path) -> Result<RootCertStore, Error> 
     }
 
     Ok(roots)
+}
+
+fn load_certificate_chain(path: &Path) -> Result<Vec<CertificateDer<'static>>, Error> {
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let certs =
+        rustls_pemfile::certs(&mut reader).collect::<Result<Vec<_>, _>>().map_err(|error| {
+            Error::Server(format!(
+                "failed to parse certificates from `{}`: {error}",
+                path.display()
+            ))
+        })?;
+
+    if certs.is_empty() {
+        let der = std::fs::read(path)?;
+        return Ok(vec![CertificateDer::from(der)]);
+    }
+
+    Ok(certs)
+}
+
+fn load_private_key(path: &Path) -> Result<rustls::pki_types::PrivateKeyDer<'static>, Error> {
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(file);
+    rustls_pemfile::private_key(&mut reader)
+        .map_err(|error| {
+            Error::Server(format!("failed to parse private key `{}`: {error}", path.display()))
+        })?
+        .ok_or_else(|| {
+            Error::Server(format!(
+                "private key file `{}` did not contain a supported PEM private key",
+                path.display()
+            ))
+        })
+}
+
+fn rustls_versions(versions: &[TlsVersion]) -> Vec<&'static rustls::SupportedProtocolVersion> {
+    versions
+        .iter()
+        .map(|version| match version {
+            TlsVersion::Tls12 => &rustls::version::TLS12,
+            TlsVersion::Tls13 => &rustls::version::TLS13,
+        })
+        .collect()
 }
 
 #[derive(Debug)]
@@ -315,7 +391,10 @@ mod tests {
             UpstreamSettings {
                 protocol: UpstreamProtocol::Auto,
                 load_balance: UpstreamLoadBalance::RoundRobin,
+                server_name: true,
                 server_name_override: None,
+                tls_versions: None,
+                client_identity: None,
                 request_timeout: Duration::from_secs(30),
                 connect_timeout: Duration::from_secs(30),
                 write_timeout: Duration::from_secs(30),
@@ -341,6 +420,7 @@ mod tests {
         ));
         let server = Server {
             listen_addr: "127.0.0.1:8080".parse().unwrap(),
+            default_certificate: None,
             trusted_proxies: Vec::new(),
             keep_alive: true,
             max_headers: None,
