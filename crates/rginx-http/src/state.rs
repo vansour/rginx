@@ -1993,8 +1993,12 @@ fn build_tls_ocsp_status_snapshot(
     bundle: &TlsOcspBundleSpec,
     runtime_statuses: Option<&HashMap<String, OcspRuntimeStatusEntry>>,
 ) -> Option<TlsOcspStatusSnapshot> {
-    let responder_urls = ocsp_responder_urls_for_certificate(&bundle.cert_path).unwrap_or_default();
-    if bundle.ocsp_staple_path.is_none() && responder_urls.is_empty() {
+    let (responder_urls, responder_error) =
+        match ocsp_responder_urls_for_certificate(&bundle.cert_path) {
+            Ok(responder_urls) => (responder_urls, None),
+            Err(error) => (Vec::new(), Some(error.to_string())),
+        };
+    if bundle.ocsp_staple_path.is_none() && responder_urls.is_empty() && responder_error.is_none() {
         return None;
     }
 
@@ -2004,18 +2008,25 @@ fn build_tls_ocsp_status_snapshot(
         .map(inspect_ocsp_cache_file)
         .unwrap_or((false, None, None));
     let runtime = runtime_statuses.and_then(|statuses| statuses.get(&bundle.scope));
-    let auto_refresh_enabled = bundle.ocsp_staple_path.is_some() && !responder_urls.is_empty();
-    let static_error = if bundle.ocsp_staple_path.is_some() && responder_urls.is_empty() {
-        Some("certificate does not expose an OCSP responder URL".to_string())
-    } else if bundle.ocsp_staple_path.is_some()
-        && crate::build_ocsp_request_for_certificate(&bundle.cert_path).is_err()
-    {
-        crate::build_ocsp_request_for_certificate(&bundle.cert_path)
-            .err()
-            .map(|error| error.to_string())
+    let ocsp_request_result = if bundle.ocsp_staple_path.is_some() && !responder_urls.is_empty() {
+        Some(crate::build_ocsp_request_for_certificate(&bundle.cert_path))
     } else {
         None
     };
+    let request_error = ocsp_request_result
+        .as_ref()
+        .and_then(|result| result.as_ref().err().map(|error| error.to_string()));
+    let auto_refresh_enabled = bundle.ocsp_staple_path.is_some()
+        && !responder_urls.is_empty()
+        && responder_error.is_none()
+        && request_error.is_none();
+    let static_error = responder_error.or_else(|| {
+        if bundle.ocsp_staple_path.is_some() && responder_urls.is_empty() {
+            Some("certificate does not expose an OCSP responder URL".to_string())
+        } else {
+            request_error
+        }
+    });
 
     Some(TlsOcspStatusSnapshot {
         scope: bundle.scope.clone(),

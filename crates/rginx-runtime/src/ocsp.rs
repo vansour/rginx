@@ -153,24 +153,31 @@ async fn fetch_ocsp_response_from_url(
         return Err(format!("responder returned HTTP {}", response.status()));
     }
 
-    let body = response
-        .into_body()
-        .collect()
+    let mut body = response.into_body();
+    let mut payload = Vec::new();
+    while let Some(frame) = body
+        .frame()
         .await
+        .transpose()
         .map_err(|error| format!("failed to read OCSP response body: {error}"))?
-        .to_bytes();
-    if body.is_empty() {
+    {
+        let Some(chunk) = frame.data_ref() else {
+            continue;
+        };
+        if payload.len().saturating_add(chunk.len()) > OCSP_MAX_RESPONSE_BYTES {
+            return Err(format!("OCSP response exceeded {} bytes", OCSP_MAX_RESPONSE_BYTES));
+        }
+        payload.extend_from_slice(chunk);
+    }
+    if payload.is_empty() {
         return Err("responder returned an empty OCSP response body".to_string());
     }
-    if body.len() > OCSP_MAX_RESPONSE_BYTES {
-        return Err(format!("OCSP response exceeded {} bytes", OCSP_MAX_RESPONSE_BYTES));
-    }
 
-    Ok(body.to_vec())
+    Ok(payload)
 }
 
 async fn write_ocsp_cache_file(path: &Path, body: &[u8]) -> Result<bool, String> {
-    if std::fs::read(path).ok().as_deref() == Some(body) {
+    if tokio::fs::read(path).await.ok().as_deref() == Some(body) {
         return Ok(false);
     }
 
@@ -195,7 +202,7 @@ async fn write_ocsp_cache_file(path: &Path, body: &[u8]) -> Result<bool, String>
 }
 
 fn build_ocsp_client() -> Result<OcspClient, String> {
-    let roots = load_native_root_store();
+    let roots = load_native_root_store()?;
     let tls_config = ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
     let connector = HttpsConnectorBuilder::new()
         .with_tls_config(tls_config)
@@ -205,9 +212,25 @@ fn build_ocsp_client() -> Result<OcspClient, String> {
     Ok(Client::builder(TokioExecutor::new()).build(connector))
 }
 
-fn load_native_root_store() -> RootCertStore {
+fn load_native_root_store() -> Result<RootCertStore, String> {
     let result = load_native_certs();
+    if !result.errors.is_empty() {
+        tracing::warn!(errors = ?result.errors, "system root certificate loading reported errors");
+    }
     let mut roots = RootCertStore::empty();
-    let _ = roots.add_parsable_certificates(result.certs);
-    roots
+    let (added, ignored) = roots.add_parsable_certificates(result.certs);
+    if ignored > 0 {
+        tracing::warn!(ignored, "system root certificate loading ignored unparsable certificates");
+    }
+    if added == 0 {
+        return Err(if result.errors.is_empty() {
+            "no usable system root certificates were loaded for dynamic OCSP requests".to_string()
+        } else {
+            format!(
+                "no usable system root certificates were loaded for dynamic OCSP requests ({} loader errors)",
+                result.errors.len()
+            )
+        });
+    }
+    Ok(roots)
 }

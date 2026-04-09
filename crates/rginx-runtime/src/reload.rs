@@ -40,25 +40,37 @@ fn describe_tls_certificate_changes(
     let previous = rginx_http::tls_runtime_snapshot_for_config(previous)
         .certificates
         .into_iter()
-        .map(|certificate| (certificate.scope, certificate.fingerprint_sha256))
-        .collect::<std::collections::HashMap<_, _>>();
-    let mut changes = rginx_http::tls_runtime_snapshot_for_config(next)
+        .map(|certificate| {
+            (certificate.scope, certificate.fingerprint_sha256.unwrap_or_else(|| "-".to_string()))
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let next = rginx_http::tls_runtime_snapshot_for_config(next)
         .certificates
         .into_iter()
-        .filter_map(|certificate| {
-            let next_fingerprint = certificate.fingerprint_sha256?;
-            match previous.get(&certificate.scope) {
-                Some(Some(previous_fingerprint)) if previous_fingerprint == &next_fingerprint => {
-                    None
-                }
-                Some(Some(previous_fingerprint)) => Some(format!(
-                    "{}:{}->{}",
-                    certificate.scope, previous_fingerprint, next_fingerprint
-                )),
-                _ => Some(format!("{}:- ->{}", certificate.scope, next_fingerprint)),
-            }
+        .map(|certificate| {
+            (certificate.scope, certificate.fingerprint_sha256.unwrap_or_else(|| "-".to_string()))
         })
-        .collect::<Vec<_>>();
-    changes.sort();
-    changes
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    previous
+        .keys()
+        .chain(next.keys())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|scope| match (previous.get(scope), next.get(scope)) {
+            (Some(previous_fingerprint), Some(next_fingerprint))
+                if previous_fingerprint == next_fingerprint =>
+            {
+                None
+            }
+            (Some(previous_fingerprint), Some(next_fingerprint)) => {
+                Some(format!("{scope}:{previous_fingerprint}->{next_fingerprint}"))
+            }
+            (None, Some(next_fingerprint)) => Some(format!("{scope}:->{next_fingerprint}")),
+            (Some(previous_fingerprint), None) => {
+                Some(format!("{scope}:{previous_fingerprint}->-"))
+            }
+            (None, None) => None,
+        })
+        .collect::<Vec<_>>()
 }
