@@ -50,14 +50,12 @@ fn convert_vhost_tls(
     server_names: &[String],
     warnings: &mut Vec<String>,
 ) -> Option<ConvertedVhostTls> {
-    let Some((cert_path, key_path, additional_certificates)) = convert_certificate_pairs(
+    let (cert_path, key_path, additional_certificates) = convert_certificate_pairs(
         &tls.cert_paths,
         &tls.key_paths,
         "vhost TLS certificate override",
         warnings,
-    ) else {
-        return None;
-    };
+    )?;
     if !tls.versions.is_empty()
         || tls.ocsp_staple_path.is_some()
         || tls.session_tickets.is_some()
