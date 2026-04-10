@@ -54,6 +54,11 @@ class ReloadResult:
     reload_apply_ms: float
 
 
+@dataclasses.dataclass(frozen=True)
+class BuildStamp:
+    values: dict[str, str]
+
+
 @dataclasses.dataclass
 class ReservedPort:
     port: int
@@ -219,24 +224,55 @@ def run_curl_request(
     headers: list[str],
     body: bytes | None,
     timeout_secs: float,
+    grpc_mode: str | None = None,
 ) -> float:
     started = time.perf_counter()
-    command = [
-        "curl",
-        "--silent",
-        "--show-error",
-        "--fail",
-        "--output",
-        "/dev/null",
-        "--max-time",
-        str(timeout_secs),
-        *flags,
-    ]
-    for header in headers:
-        command.extend(["--header", header])
-    command.append(url)
-    subprocess.run(command, input=body, check=True)
+    with tempfile.NamedTemporaryFile() as headers_file:
+        command = [
+            "curl",
+            "--silent",
+            "--show-error",
+            "--fail",
+            "--output",
+            "-",
+            "--dump-header",
+            headers_file.name,
+            "--max-time",
+            str(timeout_secs),
+            *flags,
+        ]
+        for header in headers:
+            command.extend(["--header", header])
+        command.append(url)
+        completed = subprocess.run(command, input=body, check=True, capture_output=True)
+        if grpc_mode is not None:
+            grpc_status = extract_grpc_status(
+                header_bytes=pathlib.Path(headers_file.name).read_bytes(),
+                body_bytes=completed.stdout,
+                grpc_mode=grpc_mode,
+            )
+            if grpc_status is None:
+                raise RuntimeError(f"missing grpc-status for {url}")
+            if grpc_status != "0":
+                raise RuntimeError(f"unexpected grpc-status {grpc_status} for {url}")
     return time.perf_counter() - started
+
+
+def extract_grpc_status(*, header_bytes: bytes, body_bytes: bytes, grpc_mode: str) -> str | None:
+    header_matches = re.findall(rb"(?im)^grpc-status:\s*([0-9]+)\s*$", header_bytes)
+    if header_matches:
+        return header_matches[-1].decode("ascii")
+
+    if grpc_mode == "grpc-web-text":
+        try:
+            body_bytes = base64.b64decode(body_bytes, validate=False)
+        except Exception:
+            return None
+
+    body_matches = re.findall(rb"grpc-status:\s*([0-9]+)", body_bytes)
+    if body_matches:
+        return body_matches[-1].decode("ascii")
+    return None
 
 
 def rginx_return_config(port: int) -> str:
@@ -683,6 +719,7 @@ def benchmark_named_curl(
     timeout_secs: float,
     server: str,
     scenario: str,
+    grpc_mode: str | None = None,
 ) -> BenchmarkResult:
     durations: list[float] = []
     started = time.perf_counter()
@@ -695,6 +732,7 @@ def benchmark_named_curl(
                 headers=headers,
                 body=body,
                 timeout_secs=timeout_secs,
+                grpc_mode=grpc_mode,
             )
             for _ in range(requests)
         ]
@@ -756,11 +794,14 @@ def start_grpc_backend_server(
 
 def ensure_rginx_binary(workspace: pathlib.Path) -> pathlib.Path:
     binary = workspace / "target" / "release" / "rginx"
-    if binary.exists():
+    stamp_path = binary.with_name(f"{binary.name}.benchmark-stamp.json")
+    expected_stamp = BuildStamp(values={"workspace_head": current_git_head(workspace)})
+    if binary.exists() and read_build_stamp(stamp_path) == expected_stamp:
         return binary
     run(["cargo", "build", "--release", "-p", "rginx", "--locked"], cwd=workspace)
     if not binary.exists():
         raise RuntimeError(f"rginx binary was not produced at {binary}")
+    write_build_stamp(stamp_path, expected_stamp)
     return binary
 
 
@@ -773,10 +814,29 @@ def ensure_nginx_checkout(src_dir: pathlib.Path, ref: str) -> str:
     return commit.stdout.strip()
 
 
-def ensure_nginx_binary(src_dir: pathlib.Path, install_dir: pathlib.Path) -> pathlib.Path:
+def ensure_nginx_binary(
+    src_dir: pathlib.Path,
+    install_dir: pathlib.Path,
+    *,
+    nginx_ref: str,
+    nginx_commit: str,
+) -> pathlib.Path:
     binary = install_dir / "sbin" / "nginx"
-    if binary.exists():
+    stamp_path = install_dir / ".benchmark-stamp.json"
+    expected_stamp = BuildStamp(values={"nginx_ref": nginx_ref, "nginx_commit": nginx_commit})
+    if binary.exists() and read_build_stamp(stamp_path) == expected_stamp:
         return binary
+
+    if install_dir.exists():
+        shutil.rmtree(install_dir)
+    if (src_dir / "Makefile").exists():
+        subprocess.run(
+            ["make", "clean"],
+            cwd=src_dir,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
     configure = [
         "./auto/configure",
@@ -792,6 +852,7 @@ def ensure_nginx_binary(src_dir: pathlib.Path, install_dir: pathlib.Path) -> pat
     run(["make", "install"], cwd=src_dir)
     if not binary.exists():
         raise RuntimeError(f"nginx binary was not produced at {binary}")
+    write_build_stamp(stamp_path, expected_stamp)
     return binary
 
 
@@ -812,6 +873,29 @@ def nginx_version(binary: pathlib.Path) -> str:
             f"failed to query nginx version:\nstdout:\n{completed.stdout}\nstderr:\n{completed.stderr}"
         )
     return completed.stderr.strip()
+
+
+def read_build_stamp(path: pathlib.Path) -> BuildStamp | None:
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in payload.items()
+    ):
+        return None
+    return BuildStamp(values=payload)
+
+
+def write_build_stamp(path: pathlib.Path, stamp: BuildStamp) -> None:
+    write_text(path, json.dumps(stamp.values, sort_keys=True, indent=2) + "\n")
+
+
+def current_git_head(path: pathlib.Path) -> str:
+    completed = run(["git", "rev-parse", "HEAD"], cwd=path, capture_output=True)
+    return completed.stdout.strip()
 
 
 def spawn_process(
@@ -959,6 +1043,7 @@ def run_single_server_curl_benchmark(
     timeout_secs: float,
     requests: int,
     concurrency: int,
+    grpc_mode: str | None = None,
 ) -> BenchmarkResult:
     port = port_number(port, release=True)
     stdout_path = work_dir / f"{server_name}-{scenario_name}.stdout.log"
@@ -978,6 +1063,7 @@ def run_single_server_curl_benchmark(
             headers=headers,
             body=body,
             timeout_secs=timeout_secs,
+            grpc_mode=grpc_mode,
             requests=requests,
             concurrency=concurrency,
             server=server_name,
@@ -1143,7 +1229,12 @@ def main() -> int:
 
         rginx_bin = ensure_rginx_binary(workspace)
         nginx_commit = ensure_nginx_checkout(nginx_src_dir, args.nginx_ref)
-        nginx_bin = ensure_nginx_binary(nginx_src_dir, nginx_install_dir)
+        nginx_bin = ensure_nginx_binary(
+            nginx_src_dir,
+            nginx_install_dir,
+            nginx_ref=args.nginx_ref,
+            nginx_commit=nginx_commit,
+        )
 
         rginx_version_text = rginx_version(rginx_bin)
         nginx_version_text = nginx_version(nginx_bin)
@@ -1440,6 +1531,7 @@ def main() -> int:
                     timeout_secs=10.0,
                     requests=args.requests,
                     concurrency=args.concurrency,
+                    grpc_mode="grpc",
                 )
             )
             results.append(
@@ -1467,6 +1559,7 @@ def main() -> int:
                     timeout_secs=10.0,
                     requests=args.requests,
                     concurrency=args.concurrency,
+                    grpc_mode="grpc",
                 )
             )
             results.append(
@@ -1486,6 +1579,7 @@ def main() -> int:
                     timeout_secs=10.0,
                     requests=args.requests,
                     concurrency=args.concurrency,
+                    grpc_mode="grpc-web-binary",
                 )
             )
             results.append(
@@ -1505,6 +1599,7 @@ def main() -> int:
                     timeout_secs=10.0,
                     requests=args.requests,
                     concurrency=args.concurrency,
+                    grpc_mode="grpc-web-text",
                 )
             )
 
