@@ -1,0 +1,1632 @@
+use std::collections::{HashMap, VecDeque};
+use std::convert::Infallible;
+use std::io::{Read, Write};
+use std::net::IpAddr;
+use std::net::SocketAddr;
+use std::net::TcpListener;
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::Duration;
+
+use bytes::{Bytes, BytesMut};
+use futures_util::stream;
+use http::header::{CONTENT_LENGTH, CONTENT_TYPE, HOST, TE};
+use http::{HeaderMap, HeaderValue, Method, Response, StatusCode, Uri, Version};
+use http_body_util::{BodyExt, StreamBody};
+use hyper::body::Frame;
+use rcgen::CertifiedKey;
+use rginx_core::{
+    ActiveHealthCheck, ClientIdentity, Error, TlsVersion, Upstream, UpstreamLoadBalance,
+    UpstreamPeer, UpstreamProtocol, UpstreamSettings, UpstreamTls,
+};
+
+use super::clients::{ProxyClients, load_custom_ca_store};
+use super::forward::{
+    detect_grpc_web_mode, effective_upstream_request_timeout, parse_grpc_timeout,
+    wait_for_upstream_stage,
+};
+use super::grpc_web::{
+    GrpcWebEncoding, GrpcWebMode, decode_grpc_web_text_chunk, decode_grpc_web_text_final,
+    encode_grpc_web_text_chunk, encode_grpc_web_trailers, extract_grpc_initial_trailers,
+    flush_grpc_web_text_chunk,
+};
+use super::health::{
+    GrpcHealthProbeResult, GrpcHealthServingStatus, build_active_health_request,
+    decode_grpc_health_check_response, encode_grpc_health_check_request,
+    evaluate_grpc_health_probe_response,
+};
+use super::request_body::{
+    PreparedProxyRequest, PreparedRequestBody, can_retry_peer_request, is_idempotent_method,
+};
+use super::{
+    build_proxy_uri, probe_upstream_peer, sanitize_request_headers, upstream_request_version,
+};
+use crate::client_ip::{ClientAddress, ClientIpSource};
+use tempfile::TempDir;
+
+#[test]
+fn proxy_uri_keeps_path_and_query() {
+    let peer = UpstreamPeer {
+        url: "http://127.0.0.1:9000".to_string(),
+        scheme: "http".to_string(),
+        authority: "127.0.0.1:9000".to_string(),
+        weight: 1,
+        backup: false,
+    };
+
+    let uri = build_proxy_uri(&peer, &"/api/demo?x=1".parse().unwrap(), None).unwrap();
+    assert_eq!(uri, "http://127.0.0.1:9000/api/demo?x=1".parse::<http::Uri>().unwrap());
+}
+
+#[test]
+fn proxy_uri_keeps_https_scheme() {
+    let peer = UpstreamPeer {
+        url: "https://example.com".to_string(),
+        scheme: "https".to_string(),
+        authority: "example.com".to_string(),
+        weight: 1,
+        backup: false,
+    };
+
+    let uri = build_proxy_uri(&peer, &"/healthz".parse().unwrap(), None).unwrap();
+    assert_eq!(uri, "https://example.com/healthz".parse::<http::Uri>().unwrap());
+}
+
+#[test]
+fn sanitize_request_headers_overwrites_x_forwarded_for_with_sanitized_chain() {
+    let mut headers = HeaderMap::new();
+    headers.insert(HOST, HeaderValue::from_static("client.example"));
+    headers.insert("x-forwarded-for", HeaderValue::from_static("spoofed"));
+
+    let client_address = ClientAddress {
+        peer_addr: "10.2.3.4:4000".parse().unwrap(),
+        client_ip: "198.51.100.9".parse().unwrap(),
+        forwarded_for: "198.51.100.9, 10.1.2.3, 10.2.3.4".to_string(),
+        source: ClientIpSource::XForwardedFor,
+    };
+
+    sanitize_request_headers(
+        &mut headers,
+        "127.0.0.1:9000",
+        Some(HeaderValue::from_static("client.example")),
+        &client_address,
+        "https",
+        false,
+        &[],
+        None,
+    )
+    .expect("header sanitization should succeed");
+
+    assert_eq!(headers.get(HOST).unwrap(), "127.0.0.1:9000");
+    assert_eq!(headers.get("x-forwarded-host").unwrap(), "client.example");
+    assert_eq!(headers.get("x-forwarded-for").unwrap(), "198.51.100.9, 10.1.2.3, 10.2.3.4");
+    assert_eq!(headers.get("x-forwarded-proto").unwrap(), "https");
+}
+
+#[test]
+fn sanitize_request_headers_preserves_upgrade_handshake() {
+    let mut headers = HeaderMap::new();
+    headers.insert(HOST, HeaderValue::from_static("client.example"));
+    headers.insert(http::header::CONNECTION, HeaderValue::from_static("keep-alive, Upgrade"));
+    headers.insert(http::header::UPGRADE, HeaderValue::from_static("websocket"));
+
+    let client_address = ClientAddress {
+        peer_addr: "10.2.3.4:4000".parse().unwrap(),
+        client_ip: "198.51.100.9".parse().unwrap(),
+        forwarded_for: "198.51.100.9".to_string(),
+        source: ClientIpSource::SocketPeer,
+    };
+
+    sanitize_request_headers(
+        &mut headers,
+        "127.0.0.1:9000",
+        Some(HeaderValue::from_static("client.example")),
+        &client_address,
+        "http",
+        false,
+        &[],
+        None,
+    )
+    .expect("header sanitization should succeed");
+
+    assert_eq!(headers.get(HOST).unwrap(), "127.0.0.1:9000");
+    assert_eq!(headers.get(http::header::CONNECTION).unwrap(), "upgrade");
+    assert_eq!(headers.get(http::header::UPGRADE).unwrap(), "websocket");
+}
+
+#[test]
+fn sanitize_request_headers_preserves_te_trailers() {
+    let mut headers = HeaderMap::new();
+    headers.insert(HOST, HeaderValue::from_static("client.example"));
+    headers.insert(http::header::TE, HeaderValue::from_static("trailers"));
+
+    let client_address = ClientAddress {
+        peer_addr: "10.2.3.4:4000".parse().unwrap(),
+        client_ip: "198.51.100.9".parse().unwrap(),
+        forwarded_for: "198.51.100.9".to_string(),
+        source: ClientIpSource::SocketPeer,
+    };
+
+    sanitize_request_headers(
+        &mut headers,
+        "127.0.0.1:9000",
+        Some(HeaderValue::from_static("client.example")),
+        &client_address,
+        "https",
+        false,
+        &[],
+        None,
+    )
+    .expect("header sanitization should succeed");
+
+    assert_eq!(headers.get(HOST).unwrap(), "127.0.0.1:9000");
+    assert_eq!(headers.get(http::header::TE).unwrap(), "trailers");
+}
+
+#[test]
+fn sanitize_request_headers_drops_non_trailers_te_tokens() {
+    let mut headers = HeaderMap::new();
+    headers.insert(HOST, HeaderValue::from_static("client.example"));
+    headers.insert(http::header::TE, HeaderValue::from_static("trailers, gzip"));
+
+    let client_address = ClientAddress {
+        peer_addr: "10.2.3.4:4000".parse().unwrap(),
+        client_ip: "198.51.100.9".parse().unwrap(),
+        forwarded_for: "198.51.100.9".to_string(),
+        source: ClientIpSource::SocketPeer,
+    };
+
+    sanitize_request_headers(
+        &mut headers,
+        "127.0.0.1:9000",
+        Some(HeaderValue::from_static("client.example")),
+        &client_address,
+        "https",
+        false,
+        &[],
+        None,
+    )
+    .expect("header sanitization should succeed");
+
+    assert_eq!(headers.get(HOST).unwrap(), "127.0.0.1:9000");
+    assert!(headers.get(http::header::TE).is_none());
+}
+
+#[test]
+fn detect_grpc_web_mode_rewrites_binary_content_type() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("application/grpc-web+proto; charset=utf-8"),
+    );
+
+    let mode = detect_grpc_web_mode(&headers)
+        .expect("binary grpc-web should be supported")
+        .expect("grpc-web content-type should be detected");
+
+    assert_eq!(mode.downstream_content_type, "application/grpc-web+proto; charset=utf-8");
+    assert_eq!(mode.upstream_content_type, "application/grpc+proto; charset=utf-8");
+    assert_eq!(mode.encoding, GrpcWebEncoding::Binary);
+}
+
+#[test]
+fn detect_grpc_web_mode_rewrites_text_content_type() {
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/grpc-web-text+proto"));
+
+    let mode = detect_grpc_web_mode(&headers)
+        .expect("grpc-web-text should be supported")
+        .expect("grpc-web-text content-type should be detected");
+
+    assert_eq!(mode.downstream_content_type, "application/grpc-web-text+proto");
+    assert_eq!(mode.upstream_content_type, "application/grpc+proto");
+    assert_eq!(mode.encoding, GrpcWebEncoding::Text);
+}
+
+#[test]
+fn parse_grpc_timeout_accepts_supported_units() {
+    let cases = [
+        ("1H", Duration::from_secs(60 * 60)),
+        ("2M", Duration::from_secs(2 * 60)),
+        ("3S", Duration::from_secs(3)),
+        ("4m", Duration::from_millis(4)),
+        ("5u", Duration::from_micros(5)),
+        ("6n", Duration::from_nanos(6)),
+        ("0n", Duration::ZERO),
+    ];
+
+    for (value, expected) in cases {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/grpc"));
+        headers.insert("grpc-timeout", HeaderValue::from_str(value).unwrap());
+
+        let timeout = parse_grpc_timeout(&headers)
+            .expect("grpc-timeout should parse")
+            .expect("grpc-timeout should be present");
+
+        assert_eq!(timeout, expected, "grpc-timeout {value} should parse correctly");
+    }
+}
+
+#[test]
+fn parse_grpc_timeout_rejects_invalid_values() {
+    for value in ["", "1", "abc", "123456789m", "1x", "1 m"] {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/grpc"));
+        headers.insert("grpc-timeout", HeaderValue::from_str(value).unwrap());
+
+        let error = parse_grpc_timeout(&headers).expect_err("invalid grpc-timeout should fail");
+        assert!(error.contains("invalid grpc-timeout header"));
+    }
+}
+
+#[test]
+fn effective_upstream_request_timeout_prefers_shorter_grpc_deadline() {
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/grpc"));
+    headers.insert("grpc-timeout", HeaderValue::from_static("250m"));
+
+    let timeout = effective_upstream_request_timeout(&headers, Duration::from_secs(30))
+        .expect("grpc timeout should compute");
+
+    assert_eq!(timeout, Duration::from_millis(250));
+}
+
+#[test]
+fn effective_upstream_request_timeout_ignores_non_grpc_requests() {
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+    headers.insert("grpc-timeout", HeaderValue::from_static("broken"));
+
+    let timeout = effective_upstream_request_timeout(&headers, Duration::from_secs(30))
+        .expect("non-gRPC requests should ignore grpc-timeout");
+
+    assert_eq!(timeout, Duration::from_secs(30));
+}
+
+#[test]
+fn sanitize_request_headers_translates_grpc_web_requests() {
+    let mut headers = HeaderMap::new();
+    headers.insert(HOST, HeaderValue::from_static("client.example"));
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/grpc-web+proto"));
+    headers.insert("x-grpc-web", HeaderValue::from_static("1"));
+
+    let client_address = ClientAddress {
+        peer_addr: "10.2.3.4:4000".parse().unwrap(),
+        client_ip: "198.51.100.9".parse().unwrap(),
+        forwarded_for: "198.51.100.9".to_string(),
+        source: ClientIpSource::SocketPeer,
+    };
+    let grpc_web_mode = GrpcWebMode {
+        downstream_content_type: HeaderValue::from_static("application/grpc-web+proto"),
+        upstream_content_type: HeaderValue::from_static("application/grpc+proto"),
+        encoding: GrpcWebEncoding::Binary,
+    };
+
+    sanitize_request_headers(
+        &mut headers,
+        "127.0.0.1:9000",
+        Some(HeaderValue::from_static("client.example")),
+        &client_address,
+        "http",
+        false,
+        &[],
+        Some(&grpc_web_mode),
+    )
+    .expect("header sanitization should succeed");
+
+    assert_eq!(headers.get(HOST).unwrap(), "127.0.0.1:9000");
+    assert_eq!(headers.get(CONTENT_TYPE).unwrap(), "application/grpc+proto");
+    assert_eq!(headers.get(http::header::TE).unwrap(), "trailers");
+    assert!(headers.get("x-grpc-web").is_none());
+}
+
+#[test]
+fn grpc_web_text_helpers_round_trip_streamed_payloads() {
+    let mut encoded = BytesMut::new();
+    let first =
+        encode_grpc_web_text_chunk(&mut encoded, b"hello").expect("first chunk should encode");
+    let second =
+        encode_grpc_web_text_chunk(&mut encoded, b" world").expect("second chunk should encode");
+    let tail = flush_grpc_web_text_chunk(&mut encoded).expect("tail should flush");
+
+    let mut decoder = BytesMut::new();
+    let decoded_first = decode_grpc_web_text_chunk(&mut decoder, &first)
+        .expect("first chunk should decode")
+        .expect("first chunk should yield bytes");
+    let decoded_second = decode_grpc_web_text_chunk(&mut decoder, &second)
+        .expect("second chunk should decode")
+        .expect("second chunk should yield bytes");
+    let decoded_tail = decode_grpc_web_text_chunk(&mut decoder, &tail)
+        .expect("tail chunk should decode")
+        .expect("tail chunk should yield bytes");
+    let final_flush =
+        decode_grpc_web_text_final(&mut decoder).expect("final flush should decode cleanly");
+
+    assert_eq!(decoded_first, Bytes::from_static(b"hel"));
+    assert_eq!(decoded_second, Bytes::from_static(b"lo wor"));
+    assert_eq!(decoded_tail, Bytes::from_static(b"ld"));
+    assert!(final_flush.is_none());
+}
+
+#[test]
+fn encode_grpc_web_trailers_uses_http1_header_block() {
+    let mut trailers = HeaderMap::new();
+    trailers.insert("grpc-status", HeaderValue::from_static("0"));
+    trailers.insert("grpc-message", HeaderValue::from_static("ok"));
+
+    let encoded = encode_grpc_web_trailers(&trailers);
+    assert_eq!(encoded[0], 0x80);
+    let len = u32::from_be_bytes([encoded[1], encoded[2], encoded[3], encoded[4]]) as usize;
+    assert_eq!(len, encoded.len() - 5);
+
+    let block = std::str::from_utf8(&encoded[5..]).expect("trailer block should be utf-8");
+    assert!(block.contains("grpc-status: 0\r\n"));
+    assert!(block.contains("grpc-message: ok\r\n"));
+}
+
+#[test]
+fn extract_grpc_initial_trailers_removes_grpc_status_headers() {
+    let mut headers = HeaderMap::new();
+    headers.insert("grpc-status", HeaderValue::from_static("7"));
+    headers.insert("grpc-message", HeaderValue::from_static("denied"));
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/grpc"));
+
+    let trailers =
+        extract_grpc_initial_trailers(&mut headers).expect("grpc status headers should extract");
+
+    assert_eq!(trailers.get("grpc-status").unwrap(), "7");
+    assert_eq!(trailers.get("grpc-message").unwrap(), "denied");
+    assert!(headers.get("grpc-status").is_none());
+    assert!(headers.get("grpc-message").is_none());
+    assert_eq!(headers.get(CONTENT_TYPE).unwrap(), "application/grpc");
+}
+
+#[tokio::test]
+async fn build_active_health_request_builds_grpc_probe_request() {
+    let upstream = Upstream::new(
+        "grpc-backend".to_string(),
+        vec![peer("https://example.com")],
+        UpstreamTls::NativeRoots,
+        upstream_settings(UpstreamProtocol::Auto),
+    );
+    let peer = upstream.peers[0].clone();
+    let check = ActiveHealthCheck {
+        path: "/grpc.health.v1.Health/Check".to_string(),
+        grpc_service: Some("grpc.health.v1.Health".to_string()),
+        interval: Duration::from_secs(5),
+        timeout: Duration::from_secs(1),
+        healthy_successes_required: 1,
+    };
+
+    let request =
+        build_active_health_request(&upstream, &peer, &check).expect("request should build");
+
+    assert_eq!(request.method(), Method::POST);
+    assert_eq!(request.version(), Version::HTTP_2);
+    assert_eq!(
+        request.uri(),
+        &"https://example.com/grpc.health.v1.Health/Check".parse::<Uri>().unwrap()
+    );
+    assert_eq!(request.headers().get(HOST).unwrap(), "example.com");
+    assert_eq!(request.headers().get(CONTENT_TYPE).unwrap(), "application/grpc");
+    assert_eq!(request.headers().get(TE).unwrap(), "trailers");
+    let content_length = request
+        .headers()
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
+        .expect("content-length should be present");
+
+    let body = request.into_body().collect().await.expect("request body should collect").to_bytes();
+    assert_eq!(content_length, body.len().to_string());
+    assert_eq!(body, encode_grpc_health_check_request("grpc.health.v1.Health"));
+}
+
+#[test]
+fn decode_grpc_health_check_response_reads_serving_status() {
+    let encoded = grpc_health_response_body(1);
+
+    let serving_status =
+        decode_grpc_health_check_response(&encoded).expect("response should decode");
+
+    assert_eq!(serving_status, Some(GrpcHealthServingStatus::Serving));
+}
+
+#[tokio::test]
+async fn evaluate_grpc_health_probe_response_recognizes_serving_response() {
+    let mut trailers = HeaderMap::new();
+    trailers.insert("grpc-status", HeaderValue::from_static("0"));
+    let body = StreamBody::new(stream::iter(vec![
+        Ok::<_, Infallible>(Frame::data(grpc_health_response_body(1))),
+        Ok(Frame::trailers(trailers)),
+    ]));
+    let response =
+        Response::builder().status(StatusCode::OK).body(body).expect("response should build");
+
+    let result =
+        evaluate_grpc_health_probe_response(response).await.expect("response should evaluate");
+
+    assert!(matches!(result, GrpcHealthProbeResult::Serving));
+}
+
+#[test]
+fn upstream_request_version_follows_upstream_protocol() {
+    assert_eq!(upstream_request_version(UpstreamProtocol::Auto), Version::HTTP_11);
+    assert_eq!(upstream_request_version(UpstreamProtocol::Http1), Version::HTTP_11);
+    assert_eq!(upstream_request_version(UpstreamProtocol::Http2), Version::HTTP_2);
+}
+
+#[test]
+fn load_custom_ca_store_accepts_pem_files() {
+    let temp_dir = TempDir::new().expect("temp dir should be created");
+    let path = temp_dir.path().join("custom-ca.pem");
+    std::fs::write(&path, TEST_CA_CERT_PEM).expect("PEM file should be written");
+
+    let store = load_custom_ca_store(&path).expect("PEM CA should load");
+    assert!(!store.is_empty());
+}
+
+#[test]
+fn proxy_clients_can_select_insecure_and_custom_ca_modes() {
+    let insecure = Upstream::new(
+        "insecure".to_string(),
+        vec![UpstreamPeer {
+            url: "https://localhost:9443".to_string(),
+            scheme: "https".to_string(),
+            authority: "localhost:9443".to_string(),
+            weight: 1,
+            backup: false,
+        }],
+        UpstreamTls::Insecure,
+        upstream_settings(UpstreamProtocol::Auto),
+    );
+
+    let temp_dir = TempDir::new().expect("temp dir should be created");
+    let path = temp_dir.path().join("custom-ca.pem");
+    std::fs::write(&path, TEST_CA_CERT_PEM).expect("PEM file should be written");
+
+    let custom = Upstream::new(
+        "custom".to_string(),
+        vec![UpstreamPeer {
+            url: "https://localhost:9443".to_string(),
+            scheme: "https".to_string(),
+            authority: "localhost:9443".to_string(),
+            weight: 1,
+            backup: false,
+        }],
+        UpstreamTls::CustomCa { ca_cert_path: path.clone() },
+        upstream_settings(UpstreamProtocol::Auto),
+    );
+
+    let snapshot = snapshot_with_upstreams([
+        ("insecure".to_string(), Arc::new(insecure)),
+        ("custom".to_string(), Arc::new(custom)),
+    ]);
+
+    let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+    assert!(clients.for_upstream(snapshot.upstreams["insecure"].as_ref()).is_ok());
+    assert!(clients.for_upstream(snapshot.upstreams["custom"].as_ref()).is_ok());
+}
+
+#[test]
+fn proxy_clients_cache_distinguishes_server_name_override() {
+    let temp_dir = TempDir::new().expect("temp dir should be created");
+    let path = temp_dir.path().join("custom-ca-override.pem");
+    std::fs::write(&path, TEST_CA_CERT_PEM).expect("PEM file should be written");
+
+    let peer = UpstreamPeer {
+        url: "https://127.0.0.1:9443".to_string(),
+        scheme: "https".to_string(),
+        authority: "127.0.0.1:9443".to_string(),
+        weight: 1,
+        backup: false,
+    };
+    let first = Upstream::new(
+        "first".to_string(),
+        vec![peer.clone()],
+        UpstreamTls::CustomCa { ca_cert_path: path.clone() },
+        UpstreamSettings {
+            server_name_override: Some("api-a.internal".to_string()),
+            ..upstream_settings(UpstreamProtocol::Auto)
+        },
+    );
+    let second = Upstream::new(
+        "second".to_string(),
+        vec![peer.clone()],
+        UpstreamTls::CustomCa { ca_cert_path: path.clone() },
+        UpstreamSettings {
+            server_name_override: Some("api-b.internal".to_string()),
+            ..upstream_settings(UpstreamProtocol::Auto)
+        },
+    );
+    let duplicate = Upstream::new(
+        "duplicate".to_string(),
+        vec![peer],
+        UpstreamTls::CustomCa { ca_cert_path: path.clone() },
+        UpstreamSettings {
+            server_name_override: Some("api-a.internal".to_string()),
+            ..upstream_settings(UpstreamProtocol::Auto)
+        },
+    );
+
+    let snapshot = snapshot_with_upstreams([
+        ("first".to_string(), Arc::new(first)),
+        ("second".to_string(), Arc::new(second)),
+        ("duplicate".to_string(), Arc::new(duplicate)),
+    ]);
+
+    let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+    assert_eq!(clients.cached_client_count(), 2);
+    assert!(clients.for_upstream(snapshot.upstreams["first"].as_ref()).is_ok());
+    assert!(clients.for_upstream(snapshot.upstreams["second"].as_ref()).is_ok());
+    assert!(clients.for_upstream(snapshot.upstreams["duplicate"].as_ref()).is_ok());
+}
+
+#[test]
+fn proxy_clients_cache_distinguishes_server_name_toggle() {
+    let peer = UpstreamPeer {
+        url: "https://127.0.0.1:9443".to_string(),
+        scheme: "https".to_string(),
+        authority: "127.0.0.1:9443".to_string(),
+        weight: 1,
+        backup: false,
+    };
+    let default_sni = Upstream::new(
+        "default-sni".to_string(),
+        vec![peer.clone()],
+        UpstreamTls::NativeRoots,
+        upstream_settings(UpstreamProtocol::Auto),
+    );
+    let no_sni = Upstream::new(
+        "no-sni".to_string(),
+        vec![peer.clone()],
+        UpstreamTls::NativeRoots,
+        UpstreamSettings { server_name: false, ..upstream_settings(UpstreamProtocol::Auto) },
+    );
+    let duplicate = Upstream::new(
+        "duplicate".to_string(),
+        vec![peer],
+        UpstreamTls::NativeRoots,
+        upstream_settings(UpstreamProtocol::Auto),
+    );
+
+    let snapshot = snapshot_with_upstreams([
+        ("default-sni".to_string(), Arc::new(default_sni)),
+        ("no-sni".to_string(), Arc::new(no_sni)),
+        ("duplicate".to_string(), Arc::new(duplicate)),
+    ]);
+
+    let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+    assert_eq!(clients.cached_client_count(), 2);
+}
+
+#[test]
+fn proxy_clients_cache_distinguishes_upstream_protocol() {
+    let peer = UpstreamPeer {
+        url: "https://127.0.0.1:9443".to_string(),
+        scheme: "https".to_string(),
+        authority: "127.0.0.1:9443".to_string(),
+        weight: 1,
+        backup: false,
+    };
+    let auto = Upstream::new(
+        "auto".to_string(),
+        vec![peer.clone()],
+        UpstreamTls::NativeRoots,
+        upstream_settings(UpstreamProtocol::Auto),
+    );
+    let http1 = Upstream::new(
+        "http1".to_string(),
+        vec![peer.clone()],
+        UpstreamTls::NativeRoots,
+        upstream_settings(UpstreamProtocol::Http1),
+    );
+    let http2 = Upstream::new(
+        "http2".to_string(),
+        vec![peer],
+        UpstreamTls::NativeRoots,
+        upstream_settings(UpstreamProtocol::Http2),
+    );
+
+    let snapshot = snapshot_with_upstreams([
+        ("auto".to_string(), Arc::new(auto)),
+        ("http1".to_string(), Arc::new(http1)),
+        ("http2".to_string(), Arc::new(http2)),
+    ]);
+
+    let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+    assert_eq!(clients.cached_client_count(), 3);
+}
+
+#[test]
+fn proxy_clients_cache_distinguishes_tls_versions() {
+    let peer = UpstreamPeer {
+        url: "https://127.0.0.1:9443".to_string(),
+        scheme: "https".to_string(),
+        authority: "127.0.0.1:9443".to_string(),
+        weight: 1,
+        backup: false,
+    };
+    let tls12 = Upstream::new(
+        "tls12".to_string(),
+        vec![peer.clone()],
+        UpstreamTls::NativeRoots,
+        UpstreamSettings {
+            tls_versions: Some(vec![TlsVersion::Tls12]),
+            ..upstream_settings(UpstreamProtocol::Auto)
+        },
+    );
+    let tls13 = Upstream::new(
+        "tls13".to_string(),
+        vec![peer.clone()],
+        UpstreamTls::NativeRoots,
+        UpstreamSettings {
+            tls_versions: Some(vec![TlsVersion::Tls13]),
+            ..upstream_settings(UpstreamProtocol::Auto)
+        },
+    );
+    let duplicate = Upstream::new(
+        "duplicate".to_string(),
+        vec![peer],
+        UpstreamTls::NativeRoots,
+        UpstreamSettings {
+            tls_versions: Some(vec![TlsVersion::Tls12]),
+            ..upstream_settings(UpstreamProtocol::Auto)
+        },
+    );
+
+    let snapshot = snapshot_with_upstreams([
+        ("tls12".to_string(), Arc::new(tls12)),
+        ("tls13".to_string(), Arc::new(tls13)),
+        ("duplicate".to_string(), Arc::new(duplicate)),
+    ]);
+
+    let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+    assert_eq!(clients.cached_client_count(), 2);
+}
+
+#[test]
+fn proxy_clients_cache_distinguishes_client_identity() {
+    let temp_dir = TempDir::new().expect("temp dir should be created");
+    let dir = temp_dir.path().to_path_buf();
+    let first_cert = dir.join("first.crt");
+    let first_key = dir.join("first.key");
+    let second_cert = dir.join("second.crt");
+    let second_key = dir.join("second.key");
+    write_test_identity(&first_cert, &first_key);
+    write_test_identity(&second_cert, &second_key);
+
+    let peer = UpstreamPeer {
+        url: "https://127.0.0.1:9443".to_string(),
+        scheme: "https".to_string(),
+        authority: "127.0.0.1:9443".to_string(),
+        weight: 1,
+        backup: false,
+    };
+    let first = Upstream::new(
+        "first".to_string(),
+        vec![peer.clone()],
+        UpstreamTls::NativeRoots,
+        UpstreamSettings {
+            client_identity: Some(ClientIdentity {
+                cert_path: first_cert.clone(),
+                key_path: first_key.clone(),
+            }),
+            ..upstream_settings(UpstreamProtocol::Auto)
+        },
+    );
+    let second = Upstream::new(
+        "second".to_string(),
+        vec![peer.clone()],
+        UpstreamTls::NativeRoots,
+        UpstreamSettings {
+            client_identity: Some(ClientIdentity {
+                cert_path: second_cert.clone(),
+                key_path: second_key.clone(),
+            }),
+            ..upstream_settings(UpstreamProtocol::Auto)
+        },
+    );
+    let duplicate = Upstream::new(
+        "duplicate".to_string(),
+        vec![peer],
+        UpstreamTls::NativeRoots,
+        UpstreamSettings {
+            client_identity: Some(ClientIdentity {
+                cert_path: first_cert.clone(),
+                key_path: first_key.clone(),
+            }),
+            ..upstream_settings(UpstreamProtocol::Auto)
+        },
+    );
+
+    let snapshot = snapshot_with_upstreams([
+        ("first".to_string(), Arc::new(first)),
+        ("second".to_string(), Arc::new(second)),
+        ("duplicate".to_string(), Arc::new(duplicate)),
+    ]);
+
+    let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+    assert_eq!(clients.cached_client_count(), 2);
+}
+
+#[tokio::test]
+async fn wait_for_upstream_stage_times_out() {
+    let timeout = Duration::from_millis(25);
+
+    let error = wait_for_upstream_stage(timeout, "backend", "request", async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    })
+    .await
+    .expect_err("slow future should time out");
+
+    assert!(matches!(error, Error::Server(message) if message.contains("timed out")));
+}
+
+#[test]
+fn upstream_next_peers_returns_distinct_failover_candidates() {
+    let upstream = Upstream::new(
+        "backend".to_string(),
+        vec![
+            peer("http://127.0.0.1:9000"),
+            peer("http://127.0.0.1:9001"),
+            peer("http://127.0.0.1:9002"),
+        ],
+        UpstreamTls::NativeRoots,
+        upstream_settings(UpstreamProtocol::Auto),
+    );
+
+    let first = upstream.next_peers(2);
+    let second = upstream.next_peers(2);
+
+    assert_eq!(
+        first.iter().map(|peer| peer.url.as_str()).collect::<Vec<_>>(),
+        vec!["http://127.0.0.1:9000", "http://127.0.0.1:9001",]
+    );
+    assert_eq!(
+        second.iter().map(|peer| peer.url.as_str()).collect::<Vec<_>>(),
+        vec!["http://127.0.0.1:9001", "http://127.0.0.1:9002",]
+    );
+}
+
+#[test]
+fn replayable_idempotent_requests_retry_once() {
+    let prepared = PreparedProxyRequest {
+        method: Method::GET,
+        uri: Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: PreparedRequestBody::Replayable { body: Bytes::new(), trailers: None },
+    };
+    let peers = vec![peer("http://127.0.0.1:9000"), peer("http://127.0.0.1:9001")];
+
+    assert!(can_retry_peer_request(&prepared, &peers, 0));
+    assert!(!can_retry_peer_request(&prepared, &peers, 1));
+}
+
+#[test]
+fn streaming_requests_do_not_retry() {
+    let prepared = PreparedProxyRequest {
+        method: Method::GET,
+        uri: Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: PreparedRequestBody::Streaming(None),
+    };
+    let peers = vec![peer("http://127.0.0.1:9000"), peer("http://127.0.0.1:9001")];
+
+    assert!(!can_retry_peer_request(&prepared, &peers, 0));
+}
+
+#[test]
+fn idempotent_method_detection_matches_retry_policy() {
+    assert!(is_idempotent_method(&Method::GET));
+    assert!(is_idempotent_method(&Method::PUT));
+    assert!(is_idempotent_method(&Method::DELETE));
+    assert!(!is_idempotent_method(&Method::POST));
+    assert!(!is_idempotent_method(&Method::PATCH));
+}
+
+#[test]
+fn ip_hash_keeps_the_same_primary_peer_for_the_same_client_ip() {
+    let upstream = Upstream::new(
+        "backend".to_string(),
+        vec![
+            peer("http://127.0.0.1:9000"),
+            peer("http://127.0.0.1:9001"),
+            peer("http://127.0.0.1:9002"),
+        ],
+        UpstreamTls::NativeRoots,
+        UpstreamSettings {
+            load_balance: UpstreamLoadBalance::IpHash,
+            ..upstream_settings(UpstreamProtocol::Auto)
+        },
+    );
+    let snapshot = snapshot_with_upstream("backend", Arc::new(upstream));
+    let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+
+    let first =
+        clients.select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 2);
+    let second =
+        clients.select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 2);
+
+    assert_eq!(
+        first.peers.iter().map(|peer| peer.url.as_str()).collect::<Vec<_>>(),
+        second.peers.iter().map(|peer| peer.url.as_str()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn ip_hash_skips_unhealthy_primary_and_uses_the_next_peer() {
+    let upstream = Upstream::new(
+        "backend".to_string(),
+        vec![
+            peer("http://127.0.0.1:9000"),
+            peer("http://127.0.0.1:9001"),
+            peer("http://127.0.0.1:9002"),
+        ],
+        UpstreamTls::NativeRoots,
+        UpstreamSettings {
+            load_balance: UpstreamLoadBalance::IpHash,
+            unhealthy_after_failures: 1,
+            unhealthy_cooldown: Duration::from_secs(30),
+            ..upstream_settings(UpstreamProtocol::Auto)
+        },
+    );
+    let snapshot = snapshot_with_upstream("backend", Arc::new(upstream));
+    let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+
+    let initial =
+        clients.select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 2);
+    let primary = initial.peers[0].url.clone();
+    let fallback = initial.peers[1].url.clone();
+
+    let failure = clients.record_peer_failure("backend", &primary);
+    assert!(failure.entered_cooldown);
+
+    let selected =
+        clients.select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 2);
+    assert_eq!(selected.skipped_unhealthy, 1);
+    assert_eq!(selected.peers[0].url, fallback);
+}
+
+#[test]
+fn ip_hash_distributes_multiple_client_ips_across_peers() {
+    let upstream = Upstream::new(
+        "backend".to_string(),
+        vec![
+            peer("http://127.0.0.1:9000"),
+            peer("http://127.0.0.1:9001"),
+            peer("http://127.0.0.1:9002"),
+        ],
+        UpstreamTls::NativeRoots,
+        UpstreamSettings {
+            load_balance: UpstreamLoadBalance::IpHash,
+            ..upstream_settings(UpstreamProtocol::Auto)
+        },
+    );
+    let snapshot = snapshot_with_upstream("backend", Arc::new(upstream));
+    let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+
+    let unique_primaries = (1..=16)
+        .map(|suffix| {
+            let ip = format!("198.51.100.{suffix}");
+            clients.select_peers(snapshot.upstreams["backend"].as_ref(), client_ip(&ip), 1).peers[0]
+                .url
+                .clone()
+        })
+        .collect::<std::collections::HashSet<_>>();
+
+    assert!(
+        unique_primaries.len() >= 2,
+        "expected ip_hash to spread clients across at least two peers"
+    );
+}
+
+#[test]
+fn weighted_ip_hash_prefers_heavier_peers() {
+    let upstream = Upstream::new(
+        "backend".to_string(),
+        vec![
+            peer_with_weight("http://127.0.0.1:9000", 5),
+            peer_with_weight("http://127.0.0.1:9001", 1),
+        ],
+        UpstreamTls::NativeRoots,
+        UpstreamSettings {
+            load_balance: UpstreamLoadBalance::IpHash,
+            ..upstream_settings(UpstreamProtocol::Auto)
+        },
+    );
+    let snapshot = snapshot_with_upstream("backend", Arc::new(upstream));
+    let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+
+    let heavy = (0..=255)
+        .filter(|suffix| {
+            let ip = format!("198.51.100.{suffix}");
+            clients.select_peers(snapshot.upstreams["backend"].as_ref(), client_ip(&ip), 1).peers[0]
+                .url
+                == "http://127.0.0.1:9000"
+        })
+        .count();
+
+    assert!(heavy > 128, "expected weighted ip_hash to prefer the heavier peer");
+}
+
+#[test]
+fn backup_peer_is_only_used_as_retry_candidate_while_primary_is_healthy() {
+    let upstream = Upstream::new(
+        "backend".to_string(),
+        vec![peer("http://127.0.0.1:9000"), peer_with_role("http://127.0.0.1:9010", 1, true)],
+        UpstreamTls::NativeRoots,
+        upstream_settings(UpstreamProtocol::Auto),
+    );
+    let snapshot = snapshot_with_upstream("backend", Arc::new(upstream));
+    let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+
+    let primary_only =
+        clients.select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 1);
+    assert_eq!(
+        primary_only.peers.iter().map(|peer| peer.url.as_str()).collect::<Vec<_>>(),
+        vec!["http://127.0.0.1:9000"]
+    );
+
+    let with_retry =
+        clients.select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 2);
+    assert_eq!(
+        with_retry.peers.iter().map(|peer| peer.url.as_str()).collect::<Vec<_>>(),
+        vec!["http://127.0.0.1:9000", "http://127.0.0.1:9010"]
+    );
+}
+
+#[test]
+fn backup_peer_is_selected_when_primary_pool_is_unhealthy() {
+    let upstream = Upstream::new(
+        "backend".to_string(),
+        vec![peer("http://127.0.0.1:9000"), peer_with_role("http://127.0.0.1:9010", 1, true)],
+        UpstreamTls::NativeRoots,
+        UpstreamSettings {
+            unhealthy_after_failures: 1,
+            unhealthy_cooldown: Duration::from_secs(30),
+            ..upstream_settings(UpstreamProtocol::Auto)
+        },
+    );
+    let snapshot = snapshot_with_upstream("backend", Arc::new(upstream));
+    let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+
+    let failure = clients.record_peer_failure("backend", "http://127.0.0.1:9000");
+    assert!(failure.entered_cooldown);
+
+    let selected =
+        clients.select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 1);
+    assert_eq!(selected.skipped_unhealthy, 1);
+    assert_eq!(
+        selected.peers.iter().map(|peer| peer.url.as_str()).collect::<Vec<_>>(),
+        vec!["http://127.0.0.1:9010"]
+    );
+}
+
+#[test]
+fn least_conn_prefers_peers_with_fewer_active_requests() {
+    let upstream = Upstream::new(
+        "backend".to_string(),
+        vec![
+            peer("http://127.0.0.1:9000"),
+            peer("http://127.0.0.1:9001"),
+            peer("http://127.0.0.1:9002"),
+        ],
+        UpstreamTls::NativeRoots,
+        UpstreamSettings {
+            load_balance: UpstreamLoadBalance::LeastConn,
+            ..upstream_settings(UpstreamProtocol::Auto)
+        },
+    );
+    let snapshot = snapshot_with_upstream("backend", Arc::new(upstream));
+    let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+
+    let _peer_a_1 = clients.track_active_request("backend", "http://127.0.0.1:9000");
+    let _peer_a_2 = clients.track_active_request("backend", "http://127.0.0.1:9000");
+    let _peer_b_1 = clients.track_active_request("backend", "http://127.0.0.1:9001");
+
+    let selected =
+        clients.select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 3);
+
+    assert_eq!(
+        selected.peers.iter().map(|peer| peer.url.as_str()).collect::<Vec<_>>(),
+        vec!["http://127.0.0.1:9002", "http://127.0.0.1:9001", "http://127.0.0.1:9000",]
+    );
+}
+
+#[test]
+fn least_conn_uses_configured_peer_order_to_break_ties() {
+    let upstream = Upstream::new(
+        "backend".to_string(),
+        vec![
+            peer("http://127.0.0.1:9000"),
+            peer("http://127.0.0.1:9001"),
+            peer("http://127.0.0.1:9002"),
+        ],
+        UpstreamTls::NativeRoots,
+        UpstreamSettings {
+            load_balance: UpstreamLoadBalance::LeastConn,
+            ..upstream_settings(UpstreamProtocol::Auto)
+        },
+    );
+    let snapshot = snapshot_with_upstream("backend", Arc::new(upstream));
+    let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+
+    let selected =
+        clients.select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 3);
+
+    assert_eq!(
+        selected.peers.iter().map(|peer| peer.url.as_str()).collect::<Vec<_>>(),
+        vec!["http://127.0.0.1:9000", "http://127.0.0.1:9001", "http://127.0.0.1:9002",]
+    );
+}
+
+#[test]
+fn weighted_least_conn_prefers_higher_capacity_peer_when_projected_load_ties() {
+    let upstream = Upstream::new(
+        "backend".to_string(),
+        vec![
+            peer_with_weight("http://127.0.0.1:9000", 3),
+            peer_with_weight("http://127.0.0.1:9001", 1),
+        ],
+        UpstreamTls::NativeRoots,
+        UpstreamSettings {
+            load_balance: UpstreamLoadBalance::LeastConn,
+            ..upstream_settings(UpstreamProtocol::Auto)
+        },
+    );
+    let snapshot = snapshot_with_upstream("backend", Arc::new(upstream));
+    let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+
+    let _peer_a_1 = clients.track_active_request("backend", "http://127.0.0.1:9000");
+    let _peer_a_2 = clients.track_active_request("backend", "http://127.0.0.1:9000");
+
+    let selected =
+        clients.select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 2);
+
+    assert_eq!(
+        selected.peers.iter().map(|peer| peer.url.as_str()).collect::<Vec<_>>(),
+        vec!["http://127.0.0.1:9000", "http://127.0.0.1:9001"]
+    );
+}
+
+#[test]
+fn least_conn_ignores_backup_peers_while_primary_pool_is_available() {
+    let upstream = Upstream::new(
+        "backend".to_string(),
+        vec![peer("http://127.0.0.1:9000"), peer_with_role("http://127.0.0.1:9010", 1, true)],
+        UpstreamTls::NativeRoots,
+        UpstreamSettings {
+            load_balance: UpstreamLoadBalance::LeastConn,
+            ..upstream_settings(UpstreamProtocol::Auto)
+        },
+    );
+    let snapshot = snapshot_with_upstream("backend", Arc::new(upstream));
+    let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+
+    let selected =
+        clients.select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 1);
+    assert_eq!(
+        selected.peers.iter().map(|peer| peer.url.as_str()).collect::<Vec<_>>(),
+        vec!["http://127.0.0.1:9000"]
+    );
+}
+
+#[test]
+fn unhealthy_peer_is_skipped_after_consecutive_failures() {
+    let snapshot = snapshot_with_upstream_policy(
+        "backend",
+        vec![peer("http://127.0.0.1:9000"), peer("http://127.0.0.1:9001")],
+        2,
+        Duration::from_secs(30),
+    );
+    let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+
+    let first =
+        clients.select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 2);
+    assert_eq!(first.skipped_unhealthy, 0);
+    assert_eq!(
+        first.peers.iter().map(|peer| peer.url.as_str()).collect::<Vec<_>>(),
+        vec!["http://127.0.0.1:9000", "http://127.0.0.1:9001"]
+    );
+
+    let first_failure = clients.record_peer_failure("backend", "http://127.0.0.1:9000");
+    assert_eq!(first_failure.consecutive_failures, 1);
+    assert!(!first_failure.entered_cooldown);
+
+    let second_failure = clients.record_peer_failure("backend", "http://127.0.0.1:9000");
+    assert_eq!(second_failure.consecutive_failures, 2);
+    assert!(second_failure.entered_cooldown);
+
+    let selected =
+        clients.select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 2);
+    assert_eq!(selected.skipped_unhealthy, 1);
+    assert_eq!(
+        selected.peers.iter().map(|peer| peer.url.as_str()).collect::<Vec<_>>(),
+        vec!["http://127.0.0.1:9001"]
+    );
+}
+
+#[tokio::test]
+async fn unhealthy_peer_recovers_after_cooldown() {
+    let snapshot = snapshot_with_upstream_policy(
+        "backend",
+        vec![peer("http://127.0.0.1:9000"), peer("http://127.0.0.1:9001")],
+        1,
+        Duration::from_millis(20),
+    );
+    let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+
+    let failure = clients.record_peer_failure("backend", "http://127.0.0.1:9000");
+    assert!(failure.entered_cooldown);
+
+    let immediately =
+        clients.select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 2);
+    assert_eq!(immediately.skipped_unhealthy, 1);
+    assert_eq!(
+        immediately.peers.iter().map(|peer| peer.url.as_str()).collect::<Vec<_>>(),
+        vec!["http://127.0.0.1:9001"]
+    );
+
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    let recovered =
+        clients.select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 2);
+    assert_eq!(recovered.skipped_unhealthy, 0);
+    assert_eq!(recovered.peers.len(), 2);
+}
+
+#[test]
+fn repeated_failures_during_cooldown_do_not_report_duplicate_transition() {
+    let snapshot = snapshot_with_upstream_policy(
+        "backend",
+        vec![peer("http://127.0.0.1:9000")],
+        1,
+        Duration::from_secs(30),
+    );
+    let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+
+    let first_failure = clients.record_peer_failure("backend", "http://127.0.0.1:9000");
+    assert!(first_failure.entered_cooldown);
+
+    let second_failure = clients.record_peer_failure("backend", "http://127.0.0.1:9000");
+    assert!(!second_failure.entered_cooldown);
+}
+
+#[tokio::test]
+async fn successful_request_after_cooldown_reports_passive_recovery() {
+    let snapshot = snapshot_with_upstream_policy(
+        "backend",
+        vec![peer("http://127.0.0.1:9000")],
+        1,
+        Duration::from_millis(20),
+    );
+    let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+
+    let failure = clients.record_peer_failure("backend", "http://127.0.0.1:9000");
+    assert!(failure.entered_cooldown);
+
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    assert_eq!(
+        clients
+            .select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 1)
+            .peers
+            .len(),
+        1
+    );
+    assert!(clients.record_peer_success("backend", "http://127.0.0.1:9000"));
+}
+
+#[test]
+fn successful_request_resets_peer_failure_count() {
+    let snapshot = snapshot_with_upstream_policy(
+        "backend",
+        vec![peer("http://127.0.0.1:9000")],
+        2,
+        Duration::from_secs(30),
+    );
+    let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+
+    let failure = clients.record_peer_failure("backend", "http://127.0.0.1:9000");
+    assert_eq!(failure.consecutive_failures, 1);
+
+    assert!(!clients.record_peer_success("backend", "http://127.0.0.1:9000"));
+
+    let after_reset = clients.record_peer_failure("backend", "http://127.0.0.1:9000");
+    assert_eq!(after_reset.consecutive_failures, 1);
+    assert!(!after_reset.entered_cooldown);
+}
+
+#[test]
+fn peer_health_policy_is_applied_per_upstream() {
+    let fast_fail = Arc::new(Upstream::new(
+        "fast-fail".to_string(),
+        vec![peer("http://127.0.0.1:9000")],
+        UpstreamTls::NativeRoots,
+        UpstreamSettings {
+            unhealthy_after_failures: 1,
+            unhealthy_cooldown: Duration::from_secs(30),
+            ..upstream_settings(UpstreamProtocol::Auto)
+        },
+    ));
+    let tolerant = Arc::new(Upstream::new(
+        "tolerant".to_string(),
+        vec![peer("http://127.0.0.1:9010")],
+        UpstreamTls::NativeRoots,
+        UpstreamSettings {
+            unhealthy_after_failures: 3,
+            unhealthy_cooldown: Duration::from_secs(30),
+            ..upstream_settings(UpstreamProtocol::Auto)
+        },
+    ));
+
+    let snapshot = snapshot_with_upstreams([
+        ("fast-fail".to_string(), fast_fail.clone()),
+        ("tolerant".to_string(), tolerant.clone()),
+    ]);
+    let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+
+    let fast_failure = clients.record_peer_failure("fast-fail", "http://127.0.0.1:9000");
+    assert!(fast_failure.entered_cooldown);
+
+    let tolerant_failure = clients.record_peer_failure("tolerant", "http://127.0.0.1:9010");
+    assert_eq!(tolerant_failure.consecutive_failures, 1);
+    assert!(!tolerant_failure.entered_cooldown);
+
+    let fast_selected = clients.select_peers(
+        snapshot.upstreams["fast-fail"].as_ref(),
+        client_ip("198.51.100.10"),
+        1,
+    );
+    assert!(fast_selected.peers.is_empty());
+    assert_eq!(fast_selected.skipped_unhealthy, 1);
+
+    let tolerant_selected = clients.select_peers(
+        snapshot.upstreams["tolerant"].as_ref(),
+        client_ip("198.51.100.10"),
+        1,
+    );
+    assert_eq!(tolerant_selected.peers.len(), 1);
+    assert_eq!(tolerant_selected.skipped_unhealthy, 0);
+}
+
+#[test]
+fn active_health_requires_recovery_threshold_before_peer_is_reused() {
+    let snapshot =
+        snapshot_with_active_health("backend", vec![peer("http://127.0.0.1:9000")], "/healthz", 2);
+    let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+
+    assert_eq!(
+        clients
+            .select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 1)
+            .peers
+            .len(),
+        1
+    );
+    assert!(clients.record_active_peer_failure("backend", "http://127.0.0.1:9000"));
+    assert!(
+        clients
+            .select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 1)
+            .peers
+            .is_empty()
+    );
+
+    let first_success = clients.record_active_peer_success("backend", "http://127.0.0.1:9000", 2);
+    assert!(!first_success.recovered);
+    assert_eq!(first_success.consecutive_successes, 1);
+    assert!(
+        clients
+            .select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 1)
+            .peers
+            .is_empty()
+    );
+
+    let second_success = clients.record_active_peer_success("backend", "http://127.0.0.1:9000", 2);
+    assert!(second_success.recovered);
+    assert_eq!(second_success.consecutive_successes, 2);
+    assert_eq!(
+        clients
+            .select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 1)
+            .peers
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn active_health_probe_tracks_status_transitions() {
+    let statuses = Arc::new(Mutex::new(VecDeque::from([
+        StatusCode::SERVICE_UNAVAILABLE,
+        StatusCode::OK,
+        StatusCode::OK,
+    ])));
+    let status_server = spawn_status_server(statuses).await;
+    let peer_url = format!("http://{}", status_server.listen_addr);
+    let snapshot = snapshot_with_active_health("backend", vec![peer(&peer_url)], "/healthz", 2);
+    let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+    let upstream = snapshot.upstreams["backend"].clone();
+    let peer = upstream.peers[0].clone();
+
+    probe_upstream_peer(clients.clone(), upstream.clone(), peer.clone()).await;
+    assert!(
+        clients.select_peers(upstream.as_ref(), client_ip("198.51.100.10"), 1).peers.is_empty()
+    );
+
+    probe_upstream_peer(clients.clone(), upstream.clone(), peer.clone()).await;
+    assert!(
+        clients.select_peers(upstream.as_ref(), client_ip("198.51.100.10"), 1).peers.is_empty()
+    );
+
+    probe_upstream_peer(clients.clone(), upstream.clone(), peer).await;
+    assert_eq!(
+        clients.select_peers(upstream.as_ref(), client_ip("198.51.100.10"), 1).peers.len(),
+        1
+    );
+}
+
+fn upstream_settings(protocol: UpstreamProtocol) -> UpstreamSettings {
+    UpstreamSettings {
+        protocol,
+        load_balance: UpstreamLoadBalance::RoundRobin,
+        server_name: true,
+        server_name_override: None,
+        tls_versions: None,
+        server_verify_depth: None,
+        server_crl_path: None,
+        client_identity: None,
+        request_timeout: Duration::from_secs(30),
+        connect_timeout: Duration::from_secs(30),
+        write_timeout: Duration::from_secs(30),
+        idle_timeout: Duration::from_secs(30),
+        pool_idle_timeout: Some(Duration::from_secs(90)),
+        pool_max_idle_per_host: usize::MAX,
+        tcp_keepalive: None,
+        tcp_nodelay: false,
+        http2_keep_alive_interval: None,
+        http2_keep_alive_timeout: Duration::from_secs(20),
+        http2_keep_alive_while_idle: false,
+        max_replayable_request_body_bytes: 64 * 1024,
+        unhealthy_after_failures: 2,
+        unhealthy_cooldown: Duration::from_secs(10),
+        active_health_check: None,
+    }
+}
+
+fn peer(url: &str) -> UpstreamPeer {
+    peer_with_weight(url, 1)
+}
+
+fn peer_with_weight(url: &str, weight: u32) -> UpstreamPeer {
+    peer_with_role(url, weight, false)
+}
+
+fn peer_with_role(url: &str, weight: u32, backup: bool) -> UpstreamPeer {
+    let uri: http::Uri = url.parse().expect("peer URL should parse");
+    UpstreamPeer {
+        url: url.to_string(),
+        scheme: uri.scheme_str().expect("peer should have scheme").to_string(),
+        authority: uri.authority().expect("peer should have authority").to_string(),
+        weight,
+        backup,
+    }
+}
+
+fn default_server() -> rginx_core::Server {
+    rginx_core::Server {
+        listen_addr: "127.0.0.1:8080".parse().unwrap(),
+        default_certificate: None,
+        trusted_proxies: Vec::new(),
+        keep_alive: true,
+        max_headers: None,
+        max_request_body_bytes: None,
+        max_connections: None,
+        header_read_timeout: None,
+        request_body_read_timeout: None,
+        response_write_timeout: None,
+        access_log_format: None,
+        tls: None,
+    }
+}
+
+fn default_listener(server: rginx_core::Server) -> rginx_core::Listener {
+    rginx_core::Listener {
+        id: "default".to_string(),
+        name: "default".to_string(),
+        server,
+        tls_termination_enabled: false,
+        proxy_protocol_enabled: false,
+    }
+}
+
+fn default_vhost() -> rginx_core::VirtualHost {
+    rginx_core::VirtualHost {
+        id: "server".to_string(),
+        server_names: Vec::new(),
+        routes: Vec::new(),
+        tls: None,
+    }
+}
+
+fn snapshot_with_upstreams_map(
+    upstreams: HashMap<String, Arc<Upstream>>,
+) -> rginx_core::ConfigSnapshot {
+    let server = default_server();
+    rginx_core::ConfigSnapshot {
+        runtime: rginx_core::RuntimeSettings {
+            shutdown_timeout: Duration::from_secs(1),
+            worker_threads: None,
+            accept_workers: 1,
+        },
+        server: server.clone(),
+        listeners: vec![default_listener(server)],
+        default_vhost: default_vhost(),
+        vhosts: Vec::new(),
+        upstreams,
+    }
+}
+
+fn snapshot_with_upstream(name: &str, upstream: Arc<Upstream>) -> rginx_core::ConfigSnapshot {
+    snapshot_with_upstreams_map(HashMap::from([(name.to_string(), upstream)]))
+}
+
+fn snapshot_with_upstreams(
+    upstreams: impl IntoIterator<Item = (String, Arc<Upstream>)>,
+) -> rginx_core::ConfigSnapshot {
+    snapshot_with_upstreams_map(HashMap::from_iter(upstreams))
+}
+
+fn snapshot_with_upstream_policy(
+    name: &str,
+    peers: Vec<UpstreamPeer>,
+    unhealthy_after_failures: u32,
+    unhealthy_cooldown: Duration,
+) -> rginx_core::ConfigSnapshot {
+    let upstream = Upstream::new(
+        name.to_string(),
+        peers,
+        UpstreamTls::NativeRoots,
+        UpstreamSettings {
+            unhealthy_after_failures,
+            unhealthy_cooldown,
+            ..upstream_settings(UpstreamProtocol::Auto)
+        },
+    );
+    snapshot_with_upstreams_map(HashMap::from([(name.to_string(), Arc::new(upstream))]))
+}
+
+fn snapshot_with_active_health(
+    name: &str,
+    peers: Vec<UpstreamPeer>,
+    path: &str,
+    healthy_successes_required: u32,
+) -> rginx_core::ConfigSnapshot {
+    let upstream = Upstream::new(
+        name.to_string(),
+        peers,
+        UpstreamTls::NativeRoots,
+        UpstreamSettings {
+            active_health_check: Some(ActiveHealthCheck {
+                path: path.to_string(),
+                grpc_service: None,
+                interval: Duration::from_secs(5),
+                timeout: Duration::from_secs(1),
+                healthy_successes_required,
+            }),
+            ..upstream_settings(UpstreamProtocol::Auto)
+        },
+    );
+    snapshot_with_upstreams_map(HashMap::from([(name.to_string(), Arc::new(upstream))]))
+}
+
+fn client_ip(value: &str) -> IpAddr {
+    value.parse().expect("client IP should parse")
+}
+
+fn grpc_health_response_body(serving_status: u64) -> Bytes {
+    let mut payload = BytesMut::new();
+    payload.extend_from_slice(&[0x08]);
+    if serving_status < 0x80 {
+        payload.extend_from_slice(&[serving_status as u8]);
+    } else {
+        panic!("test serving status should fit in a single-byte protobuf varint");
+    }
+
+    let mut body = BytesMut::with_capacity(5 + payload.len());
+    body.extend_from_slice(&[0]);
+    body.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    body.extend_from_slice(&payload);
+    body.freeze()
+}
+
+struct StatusServerHandle {
+    listen_addr: SocketAddr,
+    shutdown: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl Drop for StatusServerHandle {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+async fn spawn_status_server(statuses: Arc<Mutex<VecDeque<StatusCode>>>) -> StatusServerHandle {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("test status listener should bind");
+    listener.set_nonblocking(true).expect("status listener should support nonblocking mode");
+    let listen_addr = listener.local_addr().expect("listener addr should exist");
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_thread = shutdown.clone();
+
+    let thread = thread::spawn(move || {
+        while !shutdown_thread.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let statuses = statuses.clone();
+
+                    thread::spawn(move || {
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+                        let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
+                        let mut buffer = [0u8; 1024];
+                        match stream.read(&mut buffer) {
+                            Ok(_) => {}
+                            Err(error)
+                                if matches!(
+                                    error.kind(),
+                                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                                ) =>
+                            {
+                                return;
+                            }
+                            Err(_) => return,
+                        }
+                        let status = {
+                            let mut statuses =
+                                statuses.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                            statuses.pop_front().unwrap_or(StatusCode::OK)
+                        };
+                        let reason = status.canonical_reason().unwrap_or("Unknown");
+                        let response = format!(
+                            "HTTP/1.1 {} {}\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok",
+                            status.as_u16(),
+                            reason
+                        );
+
+                        if stream.write_all(response.as_bytes()).is_err() {
+                            return;
+                        }
+                        let _ = stream.flush();
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    StatusServerHandle { listen_addr, shutdown, thread: Some(thread) }
+}
+
+const TEST_CA_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\nMIIDXTCCAkWgAwIBAgIJAOIvDiVb18eVMA0GCSqGSIb3DQEBCwUAMEUxCzAJBgNV\nBAYTAkFVMRMwEQYDVQQIDApTb21lLVN0YXRlMSEwHwYDVQQKDBhJbnRlcm5ldCBX\naWRnaXRzIFB0eSBMdGQwHhcNMTYwODE0MTY1NjExWhcNMjYwODEyMTY1NjExWjBF\nMQswCQYDVQQGEwJBVTETMBEGA1UECAwKU29tZS1TdGF0ZTEhMB8GA1UECgwYSW50\nZXJuZXQgV2lkZ2l0cyBQdHkgTHRkMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIB\nCgKCAQEArVHWFn52Lbl1l59exduZntVSZyDYpzDND+S2LUcO6fRBWhV/1Kzox+2G\nZptbuMGmfI3iAnb0CFT4uC3kBkQQlXonGATSVyaFTFR+jq/lc0SP+9Bd7SBXieIV\neIXlY1TvlwIvj3Ntw9zX+scTA4SXxH6M0rKv9gTOub2vCMSHeF16X8DQr4XsZuQr\n7Cp7j1I4aqOJyap5JTl5ijmG8cnu0n+8UcRlBzy99dLWJG0AfI3VRJdWpGTNVZ92\naFff3RpK3F/WI2gp3qV1ynRAKuvmncGC3LDvYfcc2dgsc1N6Ffq8GIrkgRob6eBc\nklDHp1d023Lwre+VaVDSo1//Y72UFwIDAQABo1AwTjAdBgNVHQ4EFgQUbNOlA6sN\nXyzJjYqciKeId7g3/ZowHwYDVR0jBBgwFoAUbNOlA6sNXyzJjYqciKeId7g3/Zow\nDAYDVR0TBAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAVVaR5QWLZIRR4Dw6TSBn\nBQiLpBSXN6oAxdDw6n4PtwW6CzydaA+creiK6LfwEsiifUfQe9f+T+TBSpdIYtMv\nZ2H2tjlFX8VrjUFvPrvn5c28CuLI0foBgY8XGSkR2YMYzWw2jPEq3Th/KM5Catn3\nAFm3bGKWMtGPR4v+90chEN0jzaAmJYRrVUh9vea27bOCn31Nse6XXQPmSI6Gyncy\nOAPUsvPClF3IjeL1tmBotWqSGn1cYxLo+Lwjk22A9h6vjcNQRyZF2VLVvtwYrNU3\nmwJ6GCLsLHpwW/yjyvn8iEltnJvByM/eeRnfXV6WDObyiZsE/n6DxIRJodQzFqy9\nGA==\n-----END CERTIFICATE-----\n";
+
+fn write_test_identity(cert_path: &Path, key_path: &Path) {
+    let identity = generate_test_identity("localhost");
+    std::fs::write(cert_path, identity.cert.pem()).expect("test cert should be written");
+    std::fs::write(key_path, identity.key_pair.serialize_pem())
+        .expect("test key should be written");
+}
+
+fn generate_test_identity(hostname: &str) -> CertifiedKey {
+    let cert = rcgen::generate_simple_self_signed(vec![hostname.to_string()])
+        .expect("self-signed certificate should generate");
+    CertifiedKey { cert: cert.cert, key_pair: cert.key_pair }
+}

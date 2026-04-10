@@ -221,7 +221,7 @@ fn print_check_success(config_path: &Path, summary: CheckSummary) {
             .unwrap_or_else(|| "auto".to_string()),
         summary.accept_workers,
     );
-    println!("reload_requires_restart_for={}", rginx_http::tls_restart_required_fields().join(","));
+    println!("reload_requires_restart_for={}", summary.tls.restart_required_fields.join(","));
     println!(
         "tls_details=listener_profiles={} vhost_overrides={} sni_names={} certificate_bundles={}",
         summary.tls.listener_tls_profiles,

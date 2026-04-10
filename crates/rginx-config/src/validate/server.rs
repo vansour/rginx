@@ -55,7 +55,7 @@ pub(super) fn validate_listeners(
     let mut all_listener_names = HashSet::new();
     for (index, listener) in listeners.iter().enumerate() {
         let owner = format!("listeners[{index}]");
-        let normalized_name = listener.name.trim().to_lowercase();
+        let normalized_name = listener.name.trim().to_ascii_lowercase();
         if normalized_name.is_empty() {
             return Err(Error::Config(format!("{owner} name must not be empty")));
         }

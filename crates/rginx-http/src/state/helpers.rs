@@ -7,7 +7,12 @@ fn prepare_state(
         ProxyClients::from_config_with_health_notifier(config.as_ref(), peer_health_notifier)?;
     let listener_tls_acceptors = prepare_listener_tls_acceptors(config.as_ref())?;
 
-    Ok(PreparedState { config, clients, listener_tls_acceptors })
+    Ok(PreparedState {
+        config,
+        clients,
+        listener_tls_acceptors,
+        retired_listeners: Vec::new(),
+    })
 }
 
 fn prepare_listener_tls_acceptors(
@@ -50,57 +55,6 @@ fn unix_time_ms(time: SystemTime) -> u64 {
     time.duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
         .unwrap_or(0)
-}
-
-pub fn validate_config_transition(current: &ConfigSnapshot, next: &ConfigSnapshot) -> Result<()> {
-    let mut changes = Vec::new();
-
-    if current.listeners.len() != next.listeners.len() {
-        changes.push(format!(
-            "listeners count {} -> {}",
-            current.listeners.len(),
-            next.listeners.len()
-        ));
-    }
-
-    for (current_listener, next_listener) in current.listeners.iter().zip(next.listeners.iter()) {
-        if current_listener.id != next_listener.id {
-            changes.push(format!("listener id {} -> {}", current_listener.id, next_listener.id));
-        }
-
-        if current_listener.server.listen_addr != next_listener.server.listen_addr {
-            changes.push(format!(
-                "{}.listen {} -> {}",
-                current_listener.id,
-                current_listener.server.listen_addr,
-                next_listener.server.listen_addr
-            ));
-        }
-    }
-
-    if current.runtime.worker_threads != next.runtime.worker_threads {
-        changes.push(format!(
-            "runtime.worker_threads {:?} -> {:?}",
-            current.runtime.worker_threads, next.runtime.worker_threads
-        ));
-    }
-
-    if current.runtime.accept_workers != next.runtime.accept_workers {
-        changes.push(format!(
-            "runtime.accept_workers {} -> {}",
-            current.runtime.accept_workers, next.runtime.accept_workers
-        ));
-    }
-
-    if changes.is_empty() {
-        return Ok(());
-    }
-
-    Err(Error::Config(format!(
-        "reload requires restart because these startup-boundary fields changed (restart-boundary: {}): {}",
-        tls_restart_required_fields().join(", "),
-        changes.join("; ")
-    )))
 }
 
 fn take_background_tasks(

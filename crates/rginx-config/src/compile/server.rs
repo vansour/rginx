@@ -79,8 +79,7 @@ pub(super) fn compile_listeners(
 ) -> Result<Vec<Listener>> {
     listeners
         .into_iter()
-        .enumerate()
-        .map(|(index, listener)| {
+        .map(|listener| {
             let ListenerConfig {
                 name,
                 listen,
@@ -117,7 +116,7 @@ pub(super) fn compile_listeners(
             )?;
 
             Ok(Listener {
-                id: format!("listeners[{index}]"),
+                id: explicit_listener_id(&name),
                 name,
                 server: compiled.server,
                 tls_termination_enabled: compiled.server_tls.is_some(),
@@ -125,6 +124,10 @@ pub(super) fn compile_listeners(
             })
         })
         .collect()
+}
+
+fn explicit_listener_id(name: &str) -> String {
+    format!("listener:{}", name.trim().to_ascii_lowercase())
 }
 
 pub(super) fn compile_server_tls(

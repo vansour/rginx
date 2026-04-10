@@ -36,7 +36,7 @@ fn check_succeeds_without_binding_listener() {
     assert!(stdout.contains("worker_threads=auto"));
     assert!(stdout.contains("accept_workers=1"));
     assert!(stdout.contains(
-        "reload_requires_restart_for=listen,listeners,runtime.worker_threads,runtime.accept_workers"
+        "reload_requires_restart_for=listen,listeners[].listen,runtime.worker_threads,runtime.accept_workers"
     ));
     assert!(stdout.contains(
         "reload_tls_updates=server.tls,listeners[].tls,servers[].tls,upstreams[].tls,upstreams[].server_name,upstreams[].server_name_override"
@@ -202,10 +202,10 @@ fn check_reports_explicit_listener_summary_and_reload_boundary() {
     assert!(stdout.contains("worker_threads=3"));
     assert!(stdout.contains("accept_workers=2"));
     assert!(stdout.contains(
-        "reload_requires_restart_for=listen,listeners,runtime.worker_threads,runtime.accept_workers"
+        "reload_requires_restart_for=listen,listeners[].listen,runtime.worker_threads,runtime.accept_workers"
     ));
     assert!(stdout.contains(
-        "tls_restart_required_fields=listen,listeners,runtime.worker_threads,runtime.accept_workers"
+        "tls_restart_required_fields=listen,listeners[].listen,runtime.worker_threads,runtime.accept_workers"
     ));
 
     let _ = fs::remove_dir_all(temp_dir);

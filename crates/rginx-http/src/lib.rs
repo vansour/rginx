@@ -8,6 +8,7 @@ pub mod server;
 pub mod state;
 mod timeout;
 mod tls;
+mod transition;
 
 pub const MAX_OCSP_RESPONSE_BYTES: usize = 128 * 1024;
 
@@ -25,3 +26,7 @@ pub use state::{
     tls_restart_required_fields, tls_runtime_snapshot_for_config,
 };
 pub use tls::{build_ocsp_request_for_certificate, validate_ocsp_response_for_certificate};
+pub use transition::{
+    ConfigTransitionBoundary, ConfigTransitionKind, ConfigTransitionPlan,
+    config_transition_boundary, plan_config_transition, validate_config_transition,
+};

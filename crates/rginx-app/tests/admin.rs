@@ -346,6 +346,55 @@ fn wait_command_returns_new_snapshot_version_after_local_activity() {
 }
 
 #[test]
+fn wait_command_returns_same_snapshot_version_after_timeout_without_activity() {
+    let listen_addr = reserve_loopback_addr();
+    let mut server =
+        ServerHarness::spawn("rginx-admin-wait-timeout", |_| return_config(listen_addr));
+    server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
+
+    let socket_path = admin_socket_path_for_config(server.config_path());
+    wait_for_admin_socket(&socket_path, Duration::from_secs(5));
+
+    let response = query_admin_socket(&socket_path, AdminRequest::GetSnapshotVersion)
+        .expect("admin socket should return snapshot version");
+    let AdminResponse::SnapshotVersion(snapshot) = response else {
+        panic!("admin socket should return snapshot version");
+    };
+    let since_version = snapshot.snapshot_version;
+
+    let response = query_admin_socket(
+        &socket_path,
+        AdminRequest::WaitForSnapshotChange { since_version, timeout_ms: Some(100) },
+    )
+    .expect("admin socket should return the current snapshot version after timeout");
+    let AdminResponse::SnapshotVersion(snapshot) = response else {
+        panic!("admin socket should return snapshot version");
+    };
+    assert_eq!(snapshot.snapshot_version, since_version);
+
+    let since_version_arg = since_version.to_string();
+    let output = run_rginx([
+        "--config",
+        server.config_path().to_str().unwrap(),
+        "wait",
+        "--since-version",
+        &since_version_arg,
+        "--timeout-ms",
+        "100",
+    ]);
+    assert!(output.status.success(), "wait command should succeed: {}", render_output(&output));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let waited_version = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("snapshot_version="))
+        .and_then(|value| value.parse::<u64>().ok())
+        .expect("wait command should print snapshot version");
+    assert_eq!(waited_version, since_version);
+
+    server.shutdown_and_wait(Duration::from_secs(5));
+}
+
+#[test]
 fn delta_command_reports_changed_modules_since_version() {
     let listen_addr = reserve_loopback_addr();
     let mut server = ServerHarness::spawn("rginx-admin-delta", |_| return_config(listen_addr));
@@ -935,6 +984,87 @@ fn upstreams_command_reports_upstream_request_counters() {
     server.shutdown_and_wait(Duration::from_secs(5));
 }
 
+#[test]
+fn snapshot_and_delta_reflect_listener_lifecycle_changes_after_reload() {
+    let http_addr = reserve_loopback_addr();
+    let admin_listener_addr = reserve_loopback_addr();
+    let mut server = ServerHarness::spawn("rginx-admin-listener-lifecycle", |_| {
+        explicit_listeners_config(&[("http", http_addr)], "before reload\n")
+    });
+    server.wait_for_http_ready(http_addr, Duration::from_secs(5));
+
+    let socket_path = admin_socket_path_for_config(server.config_path());
+    wait_for_admin_socket(&socket_path, Duration::from_secs(5));
+
+    let response = query_admin_socket(&socket_path, AdminRequest::GetSnapshotVersion)
+        .expect("admin socket should return snapshot version");
+    let AdminResponse::SnapshotVersion(snapshot) = response else {
+        panic!("admin socket should return snapshot version");
+    };
+    let since_version = snapshot.snapshot_version;
+
+    std::fs::write(
+        server.config_path(),
+        explicit_listeners_config(
+            &[("http", http_addr), ("admin", admin_listener_addr)],
+            "after reload\n",
+        ),
+    )
+    .expect("reloaded config should be written");
+    server.send_signal(libc::SIGHUP);
+
+    server.wait_for_http_text_response(
+        admin_listener_addr,
+        &admin_listener_addr.to_string(),
+        "/",
+        200,
+        "after reload\n",
+        Duration::from_secs(5),
+    );
+
+    let response = query_admin_socket(
+        &socket_path,
+        AdminRequest::GetSnapshot {
+            include: Some(vec![rginx_http::SnapshotModule::Traffic]),
+            window_secs: None,
+        },
+    )
+    .expect("admin socket should return traffic snapshot");
+    let AdminResponse::Snapshot(snapshot) = response else {
+        panic!("admin socket should return traffic snapshot");
+    };
+    let traffic = snapshot.traffic.expect("traffic snapshot should be included");
+    assert_eq!(traffic.listeners.len(), 2);
+    assert!(traffic.listeners.iter().any(|listener| listener.listener_id == "listener:http"));
+    assert!(traffic.listeners.iter().any(|listener| listener.listener_id == "listener:admin"));
+
+    let response = query_admin_socket(
+        &socket_path,
+        AdminRequest::GetDelta {
+            since_version,
+            include: Some(vec![
+                rginx_http::SnapshotModule::Status,
+                rginx_http::SnapshotModule::Traffic,
+            ]),
+            window_secs: None,
+        },
+    )
+    .expect("admin socket should return delta");
+    let AdminResponse::Delta(delta) = response else {
+        panic!("admin socket should return delta");
+    };
+    assert_eq!(delta.status_changed, Some(true));
+    assert_eq!(delta.traffic_changed, Some(true));
+    assert!(
+        delta
+            .changed_listener_ids
+            .as_ref()
+            .is_some_and(|listeners| listeners.iter().any(|listener| listener == "listener:admin"))
+    );
+
+    server.shutdown_and_wait(Duration::from_secs(5));
+}
+
 fn wait_for_admin_socket(path: &Path, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     let mut last_error = String::new();
@@ -1051,6 +1181,27 @@ fn return_config(listen_addr: std::net::SocketAddr) -> String {
         "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Return(\n                status: 200,\n                location: \"\",\n                body: Some(\"ok\\n\"),\n            ),\n        ),\n    ],\n)\n",
         listen_addr.to_string(),
         ready_route = READY_ROUTE_CONFIG,
+    )
+}
+
+fn explicit_listeners_config(listeners: &[(&str, std::net::SocketAddr)], body: &str) -> String {
+    let listeners = listeners
+        .iter()
+        .map(|(name, addr)| {
+            format!(
+                "        ListenerConfig(\n            name: {:?},\n            listen: {:?},\n        )",
+                name,
+                addr.to_string()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",\n");
+
+    format!(
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    listeners: [\n{listeners}\n    ],\n    server: ServerConfig(\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Return(\n                status: 200,\n                location: \"\",\n                body: Some({body:?}),\n            ),\n        ),\n    ],\n)\n",
+        listeners = listeners,
+        ready_route = READY_ROUTE_CONFIG,
+        body = body,
     )
 }
 

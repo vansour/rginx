@@ -5,6 +5,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -59,6 +60,91 @@ fn nginx_style_quit_command_stops_the_server() {
 
     let status = server.wait_for_exit(Duration::from_secs(5));
     assert!(status.success(), "rginx should exit cleanly after quit: {status}");
+}
+
+#[test]
+fn sighup_reload_adds_explicit_listener_without_restart() {
+    let _guard = test_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let http_addr = reserve_loopback_addr();
+    let admin_addr = reserve_loopback_addr();
+    let mut server = TestServer::spawn_with_config(
+        "rginx-reload-add-listener",
+        explicit_listeners_config(&[("http", http_addr)], "before add\n"),
+    );
+
+    server.wait_for_body(http_addr, "before add\n", Duration::from_secs(5));
+    assert_unreachable(admin_addr, Duration::from_millis(500));
+
+    server.write_config(explicit_listeners_config(
+        &[("http", http_addr), ("admin", admin_addr)],
+        "after add\n",
+    ));
+    server.send_signal(libc::SIGHUP);
+
+    server.wait_for_body(http_addr, "after add\n", Duration::from_secs(5));
+    server.wait_for_body(admin_addr, "after add\n", Duration::from_secs(5));
+    server.shutdown_and_wait(Duration::from_secs(5));
+}
+
+#[test]
+fn sighup_reload_removes_explicit_listener_without_restart() {
+    let _guard = test_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let http_addr = reserve_loopback_addr();
+    let admin_addr = reserve_loopback_addr();
+    let mut server = TestServer::spawn_with_config(
+        "rginx-reload-remove-listener",
+        explicit_listeners_config(&[("http", http_addr), ("admin", admin_addr)], "before remove\n"),
+    );
+
+    server.wait_for_body(http_addr, "before remove\n", Duration::from_secs(5));
+    server.wait_for_body(admin_addr, "before remove\n", Duration::from_secs(5));
+
+    server.write_config(explicit_listeners_config(&[("http", http_addr)], "after remove\n"));
+    server.send_signal(libc::SIGHUP);
+
+    server.wait_for_body(http_addr, "after remove\n", Duration::from_secs(5));
+    assert_unreachable(admin_addr, Duration::from_secs(2));
+    server.shutdown_and_wait(Duration::from_secs(5));
+}
+
+#[test]
+fn removed_listener_drains_in_flight_request_before_going_unreachable() {
+    let _guard = test_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let http_addr = reserve_loopback_addr();
+    let drain_addr = reserve_loopback_addr();
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let upstream_addr =
+        spawn_delayed_response_server(Duration::from_millis(300), "draining\n", Some(ready_tx));
+    let mut server = TestServer::spawn_with_config(
+        "rginx-reload-drain-listener",
+        explicit_listeners_proxy_config(
+            &[("http", http_addr), ("drain", drain_addr)],
+            upstream_addr,
+        ),
+    );
+
+    server.wait_for_body(http_addr, "draining\n", Duration::from_secs(5));
+    server.wait_for_body(drain_addr, "draining\n", Duration::from_secs(5));
+    while ready_rx.try_recv().is_ok() {}
+
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        tx.send(fetch_text_response_with_timeout(drain_addr, "/", Duration::from_secs(3)))
+            .expect("result channel should remain available");
+    });
+    ready_rx.recv_timeout(Duration::from_secs(5)).expect("in-flight request should reach upstream");
+
+    server.write_config(explicit_listeners_proxy_config(&[("http", http_addr)], upstream_addr));
+    server.send_signal(libc::SIGHUP);
+
+    server.wait_for_body(http_addr, "draining\n", Duration::from_secs(5));
+    let result = rx.recv_timeout(Duration::from_secs(5)).expect("in-flight request should finish");
+    let (status, body) = result.expect("in-flight request should succeed");
+    assert_eq!(status, 200);
+    assert_eq!(body, "draining\n");
+
+    assert_unreachable(drain_addr, Duration::from_secs(2));
+    server.shutdown_and_wait(Duration::from_secs(5));
 }
 
 #[test]
@@ -440,11 +526,64 @@ fn return_route_fragment(body: &str) -> String {
     )
 }
 
+fn explicit_listeners_config(listeners: &[(&str, SocketAddr)], body: &str) -> String {
+    let listeners = listeners
+        .iter()
+        .map(|(name, addr)| {
+            format!(
+                "        ListenerConfig(\n            name: {:?},\n            listen: {:?},\n        )",
+                name,
+                addr.to_string()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",\n");
+
+    format!(
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    listeners: [\n{listeners}\n    ],\n    server: ServerConfig(\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Return(\n                status: 200,\n                location: \"\",\n                body: Some({body:?}),\n            ),\n        ),\n    ],\n)\n",
+        listeners = listeners,
+        ready_route = READY_ROUTE_CONFIG,
+        body = body,
+    )
+}
+
+fn explicit_listeners_proxy_config(
+    listeners: &[(&str, SocketAddr)],
+    upstream_addr: SocketAddr,
+) -> String {
+    let listeners = listeners
+        .iter()
+        .map(|(name, addr)| {
+            format!(
+                "        ListenerConfig(\n            name: {:?},\n            listen: {:?},\n        )",
+                name,
+                addr.to_string()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",\n");
+
+    format!(
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    listeners: [\n{listeners}\n    ],\n    server: ServerConfig(\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [\n                UpstreamPeerConfig(\n                    url: {upstream:?},\n                ),\n            ],\n            request_timeout_secs: Some(3),\n        ),\n    ],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Proxy(\n                upstream: \"backend\",\n            ),\n        ),\n    ],\n)\n",
+        listeners = listeners,
+        upstream = format!("http://{upstream_addr}"),
+        ready_route = READY_ROUTE_CONFIG,
+    )
+}
+
 fn fetch_text_response(listen_addr: SocketAddr, path: &str) -> Result<(u16, String), String> {
+    fetch_text_response_with_timeout(listen_addr, path, Duration::from_millis(500))
+}
+
+fn fetch_text_response_with_timeout(
+    listen_addr: SocketAddr,
+    path: &str,
+    read_timeout: Duration,
+) -> Result<(u16, String), String> {
     let mut stream = TcpStream::connect_timeout(&listen_addr, Duration::from_millis(200))
         .map_err(|error| format!("failed to connect to {listen_addr}: {error}"))?;
     stream
-        .set_read_timeout(Some(Duration::from_millis(500)))
+        .set_read_timeout(Some(read_timeout))
         .map_err(|error| format!("failed to set read timeout: {error}"))?;
     stream
         .set_write_timeout(Some(Duration::from_millis(500)))
@@ -471,6 +610,44 @@ fn fetch_text_response(listen_addr: SocketAddr, path: &str) -> Result<(u16, Stri
         .map_err(|error| format!("invalid status code: {error}"))?;
 
     Ok((status, body.to_string()))
+}
+
+fn spawn_delayed_response_server(
+    delay: Duration,
+    body: &'static str,
+    notify_ready: Option<mpsc::Sender<()>>,
+) -> SocketAddr {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .expect("delayed upstream listener should bind");
+    let listen_addr = listener.local_addr().expect("listener addr should be available");
+
+    std::thread::spawn(move || {
+        loop {
+            let Ok((mut stream, _)) = listener.accept() else {
+                break;
+            };
+            let notify_ready = notify_ready.clone();
+
+            std::thread::spawn(move || {
+                let mut buffer = [0u8; 1024];
+                let _ = stream.read(&mut buffer);
+                if let Some(notify_ready) = &notify_ready {
+                    let _ = notify_ready.send(());
+                }
+                std::thread::sleep(delay);
+
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/plain; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            });
+        }
+    });
+
+    listen_addr
 }
 
 fn assert_unreachable(listen_addr: SocketAddr, timeout: Duration) {
