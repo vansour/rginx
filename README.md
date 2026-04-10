@@ -480,7 +480,7 @@ rginx -t --config /etc/rginx/rginx.ron
 
 - `listener_model=legacy|explicit`
 - `listeners=<count>`
-- `reload_requires_restart_for=listen,listeners,runtime.worker_threads,runtime.accept_workers`
+- `reload_requires_restart_for=listen,listeners[].listen,runtime.worker_threads,runtime.accept_workers`
 - `reload_tls_updates=...`
 - `tls_expiring_certificates=...`
 

@@ -212,10 +212,7 @@ fn build_listener_certificate_snapshot(
             .as_ref()
             .map(|certificate| certificate.chain_diagnostics.clone())
             .unwrap_or_default(),
-        selected_as_default_for_listeners: if listener.server.default_certificate.is_none()
-            || listener.server.default_certificate.as_ref().is_some_and(|default_name| {
-                config.default_vhost.server_names.iter().any(|name| name == default_name)
-            }) {
+        selected_as_default_for_listeners: if listener.server.default_certificate.is_none() {
             vec![listener.name.clone()]
         } else {
             Vec::new()

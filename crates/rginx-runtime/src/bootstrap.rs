@@ -70,23 +70,21 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
                     Ok(pending) => {
                         match prepare_added_listener_bindings(
                             &pending.next_config.listeners,
+                            pending.next_config.runtime.accept_workers,
                             &active_listener_groups,
                             &draining_listener_groups,
                         ) {
                             Ok(prepared_additions) => {
-                                let next_accept_workers =
-                                    pending.next_config.runtime.accept_workers;
                                 match reload::commit_reload(&state, pending).await {
                                     Ok(result) => {
                                         reconcile_listener_worker_groups(
                                             &state.http,
                                             &result.config,
-                                            next_accept_workers,
                                             prepared_additions,
                                             &mut active_listener_groups,
                                             &mut draining_listener_groups,
                                         )
-                                        .await?;
+                                        .await;
                                         tracing::info!(
                                             revision = result.revision,
                                             listeners = result.config.total_listener_count(),
@@ -213,10 +211,10 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug)]
-struct PendingBoundListener {
+struct PreparedListenerWorkerGroup {
     listener: Listener,
     std_listener: Arc<StdTcpListener>,
+    worker_listeners: Vec<TcpListener>,
 }
 
 struct ListenerWorkerGroup {
@@ -259,13 +257,12 @@ async fn build_initial_listener_groups(
             Some(listener_socket) => listener_socket,
             None => bind_std_listener(listener.server.listen_addr)?,
         };
-        let group = spawn_listener_worker_group(
+        let prepared = prepare_listener_worker_group(
             listener.clone(),
             Arc::new(std_listener),
             accept_workers,
-            http_state.clone(),
-        )
-        .await?;
+        )?;
+        let group = activate_prepared_listener_worker_group(prepared, http_state.clone());
         groups.insert(listener.id.clone(), group);
     }
 
@@ -274,9 +271,10 @@ async fn build_initial_listener_groups(
 
 fn prepare_added_listener_bindings(
     next_listeners: &[Listener],
+    accept_workers: usize,
     active_listener_groups: &HashMap<String, ListenerWorkerGroup>,
     draining_listener_groups: &[ListenerWorkerGroup],
-) -> Result<Vec<PendingBoundListener>> {
+) -> Result<Vec<PreparedListenerWorkerGroup>> {
     let active_ids = active_listener_groups.keys().cloned().collect::<HashSet<_>>();
     let draining_ids = draining_listener_groups
         .iter()
@@ -294,10 +292,11 @@ fn prepare_added_listener_bindings(
                 listener.name
             )));
         }
-        prepared.push(PendingBoundListener {
-            listener: listener.clone(),
-            std_listener: Arc::new(bind_std_listener(listener.server.listen_addr)?),
-        });
+        prepared.push(prepare_listener_worker_group(
+            listener.clone(),
+            Arc::new(bind_std_listener(listener.server.listen_addr)?),
+            accept_workers,
+        )?);
     }
 
     Ok(prepared)
@@ -306,11 +305,10 @@ fn prepare_added_listener_bindings(
 async fn reconcile_listener_worker_groups(
     http_state: &rginx_http::SharedState,
     next_config: &ConfigSnapshot,
-    accept_workers: usize,
-    prepared_additions: Vec<PendingBoundListener>,
+    prepared_additions: Vec<PreparedListenerWorkerGroup>,
     active_listener_groups: &mut HashMap<String, ListenerWorkerGroup>,
     draining_listener_groups: &mut Vec<ListenerWorkerGroup>,
-) -> Result<()> {
+) {
     let next_by_id = next_config
         .listeners
         .iter()
@@ -343,47 +341,56 @@ async fn reconcile_listener_worker_groups(
         group.listener = next_listener.clone();
     }
 
-    for pending in prepared_additions {
-        let group = spawn_listener_worker_group(
-            pending.listener.clone(),
-            pending.std_listener,
-            accept_workers,
-            http_state.clone(),
-        )
-        .await?;
-        active_listener_groups.insert(pending.listener.id.clone(), group);
+    for prepared in prepared_additions {
+        let listener_id = prepared.listener.id.clone();
+        let group = activate_prepared_listener_worker_group(prepared, http_state.clone());
+        active_listener_groups.insert(listener_id, group);
     }
 
     prune_draining_listener_groups(http_state, draining_listener_groups).await;
-    Ok(())
 }
 
-async fn spawn_listener_worker_group(
+fn prepare_listener_worker_group(
     listener: Listener,
     std_listener: Arc<StdTcpListener>,
     accept_workers: usize,
+) -> Result<PreparedListenerWorkerGroup> {
+    let mut worker_listeners = Vec::new();
+    for _worker_index in 0..accept_workers {
+        worker_listeners.push(TcpListener::from_std(std_listener.try_clone()?)?);
+    }
+
+    Ok(PreparedListenerWorkerGroup { listener, std_listener, worker_listeners })
+}
+
+fn activate_prepared_listener_worker_group(
+    prepared: PreparedListenerWorkerGroup,
     http_state: rginx_http::SharedState,
-) -> Result<ListenerWorkerGroup> {
+) -> ListenerWorkerGroup {
     let (shutdown_tx, _shutdown_rx) = watch::channel(false);
     let mut tasks = Vec::new();
 
-    for worker_index in 0..accept_workers {
-        let listener_socket = TcpListener::from_std(std_listener.try_clone()?)?;
+    for (worker_index, listener_socket) in prepared.worker_listeners.into_iter().enumerate() {
         tracing::info!(
-            listener = %listener.name,
-            listen = %listener.server.listen_addr,
+            listener = %prepared.listener.name,
+            listen = %prepared.listener.server.listen_addr,
             worker = worker_index,
             "starting accept worker"
         );
         tasks.push(tokio::spawn(rginx_http::serve(
             listener_socket,
-            listener.id.clone(),
+            prepared.listener.id.clone(),
             http_state.clone(),
             shutdown_tx.subscribe(),
         )));
     }
 
-    Ok(ListenerWorkerGroup { listener, std_listener, shutdown_tx, tasks })
+    ListenerWorkerGroup {
+        listener: prepared.listener,
+        std_listener: prepared.std_listener,
+        shutdown_tx,
+        tasks,
+    }
 }
 
 async fn prune_draining_listener_groups(

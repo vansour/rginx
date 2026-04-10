@@ -118,6 +118,7 @@ impl SharedState {
             upstream_name,
             version,
         );
+        self.notify_snapshot_waiters();
     }
 
     pub(crate) fn record_upstream_peer_attempt(&self, upstream_name: &str, peer_url: &str) {
@@ -134,6 +135,7 @@ impl SharedState {
             upstream_name,
             version,
         );
+        self.notify_snapshot_waiters();
     }
 
     pub(crate) fn record_upstream_peer_success(&self, upstream_name: &str, peer_url: &str) {
@@ -149,6 +151,7 @@ impl SharedState {
             upstream_name,
             version,
         );
+        self.notify_snapshot_waiters();
     }
 
     pub(crate) fn record_upstream_peer_failure(&self, upstream_name: &str, peer_url: &str) {
@@ -164,6 +167,7 @@ impl SharedState {
             upstream_name,
             version,
         );
+        self.notify_snapshot_waiters();
     }
 
     pub(crate) fn record_upstream_peer_timeout(&self, upstream_name: &str, peer_url: &str) {
@@ -179,6 +183,7 @@ impl SharedState {
             upstream_name,
             version,
         );
+        self.notify_snapshot_waiters();
     }
 
     pub(crate) fn record_upstream_failover(&self, upstream_name: &str) {
@@ -193,6 +198,7 @@ impl SharedState {
             upstream_name,
             version,
         );
+        self.notify_snapshot_waiters();
     }
 
     pub(crate) fn record_upstream_completed_response(&self, upstream_name: &str) {
@@ -207,6 +213,7 @@ impl SharedState {
             upstream_name,
             version,
         );
+        self.notify_snapshot_waiters();
     }
 
     pub(crate) fn record_upstream_bad_gateway_response(&self, upstream_name: &str) {
@@ -221,6 +228,7 @@ impl SharedState {
             upstream_name,
             version,
         );
+        self.notify_snapshot_waiters();
     }
 
     pub(crate) fn record_upstream_gateway_timeout_response(&self, upstream_name: &str) {
@@ -235,6 +243,7 @@ impl SharedState {
             upstream_name,
             version,
         );
+        self.notify_snapshot_waiters();
     }
 
     pub(crate) fn record_upstream_bad_request_response(&self, upstream_name: &str) {
@@ -248,6 +257,7 @@ impl SharedState {
             upstream_name,
             version,
         );
+        self.notify_snapshot_waiters();
     }
 
     pub(crate) fn record_upstream_payload_too_large_response(&self, upstream_name: &str) {
@@ -261,6 +271,7 @@ impl SharedState {
             upstream_name,
             version,
         );
+        self.notify_snapshot_waiters();
     }
 
     pub(crate) fn record_upstream_unsupported_media_type_response(&self, upstream_name: &str) {
@@ -274,6 +285,7 @@ impl SharedState {
             upstream_name,
             version,
         );
+        self.notify_snapshot_waiters();
     }
 
     pub(crate) fn record_upstream_no_healthy_peers(&self, upstream_name: &str) {
@@ -287,6 +299,7 @@ impl SharedState {
             upstream_name,
             version,
         );
+        self.notify_snapshot_waiters();
     }
 
     pub(crate) fn record_upstream_peer_failure_class(
@@ -318,6 +331,7 @@ impl SharedState {
             upstream_name,
             version,
         );
+        self.notify_snapshot_waiters();
     }
 
     pub(crate) fn sync_upstream_stats(&self, config: &ConfigSnapshot) {

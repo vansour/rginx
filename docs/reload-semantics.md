@@ -72,5 +72,5 @@ rginx -s restart
 
 ## 关联文档
 
-- [refactor-plan.md](/root/github/rginx/docs/refactor-plan.md)
-- [runtime-architecture.md](/root/github/rginx/docs/runtime-architecture.md)
+- [refactor-plan.md](./refactor-plan.md)
+- [runtime-architecture.md](./runtime-architecture.md)

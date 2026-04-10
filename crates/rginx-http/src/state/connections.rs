@@ -78,6 +78,7 @@ impl SharedState {
         self.active_connections.fetch_add(1, Ordering::AcqRel);
         let version = self.mark_snapshot_changed_components(true, false, true, false, false);
         self.mark_traffic_targets_changed(version, Some(listener_id), None, None);
+        self.notify_snapshot_waiters();
         ActiveConnectionGuard {
             active_connections: self.active_connections.clone(),
             listener_active_connections,
@@ -96,6 +97,7 @@ impl SharedState {
         }
         let version = self.mark_snapshot_changed_components(true, true, true, false, false);
         self.mark_traffic_targets_changed(version, Some(listener_id), None, None);
+        self.notify_snapshot_waiters();
     }
 
     pub(crate) fn record_mtls_handshake_success(&self, listener_id: &str, authenticated: bool) {
@@ -109,6 +111,7 @@ impl SharedState {
         }
         let version = self.mark_snapshot_changed_components(true, true, true, false, false);
         self.mark_traffic_targets_changed(version, Some(listener_id), None, None);
+        self.notify_snapshot_waiters();
     }
 
     pub(crate) fn record_tls_handshake_failure(
@@ -154,6 +157,7 @@ impl SharedState {
         }
         let version = self.mark_snapshot_changed_components(true, true, true, false, false);
         self.mark_traffic_targets_changed(version, Some(listener_id), None, None);
+        self.notify_snapshot_waiters();
     }
 
     pub(crate) fn record_connection_rejected(&self, listener_id: &str) {
@@ -163,5 +167,6 @@ impl SharedState {
         }
         let version = self.mark_snapshot_changed_components(true, true, true, false, false);
         self.mark_traffic_targets_changed(version, Some(listener_id), None, None);
+        self.notify_snapshot_waiters();
     }
 }

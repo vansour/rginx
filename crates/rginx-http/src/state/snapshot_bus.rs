@@ -205,7 +205,10 @@ impl SharedState {
         if upstreams {
             self.snapshot_components.upstreams.store(version, Ordering::Relaxed);
         }
-        self.snapshot_notify.notify_waiters();
         version
+    }
+
+    pub(crate) fn notify_snapshot_waiters(&self) {
+        self.snapshot_notify.notify_waiters();
     }
 }

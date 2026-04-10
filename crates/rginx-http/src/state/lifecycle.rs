@@ -14,27 +14,30 @@ impl SharedState {
     }
 
     pub async fn status_snapshot(&self) -> RuntimeStatusSnapshot {
-        let state = self.inner.read().await;
-        let mtls = self.mtls_status_snapshot(state.config.as_ref());
+        let (revision, config) = {
+            let state = self.inner.read().await;
+            (state.revision, state.config.clone())
+        };
         let ocsp_statuses =
             self.ocsp_statuses.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+        let mtls = self.mtls_status_snapshot(config.as_ref());
         let tls = tls_runtime_snapshot_for_config_with_ocsp_statuses(
-            state.config.as_ref(),
+            config.as_ref(),
             Some(&ocsp_statuses),
         );
         RuntimeStatusSnapshot {
-            revision: state.revision,
+            revision,
             config_path: self.config_path.as_deref().cloned(),
-            listen_addr: state.config.server.listen_addr,
-            worker_threads: state.config.runtime.worker_threads,
-            accept_workers: state.config.runtime.accept_workers,
-            total_vhosts: state.config.total_vhost_count(),
-            total_routes: state.config.total_route_count(),
-            total_upstreams: state.config.upstreams.len(),
-            tls_enabled: state.config.tls_enabled(),
+            listen_addr: config.server.listen_addr,
+            worker_threads: config.runtime.worker_threads,
+            accept_workers: config.runtime.accept_workers,
+            total_vhosts: config.total_vhost_count(),
+            total_routes: config.total_route_count(),
+            total_upstreams: config.upstreams.len(),
+            tls_enabled: config.tls_enabled(),
             tls,
             mtls,
-            upstream_tls: upstream_tls_status_snapshots(state.config.as_ref()),
+            upstream_tls: upstream_tls_status_snapshots(config.as_ref()),
             active_connections: self.active_connection_count(),
             reload: self.reload_status_snapshot(),
         }
@@ -53,6 +56,7 @@ impl SharedState {
             rollback_preserved_revision: None,
         });
         self.mark_snapshot_changed_components(true, false, false, false, false);
+        self.notify_snapshot_waiters();
     }
 
     pub fn record_reload_failure(&self, error: impl Into<String>, active_revision: u64) {
@@ -68,6 +72,7 @@ impl SharedState {
             rollback_preserved_revision: Some(active_revision),
         });
         self.mark_snapshot_changed_components(true, false, false, false, false);
+        self.notify_snapshot_waiters();
     }
 
     pub fn record_ocsp_refresh_success(&self, scope: &str) {
@@ -78,6 +83,7 @@ impl SharedState {
         entry.refreshes_total += 1;
         entry.last_error = None;
         self.mark_snapshot_changed_components(true, false, false, false, false);
+        self.notify_snapshot_waiters();
     }
 
     pub fn record_ocsp_refresh_failure(&self, scope: &str, error: impl Into<String>) {
@@ -87,6 +93,7 @@ impl SharedState {
         entry.failures_total += 1;
         entry.last_error = Some(error.into());
         self.mark_snapshot_changed_components(true, false, false, false, false);
+        self.notify_snapshot_waiters();
     }
 
     pub async fn tls_acceptor(&self, listener_id: &str) -> Option<TlsAcceptor> {
@@ -103,6 +110,7 @@ impl SharedState {
         let listener_tls_acceptors = prepare_listener_tls_acceptors(config.as_ref())?;
         *self.listener_tls_acceptors.write().await = listener_tls_acceptors;
         self.mark_snapshot_changed_components(true, false, false, false, false);
+        self.notify_snapshot_waiters();
         Ok(())
     }
 
@@ -161,6 +169,7 @@ impl SharedState {
         *self.listener_tls_acceptors.write().await = merged_acceptors;
         let _ = self.revisions.send(next_revision);
         self.mark_snapshot_changed_components(true, false, true, true, true);
+        self.notify_snapshot_waiters();
 
         prepared.config
     }

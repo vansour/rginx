@@ -174,6 +174,7 @@ impl SharedState {
         }
         let version = self.mark_snapshot_changed_components(false, true, true, false, false);
         self.mark_traffic_targets_changed(version, Some(listener_id), Some(vhost_id), route_id);
+        self.notify_snapshot_waiters();
     }
 
     pub(crate) fn record_mtls_request(&self, listener_id: &str, authenticated: bool) {
@@ -193,6 +194,7 @@ impl SharedState {
 
         let version = self.mark_snapshot_changed_components(true, true, true, false, false);
         self.mark_traffic_targets_changed(version, Some(listener_id), None, None);
+        self.notify_snapshot_waiters();
     }
 
     pub(crate) fn record_downstream_response(
@@ -236,6 +238,7 @@ impl SharedState {
         }
         let version = self.mark_snapshot_changed_components(false, true, true, false, false);
         self.mark_traffic_targets_changed(version, Some(listener_id), Some(vhost_id), route_id);
+        self.notify_snapshot_waiters();
     }
 
     pub(crate) fn record_route_access_denied(&self, route_id: &str) {
@@ -244,6 +247,7 @@ impl SharedState {
         }
         let version = self.mark_snapshot_changed_components(false, false, true, false, false);
         self.mark_traffic_targets_changed(version, None, None, Some(route_id));
+        self.notify_snapshot_waiters();
     }
 
     pub(crate) fn record_route_rate_limited(&self, route_id: &str) {
@@ -252,6 +256,7 @@ impl SharedState {
         }
         let version = self.mark_snapshot_changed_components(false, false, true, false, false);
         self.mark_traffic_targets_changed(version, None, None, Some(route_id));
+        self.notify_snapshot_waiters();
     }
 
     pub(crate) fn record_grpc_request(
@@ -276,6 +281,7 @@ impl SharedState {
         }
         let version = self.mark_snapshot_changed_components(false, false, true, false, false);
         self.mark_traffic_targets_changed(version, Some(listener_id), Some(vhost_id), route_id);
+        self.notify_snapshot_waiters();
     }
 
     pub(crate) fn record_grpc_status(
@@ -297,6 +303,7 @@ impl SharedState {
         }
         let version = self.mark_snapshot_changed_components(false, false, true, false, false);
         self.mark_traffic_targets_changed(version, Some(listener_id), Some(vhost_id), route_id);
+        self.notify_snapshot_waiters();
     }
 
     pub(crate) fn sync_traffic_stats(&self, config: &ConfigSnapshot) {

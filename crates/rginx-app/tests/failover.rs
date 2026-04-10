@@ -11,8 +11,15 @@ use support::{READY_ROUTE_CONFIG, ServerHarness, reserve_loopback_addr};
 
 #[test]
 fn idempotent_requests_fail_over_after_upstream_timeout() {
-    let slow_peer = spawn_response_server(Duration::from_millis(1_500), "slow peer\n");
-    let fast_peer = spawn_response_server(Duration::from_millis(0), "fast peer\n");
+    let slow_hits = Arc::new(AtomicUsize::new(0));
+    let fast_hits = Arc::new(AtomicUsize::new(0));
+    let slow_peer = spawn_response_server_with_hits(
+        Duration::from_millis(1_500),
+        "slow peer\n",
+        slow_hits.clone(),
+    );
+    let fast_peer =
+        spawn_response_server_with_hits(Duration::from_millis(0), "fast peer\n", fast_hits.clone());
     let listen_addr = reserve_loopback_addr();
     let mut server = ServerHarness::spawn("rginx-failover-test", |_| {
         proxy_config(listen_addr, &[slow_peer, fast_peer])
@@ -23,6 +30,8 @@ fn idempotent_requests_fail_over_after_upstream_timeout() {
         fetch_text_response(listen_addr, "/api/demo").expect("failover request should succeed");
     assert_eq!(status, 200);
     assert_eq!(body, "fast peer\n");
+    assert!(slow_hits.load(Ordering::SeqCst) > 0, "slow peer should be attempted first");
+    assert!(fast_hits.load(Ordering::SeqCst) > 0, "fast peer should receive the failover attempt");
     server.shutdown_and_wait(Duration::from_secs(5));
 }
 
@@ -30,8 +39,11 @@ fn idempotent_requests_fail_over_after_upstream_timeout() {
 fn non_idempotent_requests_do_not_fail_over_after_upstream_timeout() {
     let slow_hits = Arc::new(AtomicUsize::new(0));
     let fast_hits = Arc::new(AtomicUsize::new(0));
-    let slow_peer =
-        spawn_response_server_with_hits(Duration::from_millis(1_500), "slow peer\n", slow_hits);
+    let slow_peer = spawn_response_server_with_hits(
+        Duration::from_millis(1_500),
+        "slow peer\n",
+        slow_hits.clone(),
+    );
     let fast_peer =
         spawn_response_server_with_hits(Duration::from_millis(0), "fast peer\n", fast_hits.clone());
     let listen_addr = reserve_loopback_addr();
@@ -53,13 +65,10 @@ fn non_idempotent_requests_do_not_fail_over_after_upstream_timeout() {
         body.contains("timed out after 1000 ms"),
         "expected upstream timeout body, got {body:?}"
     );
-    assert_eq!(fast_hits.load(Ordering::Relaxed), 0, "POST requests must not fail over");
+    assert!(slow_hits.load(Ordering::SeqCst) > 0, "slow peer should be attempted before timeout");
+    assert_eq!(fast_hits.load(Ordering::SeqCst), 0, "POST requests must not fail over");
 
     server.shutdown_and_wait(Duration::from_secs(5));
-}
-
-fn spawn_response_server(delay: Duration, body: &'static str) -> SocketAddr {
-    spawn_response_server_with_hits(delay, body, Arc::new(AtomicUsize::new(0)))
 }
 
 fn spawn_response_server_with_hits(

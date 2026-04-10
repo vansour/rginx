@@ -826,6 +826,49 @@ fn validate_accepts_explicit_listeners_when_legacy_listener_fields_are_empty() {
 }
 
 #[test]
+fn validate_rejects_duplicate_listener_names_after_ascii_normalization() {
+    let mut config = base_config();
+    config.server.listen = None;
+    config.listeners = vec![
+        ListenerConfig {
+            name: " HTTP ".to_string(),
+            proxy_protocol: None,
+            default_certificate: None,
+            listen: "127.0.0.1:8080".to_string(),
+            trusted_proxies: Vec::new(),
+            keep_alive: Some(true),
+            max_headers: None,
+            max_request_body_bytes: None,
+            max_connections: None,
+            header_read_timeout_secs: None,
+            request_body_read_timeout_secs: None,
+            response_write_timeout_secs: None,
+            access_log_format: None,
+            tls: None,
+        },
+        ListenerConfig {
+            name: "http".to_string(),
+            proxy_protocol: None,
+            default_certificate: None,
+            listen: "127.0.0.1:8443".to_string(),
+            trusted_proxies: Vec::new(),
+            keep_alive: Some(true),
+            max_headers: None,
+            max_request_body_bytes: None,
+            max_connections: None,
+            header_read_timeout_secs: None,
+            request_body_read_timeout_secs: None,
+            response_write_timeout_secs: None,
+            access_log_format: None,
+            tls: None,
+        },
+    ];
+
+    let error = validate(&config).expect_err("normalized duplicate listener names should fail");
+    assert!(error.to_string().contains("duplicate listener name `http` across listeners"));
+}
+
+#[test]
 fn validate_rejects_mixing_legacy_listener_fields_with_explicit_listeners() {
     let mut config = base_config();
     config.listeners = vec![ListenerConfig {
