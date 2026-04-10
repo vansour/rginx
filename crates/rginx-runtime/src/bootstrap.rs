@@ -2,11 +2,11 @@ use std::collections::{HashMap, HashSet};
 use std::net::TcpListener as StdTcpListener;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rginx_core::{ConfigSnapshot, Error, Listener, Result};
 use tokio::net::TcpListener;
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 
 use crate::admin;
@@ -22,11 +22,13 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
     let state = RuntimeState::new(config_path, config)?;
     let current_config = state.current_config().await;
     let inherited_listeners = restart::take_inherited_listeners_from_env()?;
+    let drain_completion_notify = Arc::new(Notify::new());
     let mut active_listener_groups = build_initial_listener_groups(
         &current_config.listeners,
         current_config.runtime.accept_workers,
         inherited_listeners,
         state.http.clone(),
+        drain_completion_notify.clone(),
     )
     .await?;
     let mut draining_listener_groups = Vec::new();
@@ -51,13 +53,16 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
     restart::notify_ready_if_requested()?;
 
     loop {
+        // Register before pruning so a just-finished drain cannot be missed.
+        let drain_completion = drain_completion_notify.notified();
+        tokio::pin!(drain_completion);
         prune_draining_listener_groups(&state.http, &mut draining_listener_groups).await;
         let signal = if draining_listener_groups.is_empty() {
             shutdown::wait_for_signal().await?
         } else {
             tokio::select! {
                 signal = shutdown::wait_for_signal() => signal?,
-                _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                _ = &mut drain_completion => {
                     continue;
                 }
             }
@@ -83,6 +88,7 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
                                             prepared_additions,
                                             &mut active_listener_groups,
                                             &mut draining_listener_groups,
+                                            drain_completion_notify.clone(),
                                         )
                                         .await;
                                         tracing::info!(
@@ -249,6 +255,7 @@ async fn build_initial_listener_groups(
     accept_workers: usize,
     mut inherited: HashMap<std::net::SocketAddr, StdTcpListener>,
     http_state: rginx_http::SharedState,
+    drain_completion_notify: Arc<Notify>,
 ) -> Result<HashMap<String, ListenerWorkerGroup>> {
     let mut groups = HashMap::new();
 
@@ -262,7 +269,11 @@ async fn build_initial_listener_groups(
             Arc::new(std_listener),
             accept_workers,
         )?;
-        let group = activate_prepared_listener_worker_group(prepared, http_state.clone());
+        let group = activate_prepared_listener_worker_group(
+            prepared,
+            http_state.clone(),
+            drain_completion_notify.clone(),
+        );
         groups.insert(listener.id.clone(), group);
     }
 
@@ -324,6 +335,7 @@ async fn reconcile_listener_worker_groups(
     prepared_additions: Vec<PreparedListenerWorkerGroup>,
     active_listener_groups: &mut HashMap<String, ListenerWorkerGroup>,
     draining_listener_groups: &mut Vec<ListenerWorkerGroup>,
+    drain_completion_notify: Arc<Notify>,
 ) {
     let next_by_id = next_config
         .listeners
@@ -359,7 +371,11 @@ async fn reconcile_listener_worker_groups(
 
     for prepared in prepared_additions {
         let listener_id = prepared.listener.id.clone();
-        let group = activate_prepared_listener_worker_group(prepared, http_state.clone());
+        let group = activate_prepared_listener_worker_group(
+            prepared,
+            http_state.clone(),
+            drain_completion_notify.clone(),
+        );
         active_listener_groups.insert(listener_id, group);
     }
 
@@ -382,9 +398,11 @@ fn prepare_listener_worker_group(
 fn activate_prepared_listener_worker_group(
     prepared: PreparedListenerWorkerGroup,
     http_state: rginx_http::SharedState,
+    drain_completion_notify: Arc<Notify>,
 ) -> ListenerWorkerGroup {
     let (shutdown_tx, _shutdown_rx) = watch::channel(false);
     let mut tasks = Vec::new();
+    let remaining_workers = Arc::new(AtomicUsize::new(prepared.worker_listeners.len()));
 
     for (worker_index, listener_socket) in prepared.worker_listeners.into_iter().enumerate() {
         tracing::info!(
@@ -393,12 +411,19 @@ fn activate_prepared_listener_worker_group(
             worker = worker_index,
             "starting accept worker"
         );
-        tasks.push(tokio::spawn(rginx_http::serve(
-            listener_socket,
-            prepared.listener.id.clone(),
-            http_state.clone(),
-            shutdown_tx.subscribe(),
-        )));
+        let listener_id = prepared.listener.id.clone();
+        let http_state = http_state.clone();
+        let shutdown = shutdown_tx.subscribe();
+        let remaining_workers = remaining_workers.clone();
+        let drain_completion_notify = drain_completion_notify.clone();
+        tasks.push(tokio::spawn(async move {
+            let result =
+                rginx_http::serve(listener_socket, listener_id, http_state, shutdown).await;
+            if remaining_workers.fetch_sub(1, Ordering::AcqRel) == 1 {
+                drain_completion_notify.notify_waiters();
+            }
+            result
+        }));
     }
 
     ListenerWorkerGroup {
@@ -507,4 +532,94 @@ fn bind_std_listener(listen_addr: std::net::SocketAddr) -> Result<StdTcpListener
     let socket = StdTcpListener::bind(listen_addr)?;
     socket.set_nonblocking(true)?;
     Ok(socket)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::net::SocketAddr;
+
+    use rginx_core::Server;
+
+    use super::*;
+
+    fn listener(id: &str, name: &str, listen_addr: SocketAddr) -> Listener {
+        Listener {
+            id: id.to_string(),
+            name: name.to_string(),
+            server: Server {
+                listen_addr,
+                default_certificate: None,
+                trusted_proxies: Vec::new(),
+                keep_alive: true,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout: None,
+                request_body_read_timeout: None,
+                response_write_timeout: None,
+                access_log_format: None,
+                tls: None,
+            },
+            tls_termination_enabled: false,
+            proxy_protocol_enabled: false,
+        }
+    }
+
+    fn listener_group(listener: Listener) -> ListenerWorkerGroup {
+        let std_listener = bind_std_listener(listener.server.listen_addr)
+            .expect("listener socket should bind for test");
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        ListenerWorkerGroup {
+            listener,
+            std_listener: Arc::new(std_listener),
+            shutdown_tx,
+            tasks: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn prepare_added_listener_bindings_rejects_active_addr_reuse_with_new_id() {
+        let std_listener =
+            bind_std_listener("127.0.0.1:0".parse().expect("socket addr should parse")).unwrap();
+        let listen_addr = std_listener.local_addr().expect("listener addr should exist");
+        drop(std_listener);
+
+        let active_listener = listener("listener-a", "listener-a", listen_addr);
+        let active_groups =
+            HashMap::from([(active_listener.id.clone(), listener_group(active_listener))]);
+        let error = match prepare_added_listener_bindings(
+            &[listener("listener-b", "listener-b", listen_addr)],
+            1,
+            &active_groups,
+            &[],
+        ) {
+            Ok(_) => panic!("reusing an active listen addr with a new id must fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("reuses listen address"));
+    }
+
+    #[test]
+    fn prepare_added_listener_bindings_rejects_draining_addr_reuse_with_new_id() {
+        let std_listener =
+            bind_std_listener("127.0.0.1:0".parse().expect("socket addr should parse")).unwrap();
+        let listen_addr = std_listener.local_addr().expect("listener addr should exist");
+        drop(std_listener);
+
+        let draining_groups =
+            vec![listener_group(listener("listener-a", "listener-a", listen_addr))];
+        let error = match prepare_added_listener_bindings(
+            &[listener("listener-b", "listener-b", listen_addr)],
+            1,
+            &HashMap::new(),
+            &draining_groups,
+        ) {
+            Ok(_) => panic!("reusing a draining listen addr with a new id must fail"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("reuses listen address"));
+    }
 }
