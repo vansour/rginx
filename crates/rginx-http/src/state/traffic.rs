@@ -396,4 +396,36 @@ impl SharedState {
             versions.routes.insert(route_id.to_string(), version);
         }
     }
+
+    pub(crate) fn mark_all_traffic_targets_changed(
+        &self,
+        previous: &ConfigSnapshot,
+        next: &ConfigSnapshot,
+        version: u64,
+    ) {
+        let mut versions = self
+            .traffic_component_versions
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        for listener in &previous.listeners {
+            versions.listeners.insert(listener.id.clone(), version);
+        }
+        for listener in &next.listeners {
+            versions.listeners.insert(listener.id.clone(), version);
+        }
+
+        for vhost in std::iter::once(&previous.default_vhost).chain(previous.vhosts.iter()) {
+            versions.vhosts.insert(vhost.id.clone(), version);
+            for route in &vhost.routes {
+                versions.routes.insert(route.id.clone(), version);
+            }
+        }
+        for vhost in std::iter::once(&next.default_vhost).chain(next.vhosts.iter()) {
+            versions.vhosts.insert(vhost.id.clone(), version);
+            for route in &vhost.routes {
+                versions.routes.insert(route.id.clone(), version);
+            }
+        }
+    }
 }

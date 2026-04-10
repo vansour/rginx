@@ -136,6 +136,7 @@ impl SharedState {
     }
 
     async fn commit_prepared(&self, prepared: PreparedState) -> Arc<ConfigSnapshot> {
+        let previous_config = self.current_config().await;
         if !prepared.retired_listeners.is_empty() {
             let mut retired =
                 self.retired_listeners.write().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -169,6 +170,20 @@ impl SharedState {
         *self.listener_tls_acceptors.write().await = merged_acceptors;
         let _ = self.revisions.send(next_revision);
         self.mark_snapshot_changed_components(true, false, true, true, true);
+        if traffic_topology_changed(previous_config.as_ref(), prepared.config.as_ref()) {
+            self.mark_all_traffic_targets_changed(
+                previous_config.as_ref(),
+                prepared.config.as_ref(),
+                next_revision,
+            );
+        }
+        if upstream_topology_changed(previous_config.as_ref(), prepared.config.as_ref()) {
+            self.mark_all_upstream_targets_changed(
+                previous_config.as_ref(),
+                prepared.config.as_ref(),
+                next_revision,
+            );
+        }
         self.notify_snapshot_waiters();
 
         prepared.config
@@ -198,6 +213,12 @@ impl SharedState {
         let mut authenticated_requests = 0u64;
         let mut anonymous_requests = 0u64;
         let mut handshake_failures_total = 0u64;
+        let mut handshake_failures_missing_client_cert = 0u64;
+        let mut handshake_failures_unknown_ca = 0u64;
+        let mut handshake_failures_bad_certificate = 0u64;
+        let mut handshake_failures_certificate_revoked = 0u64;
+        let mut handshake_failures_verify_depth_exceeded = 0u64;
+        let mut handshake_failures_other = 0u64;
 
         for listener in &config.listeners {
             let Some(client_auth) =
@@ -220,10 +241,25 @@ impl SharedState {
                     counters.downstream_mtls_anonymous_requests.load(Ordering::Relaxed);
                 handshake_failures_total +=
                     counters.downstream_tls_handshake_failures.load(Ordering::Relaxed);
+                handshake_failures_missing_client_cert += counters
+                    .downstream_tls_handshake_failures_missing_client_cert
+                    .load(Ordering::Relaxed);
+                handshake_failures_unknown_ca +=
+                    counters.downstream_tls_handshake_failures_unknown_ca.load(Ordering::Relaxed);
+                handshake_failures_bad_certificate += counters
+                    .downstream_tls_handshake_failures_bad_certificate
+                    .load(Ordering::Relaxed);
+                handshake_failures_certificate_revoked += counters
+                    .downstream_tls_handshake_failures_certificate_revoked
+                    .load(Ordering::Relaxed);
+                handshake_failures_verify_depth_exceeded += counters
+                    .downstream_tls_handshake_failures_verify_depth_exceeded
+                    .load(Ordering::Relaxed);
+                handshake_failures_other +=
+                    counters.downstream_tls_handshake_failures_other.load(Ordering::Relaxed);
             }
         }
 
-        let counters = self.counters_snapshot();
         MtlsStatusSnapshot {
             configured_listeners,
             optional_listeners,
@@ -232,16 +268,12 @@ impl SharedState {
             authenticated_requests,
             anonymous_requests,
             handshake_failures_total,
-            handshake_failures_missing_client_cert: counters
-                .downstream_tls_handshake_failures_missing_client_cert,
-            handshake_failures_unknown_ca: counters.downstream_tls_handshake_failures_unknown_ca,
-            handshake_failures_bad_certificate: counters
-                .downstream_tls_handshake_failures_bad_certificate,
-            handshake_failures_certificate_revoked: counters
-                .downstream_tls_handshake_failures_certificate_revoked,
-            handshake_failures_verify_depth_exceeded: counters
-                .downstream_tls_handshake_failures_verify_depth_exceeded,
-            handshake_failures_other: counters.downstream_tls_handshake_failures_other,
+            handshake_failures_missing_client_cert,
+            handshake_failures_unknown_ca,
+            handshake_failures_bad_certificate,
+            handshake_failures_certificate_revoked,
+            handshake_failures_verify_depth_exceeded,
+            handshake_failures_other,
         }
     }
 
@@ -305,4 +337,35 @@ impl SharedState {
             active.entry(listener.id.clone()).or_insert_with(|| Arc::new(AtomicUsize::new(0)));
         }
     }
+}
+
+fn traffic_topology_changed(previous: &ConfigSnapshot, next: &ConfigSnapshot) -> bool {
+    let listener_ids = |config: &ConfigSnapshot| {
+        config
+            .listeners
+            .iter()
+            .map(|listener| listener.id.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let vhost_ids = |config: &ConfigSnapshot| {
+        std::iter::once(&config.default_vhost)
+            .chain(config.vhosts.iter())
+            .map(|vhost| vhost.id.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let route_ids = |config: &ConfigSnapshot| {
+        std::iter::once(&config.default_vhost)
+            .chain(config.vhosts.iter())
+            .flat_map(|vhost| vhost.routes.iter().map(|route| route.id.clone()))
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+
+    listener_ids(previous) != listener_ids(next)
+        || vhost_ids(previous) != vhost_ids(next)
+        || route_ids(previous) != route_ids(next)
+}
+
+fn upstream_topology_changed(previous: &ConfigSnapshot, next: &ConfigSnapshot) -> bool {
+    previous.upstreams.keys().collect::<std::collections::BTreeSet<_>>()
+        != next.upstreams.keys().collect::<std::collections::BTreeSet<_>>()
 }

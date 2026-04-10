@@ -41,3 +41,4 @@ x509-parser.workspace = true
 [dev-dependencies]
 rcgen = "0.13"
 spki = { version = "0.7.3", features = ["alloc"] }
+tempfile = "3.14"

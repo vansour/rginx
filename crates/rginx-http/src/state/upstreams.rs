@@ -379,4 +379,33 @@ impl SharedState {
         let peer = entry.peers.get(peer_url)?.clone();
         Some((entry.counters.clone(), peer))
     }
+
+    pub(crate) fn mark_all_upstream_targets_changed(
+        &self,
+        previous: &ConfigSnapshot,
+        next: &ConfigSnapshot,
+        version: u64,
+    ) {
+        let mut upstream_versions = self
+            .upstream_component_versions
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for name in previous.upstreams.keys() {
+            upstream_versions.insert(name.clone(), version);
+        }
+        for name in next.upstreams.keys() {
+            upstream_versions.insert(name.clone(), version);
+        }
+
+        let mut peer_health_versions = self
+            .peer_health_component_versions
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for name in previous.upstreams.keys() {
+            peer_health_versions.insert(name.clone(), version);
+        }
+        for name in next.upstreams.keys() {
+            peer_health_versions.insert(name.clone(), version);
+        }
+    }
 }

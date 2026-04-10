@@ -125,31 +125,61 @@ impl SharedState {
                 self.counters
                     .downstream_tls_handshake_failures_missing_client_cert
                     .fetch_add(1, Ordering::Relaxed);
+                if let Some(counters) = self.listener_traffic_counters(listener_id) {
+                    counters
+                        .downstream_tls_handshake_failures_missing_client_cert
+                        .fetch_add(1, Ordering::Relaxed);
+                }
             }
             TlsHandshakeFailureReason::UnknownCa => {
                 self.counters
                     .downstream_tls_handshake_failures_unknown_ca
                     .fetch_add(1, Ordering::Relaxed);
+                if let Some(counters) = self.listener_traffic_counters(listener_id) {
+                    counters
+                        .downstream_tls_handshake_failures_unknown_ca
+                        .fetch_add(1, Ordering::Relaxed);
+                }
             }
             TlsHandshakeFailureReason::BadCertificate => {
                 self.counters
                     .downstream_tls_handshake_failures_bad_certificate
                     .fetch_add(1, Ordering::Relaxed);
+                if let Some(counters) = self.listener_traffic_counters(listener_id) {
+                    counters
+                        .downstream_tls_handshake_failures_bad_certificate
+                        .fetch_add(1, Ordering::Relaxed);
+                }
             }
             TlsHandshakeFailureReason::CertificateRevoked => {
                 self.counters
                     .downstream_tls_handshake_failures_certificate_revoked
                     .fetch_add(1, Ordering::Relaxed);
+                if let Some(counters) = self.listener_traffic_counters(listener_id) {
+                    counters
+                        .downstream_tls_handshake_failures_certificate_revoked
+                        .fetch_add(1, Ordering::Relaxed);
+                }
             }
             TlsHandshakeFailureReason::VerifyDepthExceeded => {
                 self.counters
                     .downstream_tls_handshake_failures_verify_depth_exceeded
                     .fetch_add(1, Ordering::Relaxed);
+                if let Some(counters) = self.listener_traffic_counters(listener_id) {
+                    counters
+                        .downstream_tls_handshake_failures_verify_depth_exceeded
+                        .fetch_add(1, Ordering::Relaxed);
+                }
             }
             TlsHandshakeFailureReason::Other => {
                 self.counters
                     .downstream_tls_handshake_failures_other
                     .fetch_add(1, Ordering::Relaxed);
+                if let Some(counters) = self.listener_traffic_counters(listener_id) {
+                    counters
+                        .downstream_tls_handshake_failures_other
+                        .fetch_add(1, Ordering::Relaxed);
+                }
             }
         }
         if let Some(counters) = self.listener_traffic_counters(listener_id) {

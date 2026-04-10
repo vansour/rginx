@@ -7,6 +7,7 @@ use std::net::TcpListener;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -45,6 +46,7 @@ use super::{
     build_proxy_uri, probe_upstream_peer, sanitize_request_headers, upstream_request_version,
 };
 use crate::client_ip::{ClientAddress, ClientIpSource};
+use tempfile::TempDir;
 
 #[test]
 fn proxy_uri_keeps_path_and_query() {
@@ -461,17 +463,12 @@ fn upstream_request_version_follows_upstream_protocol() {
 
 #[test]
 fn load_custom_ca_store_accepts_pem_files() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time should be after unix epoch")
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("rginx-custom-ca-{unique}.pem"));
+    let temp_dir = TempDir::new().expect("temp dir should be created");
+    let path = temp_dir.path().join("custom-ca.pem");
     std::fs::write(&path, TEST_CA_CERT_PEM).expect("PEM file should be written");
 
     let store = load_custom_ca_store(&path).expect("PEM CA should load");
     assert!(!store.is_empty());
-
-    std::fs::remove_file(path).expect("temp PEM file should be removed");
 }
 
 #[test]
@@ -489,11 +486,8 @@ fn proxy_clients_can_select_insecure_and_custom_ca_modes() {
         upstream_settings(UpstreamProtocol::Auto),
     );
 
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time should be after unix epoch")
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("rginx-custom-ca-select-{unique}.pem"));
+    let temp_dir = TempDir::new().expect("temp dir should be created");
+    let path = temp_dir.path().join("custom-ca.pem");
     std::fs::write(&path, TEST_CA_CERT_PEM).expect("PEM file should be written");
 
     let custom = Upstream::new(
@@ -553,8 +547,6 @@ fn proxy_clients_can_select_insecure_and_custom_ca_modes() {
     let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
     assert!(clients.for_upstream(snapshot.upstreams["insecure"].as_ref()).is_ok());
     assert!(clients.for_upstream(snapshot.upstreams["custom"].as_ref()).is_ok());
-
-    std::fs::remove_file(path).expect("temp PEM file should be removed");
 }
 
 #[test]
@@ -1585,8 +1577,8 @@ async fn active_health_probe_tracks_status_transitions() {
         StatusCode::OK,
         StatusCode::OK,
     ])));
-    let listen_addr = spawn_status_server(statuses).await;
-    let peer_url = format!("http://{listen_addr}");
+    let status_server = spawn_status_server(statuses).await;
+    let peer_url = format!("http://{}", status_server.listen_addr);
     let snapshot = snapshot_with_active_health("backend", vec![peer(&peer_url)], "/healthz", 2);
     let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
     let upstream = snapshot.upstreams["backend"].clone();
@@ -1656,8 +1648,8 @@ fn peer_with_role(url: &str, weight: u32, backup: bool) -> UpstreamPeer {
     }
 }
 
-fn snapshot_with_upstream(name: &str, upstream: Arc<Upstream>) -> rginx_core::ConfigSnapshot {
-    let server = rginx_core::Server {
+fn default_server() -> rginx_core::Server {
+    rginx_core::Server {
         listen_addr: "127.0.0.1:8080".parse().unwrap(),
         default_certificate: None,
         trusted_proxies: Vec::new(),
@@ -1670,7 +1662,32 @@ fn snapshot_with_upstream(name: &str, upstream: Arc<Upstream>) -> rginx_core::Co
         response_write_timeout: None,
         access_log_format: None,
         tls: None,
-    };
+    }
+}
+
+fn default_listener(server: rginx_core::Server) -> rginx_core::Listener {
+    rginx_core::Listener {
+        id: "default".to_string(),
+        name: "default".to_string(),
+        server,
+        tls_termination_enabled: false,
+        proxy_protocol_enabled: false,
+    }
+}
+
+fn default_vhost() -> rginx_core::VirtualHost {
+    rginx_core::VirtualHost {
+        id: "server".to_string(),
+        server_names: Vec::new(),
+        routes: Vec::new(),
+        tls: None,
+    }
+}
+
+fn snapshot_with_upstreams_map(
+    upstreams: HashMap<String, Arc<Upstream>>,
+) -> rginx_core::ConfigSnapshot {
+    let server = default_server();
     rginx_core::ConfigSnapshot {
         runtime: rginx_core::RuntimeSettings {
             shutdown_timeout: Duration::from_secs(1),
@@ -1678,64 +1695,21 @@ fn snapshot_with_upstream(name: &str, upstream: Arc<Upstream>) -> rginx_core::Co
             accept_workers: 1,
         },
         server: server.clone(),
-        listeners: vec![rginx_core::Listener {
-            id: "default".to_string(),
-            name: "default".to_string(),
-            server,
-            tls_termination_enabled: false,
-            proxy_protocol_enabled: false,
-        }],
-        default_vhost: rginx_core::VirtualHost {
-            id: "server".to_string(),
-            server_names: Vec::new(),
-            routes: Vec::new(),
-            tls: None,
-        },
+        listeners: vec![default_listener(server)],
+        default_vhost: default_vhost(),
         vhosts: Vec::new(),
-        upstreams: HashMap::from([(name.to_string(), upstream)]),
+        upstreams,
     }
+}
+
+fn snapshot_with_upstream(name: &str, upstream: Arc<Upstream>) -> rginx_core::ConfigSnapshot {
+    snapshot_with_upstreams_map(HashMap::from([(name.to_string(), upstream)]))
 }
 
 fn snapshot_with_upstreams(
     upstreams: impl IntoIterator<Item = (String, Arc<Upstream>)>,
 ) -> rginx_core::ConfigSnapshot {
-    let server = rginx_core::Server {
-        listen_addr: "127.0.0.1:8080".parse().unwrap(),
-        default_certificate: None,
-        trusted_proxies: Vec::new(),
-        keep_alive: true,
-        max_headers: None,
-        max_request_body_bytes: None,
-        max_connections: None,
-        header_read_timeout: None,
-        request_body_read_timeout: None,
-        response_write_timeout: None,
-        access_log_format: None,
-        tls: None,
-    };
-    rginx_core::ConfigSnapshot {
-        runtime: rginx_core::RuntimeSettings {
-            shutdown_timeout: Duration::from_secs(1),
-            worker_threads: None,
-            accept_workers: 1,
-        },
-        server: server.clone(),
-        listeners: vec![rginx_core::Listener {
-            id: "default".to_string(),
-            name: "default".to_string(),
-            server,
-            tls_termination_enabled: false,
-            proxy_protocol_enabled: false,
-        }],
-        default_vhost: rginx_core::VirtualHost {
-            id: "server".to_string(),
-            server_names: Vec::new(),
-            routes: Vec::new(),
-            tls: None,
-        },
-        vhosts: Vec::new(),
-        upstreams: HashMap::from_iter(upstreams),
-    }
+    snapshot_with_upstreams_map(HashMap::from_iter(upstreams))
 }
 
 fn snapshot_with_upstream_policy(
@@ -1754,44 +1728,7 @@ fn snapshot_with_upstream_policy(
             ..upstream_settings(UpstreamProtocol::Auto)
         },
     );
-    let server = rginx_core::Server {
-        listen_addr: "127.0.0.1:8080".parse().unwrap(),
-        default_certificate: None,
-        trusted_proxies: Vec::new(),
-        keep_alive: true,
-        max_headers: None,
-        max_request_body_bytes: None,
-        max_connections: None,
-        header_read_timeout: None,
-        request_body_read_timeout: None,
-        response_write_timeout: None,
-        access_log_format: None,
-        tls: None,
-    };
-
-    rginx_core::ConfigSnapshot {
-        runtime: rginx_core::RuntimeSettings {
-            shutdown_timeout: Duration::from_secs(1),
-            worker_threads: None,
-            accept_workers: 1,
-        },
-        server: server.clone(),
-        listeners: vec![rginx_core::Listener {
-            id: "default".to_string(),
-            name: "default".to_string(),
-            server,
-            tls_termination_enabled: false,
-            proxy_protocol_enabled: false,
-        }],
-        default_vhost: rginx_core::VirtualHost {
-            id: "server".to_string(),
-            server_names: Vec::new(),
-            routes: Vec::new(),
-            tls: None,
-        },
-        vhosts: Vec::new(),
-        upstreams: HashMap::from([(name.to_string(), Arc::new(upstream))]),
-    }
+    snapshot_with_upstreams_map(HashMap::from([(name.to_string(), Arc::new(upstream))]))
 }
 
 fn snapshot_with_active_health(
@@ -1815,44 +1752,7 @@ fn snapshot_with_active_health(
             ..upstream_settings(UpstreamProtocol::Auto)
         },
     );
-    let server = rginx_core::Server {
-        listen_addr: "127.0.0.1:8080".parse().unwrap(),
-        default_certificate: None,
-        trusted_proxies: Vec::new(),
-        keep_alive: true,
-        max_headers: None,
-        max_request_body_bytes: None,
-        max_connections: None,
-        header_read_timeout: None,
-        request_body_read_timeout: None,
-        response_write_timeout: None,
-        access_log_format: None,
-        tls: None,
-    };
-
-    rginx_core::ConfigSnapshot {
-        runtime: rginx_core::RuntimeSettings {
-            shutdown_timeout: Duration::from_secs(1),
-            worker_threads: None,
-            accept_workers: 1,
-        },
-        server: server.clone(),
-        listeners: vec![rginx_core::Listener {
-            id: "default".to_string(),
-            name: "default".to_string(),
-            server,
-            tls_termination_enabled: false,
-            proxy_protocol_enabled: false,
-        }],
-        default_vhost: rginx_core::VirtualHost {
-            id: "server".to_string(),
-            server_names: Vec::new(),
-            routes: Vec::new(),
-            tls: None,
-        },
-        vhosts: Vec::new(),
-        upstreams: HashMap::from([(name.to_string(), Arc::new(upstream))]),
-    }
+    snapshot_with_upstreams_map(HashMap::from([(name.to_string(), Arc::new(upstream))]))
 }
 
 fn client_ip(value: &str) -> IpAddr {
@@ -1875,39 +1775,62 @@ fn grpc_health_response_body(serving_status: u64) -> Bytes {
     body.freeze()
 }
 
-async fn spawn_status_server(statuses: Arc<Mutex<VecDeque<StatusCode>>>) -> SocketAddr {
+struct StatusServerHandle {
+    listen_addr: SocketAddr,
+    shutdown: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl Drop for StatusServerHandle {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+async fn spawn_status_server(statuses: Arc<Mutex<VecDeque<StatusCode>>>) -> StatusServerHandle {
     let listener = TcpListener::bind(("127.0.0.1", 0)).expect("test status listener should bind");
+    listener.set_nonblocking(true).expect("status listener should support nonblocking mode");
     let listen_addr = listener.local_addr().expect("listener addr should exist");
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_thread = shutdown.clone();
 
-    thread::spawn(move || {
-        loop {
-            let Ok((mut stream, _)) = listener.accept() else {
-                break;
-            };
-            let statuses = statuses.clone();
+    let thread = thread::spawn(move || {
+        while !shutdown_thread.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let statuses = statuses.clone();
 
-            thread::spawn(move || {
-                let mut buffer = [0u8; 1024];
-                let _ = stream.read(&mut buffer);
-                let status = {
-                    let mut statuses =
-                        statuses.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                    statuses.pop_front().unwrap_or(StatusCode::OK)
-                };
-                let reason = status.canonical_reason().unwrap_or("Unknown");
-                let response = format!(
-                    "HTTP/1.1 {} {}\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok",
-                    status.as_u16(),
-                    reason
-                );
+                    thread::spawn(move || {
+                        let mut buffer = [0u8; 1024];
+                        let _ = stream.read(&mut buffer);
+                        let status = {
+                            let mut statuses =
+                                statuses.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                            statuses.pop_front().unwrap_or(StatusCode::OK)
+                        };
+                        let reason = status.canonical_reason().unwrap_or("Unknown");
+                        let response = format!(
+                            "HTTP/1.1 {} {}\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok",
+                            status.as_u16(),
+                            reason
+                        );
 
-                let _ = stream.write_all(response.as_bytes());
-                let _ = stream.flush();
-            });
+                        let _ = stream.write_all(response.as_bytes());
+                        let _ = stream.flush();
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
         }
     });
 
-    listen_addr
+    StatusServerHandle { listen_addr, shutdown, thread: Some(thread) }
 }
 
 const TEST_CA_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\nMIIDXTCCAkWgAwIBAgIJAOIvDiVb18eVMA0GCSqGSIb3DQEBCwUAMEUxCzAJBgNV\nBAYTAkFVMRMwEQYDVQQIDApTb21lLVN0YXRlMSEwHwYDVQQKDBhJbnRlcm5ldCBX\naWRnaXRzIFB0eSBMdGQwHhcNMTYwODE0MTY1NjExWhcNMjYwODEyMTY1NjExWjBF\nMQswCQYDVQQGEwJBVTETMBEGA1UECAwKU29tZS1TdGF0ZTEhMB8GA1UECgwYSW50\nZXJuZXQgV2lkZ2l0cyBQdHkgTHRkMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIB\nCgKCAQEArVHWFn52Lbl1l59exduZntVSZyDYpzDND+S2LUcO6fRBWhV/1Kzox+2G\nZptbuMGmfI3iAnb0CFT4uC3kBkQQlXonGATSVyaFTFR+jq/lc0SP+9Bd7SBXieIV\neIXlY1TvlwIvj3Ntw9zX+scTA4SXxH6M0rKv9gTOub2vCMSHeF16X8DQr4XsZuQr\n7Cp7j1I4aqOJyap5JTl5ijmG8cnu0n+8UcRlBzy99dLWJG0AfI3VRJdWpGTNVZ92\naFff3RpK3F/WI2gp3qV1ynRAKuvmncGC3LDvYfcc2dgsc1N6Ffq8GIrkgRob6eBc\nklDHp1d023Lwre+VaVDSo1//Y72UFwIDAQABo1AwTjAdBgNVHQ4EFgQUbNOlA6sN\nXyzJjYqciKeId7g3/ZowHwYDVR0jBBgwFoAUbNOlA6sNXyzJjYqciKeId7g3/Zow\nDAYDVR0TBAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAVVaR5QWLZIRR4Dw6TSBn\nBQiLpBSXN6oAxdDw6n4PtwW6CzydaA+creiK6LfwEsiifUfQe9f+T+TBSpdIYtMv\nZ2H2tjlFX8VrjUFvPrvn5c28CuLI0foBgY8XGSkR2YMYzWw2jPEq3Th/KM5Catn3\nAFm3bGKWMtGPR4v+90chEN0jzaAmJYRrVUh9vea27bOCn31Nse6XXQPmSI6Gyncy\nOAPUsvPClF3IjeL1tmBotWqSGn1cYxLo+Lwjk22A9h6vjcNQRyZF2VLVvtwYrNU3\nmwJ6GCLsLHpwW/yjyvn8iEltnJvByM/eeRnfXV6WDObyiZsE/n6DxIRJodQzFqy9\nGA==\n-----END CERTIFICATE-----\n";

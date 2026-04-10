@@ -280,6 +280,14 @@ fn prepare_added_listener_bindings(
         .iter()
         .map(|group| group.listener.id.clone())
         .collect::<HashSet<_>>();
+    let active_addrs = active_listener_groups
+        .values()
+        .map(|group| group.listener.server.listen_addr)
+        .collect::<HashSet<_>>();
+    let draining_addrs = draining_listener_groups
+        .iter()
+        .map(|group| group.listener.server.listen_addr)
+        .collect::<HashSet<_>>();
 
     let mut prepared = Vec::new();
     for listener in next_listeners {
@@ -290,6 +298,14 @@ fn prepare_added_listener_bindings(
             return Err(Error::Server(format!(
                 "listener `{}` cannot be re-added until the previous generation has drained",
                 listener.name
+            )));
+        }
+        if active_addrs.contains(&listener.server.listen_addr)
+            || draining_addrs.contains(&listener.server.listen_addr)
+        {
+            return Err(Error::Server(format!(
+                "listener `{}` reuses listen address `{}` with a different listener identity during reload",
+                listener.name, listener.server.listen_addr
             )));
         }
         prepared.push(prepare_listener_worker_group(
