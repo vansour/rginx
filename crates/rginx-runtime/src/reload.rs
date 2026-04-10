@@ -4,22 +4,42 @@ use rginx_core::{ConfigSnapshot, Result};
 
 use crate::state::RuntimeState;
 
+pub struct PendingReload {
+    pub current_config: Arc<ConfigSnapshot>,
+    pub current_revision: u64,
+    pub next_config: ConfigSnapshot,
+}
+
 pub struct ReloadSuccess {
     pub config: Arc<ConfigSnapshot>,
     pub revision: u64,
 }
 
-pub async fn reload(state: &RuntimeState) -> Result<ReloadSuccess> {
+pub async fn prepare_reload(state: &RuntimeState) -> Result<PendingReload> {
     let current_config = state.current_config().await;
     let current_revision = state.http.current_revision().await;
-    let config = match rginx_config::load_and_compile(&state.config_path) {
+    let next_config = match rginx_config::load_and_compile(&state.config_path) {
         Ok(config) => config,
         Err(error) => {
             state.http.record_reload_failure(error.to_string(), current_revision);
             return Err(error);
         }
     };
-    let config = match state.http.replace(config).await {
+
+    if let Err(error) =
+        rginx_http::validate_config_transition(current_config.as_ref(), &next_config)
+    {
+        state.http.record_reload_failure(error.to_string(), current_revision);
+        return Err(error);
+    }
+
+    Ok(PendingReload { current_config, current_revision, next_config })
+}
+
+pub async fn commit_reload(state: &RuntimeState, pending: PendingReload) -> Result<ReloadSuccess> {
+    let current_config = pending.current_config;
+    let current_revision = pending.current_revision;
+    let config = match state.http.replace(pending.next_config).await {
         Ok(config) => config,
         Err(error) => {
             state.http.record_reload_failure(error.to_string(), current_revision);
@@ -31,6 +51,11 @@ pub async fn reload(state: &RuntimeState) -> Result<ReloadSuccess> {
         describe_tls_certificate_changes(current_config.as_ref(), config.as_ref());
     state.http.record_reload_success(revision, tls_certificate_changes);
     Ok(ReloadSuccess { config, revision })
+}
+
+pub async fn reload(state: &RuntimeState) -> Result<ReloadSuccess> {
+    let pending = prepare_reload(state).await?;
+    commit_reload(state, pending).await
 }
 
 fn describe_tls_certificate_changes(

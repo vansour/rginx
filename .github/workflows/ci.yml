@@ -36,8 +36,8 @@ jobs:
       - name: Check Formatting
         run: cargo fmt --all --check
 
-  test:
-    name: Test
+  test-fast:
+    name: Test Fast
     runs-on: ubuntu-24.04
     steps:
       - name: Check Out Source
@@ -49,8 +49,41 @@ jobs:
       - name: Restore Rust Cache
         uses: Swatinem/rust-cache@v2.9.1
 
-      - name: Run Workspace Tests
-        run: cargo test --workspace --locked --quiet -- --test-threads=1
+      - name: Run Fast Test Layer
+        run: ./scripts/test-fast.sh
+
+  test-slow:
+    name: Test Slow
+    runs-on: ubuntu-24.04
+    needs:
+      - test-fast
+    steps:
+      - name: Check Out Source
+        uses: actions/checkout@v6.0.2
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore Rust Cache
+        uses: Swatinem/rust-cache@v2.9.1
+
+      - name: Run Slow Test Layer
+        run: ./scripts/test-slow.sh
+
+  tls-gate:
+    name: TLS Gate
+    runs-on: ubuntu-24.04
+    needs:
+      - test-fast
+    steps:
+      - name: Check Out Source
+        uses: actions/checkout@v6.0.2
+
+      - name: Install Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore Rust Cache
+        uses: Swatinem/rust-cache@v2.9.1
 
       - name: Run TLS Release Gate
         run: ./scripts/run-tls-gate.sh

@@ -1,9 +1,13 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::net::TcpListener as StdTcpListener;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
 use rginx_core::{ConfigSnapshot, Error, Listener, Result};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
+use tokio::task::JoinHandle;
 
 use crate::admin;
 use crate::health;
@@ -18,13 +22,15 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
     let state = RuntimeState::new(config_path, config)?;
     let current_config = state.current_config().await;
     let inherited_listeners = restart::take_inherited_listeners_from_env()?;
-    let bound_listeners = bind_server_listeners(
+    let mut active_listener_groups = build_initial_listener_groups(
         &current_config.listeners,
         current_config.runtime.accept_workers,
         inherited_listeners,
+        state.http.clone(),
     )
     .await?;
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let mut draining_listener_groups = Vec::new();
+    let (shutdown_tx, _shutdown_rx) = watch::channel(false);
 
     tracing::info!(
         listeners = current_config.total_listener_count(),
@@ -35,24 +41,6 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
         "starting rginx runtime"
     );
 
-    let mut server_tasks = bound_listeners
-        .workers
-        .into_iter()
-        .map(|bound_listener| {
-            tracing::info!(
-                listener = %bound_listener.listener_name,
-                listen = %bound_listener.listen_addr,
-                worker = bound_listener.worker_index,
-                "starting accept worker"
-            );
-            tokio::spawn(rginx_http::serve(
-                bound_listener.listener,
-                bound_listener.listener_id,
-                state.http.clone(),
-                shutdown_rx.clone(),
-            ))
-        })
-        .collect::<Vec<_>>();
     let mut admin_task = tokio::spawn(admin::run(
         state.config_path.clone(),
         state.http.clone(),
@@ -63,19 +51,64 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
     restart::notify_ready_if_requested()?;
 
     loop {
-        match shutdown::wait_for_signal().await? {
+        prune_draining_listener_groups(&state.http, &mut draining_listener_groups).await;
+        let signal = if draining_listener_groups.is_empty() {
+            shutdown::wait_for_signal().await?
+        } else {
+            tokio::select! {
+                signal = shutdown::wait_for_signal() => signal?,
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                    continue;
+                }
+            }
+        };
+
+        match signal {
             RuntimeSignal::Reload => {
                 tracing::info!("reload signal received");
-                match reload::reload(&state).await {
-                    Ok(result) => {
-                        tracing::info!(
-                            revision = result.revision,
-                            listeners = result.config.total_listener_count(),
-                            vhosts = result.config.total_vhost_count(),
-                            routes = result.config.total_route_count(),
-                            upstreams = result.config.upstreams.len(),
-                            "configuration reloaded"
-                        );
+                match reload::prepare_reload(&state).await {
+                    Ok(pending) => {
+                        match prepare_added_listener_bindings(
+                            &pending.next_config.listeners,
+                            &active_listener_groups,
+                            &draining_listener_groups,
+                        ) {
+                            Ok(prepared_additions) => {
+                                let next_accept_workers =
+                                    pending.next_config.runtime.accept_workers;
+                                match reload::commit_reload(&state, pending).await {
+                                    Ok(result) => {
+                                        reconcile_listener_worker_groups(
+                                            &state.http,
+                                            &result.config,
+                                            next_accept_workers,
+                                            prepared_additions,
+                                            &mut active_listener_groups,
+                                            &mut draining_listener_groups,
+                                        )
+                                        .await?;
+                                        tracing::info!(
+                                            revision = result.revision,
+                                            listeners = result.config.total_listener_count(),
+                                            vhosts = result.config.total_vhost_count(),
+                                            routes = result.config.total_route_count(),
+                                            upstreams = result.config.upstreams.len(),
+                                            "configuration reloaded"
+                                        );
+                                    }
+                                    Err(error) => {
+                                        tracing::warn!(%error, "configuration reload failed");
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                state.http.record_reload_failure(
+                                    error.to_string(),
+                                    pending.current_revision,
+                                );
+                                tracing::warn!(%error, "configuration reload failed");
+                            }
+                        }
                     }
                     Err(error) => {
                         tracing::warn!(%error, "configuration reload failed");
@@ -84,7 +117,11 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
             }
             RuntimeSignal::Restart => {
                 tracing::info!("restart signal received");
-                match restart::restart(&state.config_path, &bound_listeners.handles).await {
+                let handles = active_listener_groups
+                    .values()
+                    .map(ListenerWorkerGroup::restart_handle)
+                    .collect::<Vec<_>>();
+                match restart::restart(&state.config_path, &handles).await {
                     Ok(()) => {
                         tracing::info!(
                             "replacement process became ready; starting graceful handoff"
@@ -107,9 +144,16 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
         "graceful shutdown requested"
     );
     let _ = shutdown_tx.send(true);
+    initiate_shutdown_for_groups(active_listener_groups.values());
+    initiate_shutdown_for_groups(draining_listener_groups.iter());
 
     match tokio::time::timeout(current_config.runtime.shutdown_timeout, async {
-        join_server_tasks(&mut server_tasks).await?;
+        join_listener_worker_groups(
+            &state.http,
+            &mut active_listener_groups,
+            &mut draining_listener_groups,
+        )
+        .await?;
         (&mut admin_task).await.map_err(|error| {
             Error::Server(format!("admin socket task failed to join: {error}"))
         })??;
@@ -131,12 +175,18 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
             tracing::warn!(
                 "shutdown timeout reached before background tasks drained all active work"
             );
-            abort_server_tasks(&server_tasks);
+            abort_listener_worker_groups(active_listener_groups.values());
+            abort_listener_worker_groups(draining_listener_groups.iter());
             admin_task.abort();
             health_task.abort();
             ocsp_task.abort();
 
-            join_aborted_server_tasks(server_tasks).await;
+            join_aborted_listener_worker_groups(
+                &state.http,
+                &mut active_listener_groups,
+                &mut draining_listener_groups,
+            )
+            .await;
 
             if let Err(error) = admin_task.await
                 && !error.is_cancelled()
@@ -163,79 +213,275 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
     Ok(())
 }
 
-async fn bind_server_listeners(
+#[derive(Debug)]
+struct PendingBoundListener {
+    listener: Listener,
+    std_listener: Arc<StdTcpListener>,
+}
+
+struct ListenerWorkerGroup {
+    listener: Listener,
+    std_listener: Arc<StdTcpListener>,
+    shutdown_tx: watch::Sender<bool>,
+    tasks: Vec<JoinHandle<Result<()>>>,
+}
+
+impl ListenerWorkerGroup {
+    fn restart_handle(&self) -> ListenerHandle {
+        ListenerHandle { listener: self.listener.clone(), std_listener: self.std_listener.clone() }
+    }
+
+    fn initiate_shutdown(&self) {
+        let _ = self.shutdown_tx.send(true);
+    }
+
+    fn abort(&self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
+
+    fn is_finished(&self) -> bool {
+        self.tasks.iter().all(JoinHandle::is_finished)
+    }
+}
+
+async fn build_initial_listener_groups(
     listeners: &[Listener],
     accept_workers: usize,
-    mut inherited: HashMap<std::net::SocketAddr, std::net::TcpListener>,
-) -> Result<BoundListeners> {
-    let mut worker_listeners = Vec::new();
-    let mut listener_handles = Vec::new();
+    mut inherited: HashMap<std::net::SocketAddr, StdTcpListener>,
+    http_state: rginx_http::SharedState,
+) -> Result<HashMap<String, ListenerWorkerGroup>> {
+    let mut groups = HashMap::new();
 
     for listener in listeners {
         let std_listener = match inherited.remove(&listener.server.listen_addr) {
             Some(listener_socket) => listener_socket,
-            None => {
-                let socket = std::net::TcpListener::bind(listener.server.listen_addr)?;
-                socket.set_nonblocking(true)?;
-                socket
-            }
+            None => bind_std_listener(listener.server.listen_addr)?,
         };
-        let std_listener = std::sync::Arc::new(std_listener);
-        listener_handles.push(ListenerHandle {
-            listener: listener.clone(),
-            std_listener: std_listener.clone(),
-        });
+        let group = spawn_listener_worker_group(
+            listener.clone(),
+            Arc::new(std_listener),
+            accept_workers,
+            http_state.clone(),
+        )
+        .await?;
+        groups.insert(listener.id.clone(), group);
+    }
 
-        for worker_index in 0..accept_workers {
-            let listener_socket = TcpListener::from_std(std_listener.try_clone()?)?;
-            worker_listeners.push(BoundListener {
-                listener: listener_socket,
-                listener_id: listener.id.clone(),
-                listener_name: listener.name.clone(),
-                listen_addr: listener.server.listen_addr,
-                worker_index,
-            });
+    Ok(groups)
+}
+
+fn prepare_added_listener_bindings(
+    next_listeners: &[Listener],
+    active_listener_groups: &HashMap<String, ListenerWorkerGroup>,
+    draining_listener_groups: &[ListenerWorkerGroup],
+) -> Result<Vec<PendingBoundListener>> {
+    let active_ids = active_listener_groups.keys().cloned().collect::<HashSet<_>>();
+    let draining_ids = draining_listener_groups
+        .iter()
+        .map(|group| group.listener.id.clone())
+        .collect::<HashSet<_>>();
+
+    let mut prepared = Vec::new();
+    for listener in next_listeners {
+        if active_ids.contains(&listener.id) {
+            continue;
+        }
+        if draining_ids.contains(&listener.id) {
+            return Err(Error::Server(format!(
+                "listener `{}` cannot be re-added until the previous generation has drained",
+                listener.name
+            )));
+        }
+        prepared.push(PendingBoundListener {
+            listener: listener.clone(),
+            std_listener: Arc::new(bind_std_listener(listener.server.listen_addr)?),
+        });
+    }
+
+    Ok(prepared)
+}
+
+async fn reconcile_listener_worker_groups(
+    http_state: &rginx_http::SharedState,
+    next_config: &ConfigSnapshot,
+    accept_workers: usize,
+    prepared_additions: Vec<PendingBoundListener>,
+    active_listener_groups: &mut HashMap<String, ListenerWorkerGroup>,
+    draining_listener_groups: &mut Vec<ListenerWorkerGroup>,
+) -> Result<()> {
+    let next_by_id = next_config
+        .listeners
+        .iter()
+        .map(|listener| (listener.id.clone(), listener.clone()))
+        .collect::<HashMap<_, _>>();
+
+    let removed_ids = active_listener_groups
+        .keys()
+        .filter(|listener_id| !next_by_id.contains_key(*listener_id))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    for removed_id in removed_ids {
+        if let Some(group) = active_listener_groups.remove(&removed_id) {
+            http_state.retire_listener_runtime(&group.listener);
+            group.initiate_shutdown();
+            tracing::info!(
+                listener = %group.listener.name,
+                listen = %group.listener.server.listen_addr,
+                "listener removed from active config; draining existing connections"
+            );
+            draining_listener_groups.push(group);
         }
     }
 
-    Ok(BoundListeners { workers: worker_listeners, handles: listener_handles })
+    for (listener_id, group) in active_listener_groups.iter_mut() {
+        let next_listener = next_by_id
+            .get(listener_id)
+            .expect("active listener ids should remain present in the next config");
+        group.listener = next_listener.clone();
+    }
+
+    for pending in prepared_additions {
+        let group = spawn_listener_worker_group(
+            pending.listener.clone(),
+            pending.std_listener,
+            accept_workers,
+            http_state.clone(),
+        )
+        .await?;
+        active_listener_groups.insert(pending.listener.id.clone(), group);
+    }
+
+    prune_draining_listener_groups(http_state, draining_listener_groups).await;
+    Ok(())
 }
 
-struct BoundListener {
-    listener: TcpListener,
-    listener_id: String,
-    listener_name: String,
-    listen_addr: std::net::SocketAddr,
-    worker_index: usize,
+async fn spawn_listener_worker_group(
+    listener: Listener,
+    std_listener: Arc<StdTcpListener>,
+    accept_workers: usize,
+    http_state: rginx_http::SharedState,
+) -> Result<ListenerWorkerGroup> {
+    let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+    let mut tasks = Vec::new();
+
+    for worker_index in 0..accept_workers {
+        let listener_socket = TcpListener::from_std(std_listener.try_clone()?)?;
+        tracing::info!(
+            listener = %listener.name,
+            listen = %listener.server.listen_addr,
+            worker = worker_index,
+            "starting accept worker"
+        );
+        tasks.push(tokio::spawn(rginx_http::serve(
+            listener_socket,
+            listener.id.clone(),
+            http_state.clone(),
+            shutdown_tx.subscribe(),
+        )));
+    }
+
+    Ok(ListenerWorkerGroup { listener, std_listener, shutdown_tx, tasks })
 }
 
-struct BoundListeners {
-    workers: Vec<BoundListener>,
-    handles: Vec<ListenerHandle>,
+async fn prune_draining_listener_groups(
+    http_state: &rginx_http::SharedState,
+    draining_listener_groups: &mut Vec<ListenerWorkerGroup>,
+) {
+    let mut index = 0usize;
+    while index < draining_listener_groups.len() {
+        if !draining_listener_groups[index].is_finished() {
+            index += 1;
+            continue;
+        }
+
+        let mut group = draining_listener_groups.remove(index);
+        let listener_id = group.listener.id.clone();
+        if let Err(error) = join_listener_worker_group(&mut group).await {
+            tracing::warn!(%error, listener_id = %listener_id, "listener drain failed");
+        }
+        http_state.remove_retired_listener_runtime(&listener_id).await;
+    }
 }
 
-async fn join_server_tasks(server_tasks: &mut [tokio::task::JoinHandle<Result<()>>]) -> Result<()> {
-    for (worker_index, server_task) in server_tasks.iter_mut().enumerate() {
-        server_task.await.map_err(|error| {
-            Error::Server(format!("http worker {worker_index} failed to join: {error}"))
+async fn join_listener_worker_group(group: &mut ListenerWorkerGroup) -> Result<()> {
+    for (worker_index, task) in group.tasks.iter_mut().enumerate() {
+        task.await.map_err(|error| {
+            Error::Server(format!(
+                "listener `{}` worker {worker_index} failed to join: {error}",
+                group.listener.name
+            ))
         })??;
     }
+    group.tasks.clear();
+    Ok(())
+}
+
+async fn join_listener_worker_groups(
+    http_state: &rginx_http::SharedState,
+    active_listener_groups: &mut HashMap<String, ListenerWorkerGroup>,
+    draining_listener_groups: &mut Vec<ListenerWorkerGroup>,
+) -> Result<()> {
+    for group in active_listener_groups.values_mut() {
+        join_listener_worker_group(group).await?;
+    }
+    active_listener_groups.clear();
+
+    for group in draining_listener_groups.iter_mut() {
+        let listener_id = group.listener.id.clone();
+        join_listener_worker_group(group).await?;
+        http_state.remove_retired_listener_runtime(&listener_id).await;
+    }
+    draining_listener_groups.clear();
 
     Ok(())
 }
 
-fn abort_server_tasks(server_tasks: &[tokio::task::JoinHandle<Result<()>>]) {
-    for server_task in server_tasks {
-        server_task.abort();
+fn initiate_shutdown_for_groups<'a>(groups: impl IntoIterator<Item = &'a ListenerWorkerGroup>) {
+    for group in groups {
+        group.initiate_shutdown();
     }
 }
 
-async fn join_aborted_server_tasks(server_tasks: Vec<tokio::task::JoinHandle<Result<()>>>) {
-    for server_task in server_tasks {
-        if let Err(error) = server_task.await
+fn abort_listener_worker_groups<'a>(groups: impl IntoIterator<Item = &'a ListenerWorkerGroup>) {
+    for group in groups {
+        group.abort();
+    }
+}
+
+async fn join_aborted_listener_worker_groups(
+    http_state: &rginx_http::SharedState,
+    active_listener_groups: &mut HashMap<String, ListenerWorkerGroup>,
+    draining_listener_groups: &mut Vec<ListenerWorkerGroup>,
+) {
+    for group in active_listener_groups.values_mut() {
+        join_aborted_listener_worker_group(group).await;
+    }
+    active_listener_groups.clear();
+
+    for group in draining_listener_groups.iter_mut() {
+        let listener_id = group.listener.id.clone();
+        join_aborted_listener_worker_group(group).await;
+        http_state.remove_retired_listener_runtime(&listener_id).await;
+    }
+    draining_listener_groups.clear();
+}
+
+async fn join_aborted_listener_worker_group(group: &mut ListenerWorkerGroup) {
+    for task in group.tasks.iter_mut() {
+        if let Err(error) = task.await
             && !error.is_cancelled()
         {
-            tracing::warn!(%error, "http worker failed after abort");
+            tracing::warn!(%error, listener = %group.listener.name, "http worker failed after abort");
         }
     }
+    group.tasks.clear();
+}
+
+fn bind_std_listener(listen_addr: std::net::SocketAddr) -> Result<StdTcpListener> {
+    let socket = StdTcpListener::bind(listen_addr)?;
+    socket.set_nonblocking(true)?;
+    Ok(socket)
 }

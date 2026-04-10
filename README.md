@@ -2,7 +2,7 @@
 
 `rginx` 是一个面向中小规模部署的 Rust 入口反向代理。
 
-当前版本：`v0.1.3-rc.4`
+当前版本：`v0.1.3-rc.5`
 
 它的目标很收口：
 
@@ -83,6 +83,7 @@
 | `crates/rginx-observability` | tracing / logging 初始化 |
 | `configs/` | 默认活跃配置目录镜像 |
 | `example/` | 更完整的配置参考 |
+| `docs/` | 维护与重构类开发文档，例如 `refactor-plan.md` |
 | `deploy/` | systemd / supervisor 示例 |
 | `scripts/` | 安装、卸载、`.deb` 打包、APT 仓库发布、benchmark、soak、release 脚本 |
 
@@ -120,6 +121,41 @@ cargo build -p rginx
 ./target/debug/rginx check --config configs/rginx.ron
 ./target/debug/rginx status --config configs/rginx.ron
 ```
+
+### 测试分层
+
+阶段 0 之后，仓库把测试入口分成了快测和慢测两层：
+
+```bash
+./scripts/test-fast.sh
+./scripts/test-slow.sh
+```
+
+- `test-fast.sh` 运行 `rginx-core`、`rginx-config`、`rginx-http`、`rginx-runtime`、`rginx-observability` 的 crate 内测试，以及 `rginx` 二进制本身的单测。
+- `test-slow.sh` 运行 `crates/rginx-app/tests/` 下的集成测试。
+- `scripts/run-tls-gate.sh` 继续保留给 TLS 相关回归门禁和发布前检查。
+
+### 热更新边界
+
+当前 `SIGHUP` 热重载支持：
+
+- 路由、vhost、upstream、TLS 相关业务配置变更
+- 显式 `listeners: []` 模型下的 listener 新增与删除
+- `include` 片段更新
+
+当前仍然要求显式重启的字段：
+
+- `listen`
+- `listeners[].listen`
+- `runtime.worker_threads`
+- `runtime.accept_workers`
+
+也就是说，显式 listener 可以热增删，但既有 listener 的 `listen` 地址变化仍属于 restart boundary。
+
+更完整的运行时语义见：
+
+- `docs/reload-semantics.md`
+- `docs/runtime-architecture.md`
 
 ### 安装
 
@@ -275,7 +311,7 @@ sudo apt install rginx
 
 当前约定：
 
-- 预发布 tag，例如 `v0.1.3-rc.4`：发布 GitHub Release 资产，但不更新 APT 仓库
+- 预发布 tag，例如 `v0.1.3-rc.5`：发布 GitHub Release 资产，但不更新 APT 仓库
 - 稳定 tag，例如 `v0.1.3`：同时发布 GitHub Release 和 GitHub Pages APT 仓库
 
 要让稳定版自动发布 APT 仓库，还需要一次性配置：
@@ -551,10 +587,11 @@ python3 scripts/run-benchmark-matrix.py \
 ./scripts/run-soak.sh --iterations 1
 ```
 
-当前建议至少用下面两条命令把工作区收口成可继续迭代的稳定基线：
+当前建议至少用下面三条命令把工作区收口成可继续迭代的稳定基线：
 
 ```bash
-cargo test --workspace --locked -- --test-threads=1
+./scripts/test-fast.sh
+./scripts/test-slow.sh
 ./scripts/run-soak.sh --iterations 1
 ```
 
@@ -563,7 +600,8 @@ cargo test --workspace --locked -- --test-threads=1
 每次改动 TLS 相关逻辑，发布前至少确认：
 
 ```bash
-cargo test --workspace --locked -- --test-threads=1
+./scripts/test-fast.sh
+./scripts/test-slow.sh
 ./scripts/run-tls-gate.sh
 ./scripts/run-soak.sh --iterations 1
 rginx check --config /etc/rginx/rginx.ron

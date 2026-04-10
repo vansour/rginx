@@ -111,8 +111,11 @@ jobs:
       - name: Check Formatting
         run: cargo fmt --all --check
 
-      - name: Run Workspace Tests
-        run: cargo test --workspace --locked -- --test-threads=1
+      - name: Run Fast Test Layer
+        run: ./scripts/test-fast.sh
+
+      - name: Run Slow Test Layer
+        run: ./scripts/test-slow.sh
 
       - name: Run TLS Release Gate
         run: ./scripts/run-tls-gate.sh
