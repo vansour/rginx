@@ -1,15 +1,23 @@
 #![cfg(unix)]
-#![allow(unused_imports)]
 
+#[allow(unused_imports)]
 use std::fs;
+#[allow(unused_imports)]
 use std::io::{Read, Write};
+#[allow(unused_imports)]
 use std::net::{SocketAddr, TcpStream};
+#[allow(unused_imports)]
 use std::path::{Path, PathBuf};
+#[allow(unused_imports)]
 use std::process::{Command, Output};
+#[allow(unused_imports)]
 use std::sync::mpsc;
+#[allow(unused_imports)]
 use std::sync::{Mutex, OnceLock};
+#[allow(unused_imports)]
 use std::time::{Duration, Instant};
 
+#[allow(unused_imports)]
 use rcgen::{CertifiedKey, KeyPair};
 
 mod support;
@@ -100,6 +108,14 @@ impl TestServer {
             command.arg(arg);
         }
         command.output().expect("rginx command should run")
+    }
+
+    fn wait_for_status_output(
+        &self,
+        predicate: impl Fn(&str) -> bool,
+        timeout: Duration,
+    ) -> String {
+        wait_for_status_output(self.inner.config_path(), predicate, timeout)
     }
 }
 
@@ -372,6 +388,36 @@ fn run_cli_command<'a>(config_path: &Path, args: impl IntoIterator<Item = &'a st
         command.arg(arg);
     }
     command.output().expect("rginx command should run")
+}
+
+fn wait_for_status_output(
+    config_path: &Path,
+    predicate: impl Fn(&str) -> bool,
+    timeout: Duration,
+) -> String {
+    let deadline = Instant::now() + timeout;
+    let mut last_output = String::new();
+
+    while Instant::now() < deadline {
+        let output = run_cli_command(config_path, ["status"]);
+        let rendered = render_output(&output);
+
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            if predicate(&stdout) {
+                return stdout;
+            }
+        }
+
+        last_output = rendered;
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    panic!(
+        "timed out waiting for rginx status on {} to satisfy the expected condition; last output: {}",
+        config_path.display(),
+        last_output
+    );
 }
 
 fn test_lock() -> &'static Mutex<()> {

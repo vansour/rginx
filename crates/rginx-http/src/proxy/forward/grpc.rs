@@ -13,26 +13,28 @@ pub(crate) fn detect_grpc_web_mode(
 
     let (mime, params) = split_content_type(content_type_str);
     let normalized_mime = mime.to_ascii_lowercase();
-    if !normalized_mime.starts_with(GRPC_WEB_CONTENT_TYPE_PREFIX) {
+    let is_grpc_web_binary = matches_grpc_web_mime(&normalized_mime, GRPC_WEB_CONTENT_TYPE_PREFIX);
+    let is_grpc_web_text =
+        matches_grpc_web_mime(&normalized_mime, GRPC_WEB_TEXT_CONTENT_TYPE_PREFIX);
+    if !is_grpc_web_binary && !is_grpc_web_text {
         return Ok(None);
     }
 
-    let (encoding, upstream_mime) =
-        if normalized_mime.starts_with(GRPC_WEB_TEXT_CONTENT_TYPE_PREFIX) {
-            (
-                GrpcWebEncoding::Text,
-                normalized_mime.replacen(
-                    GRPC_WEB_TEXT_CONTENT_TYPE_PREFIX,
-                    GRPC_CONTENT_TYPE_PREFIX,
-                    1,
-                ),
-            )
-        } else {
-            (
-                GrpcWebEncoding::Binary,
-                normalized_mime.replacen(GRPC_WEB_CONTENT_TYPE_PREFIX, GRPC_CONTENT_TYPE_PREFIX, 1),
-            )
-        };
+    let (encoding, upstream_mime) = if is_grpc_web_text {
+        (
+            GrpcWebEncoding::Text,
+            normalized_mime.replacen(
+                GRPC_WEB_TEXT_CONTENT_TYPE_PREFIX,
+                GRPC_CONTENT_TYPE_PREFIX,
+                1,
+            ),
+        )
+    } else {
+        (
+            GrpcWebEncoding::Binary,
+            normalized_mime.replacen(GRPC_WEB_CONTENT_TYPE_PREFIX, GRPC_CONTENT_TYPE_PREFIX, 1),
+        )
+    };
     let upstream_content_type =
         if params.is_empty() { upstream_mime } else { format!("{upstream_mime}; {params}") };
 
@@ -44,6 +46,10 @@ pub(crate) fn detect_grpc_web_mode(
         upstream_content_type,
         encoding,
     }))
+}
+
+fn matches_grpc_web_mime(mime: &str, prefix: &str) -> bool {
+    mime == prefix || mime.strip_prefix(prefix).is_some_and(|suffix| suffix.starts_with('+'))
 }
 
 pub(super) fn grpc_protocol_request(headers: &HeaderMap) -> bool {

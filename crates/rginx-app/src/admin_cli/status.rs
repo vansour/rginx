@@ -59,6 +59,10 @@ pub(super) fn print_admin_status(config_path: &Path) -> anyhow::Result<()> {
                     ("mtls_anonymous_requests", status.mtls.anonymous_requests.to_string()),
                     ("mtls_handshake_failures", status.mtls.handshake_failures_total.to_string()),
                     (
+                        "mtls_handshake_failures_missing_client_cert",
+                        status.mtls.handshake_failures_missing_client_cert.to_string(),
+                    ),
+                    (
                         "mtls_handshake_failures_certificate_revoked",
                         status.mtls.handshake_failures_certificate_revoked.to_string(),
                     ),

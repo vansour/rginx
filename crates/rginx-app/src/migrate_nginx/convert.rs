@@ -11,9 +11,11 @@ fn convert_server_tls(
     tls: &ParsedServerTls,
     warnings: &mut Vec<String>,
 ) -> Option<ConvertedServerTls> {
-    let (Some(cert_path), Some(key_path)) = (tls.cert_path.clone(), tls.key_path.clone()) else {
-        if tls.cert_path.is_some()
-            || tls.key_path.is_some()
+    let Some((cert_path, key_path, additional_certificates)) =
+        convert_certificate_pairs(&tls.cert_paths, &tls.key_paths, "server.tls", warnings)
+    else {
+        if !tls.cert_paths.is_empty()
+            || !tls.key_paths.is_empty()
             || !tls.versions.is_empty()
             || tls.ocsp_staple_path.is_some()
             || tls.session_tickets.is_some()
@@ -32,6 +34,7 @@ fn convert_server_tls(
     Some(ConvertedServerTls {
         cert_path,
         key_path,
+        additional_certificates,
         versions: tls.versions.clone(),
         ocsp_staple_path: tls.ocsp_staple_path.clone(),
         session_tickets: tls.session_tickets,
@@ -47,7 +50,12 @@ fn convert_vhost_tls(
     server_names: &[String],
     warnings: &mut Vec<String>,
 ) -> Option<ConvertedVhostTls> {
-    let (Some(cert_path), Some(key_path)) = (tls.cert_path.clone(), tls.key_path.clone()) else {
+    let Some((cert_path, key_path, additional_certificates)) = convert_certificate_pairs(
+        &tls.cert_paths,
+        &tls.key_paths,
+        "vhost TLS certificate override",
+        warnings,
+    ) else {
         return None;
     };
     if !tls.versions.is_empty()
@@ -63,7 +71,44 @@ fn convert_vhost_tls(
             ron_string_list(server_names)
         ));
     }
-    Some(ConvertedVhostTls { cert_path, key_path })
+    Some(ConvertedVhostTls { cert_path, key_path, additional_certificates })
+}
+
+fn convert_certificate_pairs(
+    cert_paths: &[String],
+    key_paths: &[String],
+    owner_label: &str,
+    warnings: &mut Vec<String>,
+) -> Option<(String, String, Vec<ConvertedCertificateBundle>)> {
+    let (Some(cert_path), Some(key_path)) =
+        (cert_paths.first().cloned(), key_paths.first().cloned())
+    else {
+        return None;
+    };
+
+    let pair_count = cert_paths.len().min(key_paths.len());
+    if pair_count > 1 {
+        warnings.push(format!(
+            "{owner_label} contained multiple nginx certificate/key pairs; migrated the first pair as the primary certificate and the remaining complete pairs as `additional_certificates` in declaration order"
+        ));
+    }
+    if cert_paths.len() != key_paths.len() {
+        warnings.push(format!(
+            "{owner_label} contained {} `ssl_certificate` directive(s) and {} `ssl_certificate_key` directive(s); migrated {pair_count} complete pair(s) and ignored incomplete extras",
+            cert_paths.len(),
+            key_paths.len(),
+        ));
+    }
+
+    let additional_certificates = cert_paths
+        .iter()
+        .cloned()
+        .zip(key_paths.iter().cloned())
+        .skip(1)
+        .map(|(cert_path, key_path)| ConvertedCertificateBundle { cert_path, key_path })
+        .collect::<Vec<_>>();
+
+    Some((cert_path, key_path, additional_certificates))
 }
 
 fn convert_upstream_tls(tls: &ParsedUpstreamTls) -> Option<ConvertedUpstreamTls> {
@@ -277,6 +322,7 @@ struct PendingUpstream {
 pub(super) struct ConvertedServerTls {
     pub(super) cert_path: String,
     pub(super) key_path: String,
+    pub(super) additional_certificates: Vec<ConvertedCertificateBundle>,
     pub(super) versions: Vec<String>,
     pub(super) ocsp_staple_path: Option<String>,
     pub(super) session_tickets: Option<bool>,
@@ -288,6 +334,13 @@ pub(super) struct ConvertedServerTls {
 
 #[derive(Debug, Clone)]
 pub(super) struct ConvertedVhostTls {
+    pub(super) cert_path: String,
+    pub(super) key_path: String,
+    pub(super) additional_certificates: Vec<ConvertedCertificateBundle>,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct ConvertedCertificateBundle {
     pub(super) cert_path: String,
     pub(super) key_path: String,
 }

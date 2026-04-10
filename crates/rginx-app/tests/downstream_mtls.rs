@@ -1,22 +1,33 @@
-#![allow(unused_imports)]
-
+#[allow(unused_imports)]
 use std::env;
+#[allow(unused_imports)]
 use std::io::{Read, Write};
+#[allow(unused_imports)]
 use std::net::SocketAddr;
+#[allow(unused_imports)]
 use std::os::unix::net::UnixStream;
+#[allow(unused_imports)]
 use std::path::{Path, PathBuf};
+#[allow(unused_imports)]
 use std::sync::Arc;
+#[allow(unused_imports)]
 use std::sync::atomic::{AtomicU64, Ordering};
+#[allow(unused_imports)]
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[allow(unused_imports)]
 use rcgen::{
     BasicConstraints, CertificateParams, CertificateRevocationList,
     CertificateRevocationListParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyIdMethod,
     KeyPair, KeyUsagePurpose, RevocationReason, RevokedCertParams, SerialNumber, date_time_ymd,
 };
+#[allow(unused_imports)]
 use rginx_runtime::admin::{AdminRequest, AdminResponse, admin_socket_path_for_config};
+#[allow(unused_imports)]
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+#[allow(unused_imports)]
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+#[allow(unused_imports)]
 use rustls::{ClientConfig, ClientConnection, DigitallySignedStruct, SignatureScheme, StreamOwned};
 
 mod support;

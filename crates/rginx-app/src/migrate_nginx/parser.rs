@@ -132,8 +132,8 @@ pub(super) struct ParsedLocation {
 
 #[derive(Debug, Default, Clone)]
 pub(super) struct ParsedServerTls {
-    pub(super) cert_path: Option<String>,
-    pub(super) key_path: Option<String>,
+    pub(super) cert_paths: Vec<String>,
+    pub(super) key_paths: Vec<String>,
     pub(super) versions: Vec<String>,
     pub(super) ocsp_staple_path: Option<String>,
     pub(super) session_tickets: Option<bool>,
@@ -316,10 +316,14 @@ fn parse_server_block(
                 client_max_body_size = Some(parse_size(value)?);
             }
             Statement::Directive { name, args } if name == "ssl_certificate" => {
-                tls.cert_path = args.first().cloned();
+                if let Some(path) = args.first() {
+                    tls.cert_paths.push(path.clone());
+                }
             }
             Statement::Directive { name, args } if name == "ssl_certificate_key" => {
-                tls.key_path = args.first().cloned();
+                if let Some(path) = args.first() {
+                    tls.key_paths.push(path.clone());
+                }
             }
             Statement::Directive { name, args } if name == "ssl_client_certificate" => {
                 tls.client_ca_path = args.first().cloned();
@@ -414,7 +418,8 @@ fn parse_listen(args: &[String], warnings: &mut Vec<String>) -> Result<ParsedLis
     let mut ssl = false;
     for arg in args {
         match arg.as_str() {
-            "default_server" | "http2" | "proxy_protocol" | "reuseport" | "deferred" | "bind" => {
+            "default_server" | "http2" | "proxy_protocol" | "reuseport" | "deferred" | "bind"
+            | "quic" => {
                 if arg == "http2" {
                     warnings.push(
                         "nginx `listen ... http2` was seen; inbound HTTP/2 in rginx is negotiated via TLS/ALPN, so verify TLS placement manually"
@@ -427,12 +432,20 @@ fn parse_listen(args: &[String], warnings: &mut Vec<String>) -> Result<ParsedLis
                             .to_string(),
                     );
                 }
+                if arg == "quic" {
+                    warnings.push(
+                        "nginx `listen ... quic` was ignored by the migration tool because HTTP/3/QUIC is outside the supported migration subset"
+                            .to_string(),
+                    );
+                }
             }
             "ssl" => ssl = true,
             option if option.contains('=') => {
                 warnings.push(format!("ignored nginx `listen` option `{option}` during migration"))
             }
-            candidate => address = Some(normalize_listen_address(candidate)?),
+            candidate if address.is_none() => address = Some(normalize_listen_address(candidate)?),
+            candidate => warnings
+                .push(format!("ignored nginx `listen` token `{candidate}` during migration")),
         }
     }
 

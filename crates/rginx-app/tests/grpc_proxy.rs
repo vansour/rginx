@@ -1,35 +1,63 @@
-#![allow(unused_imports)]
-
+#[allow(unused_imports)]
 use std::convert::Infallible;
+#[allow(unused_imports)]
 use std::fs::{self, File};
+#[allow(unused_imports)]
 use std::future::Future;
+#[allow(unused_imports)]
 use std::io::BufReader;
+#[allow(unused_imports)]
 use std::net::SocketAddr;
+#[allow(unused_imports)]
 use std::path::{Path, PathBuf};
+#[allow(unused_imports)]
 use std::pin::Pin;
+#[allow(unused_imports)]
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+#[allow(unused_imports)]
 use std::sync::{Arc, Mutex};
+#[allow(unused_imports)]
 use std::task::{Context, Poll};
+#[allow(unused_imports)]
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[allow(unused_imports)]
 use base64::Engine as _;
+#[allow(unused_imports)]
 use base64::engine::general_purpose::STANDARD;
+#[allow(unused_imports)]
 use bytes::{Bytes, BytesMut};
+#[allow(unused_imports)]
 use http_body_util::{BodyExt, Empty, Full};
+#[allow(unused_imports)]
 use hyper::body::{Body, Frame, Incoming, SizeHint};
+#[allow(unused_imports)]
 use hyper::http::HeaderMap;
+#[allow(unused_imports)]
 use hyper::http::header::{CONTENT_TYPE, HeaderName, HeaderValue, TE};
+#[allow(unused_imports)]
 use hyper::server::conn::http2;
+#[allow(unused_imports)]
 use hyper::service::service_fn;
+#[allow(unused_imports)]
 use hyper::{Request, Response, StatusCode, Version};
+#[allow(unused_imports)]
 use hyper_rustls::HttpsConnectorBuilder;
+#[allow(unused_imports)]
 use hyper_util::client::legacy::Client;
+#[allow(unused_imports)]
 use hyper_util::rt::{TokioExecutor, TokioIo};
+#[allow(unused_imports)]
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+#[allow(unused_imports)]
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
+#[allow(unused_imports)]
 use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
+#[allow(unused_imports)]
 use tokio::sync::oneshot;
+#[allow(unused_imports)]
 use tokio::task::JoinHandle;
+#[allow(unused_imports)]
 use tokio_rustls::TlsAcceptor;
 
 mod support;

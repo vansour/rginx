@@ -12,6 +12,10 @@ fn sighup_rejects_listen_address_changes() {
     server.write_return_config(rejected_addr, "should not apply\n");
     server.send_signal(libc::SIGHUP);
 
+    let _stdout = server.wait_for_status_output(
+        |stdout| stdout.contains("reload_attempts=1") && stdout.contains("reload_failures=1"),
+        Duration::from_secs(5),
+    );
     server.wait_for_body(initial_addr, "stable config\n", Duration::from_secs(5));
     assert_unreachable(rejected_addr, Duration::from_millis(500));
 
@@ -33,6 +37,10 @@ fn sighup_rejects_accept_worker_changes() {
     ));
     server.send_signal(libc::SIGHUP);
 
+    let _stdout = server.wait_for_status_output(
+        |stdout| stdout.contains("reload_attempts=1") && stdout.contains("reload_failures=1"),
+        Duration::from_secs(5),
+    );
     server.wait_for_body(listen_addr, "stable workers\n", Duration::from_secs(5));
     server.kill_and_wait(Duration::from_secs(5));
 }
@@ -52,6 +60,10 @@ fn sighup_rejects_runtime_worker_thread_changes() {
     ));
     server.send_signal(libc::SIGHUP);
 
+    let _stdout = server.wait_for_status_output(
+        |stdout| stdout.contains("reload_attempts=1") && stdout.contains("reload_failures=1"),
+        Duration::from_secs(5),
+    );
     server.wait_for_body(listen_addr, "stable runtime\n", Duration::from_secs(5));
     server.kill_and_wait(Duration::from_secs(5));
 }
@@ -71,14 +83,11 @@ fn sighup_status_reports_restart_required_fields_for_startup_boundary_changes() 
     ));
     server.send_signal(libc::SIGHUP);
 
-    server.wait_for_body(listen_addr, "stable runtime\n", Duration::from_secs(5));
-    let status_output = server.run_cli_command(["status"]);
-    assert!(
-        status_output.status.success(),
-        "rginx status should succeed after rejected reload: {}",
-        render_output(&status_output)
+    let stdout = server.wait_for_status_output(
+        |stdout| stdout.contains("reload_attempts=1") && stdout.contains("reload_failures=1"),
+        Duration::from_secs(5),
     );
-    let stdout = String::from_utf8_lossy(&status_output.stdout);
+    server.wait_for_body(listen_addr, "stable runtime\n", Duration::from_secs(5));
     assert!(stdout.contains("reload_failures=1"), "stdout should report reload failure: {stdout}");
     assert!(
         stdout.contains("last_reload_active_revision=0"),

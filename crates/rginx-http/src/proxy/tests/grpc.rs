@@ -32,6 +32,17 @@ fn detect_grpc_web_mode_rewrites_text_content_type() {
 }
 
 #[test]
+fn detect_grpc_web_mode_rejects_invalid_prefix_matches() {
+    for content_type in ["application/grpc-websocket", "application/grpc-web-textual"] {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_str(content_type).unwrap());
+
+        let mode = detect_grpc_web_mode(&headers).expect("invalid grpc-web mime should not error");
+        assert!(mode.is_none(), "{content_type} should not be treated as grpc-web");
+    }
+}
+
+#[test]
 fn parse_grpc_timeout_accepts_supported_units() {
     let cases = [
         ("1H", Duration::from_secs(60 * 60)),

@@ -1,8 +1,9 @@
 use std::fmt::Write as _;
 
 use super::convert::{
-    ConvertedConfig, ConvertedLocation, ConvertedMatcher, ConvertedServer, ConvertedServerTls,
-    ConvertedUpstream, ConvertedUpstreamTls, ConvertedUpstreamVerify, ConvertedVhost,
+    ConvertedCertificateBundle, ConvertedConfig, ConvertedLocation, ConvertedMatcher,
+    ConvertedServer, ConvertedServerTls, ConvertedUpstream, ConvertedUpstreamTls,
+    ConvertedUpstreamVerify, ConvertedVhost,
 };
 
 impl ConvertedConfig {
@@ -144,6 +145,7 @@ fn render_vhosts(out: &mut String, vhosts: &[ConvertedVhost]) {
             let _ = writeln!(out, "            tls: Some(VirtualHostTlsConfig(");
             let _ = writeln!(out, "                cert_path: {},", ron_string(&tls.cert_path));
             let _ = writeln!(out, "                key_path: {},", ron_string(&tls.key_path));
+            render_additional_certificates(out, "                ", &tls.additional_certificates);
             let _ = writeln!(out, "            )),");
         }
         render_locations(out, "            locations", &vhost.locations);
@@ -184,6 +186,7 @@ fn render_server_tls(out: &mut String, indent: &str, tls: Option<&ConvertedServe
 fn render_server_tls_body(out: &mut String, indent: &str, tls: &ConvertedServerTls) {
     let _ = writeln!(out, "{indent}cert_path: {},", ron_string(&tls.cert_path));
     let _ = writeln!(out, "{indent}key_path: {},", ron_string(&tls.key_path));
+    render_additional_certificates(out, indent, &tls.additional_certificates);
     if !tls.versions.is_empty() {
         let _ = writeln!(out, "{indent}versions: Some({}),", ron_enum_list(&tls.versions));
     }
@@ -207,9 +210,30 @@ fn render_server_tls_body(out: &mut String, indent: &str, tls: &ConvertedServerT
     }
 }
 
+fn render_additional_certificates(
+    out: &mut String,
+    indent: &str,
+    additional_certificates: &[ConvertedCertificateBundle],
+) {
+    if additional_certificates.is_empty() {
+        return;
+    }
+
+    let _ = writeln!(out, "{indent}additional_certificates: Some([");
+    for bundle in additional_certificates {
+        let _ = writeln!(out, "{indent}    ServerCertificateBundleConfig(");
+        let _ = writeln!(out, "{indent}        cert_path: {},", ron_string(&bundle.cert_path));
+        let _ = writeln!(out, "{indent}        key_path: {},", ron_string(&bundle.key_path));
+        let _ = writeln!(out, "{indent}    ),");
+    }
+    let _ = writeln!(out, "{indent}]),");
+}
+
 fn render_upstream_tls(out: &mut String, indent: &str, tls: &ConvertedUpstreamTls) {
     let shorthand = matches!(tls.verify, ConvertedUpstreamVerify::Insecure)
         && tls.versions.is_empty()
+        && tls.verify_depth.is_none()
+        && tls.crl_path.is_none()
         && tls.client_cert_path.is_none()
         && tls.client_key_path.is_none();
     if shorthand {

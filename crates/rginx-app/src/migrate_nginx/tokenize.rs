@@ -40,6 +40,7 @@ pub(super) fn tokenize(source: &str) -> Result<Vec<Token>> {
                             })?;
                             if escaped == '\n' {
                                 line += 1;
+                                continue;
                             }
                             value.push(escaped);
                         }
@@ -71,4 +72,42 @@ pub(super) fn tokenize(source: &str) -> Result<Vec<Token>> {
     }
 
     Ok(tokens)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tokenize;
+
+    #[test]
+    fn tokenize_treats_backslash_newline_in_quotes_as_line_continuation() {
+        let tokens = tokenize("set \"hello\\\nworld\";").expect("tokenization should succeed");
+
+        assert_eq!(tokens.len(), 3);
+        assert_eq!(tokens[0].text, "set");
+        assert_eq!(tokens[0].line, 1);
+        assert_eq!(tokens[1].text, "helloworld");
+        assert_eq!(tokens[1].line, 1);
+        assert_eq!(tokens[2].text, ";");
+        assert_eq!(tokens[2].line, 2);
+    }
+
+    #[test]
+    fn tokenize_skips_hash_comments_inline_and_on_their_own_line() {
+        let tokens = tokenize("set value; # trailing comment\n# whole line comment\nnext;")
+            .expect("tokenization should succeed");
+
+        let rendered =
+            tokens.iter().map(|token| (token.text.as_str(), token.line)).collect::<Vec<_>>();
+        assert_eq!(rendered, vec![("set", 1), ("value", 1), (";", 1), ("next", 3), (";", 3)]);
+    }
+
+    #[test]
+    fn tokenize_keeps_braces_and_semicolons_inside_quotes() {
+        let tokens = tokenize("set \"{ keep; braces; }\";").expect("tokenization should succeed");
+
+        assert_eq!(tokens.len(), 3);
+        assert_eq!(tokens[0].text, "set");
+        assert_eq!(tokens[1].text, "{ keep; braces; }");
+        assert_eq!(tokens[2].text, ";");
+    }
 }

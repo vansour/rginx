@@ -126,14 +126,12 @@ fn sighup_status_reports_tls_certificate_changes_after_rotation() {
     .expect("rotated TLS config should be written");
     server.send_signal(libc::SIGHUP);
 
-    server.wait_for_https_ready(listen_addr, Duration::from_secs(5));
-    let status_output = run_cli_command(server.config_path(), ["status"]);
-    assert!(
-        status_output.status.success(),
-        "rginx status should succeed after certificate rotation reload: {}",
-        render_output(&status_output)
+    let stdout = wait_for_status_output(
+        server.config_path(),
+        |stdout| stdout.contains("reload_successes=1"),
+        Duration::from_secs(5),
     );
-    let stdout = String::from_utf8_lossy(&status_output.stdout);
+    server.wait_for_https_ready(listen_addr, Duration::from_secs(5));
     assert!(stdout.contains("reload_successes=1"), "stdout should report reload success: {stdout}");
     assert!(
         stdout.contains("last_reload_tls_certificate_changes=")

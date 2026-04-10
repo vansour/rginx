@@ -1,13 +1,19 @@
 #![cfg(unix)]
-#![allow(unused_imports)]
 
+#[allow(unused_imports)]
 use std::io::{BufReader, Read, Write};
+#[allow(unused_imports)]
 use std::net::TcpListener;
+#[allow(unused_imports)]
 use std::os::unix::net::UnixStream;
+#[allow(unused_imports)]
 use std::path::Path;
+#[allow(unused_imports)]
 use std::process::Command;
+#[allow(unused_imports)]
 use std::time::{Duration, Instant};
 
+#[allow(unused_imports)]
 use rcgen::{
     BasicConstraints, CertificateParams, CertificateRevocationList,
     CertificateRevocationListParams, DnType, IsCa, Issuer, KeyIdMethod, KeyPair, KeyUsagePurpose,
@@ -16,6 +22,7 @@ use rcgen::{
 
 mod support;
 
+#[allow(unused_imports)]
 use rginx_runtime::admin::{
     AdminRequest, AdminResponse, RevisionSnapshot, admin_socket_path_for_config,
 };
