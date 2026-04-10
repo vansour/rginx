@@ -19,7 +19,8 @@ impl ConvertedConfig {
         } else {
             let _ = writeln!(out, "// Migration warnings:");
             for warning in &self.warnings {
-                let _ = writeln!(out, "// - {}", warning);
+                let sanitized = warning.replace('\n', "\n//   ");
+                let _ = writeln!(out, "// - {}", sanitized);
             }
         }
         let _ = writeln!(out);

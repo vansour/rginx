@@ -42,7 +42,13 @@ pub(super) fn tokenize(source: &str) -> Result<Vec<Token>> {
                                 line += 1;
                                 continue;
                             }
-                            value.push(escaped);
+                            match escaped {
+                                '\\' | '"' | '\'' => value.push(escaped),
+                                other => {
+                                    value.push('\\');
+                                    value.push(other);
+                                }
+                            }
                         }
                         candidate if candidate == quote => {
                             closed = true;
@@ -109,5 +115,14 @@ mod tests {
         assert_eq!(tokens[0].text, "set");
         assert_eq!(tokens[1].text, "{ keep; braces; }");
         assert_eq!(tokens[2].text, ";");
+    }
+
+    #[test]
+    fn tokenize_preserves_backslash_for_non_special_escapes() {
+        let tokens = tokenize(r#"set "foo\nbar\tbaz\\qux\"quote\'apos";"#)
+            .expect("tokenization should succeed");
+
+        assert_eq!(tokens.len(), 3);
+        assert_eq!(tokens[1].text, r#"foo\nbar\tbaz\qux"quote'apos"#);
     }
 }
