@@ -89,6 +89,8 @@ pub struct ServerTlsConfig {
     #[serde(default)]
     pub ocsp_staple_path: Option<String>,
     #[serde(default)]
+    pub ocsp: Option<OcspConfig>,
+    #[serde(default)]
     pub session_resumption: Option<bool>,
     #[serde(default)]
     pub session_tickets: Option<bool>,
@@ -106,6 +108,7 @@ pub struct VirtualHostTlsConfig {
     pub key_path: String,
     pub additional_certificates: Option<Vec<ServerCertificateBundleConfig>>,
     pub ocsp_staple_path: Option<String>,
+    pub ocsp: Option<OcspConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -114,6 +117,29 @@ pub struct ServerCertificateBundleConfig {
     pub key_path: String,
     #[serde(default)]
     pub ocsp_staple_path: Option<String>,
+    #[serde(default)]
+    pub ocsp: Option<OcspConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct OcspConfig {
+    #[serde(default)]
+    pub nonce: Option<OcspNonceModeConfig>,
+    #[serde(default)]
+    pub responder_policy: Option<OcspResponderPolicyConfig>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Hash)]
+pub enum OcspNonceModeConfig {
+    Disabled,
+    Preferred,
+    Required,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Hash)]
+pub enum OcspResponderPolicyConfig {
+    IssuerOnly,
+    IssuerOrDelegated,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Hash)]
@@ -457,6 +483,8 @@ impl<'de> Deserialize<'de> for VirtualHostTlsConfig {
                 additional_certificates: Option<Vec<ServerCertificateBundleConfig>>,
                 #[serde(default)]
                 ocsp_staple_path: Option<String>,
+                #[serde(default)]
+                ocsp: Option<OcspConfig>,
             },
             ServerTlsConfig {
                 cert_path: String,
@@ -473,6 +501,8 @@ impl<'de> Deserialize<'de> for VirtualHostTlsConfig {
                 alpn_protocols: Option<Vec<String>>,
                 #[serde(default)]
                 ocsp_staple_path: Option<String>,
+                #[serde(default)]
+                ocsp: Option<OcspConfig>,
                 #[serde(default)]
                 session_resumption: Option<bool>,
                 #[serde(default)]
@@ -492,7 +522,8 @@ impl<'de> Deserialize<'de> for VirtualHostTlsConfig {
                 key_path,
                 additional_certificates,
                 ocsp_staple_path,
-            } => Ok(Self { cert_path, key_path, additional_certificates, ocsp_staple_path }),
+                ocsp,
+            } => Ok(Self { cert_path, key_path, additional_certificates, ocsp_staple_path, ocsp }),
             VirtualHostTlsConfigDe::ServerTlsConfig {
                 cert_path,
                 key_path,
@@ -502,6 +533,7 @@ impl<'de> Deserialize<'de> for VirtualHostTlsConfig {
                 key_exchange_groups,
                 alpn_protocols,
                 ocsp_staple_path,
+                ocsp,
                 session_resumption,
                 session_tickets,
                 session_cache_size,
@@ -523,7 +555,7 @@ impl<'de> Deserialize<'de> for VirtualHostTlsConfig {
                     ));
                 }
 
-                Ok(Self { cert_path, key_path, additional_certificates, ocsp_staple_path })
+                Ok(Self { cert_path, key_path, additional_certificates, ocsp_staple_path, ocsp })
             }
         }
     }

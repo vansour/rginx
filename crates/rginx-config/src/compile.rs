@@ -1660,6 +1660,7 @@ mod tests {
                     key_exchange_groups: None,
                     alpn_protocols: None,
                     ocsp_staple_path: None,
+                    ocsp: None,
                     session_resumption: None,
                     session_tickets: None,
                     session_cache_size: None,
@@ -1740,6 +1741,7 @@ mod tests {
                     key_exchange_groups: Some(vec![TlsKeyExchangeGroupConfig::Secp256r1]),
                     alpn_protocols: Some(vec!["http/1.1".to_string()]),
                     ocsp_staple_path: None,
+                    ocsp: None,
                     session_resumption: Some(true),
                     session_tickets: Some(false),
                     session_cache_size: Some(512),
@@ -1778,6 +1780,91 @@ mod tests {
 
         fs::remove_file(cert_path).expect("temp cert file should be removed");
         fs::remove_file(key_path).expect("temp key file should be removed");
+        fs::remove_dir(base_dir).expect("temp base dir should be removed");
+    }
+
+    #[test]
+    fn compile_preserves_server_tls_ocsp_policy_fields() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        let base_dir = std::env::temp_dir().join(format!("rginx-server-ocsp-policy-test-{unique}"));
+        fs::create_dir_all(&base_dir).expect("temp base dir should be created");
+        let cert_path = base_dir.join("server.crt");
+        let key_path = base_dir.join("server.key");
+        let ocsp_path = base_dir.join("server.ocsp");
+        fs::write(&cert_path, b"placeholder").expect("temp cert file should be written");
+        fs::write(&key_path, b"placeholder").expect("temp key file should be written");
+        fs::write(&ocsp_path, b"").expect("temp ocsp file should be written");
+
+        let config = Config {
+            runtime: RuntimeConfig {
+                shutdown_timeout_secs: 10,
+                worker_threads: None,
+                accept_workers: None,
+            },
+            listeners: Vec::new(),
+            server: ServerConfig {
+                listen: Some("127.0.0.1:8080".to_string()),
+                proxy_protocol: None,
+                default_certificate: None,
+                server_names: Vec::new(),
+                trusted_proxies: Vec::new(),
+                keep_alive: None,
+                max_headers: None,
+                max_request_body_bytes: None,
+                max_connections: None,
+                header_read_timeout_secs: None,
+                request_body_read_timeout_secs: None,
+                response_write_timeout_secs: None,
+                access_log_format: None,
+                tls: Some(ServerTlsConfig {
+                    cert_path: "server.crt".to_string(),
+                    key_path: "server.key".to_string(),
+                    additional_certificates: None,
+                    versions: None,
+                    cipher_suites: None,
+                    key_exchange_groups: None,
+                    alpn_protocols: None,
+                    ocsp_staple_path: Some("server.ocsp".to_string()),
+                    ocsp: Some(crate::model::OcspConfig {
+                        nonce: Some(crate::model::OcspNonceModeConfig::Required),
+                        responder_policy: Some(crate::model::OcspResponderPolicyConfig::IssuerOnly),
+                    }),
+                    session_resumption: None,
+                    session_tickets: None,
+                    session_cache_size: None,
+                    session_ticket_count: None,
+                    client_auth: None,
+                }),
+            },
+            upstreams: Vec::new(),
+            locations: vec![LocationConfig {
+                matcher: MatcherConfig::Exact("/".to_string()),
+                handler: HandlerConfig::Return {
+                    status: 200,
+                    location: String::new(),
+                    body: Some("ok\n".to_string()),
+                },
+                grpc_service: None,
+                grpc_method: None,
+                allow_cidrs: Vec::new(),
+                deny_cidrs: Vec::new(),
+                requests_per_sec: None,
+                burst: None,
+            }],
+            servers: Vec::new(),
+        };
+
+        let snapshot = compile_with_base(config, &base_dir).expect("server TLS should compile");
+        let tls = snapshot.server.tls.expect("compiled server TLS should exist");
+        assert_eq!(tls.ocsp.nonce, rginx_core::OcspNonceMode::Required);
+        assert_eq!(tls.ocsp.responder_policy, rginx_core::OcspResponderPolicy::IssuerOnly);
+
+        fs::remove_file(cert_path).expect("temp cert file should be removed");
+        fs::remove_file(key_path).expect("temp key file should be removed");
+        fs::remove_file(ocsp_path).expect("temp ocsp file should be removed");
         fs::remove_dir(base_dir).expect("temp base dir should be removed");
     }
 

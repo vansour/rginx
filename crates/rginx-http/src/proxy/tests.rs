@@ -17,7 +17,7 @@ use http::header::{CONTENT_LENGTH, CONTENT_TYPE, HOST, TE};
 use http::{HeaderMap, HeaderValue, Method, Response, StatusCode, Uri, Version};
 use http_body_util::{BodyExt, StreamBody};
 use hyper::body::Frame;
-use rcgen::CertifiedKey;
+use rcgen::{CertifiedKey, KeyPair};
 use rginx_core::{
     ActiveHealthCheck, ClientIdentity, Error, TlsVersion, Upstream, UpstreamLoadBalance,
     UpstreamPeer, UpstreamProtocol, UpstreamSettings, UpstreamTls,
@@ -1618,15 +1618,16 @@ async fn spawn_status_server(statuses: Arc<Mutex<VecDeque<StatusCode>>>) -> Stat
 
 const TEST_CA_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\nMIIDXTCCAkWgAwIBAgIJAOIvDiVb18eVMA0GCSqGSIb3DQEBCwUAMEUxCzAJBgNV\nBAYTAkFVMRMwEQYDVQQIDApTb21lLVN0YXRlMSEwHwYDVQQKDBhJbnRlcm5ldCBX\naWRnaXRzIFB0eSBMdGQwHhcNMTYwODE0MTY1NjExWhcNMjYwODEyMTY1NjExWjBF\nMQswCQYDVQQGEwJBVTETMBEGA1UECAwKU29tZS1TdGF0ZTEhMB8GA1UECgwYSW50\nZXJuZXQgV2lkZ2l0cyBQdHkgTHRkMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIB\nCgKCAQEArVHWFn52Lbl1l59exduZntVSZyDYpzDND+S2LUcO6fRBWhV/1Kzox+2G\nZptbuMGmfI3iAnb0CFT4uC3kBkQQlXonGATSVyaFTFR+jq/lc0SP+9Bd7SBXieIV\neIXlY1TvlwIvj3Ntw9zX+scTA4SXxH6M0rKv9gTOub2vCMSHeF16X8DQr4XsZuQr\n7Cp7j1I4aqOJyap5JTl5ijmG8cnu0n+8UcRlBzy99dLWJG0AfI3VRJdWpGTNVZ92\naFff3RpK3F/WI2gp3qV1ynRAKuvmncGC3LDvYfcc2dgsc1N6Ffq8GIrkgRob6eBc\nklDHp1d023Lwre+VaVDSo1//Y72UFwIDAQABo1AwTjAdBgNVHQ4EFgQUbNOlA6sN\nXyzJjYqciKeId7g3/ZowHwYDVR0jBBgwFoAUbNOlA6sNXyzJjYqciKeId7g3/Zow\nDAYDVR0TBAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAVVaR5QWLZIRR4Dw6TSBn\nBQiLpBSXN6oAxdDw6n4PtwW6CzydaA+creiK6LfwEsiifUfQe9f+T+TBSpdIYtMv\nZ2H2tjlFX8VrjUFvPrvn5c28CuLI0foBgY8XGSkR2YMYzWw2jPEq3Th/KM5Catn3\nAFm3bGKWMtGPR4v+90chEN0jzaAmJYRrVUh9vea27bOCn31Nse6XXQPmSI6Gyncy\nOAPUsvPClF3IjeL1tmBotWqSGn1cYxLo+Lwjk22A9h6vjcNQRyZF2VLVvtwYrNU3\nmwJ6GCLsLHpwW/yjyvn8iEltnJvByM/eeRnfXV6WDObyiZsE/n6DxIRJodQzFqy9\nGA==\n-----END CERTIFICATE-----\n";
 
+type TestCertifiedKey = CertifiedKey<KeyPair>;
+
 fn write_test_identity(cert_path: &Path, key_path: &Path) {
     let identity = generate_test_identity("localhost");
     std::fs::write(cert_path, identity.cert.pem()).expect("test cert should be written");
-    std::fs::write(key_path, identity.key_pair.serialize_pem())
+    std::fs::write(key_path, identity.signing_key.serialize_pem())
         .expect("test key should be written");
 }
 
-fn generate_test_identity(hostname: &str) -> CertifiedKey {
-    let cert = rcgen::generate_simple_self_signed(vec![hostname.to_string()])
-        .expect("self-signed certificate should generate");
-    CertifiedKey { cert: cert.cert, key_pair: cert.key_pair }
+fn generate_test_identity(hostname: &str) -> TestCertifiedKey {
+    rcgen::generate_simple_self_signed(vec![hostname.to_string()])
+        .expect("self-signed certificate should generate")
 }

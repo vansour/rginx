@@ -1,10 +1,32 @@
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum OcspNonceMode {
+    #[default]
+    Disabled,
+    Preferred,
+    Required,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum OcspResponderPolicy {
+    IssuerOnly,
+    #[default]
+    IssuerOrDelegated,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct OcspConfig {
+    pub nonce: OcspNonceMode,
+    pub responder_policy: OcspResponderPolicy,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ServerCertificateBundle {
     pub cert_path: PathBuf,
     pub key_path: PathBuf,
     pub ocsp_staple_path: Option<PathBuf>,
+    pub ocsp: OcspConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -63,6 +85,7 @@ pub struct VirtualHostTls {
     pub key_path: PathBuf,
     pub additional_certificates: Vec<ServerCertificateBundle>,
     pub ocsp_staple_path: Option<PathBuf>,
+    pub ocsp: OcspConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +98,7 @@ pub struct ServerTls {
     pub key_exchange_groups: Option<Vec<TlsKeyExchangeGroup>>,
     pub alpn_protocols: Option<Vec<String>>,
     pub ocsp_staple_path: Option<PathBuf>,
+    pub ocsp: OcspConfig,
     pub session_resumption: Option<bool>,
     pub session_tickets: Option<bool>,
     pub session_cache_size: Option<usize>,

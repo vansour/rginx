@@ -103,6 +103,12 @@ pub struct TlsOcspStatusSnapshot {
     pub cert_path: PathBuf,
     pub ocsp_staple_path: Option<PathBuf>,
     pub responder_urls: Vec<String>,
+    #[serde(skip, default)]
+    pub ocsp_nonce_mode: rginx_core::OcspNonceMode,
+    #[serde(skip, default)]
+    pub ocsp_responder_policy: rginx_core::OcspResponderPolicy,
+    pub nonce_mode: String,
+    pub responder_policy: String,
     pub cache_loaded: bool,
     pub cache_size_bytes: Option<usize>,
     pub cache_modified_unix_ms: Option<u64>,

@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use rginx_core::{
-    Error, Result, ServerClientAuthMode, ServerNameMatch, ServerTls, TlsCipherSuite,
-    TlsKeyExchangeGroup, TlsVersion, VirtualHost, match_server_name,
+    Error, OcspNonceMode, OcspResponderPolicy, Result, ServerClientAuthMode, ServerNameMatch,
+    ServerTls, TlsCipherSuite, TlsKeyExchangeGroup, TlsVersion, VirtualHost, match_server_name,
 };
 use rustls::SignatureScheme;
 use rustls::crypto::CryptoProvider;
@@ -20,6 +20,7 @@ use rustls::{ServerConfig, SupportedCipherSuite};
 use tokio_rustls::TlsAcceptor;
 
 pub(crate) mod certificates;
+pub(crate) mod ocsp;
 
 use self::certificates::{
     load_ca_cert_store, load_certificate_revocation_lists, load_certified_keys,
@@ -27,14 +28,37 @@ use self::certificates::{
 };
 
 pub fn build_ocsp_request_for_certificate(path: &std::path::Path) -> Result<Vec<u8>> {
-    certificates::build_ocsp_request_for_certificate(path)
+    ocsp::build_ocsp_request_for_certificate(path)
+}
+
+pub fn build_ocsp_request_for_certificate_with_options(
+    path: &std::path::Path,
+    nonce_mode: OcspNonceMode,
+) -> Result<(Vec<u8>, Option<Vec<u8>>)> {
+    ocsp::build_ocsp_request_for_certificate_with_options(path, nonce_mode)
 }
 
 pub fn validate_ocsp_response_for_certificate(
     path: &std::path::Path,
     response_der: &[u8],
 ) -> Result<()> {
-    certificates::validate_ocsp_response_for_certificate(path, response_der)
+    ocsp::validate_ocsp_response_for_certificate(path, response_der)
+}
+
+pub fn validate_ocsp_response_for_certificate_with_options(
+    path: &std::path::Path,
+    response_der: &[u8],
+    expected_nonce: Option<&[u8]>,
+    nonce_mode: OcspNonceMode,
+    responder_policy: OcspResponderPolicy,
+) -> Result<()> {
+    ocsp::validate_ocsp_response_for_certificate_with_options(
+        path,
+        response_der,
+        expected_nonce,
+        nonce_mode,
+        responder_policy,
+    )
 }
 
 /// SNI 证书解析器，支持基于域名选择证书
@@ -462,6 +486,7 @@ mod tests {
             key_exchange_groups: None,
             alpn_protocols: None,
             ocsp_staple_path: None,
+            ocsp: rginx_core::OcspConfig::default(),
             session_resumption: None,
             session_tickets: None,
             session_cache_size: None,
@@ -517,6 +542,7 @@ mod tests {
             key_exchange_groups: None,
             alpn_protocols: Some(vec!["http/1.1".to_string()]),
             ocsp_staple_path: None,
+            ocsp: rginx_core::OcspConfig::default(),
             session_resumption: None,
             session_tickets: None,
             session_cache_size: None,
@@ -570,6 +596,7 @@ mod tests {
                 key_path: key_path.clone(),
                 additional_certificates: Vec::new(),
                 ocsp_staple_path: None,
+                ocsp: rginx_core::OcspConfig::default(),
             }),
         }];
         let default_vhost = VirtualHost {
@@ -619,6 +646,7 @@ mod tests {
                 key_path: key_path.clone(),
                 additional_certificates: Vec::new(),
                 ocsp_staple_path: None,
+                ocsp: rginx_core::OcspConfig::default(),
             }),
         }];
         let default_vhost = VirtualHost {
@@ -663,6 +691,7 @@ mod tests {
             key_exchange_groups: Some(vec![TlsKeyExchangeGroup::Secp256r1]),
             alpn_protocols: None,
             ocsp_staple_path: None,
+            ocsp: rginx_core::OcspConfig::default(),
             session_resumption: None,
             session_tickets: None,
             session_cache_size: None,
@@ -700,6 +729,7 @@ mod tests {
             key_exchange_groups: None,
             alpn_protocols: None,
             ocsp_staple_path: None,
+            ocsp: rginx_core::OcspConfig::default(),
             session_resumption: Some(false),
             session_tickets: Some(false),
             session_cache_size: Some(0),
@@ -735,6 +765,7 @@ mod tests {
             key_exchange_groups: None,
             alpn_protocols: None,
             ocsp_staple_path: None,
+            ocsp: rginx_core::OcspConfig::default(),
             session_resumption: Some(true),
             session_tickets: Some(true),
             session_cache_size: Some(2),
@@ -777,6 +808,7 @@ mod tests {
                 cert_path: cert_path.clone(),
                 key_path: key_path.clone(),
                 ocsp_staple_path: None,
+                ocsp: rginx_core::OcspConfig::default(),
             },
         )
         .expect("dummy certified key should load");

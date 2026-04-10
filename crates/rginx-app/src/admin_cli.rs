@@ -232,6 +232,8 @@ fn print_admin_status(config_path: &Path) -> anyhow::Result<()> {
                                 ocsp.responder_urls.join(",")
                             },
                         ),
+                        ("nonce_mode", ocsp.nonce_mode.clone()),
+                        ("responder_policy", ocsp.responder_policy.clone()),
                         ("cache_loaded", ocsp.cache_loaded.to_string()),
                         (
                             "cache_size_bytes",

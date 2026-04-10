@@ -29,7 +29,7 @@ tokio.workspace = true
 base64.workspace = true
 brotli.workspace = true
 bytes.workspace = true
-der = { version = "0.7.8", features = ["alloc", "derive", "oid", "std"] }
+chrono.workspace = true
 flate2.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
@@ -38,8 +38,11 @@ hyper-util.workspace = true
 libc = "0.2"
 rustls.workspace = true
 rustls-pemfile.workspace = true
-rcgen = "0.13"
+rcgen = { version = "0.14", features = ["x509-parser"] }
+rasn = "0.28.11"
+rasn-ocsp = "0.28.11"
+rasn-pkix = "0.28.11"
 serde_json.workspace = true
-spki = { version = "0.7.3", features = ["alloc"] }
+sha1.workspace = true
 tokio-rustls.workspace = true
-x509-ocsp = { version = "0.2.1", features = ["std"] }
+x509-parser.workspace = true

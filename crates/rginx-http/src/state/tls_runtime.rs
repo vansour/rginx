@@ -430,6 +430,7 @@ struct TlsOcspBundleSpec {
     scope: String,
     cert_path: PathBuf,
     ocsp_staple_path: Option<PathBuf>,
+    ocsp: rginx_core::OcspConfig,
 }
 
 fn tls_ocsp_status_snapshots(
@@ -452,12 +453,14 @@ fn tls_ocsp_bundle_specs(config: &ConfigSnapshot) -> Vec<TlsOcspBundleSpec> {
                 scope: format!("listener:{}", listener.name),
                 cert_path: tls.cert_path.clone(),
                 ocsp_staple_path: tls.ocsp_staple_path.clone(),
+                ocsp: tls.ocsp.clone(),
             });
             bundles.extend(tls.additional_certificates.iter().enumerate().map(
                 |(index, bundle)| TlsOcspBundleSpec {
                     scope: format!("listener:{}/additional[{index}]", listener.name),
                     cert_path: bundle.cert_path.clone(),
                     ocsp_staple_path: bundle.ocsp_staple_path.clone(),
+                    ocsp: bundle.ocsp.clone(),
                 },
             ));
         }
@@ -468,12 +471,14 @@ fn tls_ocsp_bundle_specs(config: &ConfigSnapshot) -> Vec<TlsOcspBundleSpec> {
             scope: format!("vhost:{}", config.default_vhost.id),
             cert_path: tls.cert_path.clone(),
             ocsp_staple_path: tls.ocsp_staple_path.clone(),
+            ocsp: tls.ocsp.clone(),
         });
         bundles.extend(tls.additional_certificates.iter().enumerate().map(|(index, bundle)| {
             TlsOcspBundleSpec {
                 scope: format!("vhost:{}/additional[{index}]", config.default_vhost.id),
                 cert_path: bundle.cert_path.clone(),
                 ocsp_staple_path: bundle.ocsp_staple_path.clone(),
+                ocsp: bundle.ocsp.clone(),
             }
         }));
     }
@@ -484,12 +489,14 @@ fn tls_ocsp_bundle_specs(config: &ConfigSnapshot) -> Vec<TlsOcspBundleSpec> {
                 scope: format!("vhost:{}", vhost.id),
                 cert_path: tls.cert_path.clone(),
                 ocsp_staple_path: tls.ocsp_staple_path.clone(),
+                ocsp: tls.ocsp.clone(),
             });
             bundles.extend(tls.additional_certificates.iter().enumerate().map(
                 |(index, bundle)| TlsOcspBundleSpec {
                     scope: format!("vhost:{}/additional[{index}]", vhost.id),
                     cert_path: bundle.cert_path.clone(),
                     ocsp_staple_path: bundle.ocsp_staple_path.clone(),
+                    ocsp: bundle.ocsp.clone(),
                 },
             ));
         }
@@ -514,11 +521,17 @@ fn build_tls_ocsp_status_snapshot(
     let (cache_loaded, cache_size_bytes, cache_modified_unix_ms, cache_error) = bundle
         .ocsp_staple_path
         .as_ref()
-        .map(|path| inspect_ocsp_cache_file(&bundle.cert_path, path))
+        .map(|path| inspect_ocsp_cache_file(&bundle.cert_path, path, bundle.ocsp.responder_policy))
         .unwrap_or((false, None, None, None));
     let runtime = runtime_statuses.and_then(|statuses| statuses.get(&bundle.scope));
     let ocsp_request_result = if bundle.ocsp_staple_path.is_some() && !responder_urls.is_empty() {
-        Some(crate::build_ocsp_request_for_certificate(&bundle.cert_path))
+        Some(
+            crate::build_ocsp_request_for_certificate_with_options(
+                &bundle.cert_path,
+                bundle.ocsp.nonce,
+            )
+            .map(|(request, _nonce)| request),
+        )
     } else {
         None
     };
@@ -542,6 +555,17 @@ fn build_tls_ocsp_status_snapshot(
         cert_path: bundle.cert_path.clone(),
         ocsp_staple_path: bundle.ocsp_staple_path.clone(),
         responder_urls,
+        ocsp_nonce_mode: bundle.ocsp.nonce,
+        ocsp_responder_policy: bundle.ocsp.responder_policy,
+        nonce_mode: match bundle.ocsp.nonce {
+            rginx_core::OcspNonceMode::Disabled => "disabled".to_string(),
+            rginx_core::OcspNonceMode::Preferred => "preferred".to_string(),
+            rginx_core::OcspNonceMode::Required => "required".to_string(),
+        },
+        responder_policy: match bundle.ocsp.responder_policy {
+            rginx_core::OcspResponderPolicy::IssuerOnly => "issuer_only".to_string(),
+            rginx_core::OcspResponderPolicy::IssuerOrDelegated => "issuer_or_delegated".to_string(),
+        },
         cache_loaded,
         cache_size_bytes,
         cache_modified_unix_ms,
@@ -556,6 +580,7 @@ fn build_tls_ocsp_status_snapshot(
 fn inspect_ocsp_cache_file(
     cert_path: &std::path::Path,
     path: &PathBuf,
+    responder_policy: rginx_core::OcspResponderPolicy,
 ) -> (bool, Option<usize>, Option<u64>, Option<String>) {
     let metadata = match std::fs::metadata(path) {
         Ok(metadata) => metadata,
@@ -604,9 +629,15 @@ fn inspect_ocsp_cache_file(
         Ok(bytes) if bytes.len() > crate::MAX_OCSP_RESPONSE_BYTES => {
             Some(format!("OCSP cache file exceeds {} bytes", crate::MAX_OCSP_RESPONSE_BYTES))
         }
-        Ok(bytes) => validate_ocsp_response_for_certificate(cert_path, &bytes)
-            .err()
-            .map(|error| error.to_string()),
+        Ok(bytes) => crate::validate_ocsp_response_for_certificate_with_options(
+            cert_path,
+            &bytes,
+            None,
+            rginx_core::OcspNonceMode::Disabled,
+            responder_policy,
+        )
+        .err()
+        .map(|error| error.to_string()),
         Err(error) => Some(format!("failed to read OCSP cache file `{}`: {error}", path.display())),
     };
     (cache_error.is_none(), Some(size_bytes), modified, cache_error)

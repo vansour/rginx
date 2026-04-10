@@ -19,9 +19,7 @@ use x509_parser::prelude::{FromDer, X509Certificate};
 use crate::proxy::{HealthChangeNotifier, ProxyClients, UpstreamHealthSnapshot};
 use crate::rate_limit::RateLimiters;
 use crate::tls::build_tls_acceptor;
-use crate::tls::certificates::{
-    ocsp_responder_urls_for_certificate, validate_ocsp_response_for_certificate,
-};
+use crate::tls::ocsp::ocsp_responder_urls_for_certificate;
 
 mod connections;
 mod lifecycle;
@@ -172,8 +170,7 @@ mod tests {
 
     use http::StatusCode;
     use rcgen::{
-        BasicConstraints, CertificateParams, CertifiedKey, DnType, ExtendedKeyUsagePurpose, IsCa,
-        KeyPair,
+        BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
     };
     use rginx_core::{
         Listener, ReturnAction, Route, RouteAccessControl, RouteAction, RouteMatcher,
@@ -437,17 +434,16 @@ mod tests {
         ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         ca_params.distinguished_name.push(DnType::CommonName, "Test Root CA");
         let ca_key = KeyPair::generate().expect("CA key should generate");
-        let ca_cert = ca_params.self_signed(&ca_key).expect("CA should self-sign");
-        let ca = CertifiedKey { cert: ca_cert, key_pair: ca_key };
+        let _ca_cert = ca_params.self_signed(&ca_key).expect("CA should self-sign");
+        let ca_issuer = Issuer::from_params(&ca_params, &ca_key);
 
         let mut leaf_params =
             CertificateParams::new(vec!["leaf.example.com".to_string()]).expect("leaf params");
         leaf_params.distinguished_name.push(DnType::CommonName, "leaf.example.com");
         leaf_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
         let leaf_key = KeyPair::generate().expect("leaf key should generate");
-        let leaf_cert = leaf_params
-            .signed_by(&leaf_key, &ca.cert, &ca.key_pair)
-            .expect("leaf should be signed by CA");
+        let leaf_cert =
+            leaf_params.signed_by(&leaf_key, &ca_issuer).expect("leaf should be signed by CA");
 
         fs::write(&cert_path, leaf_cert.pem()).expect("leaf cert should be written");
 
@@ -475,17 +471,16 @@ mod tests {
         ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         ca_params.distinguished_name.push(DnType::CommonName, "Extension Root CA");
         let ca_key = KeyPair::generate().expect("CA key should generate");
-        let ca_cert = ca_params.self_signed(&ca_key).expect("CA should self-sign");
-        let ca = CertifiedKey { cert: ca_cert, key_pair: ca_key };
+        let _ca_cert = ca_params.self_signed(&ca_key).expect("CA should self-sign");
+        let ca_issuer = Issuer::from_params(&ca_params, &ca_key);
 
         let mut leaf_params = CertificateParams::new(vec!["client-only.example.com".to_string()])
             .expect("leaf params");
         leaf_params.distinguished_name.push(DnType::CommonName, "client-only.example.com");
         leaf_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
         let leaf_key = KeyPair::generate().expect("leaf key should generate");
-        let leaf_cert = leaf_params
-            .signed_by(&leaf_key, &ca.cert, &ca.key_pair)
-            .expect("leaf should be signed by CA");
+        let leaf_cert =
+            leaf_params.signed_by(&leaf_key, &ca_issuer).expect("leaf should be signed by CA");
 
         fs::write(&cert_path, leaf_cert.pem()).expect("leaf cert should be written");
 

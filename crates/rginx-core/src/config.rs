@@ -16,8 +16,9 @@ pub use route::{
     RouteMatcher, RouteRateLimit,
 };
 pub use tls::{
-    ClientIdentity, ServerCertificateBundle, ServerClientAuthMode, ServerClientAuthPolicy,
-    ServerTls, TlsCipherSuite, TlsKeyExchangeGroup, TlsVersion, VirtualHostTls,
+    ClientIdentity, OcspConfig, OcspNonceMode, OcspResponderPolicy, ServerCertificateBundle,
+    ServerClientAuthMode, ServerClientAuthPolicy, ServerTls, TlsCipherSuite, TlsKeyExchangeGroup,
+    TlsVersion, VirtualHostTls,
 };
 pub use upstream::{
     ActiveHealthCheck, Upstream, UpstreamLoadBalance, UpstreamPeer, UpstreamProtocol,

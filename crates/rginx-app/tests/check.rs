@@ -222,14 +222,14 @@ fn check_reports_tls_diagnostics_for_listener_and_vhost_certificates() {
     let primary_cert_path = temp_dir.join("default.crt");
     let primary_key_path = temp_dir.join("default.key");
     fs::write(&primary_cert_path, primary.cert.pem()).expect("primary cert should be written");
-    fs::write(&primary_key_path, primary.key_pair.serialize_pem())
+    fs::write(&primary_key_path, primary.signing_key.serialize_pem())
         .expect("primary key should be written");
 
     let vhost = generate_cert("api.example.com");
     let vhost_cert_path = temp_dir.join("api.crt");
     let vhost_key_path = temp_dir.join("api.key");
     fs::write(&vhost_cert_path, vhost.cert.pem()).expect("vhost cert should be written");
-    fs::write(&vhost_key_path, vhost.key_pair.serialize_pem())
+    fs::write(&vhost_key_path, vhost.signing_key.serialize_pem())
         .expect("vhost key should be written");
 
     fs::write(
@@ -316,7 +316,8 @@ fn check_reports_certificate_fingerprint_and_chain_diagnostics() {
 
     let cert_pair = generate_cert_signed_by_ca("leaf.example.com");
     fs::write(&cert_path, cert_pair.cert.pem()).expect("leaf cert should be written");
-    fs::write(&key_path, cert_pair.key_pair.serialize_pem()).expect("leaf key should be written");
+    fs::write(&key_path, cert_pair.signing_key.serialize_pem())
+        .expect("leaf key should be written");
 
     fs::write(
         &config_path,
@@ -442,27 +443,27 @@ fn render_output(output: &Output) -> String {
     )
 }
 
-fn generate_cert(hostname: &str) -> CertifiedKey {
-    let cert = rcgen::generate_simple_self_signed(vec![hostname.to_string()])
-        .expect("self-signed certificate should generate");
-    CertifiedKey { cert: cert.cert, key_pair: cert.key_pair }
+type TestCertifiedKey = CertifiedKey<KeyPair>;
+
+fn generate_cert(hostname: &str) -> TestCertifiedKey {
+    rcgen::generate_simple_self_signed(vec![hostname.to_string()])
+        .expect("self-signed certificate should generate")
 }
 
-fn generate_cert_signed_by_ca(hostname: &str) -> CertifiedKey {
+fn generate_cert_signed_by_ca(hostname: &str) -> TestCertifiedKey {
     let mut ca_params = CertificateParams::default();
     ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     ca_params.distinguished_name.push(DnType::CommonName, "check test ca");
     let ca_key = KeyPair::generate().expect("CA key should generate");
     let ca_cert = ca_params.self_signed(&ca_key).expect("CA cert should generate");
-    let ca = CertifiedKey { cert: ca_cert, key_pair: ca_key };
+    let _ca = CertifiedKey { cert: ca_cert, signing_key: ca_key };
+    let ca_issuer = rcgen::Issuer::from_params(&ca_params, &_ca.signing_key);
 
     let mut leaf_params =
         CertificateParams::new(vec![hostname.to_string()]).expect("leaf params should build");
     leaf_params.distinguished_name.push(DnType::CommonName, hostname);
     leaf_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
     let leaf_key = KeyPair::generate().expect("leaf key should generate");
-    let cert = leaf_params
-        .signed_by(&leaf_key, &ca.cert, &ca.key_pair)
-        .expect("leaf cert should be signed");
-    CertifiedKey { cert, key_pair: leaf_key }
+    let cert = leaf_params.signed_by(&leaf_key, &ca_issuer).expect("leaf cert should be signed");
+    CertifiedKey { cert, signing_key: leaf_key }
 }

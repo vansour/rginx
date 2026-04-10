@@ -9,7 +9,7 @@ use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use rcgen::CertifiedKey;
+use rcgen::{CertifiedKey, KeyPair};
 
 mod support;
 
@@ -383,7 +383,7 @@ fn sighup_status_reports_tls_certificate_changes_after_rotation() {
         let cert_path = temp_dir.join("server.crt");
         let key_path = temp_dir.join("server.key");
         fs::write(&cert_path, initial_cert.cert.pem()).expect("initial cert should be written");
-        fs::write(&key_path, initial_cert.key_pair.serialize_pem())
+        fs::write(&key_path, initial_cert.signing_key.serialize_pem())
             .expect("initial key should be written");
         tls_return_config(listen_addr, &cert_path, &key_path)
     });
@@ -393,7 +393,7 @@ fn sighup_status_reports_tls_certificate_changes_after_rotation() {
     let rotated_cert_path = server.temp_dir().join("server-rotated.crt");
     let rotated_key_path = server.temp_dir().join("server-rotated.key");
     fs::write(&rotated_cert_path, rotated_cert.cert.pem()).expect("rotated cert should be written");
-    fs::write(&rotated_key_path, rotated_cert.key_pair.serialize_pem())
+    fs::write(&rotated_key_path, rotated_cert.signing_key.serialize_pem())
         .expect("rotated key should be written");
     fs::write(
         server.config_path(),
@@ -746,10 +746,11 @@ fn render_output(output: &Output) -> String {
     )
 }
 
-fn generate_cert(hostname: &str) -> CertifiedKey {
-    let cert = rcgen::generate_simple_self_signed(vec![hostname.to_string()])
-        .expect("self-signed certificate should generate");
-    CertifiedKey { cert: cert.cert, key_pair: cert.key_pair }
+type TestCertifiedKey = CertifiedKey<KeyPair>;
+
+fn generate_cert(hostname: &str) -> TestCertifiedKey {
+    rcgen::generate_simple_self_signed(vec![hostname.to_string()])
+        .expect("self-signed certificate should generate")
 }
 
 fn tls_return_config(listen_addr: SocketAddr, cert_path: &Path, key_path: &Path) -> String {

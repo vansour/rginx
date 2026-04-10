@@ -228,6 +228,7 @@ fn validate_listener_like(config: ListenerLikeRef<'_>) -> Result<()> {
         key_exchange_groups,
         alpn_protocols,
         ocsp_staple_path,
+        ocsp: _,
         session_resumption,
         session_tickets,
         session_cache_size,

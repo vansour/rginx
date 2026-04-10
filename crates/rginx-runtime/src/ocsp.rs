@@ -77,32 +77,41 @@ async fn refresh_ocsp_staples(state: &SharedState, client: &OcspClient) -> Resul
             continue;
         }
 
-        let request_body = match rginx_http::build_ocsp_request_for_certificate(&ocsp.cert_path) {
-            Ok(request_body) => request_body,
-            Err(error) => {
-                let (message, cache_cleared) = handle_ocsp_refresh_failure(
-                    &ocsp.cert_path,
-                    &ocsp_staple_path,
-                    error.to_string(),
-                )
-                .await;
-                if cache_cleared {
-                    tls_acceptors_changed = true;
+        let (request_body, request_nonce) =
+            match rginx_http::build_ocsp_request_for_certificate_with_options(
+                &ocsp.cert_path,
+                ocsp.ocsp_nonce_mode,
+            ) {
+                Ok(request) => request,
+                Err(error) => {
+                    let (message, cache_cleared) = handle_ocsp_refresh_failure(
+                        &ocsp.cert_path,
+                        &ocsp_staple_path,
+                        ocsp.ocsp_responder_policy,
+                        error.to_string(),
+                    )
+                    .await;
+                    if cache_cleared {
+                        tls_acceptors_changed = true;
+                    }
+                    state.record_ocsp_refresh_failure(&ocsp.scope, message);
+                    continue;
                 }
-                state.record_ocsp_refresh_failure(&ocsp.scope, message);
-                continue;
-            }
-        };
+            };
 
         match fetch_ocsp_response(client, &ocsp.responder_urls, request_body).await {
             Ok(response_body) => {
-                if let Err(error) = rginx_http::validate_ocsp_response_for_certificate(
+                if let Err(error) = rginx_http::validate_ocsp_response_for_certificate_with_options(
                     &ocsp.cert_path,
                     &response_body,
+                    request_nonce.as_deref(),
+                    ocsp.ocsp_nonce_mode,
+                    ocsp.ocsp_responder_policy,
                 ) {
                     let (message, cache_cleared) = handle_ocsp_refresh_failure(
                         &ocsp.cert_path,
                         &ocsp_staple_path,
+                        ocsp.ocsp_responder_policy,
                         error.to_string(),
                     )
                     .await;
@@ -120,9 +129,13 @@ async fn refresh_ocsp_staples(state: &SharedState, client: &OcspClient) -> Resul
                         state.record_ocsp_refresh_success(&ocsp.scope);
                     }
                     Err(error) => {
-                        let (message, cache_cleared) =
-                            handle_ocsp_refresh_failure(&ocsp.cert_path, &ocsp_staple_path, error)
-                                .await;
+                        let (message, cache_cleared) = handle_ocsp_refresh_failure(
+                            &ocsp.cert_path,
+                            &ocsp_staple_path,
+                            ocsp.ocsp_responder_policy,
+                            error,
+                        )
+                        .await;
                         if cache_cleared {
                             tls_acceptors_changed = true;
                         }
@@ -131,8 +144,13 @@ async fn refresh_ocsp_staples(state: &SharedState, client: &OcspClient) -> Resul
                 }
             }
             Err(error) => {
-                let (message, cache_cleared) =
-                    handle_ocsp_refresh_failure(&ocsp.cert_path, &ocsp_staple_path, error).await;
+                let (message, cache_cleared) = handle_ocsp_refresh_failure(
+                    &ocsp.cert_path,
+                    &ocsp_staple_path,
+                    ocsp.ocsp_responder_policy,
+                    error,
+                )
+                .await;
                 if cache_cleared {
                     tls_acceptors_changed = true;
                 }
@@ -246,9 +264,10 @@ async fn write_ocsp_cache_file(path: &Path, body: &[u8]) -> Result<bool, String>
 async fn handle_ocsp_refresh_failure(
     cert_path: &Path,
     cache_path: &Path,
+    responder_policy: rginx_core::OcspResponderPolicy,
     error: String,
 ) -> (String, bool) {
-    match clear_invalid_ocsp_cache_file(cert_path, cache_path).await {
+    match clear_invalid_ocsp_cache_file(cert_path, cache_path, responder_policy).await {
         Ok(true) => (format!("{error}; cleared stale OCSP cache"), true),
         Ok(false) => (error, false),
         Err(clear_error) => {
@@ -260,6 +279,7 @@ async fn handle_ocsp_refresh_failure(
 async fn clear_invalid_ocsp_cache_file(
     cert_path: &Path,
     cache_path: &Path,
+    responder_policy: rginx_core::OcspResponderPolicy,
 ) -> Result<bool, String> {
     let metadata = match tokio::fs::metadata(cache_path).await {
         Ok(metadata) => metadata,
@@ -292,7 +312,15 @@ async fn clear_invalid_ocsp_cache_file(
         return Ok(false);
     }
 
-    if rginx_http::validate_ocsp_response_for_certificate(cert_path, &body).is_ok() {
+    if rginx_http::validate_ocsp_response_for_certificate_with_options(
+        cert_path,
+        &body,
+        None,
+        rginx_core::OcspNonceMode::Disabled,
+        responder_policy,
+    )
+    .is_ok()
+    {
         return Ok(false);
     }
 

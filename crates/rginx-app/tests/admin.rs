@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use rcgen::{
     BasicConstraints, CertificateParams, CertificateRevocationList,
-    CertificateRevocationListParams, CertifiedKey, DnType, IsCa, KeyIdMethod, KeyPair,
-    KeyUsagePurpose, RevocationReason, RevokedCertParams, SerialNumber, date_time_ymd,
+    CertificateRevocationListParams, DnType, IsCa, Issuer, KeyIdMethod, KeyPair, KeyUsagePurpose,
+    RevocationReason, RevokedCertParams, SerialNumber, date_time_ymd,
 };
 
 mod support;
@@ -98,7 +98,7 @@ fn snapshot_includes_certificate_fingerprint_and_chain_details_for_tls_servers()
     let mut server = ServerHarness::spawn_with_tls(
         "rginx-admin-tls-snapshot",
         &cert.cert.pem(),
-        &cert.key_pair.serialize_pem(),
+        &cert.signing_key.serialize_pem(),
         |_, cert_path, key_path| {
             format!(
                 "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n        server_names: [\"localhost\"],\n        tls: Some(ServerTlsConfig(\n            cert_path: {:?},\n            key_path: {:?},\n        )),\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Return(\n                status: 200,\n                location: \"\",\n                body: Some(\"ok\\n\"),\n            ),\n        ),\n    ],\n)\n",
@@ -174,7 +174,7 @@ fn status_and_upstreams_commands_report_upstream_tls_diagnostics() {
             .expect("upstream CRL should be written");
         std::fs::write(&client_cert_path, client_identity.cert.pem())
             .expect("upstream client cert should be written");
-        std::fs::write(&client_key_path, client_identity.key_pair.serialize_pem())
+        std::fs::write(&client_key_path, client_identity.signing_key.serialize_pem())
             .expect("upstream client key should be written");
 
         format!(
@@ -1256,24 +1256,38 @@ fn render_output(output: &std::process::Output) -> String {
     )
 }
 
-fn generate_cert(hostname: &str) -> CertifiedKey {
-    let cert = rcgen::generate_simple_self_signed(vec![hostname.to_string()])
-        .expect("self-signed certificate should generate");
-    CertifiedKey { cert: cert.cert, key_pair: cert.key_pair }
+struct TestCertifiedKey {
+    cert: rcgen::Certificate,
+    signing_key: KeyPair,
+    params: CertificateParams,
 }
 
-fn generate_ca_cert(common_name: &str) -> CertifiedKey {
+impl TestCertifiedKey {
+    fn issuer(&self) -> Issuer<'_, &KeyPair> {
+        Issuer::from_params(&self.params, &self.signing_key)
+    }
+}
+
+fn generate_cert(hostname: &str) -> TestCertifiedKey {
+    let params = CertificateParams::new(vec![hostname.to_string()])
+        .expect("self-signed certificate should generate");
+    let signing_key = KeyPair::generate().expect("keypair should generate");
+    let cert = params.self_signed(&signing_key).expect("self-signed certificate should generate");
+    TestCertifiedKey { cert, signing_key, params }
+}
+
+fn generate_ca_cert(common_name: &str) -> TestCertifiedKey {
     let mut params =
         CertificateParams::new(vec![common_name.to_string()]).expect("CA params should build");
     params.distinguished_name.push(DnType::CommonName, common_name);
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-    let key_pair = KeyPair::generate().expect("CA keypair should generate");
-    let cert = params.self_signed(&key_pair).expect("CA certificate should self-sign");
-    CertifiedKey { cert, key_pair }
+    let signing_key = KeyPair::generate().expect("CA keypair should generate");
+    let cert = params.self_signed(&signing_key).expect("CA certificate should self-sign");
+    TestCertifiedKey { cert, signing_key, params }
 }
 
-fn generate_crl(issuer: &CertifiedKey, revoked_serial: u64) -> CertificateRevocationList {
+fn generate_crl(issuer: &TestCertifiedKey, revoked_serial: u64) -> CertificateRevocationList {
     CertificateRevocationListParams {
         this_update: date_time_ymd(2024, 1, 1),
         next_update: date_time_ymd(2027, 1, 1),
@@ -1287,6 +1301,6 @@ fn generate_crl(issuer: &CertifiedKey, revoked_serial: u64) -> CertificateRevoca
         }],
         key_identifier_method: KeyIdMethod::Sha256,
     }
-    .signed_by(&issuer.cert, &issuer.key_pair)
+    .signed_by(&issuer.issuer())
     .expect("CRL should be signed")
 }
