@@ -10,7 +10,6 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::{Bytes, BytesMut};
 use futures_util::stream;
@@ -503,46 +502,10 @@ fn proxy_clients_can_select_insecure_and_custom_ca_modes() {
         upstream_settings(UpstreamProtocol::Auto),
     );
 
-    let server = rginx_core::Server {
-        listen_addr: "127.0.0.1:8080".parse().unwrap(),
-        default_certificate: None,
-        trusted_proxies: Vec::new(),
-        keep_alive: true,
-        max_headers: None,
-        max_request_body_bytes: None,
-        max_connections: None,
-        header_read_timeout: None,
-        request_body_read_timeout: None,
-        response_write_timeout: None,
-        access_log_format: None,
-        tls: None,
-    };
-    let snapshot = rginx_core::ConfigSnapshot {
-        runtime: rginx_core::RuntimeSettings {
-            shutdown_timeout: std::time::Duration::from_secs(1),
-            worker_threads: None,
-            accept_workers: 1,
-        },
-        server: server.clone(),
-        listeners: vec![rginx_core::Listener {
-            id: "default".to_string(),
-            name: "default".to_string(),
-            server,
-            tls_termination_enabled: false,
-            proxy_protocol_enabled: false,
-        }],
-        default_vhost: rginx_core::VirtualHost {
-            id: "server".to_string(),
-            server_names: Vec::new(),
-            routes: Vec::new(),
-            tls: None,
-        },
-        vhosts: Vec::new(),
-        upstreams: HashMap::from([
-            ("insecure".to_string(), Arc::new(insecure)),
-            ("custom".to_string(), Arc::new(custom)),
-        ]),
-    };
+    let snapshot = snapshot_with_upstreams([
+        ("insecure".to_string(), Arc::new(insecure)),
+        ("custom".to_string(), Arc::new(custom)),
+    ]);
 
     let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
     assert!(clients.for_upstream(snapshot.upstreams["insecure"].as_ref()).is_ok());
@@ -551,11 +514,8 @@ fn proxy_clients_can_select_insecure_and_custom_ca_modes() {
 
 #[test]
 fn proxy_clients_cache_distinguishes_server_name_override() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time should be after unix epoch")
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!("rginx-custom-ca-override-{unique}.pem"));
+    let temp_dir = TempDir::new().expect("temp dir should be created");
+    let path = temp_dir.path().join("custom-ca-override.pem");
     std::fs::write(&path, TEST_CA_CERT_PEM).expect("PEM file should be written");
 
     let peer = UpstreamPeer {
@@ -593,55 +553,17 @@ fn proxy_clients_cache_distinguishes_server_name_override() {
         },
     );
 
-    let server = rginx_core::Server {
-        listen_addr: "127.0.0.1:8080".parse().unwrap(),
-        default_certificate: None,
-        trusted_proxies: Vec::new(),
-        keep_alive: true,
-        max_headers: None,
-        max_request_body_bytes: None,
-        max_connections: None,
-        header_read_timeout: None,
-        request_body_read_timeout: None,
-        response_write_timeout: None,
-        access_log_format: None,
-        tls: None,
-    };
-    let snapshot = rginx_core::ConfigSnapshot {
-        runtime: rginx_core::RuntimeSettings {
-            shutdown_timeout: std::time::Duration::from_secs(1),
-            worker_threads: None,
-            accept_workers: 1,
-        },
-        server: server.clone(),
-        listeners: vec![rginx_core::Listener {
-            id: "default".to_string(),
-            name: "default".to_string(),
-            server,
-            tls_termination_enabled: false,
-            proxy_protocol_enabled: false,
-        }],
-        default_vhost: rginx_core::VirtualHost {
-            id: "server".to_string(),
-            server_names: Vec::new(),
-            routes: Vec::new(),
-            tls: None,
-        },
-        vhosts: Vec::new(),
-        upstreams: HashMap::from([
-            ("first".to_string(), Arc::new(first)),
-            ("second".to_string(), Arc::new(second)),
-            ("duplicate".to_string(), Arc::new(duplicate)),
-        ]),
-    };
+    let snapshot = snapshot_with_upstreams([
+        ("first".to_string(), Arc::new(first)),
+        ("second".to_string(), Arc::new(second)),
+        ("duplicate".to_string(), Arc::new(duplicate)),
+    ]);
 
     let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
     assert_eq!(clients.cached_client_count(), 2);
     assert!(clients.for_upstream(snapshot.upstreams["first"].as_ref()).is_ok());
     assert!(clients.for_upstream(snapshot.upstreams["second"].as_ref()).is_ok());
     assert!(clients.for_upstream(snapshot.upstreams["duplicate"].as_ref()).is_ok());
-
-    std::fs::remove_file(path).expect("temp PEM file should be removed");
 }
 
 #[test]
@@ -710,47 +632,11 @@ fn proxy_clients_cache_distinguishes_upstream_protocol() {
         upstream_settings(UpstreamProtocol::Http2),
     );
 
-    let server = rginx_core::Server {
-        listen_addr: "127.0.0.1:8080".parse().unwrap(),
-        default_certificate: None,
-        trusted_proxies: Vec::new(),
-        keep_alive: true,
-        max_headers: None,
-        max_request_body_bytes: None,
-        max_connections: None,
-        header_read_timeout: None,
-        request_body_read_timeout: None,
-        response_write_timeout: None,
-        access_log_format: None,
-        tls: None,
-    };
-    let snapshot = rginx_core::ConfigSnapshot {
-        runtime: rginx_core::RuntimeSettings {
-            shutdown_timeout: Duration::from_secs(1),
-            worker_threads: None,
-            accept_workers: 1,
-        },
-        server: server.clone(),
-        listeners: vec![rginx_core::Listener {
-            id: "default".to_string(),
-            name: "default".to_string(),
-            server,
-            tls_termination_enabled: false,
-            proxy_protocol_enabled: false,
-        }],
-        default_vhost: rginx_core::VirtualHost {
-            id: "server".to_string(),
-            server_names: Vec::new(),
-            routes: Vec::new(),
-            tls: None,
-        },
-        vhosts: Vec::new(),
-        upstreams: HashMap::from([
-            ("auto".to_string(), Arc::new(auto)),
-            ("http1".to_string(), Arc::new(http1)),
-            ("http2".to_string(), Arc::new(http2)),
-        ]),
-    };
+    let snapshot = snapshot_with_upstreams([
+        ("auto".to_string(), Arc::new(auto)),
+        ("http1".to_string(), Arc::new(http1)),
+        ("http2".to_string(), Arc::new(http2)),
+    ]);
 
     let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
     assert_eq!(clients.cached_client_count(), 3);
@@ -793,47 +679,11 @@ fn proxy_clients_cache_distinguishes_tls_versions() {
         },
     );
 
-    let server = rginx_core::Server {
-        listen_addr: "127.0.0.1:8080".parse().unwrap(),
-        default_certificate: None,
-        trusted_proxies: Vec::new(),
-        keep_alive: true,
-        max_headers: None,
-        max_request_body_bytes: None,
-        max_connections: None,
-        header_read_timeout: None,
-        request_body_read_timeout: None,
-        response_write_timeout: None,
-        access_log_format: None,
-        tls: None,
-    };
-    let snapshot = rginx_core::ConfigSnapshot {
-        runtime: rginx_core::RuntimeSettings {
-            shutdown_timeout: std::time::Duration::from_secs(1),
-            worker_threads: None,
-            accept_workers: 1,
-        },
-        server: server.clone(),
-        listeners: vec![rginx_core::Listener {
-            id: "default".to_string(),
-            name: "default".to_string(),
-            server,
-            tls_termination_enabled: false,
-            proxy_protocol_enabled: false,
-        }],
-        default_vhost: rginx_core::VirtualHost {
-            id: "server".to_string(),
-            server_names: Vec::new(),
-            routes: Vec::new(),
-            tls: None,
-        },
-        vhosts: Vec::new(),
-        upstreams: HashMap::from([
-            ("tls12".to_string(), Arc::new(tls12)),
-            ("tls13".to_string(), Arc::new(tls13)),
-            ("duplicate".to_string(), Arc::new(duplicate)),
-        ]),
-    };
+    let snapshot = snapshot_with_upstreams([
+        ("tls12".to_string(), Arc::new(tls12)),
+        ("tls13".to_string(), Arc::new(tls13)),
+        ("duplicate".to_string(), Arc::new(duplicate)),
+    ]);
 
     let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
     assert_eq!(clients.cached_client_count(), 2);
@@ -841,12 +691,8 @@ fn proxy_clients_cache_distinguishes_tls_versions() {
 
 #[test]
 fn proxy_clients_cache_distinguishes_client_identity() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time should be after unix epoch")
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("rginx-client-identity-cache-{unique}"));
-    std::fs::create_dir_all(&dir).expect("temp dir should be created");
+    let temp_dir = TempDir::new().expect("temp dir should be created");
+    let dir = temp_dir.path().to_path_buf();
     let first_cert = dir.join("first.crt");
     let first_key = dir.join("first.key");
     let second_cert = dir.join("second.crt");
@@ -898,56 +744,14 @@ fn proxy_clients_cache_distinguishes_client_identity() {
         },
     );
 
-    let server = rginx_core::Server {
-        listen_addr: "127.0.0.1:8080".parse().unwrap(),
-        default_certificate: None,
-        trusted_proxies: Vec::new(),
-        keep_alive: true,
-        max_headers: None,
-        max_request_body_bytes: None,
-        max_connections: None,
-        header_read_timeout: None,
-        request_body_read_timeout: None,
-        response_write_timeout: None,
-        access_log_format: None,
-        tls: None,
-    };
-    let snapshot = rginx_core::ConfigSnapshot {
-        runtime: rginx_core::RuntimeSettings {
-            shutdown_timeout: std::time::Duration::from_secs(1),
-            worker_threads: None,
-            accept_workers: 1,
-        },
-        server: server.clone(),
-        listeners: vec![rginx_core::Listener {
-            id: "default".to_string(),
-            name: "default".to_string(),
-            server,
-            tls_termination_enabled: false,
-            proxy_protocol_enabled: false,
-        }],
-        default_vhost: rginx_core::VirtualHost {
-            id: "server".to_string(),
-            server_names: Vec::new(),
-            routes: Vec::new(),
-            tls: None,
-        },
-        vhosts: Vec::new(),
-        upstreams: HashMap::from([
-            ("first".to_string(), Arc::new(first)),
-            ("second".to_string(), Arc::new(second)),
-            ("duplicate".to_string(), Arc::new(duplicate)),
-        ]),
-    };
+    let snapshot = snapshot_with_upstreams([
+        ("first".to_string(), Arc::new(first)),
+        ("second".to_string(), Arc::new(second)),
+        ("duplicate".to_string(), Arc::new(duplicate)),
+    ]);
 
     let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
     assert_eq!(clients.cached_client_count(), 2);
-
-    std::fs::remove_file(first_cert).expect("first cert should be removed");
-    std::fs::remove_file(first_key).expect("first key should be removed");
-    std::fs::remove_file(second_cert).expect("second cert should be removed");
-    std::fs::remove_file(second_key).expect("second key should be removed");
-    std::fs::remove_dir(dir).expect("temp dir should be removed");
 }
 
 #[tokio::test]
@@ -1461,46 +1265,10 @@ fn peer_health_policy_is_applied_per_upstream() {
         },
     ));
 
-    let server = rginx_core::Server {
-        listen_addr: "127.0.0.1:8080".parse().unwrap(),
-        default_certificate: None,
-        trusted_proxies: Vec::new(),
-        keep_alive: true,
-        max_headers: None,
-        max_request_body_bytes: None,
-        max_connections: None,
-        header_read_timeout: None,
-        request_body_read_timeout: None,
-        response_write_timeout: None,
-        access_log_format: None,
-        tls: None,
-    };
-    let snapshot = rginx_core::ConfigSnapshot {
-        runtime: rginx_core::RuntimeSettings {
-            shutdown_timeout: Duration::from_secs(1),
-            worker_threads: None,
-            accept_workers: 1,
-        },
-        server: server.clone(),
-        listeners: vec![rginx_core::Listener {
-            id: "default".to_string(),
-            name: "default".to_string(),
-            server,
-            tls_termination_enabled: false,
-            proxy_protocol_enabled: false,
-        }],
-        default_vhost: rginx_core::VirtualHost {
-            id: "server".to_string(),
-            server_names: Vec::new(),
-            routes: Vec::new(),
-            tls: None,
-        },
-        vhosts: Vec::new(),
-        upstreams: HashMap::from([
-            ("fast-fail".to_string(), fast_fail.clone()),
-            ("tolerant".to_string(), tolerant.clone()),
-        ]),
-    };
+    let snapshot = snapshot_with_upstreams([
+        ("fast-fail".to_string(), fast_fail.clone()),
+        ("tolerant".to_string(), tolerant.clone()),
+    ]);
     let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
 
     let fast_failure = clients.record_peer_failure("fast-fail", "http://127.0.0.1:9000");
@@ -1804,8 +1572,21 @@ async fn spawn_status_server(statuses: Arc<Mutex<VecDeque<StatusCode>>>) -> Stat
                     let statuses = statuses.clone();
 
                     thread::spawn(move || {
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+                        let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
                         let mut buffer = [0u8; 1024];
-                        let _ = stream.read(&mut buffer);
+                        match stream.read(&mut buffer) {
+                            Ok(_) => {}
+                            Err(error)
+                                if matches!(
+                                    error.kind(),
+                                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                                ) =>
+                            {
+                                return;
+                            }
+                            Err(_) => return,
+                        }
                         let status = {
                             let mut statuses =
                                 statuses.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1818,7 +1599,9 @@ async fn spawn_status_server(statuses: Arc<Mutex<VecDeque<StatusCode>>>) -> Stat
                             reason
                         );
 
-                        let _ = stream.write_all(response.as_bytes());
+                        if stream.write_all(response.as_bytes()).is_err() {
+                            return;
+                        }
                         let _ = stream.flush();
                     });
                 }

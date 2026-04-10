@@ -223,6 +223,19 @@ struct PreparedListenerWorkerGroup {
     worker_listeners: Vec<TcpListener>,
 }
 
+struct WorkerDrainGuard {
+    remaining_workers: Arc<AtomicUsize>,
+    drain_completion_notify: Arc<Notify>,
+}
+
+impl Drop for WorkerDrainGuard {
+    fn drop(&mut self) {
+        if self.remaining_workers.fetch_sub(1, Ordering::AcqRel) == 1 {
+            self.drain_completion_notify.notify_waiters();
+        }
+    }
+}
+
 struct ListenerWorkerGroup {
     listener: Listener,
     std_listener: Arc<StdTcpListener>,
@@ -417,12 +430,8 @@ fn activate_prepared_listener_worker_group(
         let remaining_workers = remaining_workers.clone();
         let drain_completion_notify = drain_completion_notify.clone();
         tasks.push(tokio::spawn(async move {
-            let result =
-                rginx_http::serve(listener_socket, listener_id, http_state, shutdown).await;
-            if remaining_workers.fetch_sub(1, Ordering::AcqRel) == 1 {
-                drain_completion_notify.notify_waiters();
-            }
-            result
+            let _drain_guard = WorkerDrainGuard { remaining_workers, drain_completion_notify };
+            rginx_http::serve(listener_socket, listener_id, http_state, shutdown).await
         }));
     }
 
@@ -566,9 +575,10 @@ mod tests {
         }
     }
 
-    fn listener_group(listener: Listener) -> ListenerWorkerGroup {
-        let std_listener = bind_std_listener(listener.server.listen_addr)
-            .expect("listener socket should bind for test");
+    fn listener_group_with_socket(
+        listener: Listener,
+        std_listener: StdTcpListener,
+    ) -> ListenerWorkerGroup {
         let (shutdown_tx, _shutdown_rx) = watch::channel(false);
         ListenerWorkerGroup {
             listener,
@@ -583,11 +593,12 @@ mod tests {
         let std_listener =
             bind_std_listener("127.0.0.1:0".parse().expect("socket addr should parse")).unwrap();
         let listen_addr = std_listener.local_addr().expect("listener addr should exist");
-        drop(std_listener);
 
         let active_listener = listener("listener-a", "listener-a", listen_addr);
-        let active_groups =
-            HashMap::from([(active_listener.id.clone(), listener_group(active_listener))]);
+        let active_groups = HashMap::from([(
+            active_listener.id.clone(),
+            listener_group_with_socket(active_listener, std_listener),
+        )]);
         let error = match prepare_added_listener_bindings(
             &[listener("listener-b", "listener-b", listen_addr)],
             1,
@@ -606,10 +617,11 @@ mod tests {
         let std_listener =
             bind_std_listener("127.0.0.1:0".parse().expect("socket addr should parse")).unwrap();
         let listen_addr = std_listener.local_addr().expect("listener addr should exist");
-        drop(std_listener);
 
-        let draining_groups =
-            vec![listener_group(listener("listener-a", "listener-a", listen_addr))];
+        let draining_groups = vec![listener_group_with_socket(
+            listener("listener-a", "listener-a", listen_addr),
+            std_listener,
+        )];
         let error = match prepare_added_listener_bindings(
             &[listener("listener-b", "listener-b", listen_addr)],
             1,
