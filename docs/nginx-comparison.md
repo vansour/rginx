@@ -166,47 +166,15 @@
 - `target/nginx-compare/performance-results.json`
 - `target/nginx-compare/performance-results.md`
 
-### 当前一次 trixie 容器 smoke 样本
+## 8. 结果快照
 
-这是我刚刚用默认 `trixie` Docker 环境跑的一次小样本：
+主文档不直接绑定某一次 benchmark 样本。
 
-- benchmark parameters: `40 requests / concurrency 4`
-- `rginx`: `0.1.3-rc.6`
-- `nginx`: `1.29.8`
+当前保留的样本快照：
 
-| 场景 | nginx req/s | rginx req/s | rginx/nginx |
-| --- | ---: | ---: | ---: |
-| `return_200` | `41109.97` | `21470.75` | `0.522` |
-| `proxy_http1` | `2044.47` | `100.45` | `0.049` |
-| `https_return_200` | `210.80` | `88.61` | `0.420` |
-| `http2_tls_return_200` | `221.86` | `102.64` | `0.463` |
-| `grpc_unary` | `166.78` | `64.79` | `0.388` |
+- [2026-04-10 trixie smoke](./nginx-comparison-snapshots/2026-04-10-trixie-smoke.md)
 
-另外：
-
-- `grpc_web_binary` 和 `grpc_web_text` 当前只跑 `rginx`
-- `NGINX OSS` 在 harness 里被记录为 `unsupported`
-- `reload_return_body` 这次样本里：
-  - `nginx`: `31.847 ms`
-  - `rginx`: `10.984 ms`
-
-这组数字只能说明：
-
-- 这套 Docker harness 现在已经能覆盖你要的六类比较入口
-- 当前小样本里，`NGINX OSS` 在大多数已对齐场景上更快
-- `grpc-web` 仍是 `rginx` 的差异化能力，不是双方对等对比项
-- `reload` 现在也能形成可重复的时间指标
-- 这些都还只是 smoke 级结果，不能直接拿去做对外宣传结论
-
-如果要形成对外能站住的性能结论，至少还要补：
-
-- 更大的请求量和更稳定的重复次数
-- 多轮重复跑的统计汇总
-- reload 期间旧连接排空而不只是新配置生效时间
-- RSS / CPU / fd 使用曲线
-- 更真实的上游后端，而不只是当前的最小 benchmark backend
-
-## 8. 这套 benchmark 的边界
+## 9. 这套 benchmark 的边界
 
 当前容器化脚本故意先收口，不追求“一口气测完所有协议”。
 
@@ -227,7 +195,7 @@
 - RSS / CPU / file descriptor / active connections 采样
 - 更真实的 upstream，如 keepalive 池、多连接上游、TLS upstream verify on/off 对照
 
-## 9. 如何解读结果
+## 10. 如何解读结果
 
 建议不要只盯着 `req/s`。
 
@@ -244,7 +212,7 @@
 - 如果是 `proxy_http1`，本质上测的是入口代理实现和上游连接复用
 - 以后补 `gRPC / grpc-web` 时，结果才更能体现 `rginx` 的差异化价值
 
-## 10. 建议写进最终对外文档的结论口径
+## 11. 建议写进最终对外文档的结论口径
 
 推荐用这种口径，而不是“谁全面更强”：
 
@@ -253,7 +221,7 @@
 - 在“静态文件服务、通用 Web server、多协议代理生态、模块生态、长期生产成熟度”这些维度，`NGINX OSS` 仍明显更成熟
 - 如果比较双方，应该把“定位差异”和“功能面差异”写清楚，再谈性能
 
-## 11. 参考资料
+## 12. 参考资料
 
 NGINX 官方文档，本文比较时主要参考：
 
@@ -281,5 +249,5 @@ NGINX 官方文档，本文比较时主要参考：
 - [README.md](../README.md)
 - [crates/rginx-http/src/transition.rs](../crates/rginx-http/src/transition.rs)
 - [crates/rginx-runtime/src/admin.rs](../crates/rginx-runtime/src/admin.rs)
-- [crates/rginx-http/src/proxy/forward.rs](../crates/rginx-http/src/proxy/forward.rs)
-- [crates/rginx-http/src/state.rs](../crates/rginx-http/src/state.rs)
+- [crates/rginx-http/src/proxy/forward.rs](../crates/rginx-http/src/proxy/forward/mod.rs)
+- [crates/rginx-http/src/state.rs](../crates/rginx-http/src/state/mod.rs)

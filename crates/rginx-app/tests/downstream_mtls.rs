@@ -1,387 +1,45 @@
+#[allow(unused_imports)]
 use std::env;
+#[allow(unused_imports)]
 use std::io::{Read, Write};
+#[allow(unused_imports)]
 use std::net::SocketAddr;
+#[allow(unused_imports)]
 use std::os::unix::net::UnixStream;
+#[allow(unused_imports)]
 use std::path::{Path, PathBuf};
+#[allow(unused_imports)]
 use std::sync::Arc;
+#[allow(unused_imports)]
 use std::sync::atomic::{AtomicU64, Ordering};
+#[allow(unused_imports)]
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[allow(unused_imports)]
 use rcgen::{
     BasicConstraints, CertificateParams, CertificateRevocationList,
     CertificateRevocationListParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyIdMethod,
     KeyPair, KeyUsagePurpose, RevocationReason, RevokedCertParams, SerialNumber, date_time_ymd,
 };
+#[allow(unused_imports)]
 use rginx_runtime::admin::{AdminRequest, AdminResponse, admin_socket_path_for_config};
+#[allow(unused_imports)]
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+#[allow(unused_imports)]
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+#[allow(unused_imports)]
 use rustls::{ClientConfig, ClientConnection, DigitallySignedStruct, SignatureScheme, StreamOwned};
 
 mod support;
 
 use support::{READY_ROUTE_CONFIG, ServerHarness, reserve_loopback_addr};
 
-#[test]
-fn required_client_cert_rejects_anonymous_clients_and_accepts_authenticated_clients() {
-    let fixture = TlsFixture::new("rginx-downstream-mtls-required");
-    let listen_addr = reserve_loopback_addr();
-    let mut server = ServerHarness::spawn_with_tls(
-        "rginx-downstream-mtls-required",
-        &fixture.server_cert_pem,
-        &fixture.server_key_pem,
-        |temp_dir, cert_path, key_path| {
-            let ca_path = temp_dir.join("client-ca.pem");
-            std::fs::write(&ca_path, &fixture.ca_cert_pem).expect("CA cert should be written");
-            required_client_auth_config(listen_addr, cert_path, key_path, &ca_path)
-        },
-    );
-
-    wait_for_https_text_response(
-        &mut server,
-        listen_addr,
-        "localhost",
-        "/",
-        Some((&fixture.client_cert_path, &fixture.client_key_path)),
-        200,
-        "required mtls\n",
-        Duration::from_secs(5),
-    );
-
-    let anonymous = fetch_https_text_response(listen_addr, "localhost", "/", None);
-    assert!(anonymous.is_err(), "anonymous TLS client should be rejected");
-
-    let authenticated = fetch_https_text_response(
-        listen_addr,
-        "localhost",
-        "/",
-        Some((&fixture.client_cert_path, &fixture.client_key_path)),
-    )
-    .expect("mTLS-authenticated client should succeed");
-    assert_eq!(authenticated, (200, "required mtls\n".to_string()));
-
-    server.shutdown_and_wait(Duration::from_secs(5));
-}
-
-#[test]
-fn optional_client_cert_allows_both_anonymous_and_authenticated_clients() {
-    let fixture = TlsFixture::new("rginx-downstream-mtls-optional");
-    let listen_addr = reserve_loopback_addr();
-    let mut server = ServerHarness::spawn_with_tls(
-        "rginx-downstream-mtls-optional",
-        &fixture.server_cert_pem,
-        &fixture.server_key_pem,
-        |temp_dir, cert_path, key_path| {
-            let ca_path = temp_dir.join("client-ca.pem");
-            std::fs::write(&ca_path, &fixture.ca_cert_pem).expect("CA cert should be written");
-            optional_client_auth_config(listen_addr, cert_path, key_path, &ca_path)
-        },
-    );
-
-    wait_for_https_text_response(
-        &mut server,
-        listen_addr,
-        "localhost",
-        "/",
-        None,
-        200,
-        "optional mtls\n",
-        Duration::from_secs(5),
-    );
-
-    let anonymous =
-        fetch_https_text_response(listen_addr, "localhost", "/", None).expect("anonymous client");
-    assert_eq!(anonymous, (200, "optional mtls\n".to_string()));
-
-    let authenticated = fetch_https_text_response(
-        listen_addr,
-        "localhost",
-        "/",
-        Some((&fixture.client_cert_path, &fixture.client_key_path)),
-    )
-    .expect("authenticated client");
-    assert_eq!(authenticated, (200, "optional mtls\n".to_string()));
-
-    server.shutdown_and_wait(Duration::from_secs(5));
-}
-
-#[test]
-fn required_mtls_updates_admin_status_and_counters() {
-    let fixture = TlsFixture::new("rginx-downstream-mtls-admin");
-    let listen_addr = reserve_loopback_addr();
-    let mut server = ServerHarness::spawn_with_tls(
-        "rginx-downstream-mtls-admin",
-        &fixture.server_cert_pem,
-        &fixture.server_key_pem,
-        |temp_dir, cert_path, key_path| {
-            let ca_path = temp_dir.join("client-ca.pem");
-            std::fs::write(&ca_path, &fixture.ca_cert_pem).expect("CA cert should be written");
-            required_client_auth_config(listen_addr, cert_path, key_path, &ca_path)
-        },
-    );
-
-    wait_for_https_text_response(
-        &mut server,
-        listen_addr,
-        "localhost",
-        "/",
-        Some((&fixture.client_cert_path, &fixture.client_key_path)),
-        200,
-        "required mtls\n",
-        Duration::from_secs(5),
-    );
-
-    let anonymous = fetch_https_text_response(listen_addr, "localhost", "/", None);
-    assert!(anonymous.is_err(), "anonymous TLS client should be rejected");
-
-    let authenticated = fetch_https_text_response(
-        listen_addr,
-        "localhost",
-        "/",
-        Some((&fixture.client_cert_path, &fixture.client_key_path)),
-    )
-    .expect("authenticated client should succeed");
-    assert_eq!(authenticated, (200, "required mtls\n".to_string()));
-
-    let socket_path = admin_socket_path_for_config(server.config_path());
-    wait_for_admin_socket(&socket_path, Duration::from_secs(5));
-
-    let status = match query_admin_socket(&socket_path, AdminRequest::GetStatus)
-        .expect("admin status should succeed")
-    {
-        AdminResponse::Status(status) => status,
-        other => panic!("unexpected admin response: {other:?}"),
-    };
-    assert_eq!(status.mtls.configured_listeners, 1);
-    assert_eq!(status.mtls.required_listeners, 1);
-    assert_eq!(status.mtls.optional_listeners, 0);
-    assert!(status.mtls.authenticated_connections >= 1);
-    assert!(status.mtls.authenticated_requests >= 1);
-    assert!(status.mtls.handshake_failures_missing_client_cert >= 1);
-
-    let counters = match query_admin_socket(&socket_path, AdminRequest::GetCounters)
-        .expect("admin counters should succeed")
-    {
-        AdminResponse::Counters(counters) => counters,
-        other => panic!("unexpected admin response: {other:?}"),
-    };
-    assert!(counters.downstream_mtls_authenticated_connections >= 1);
-    assert!(counters.downstream_mtls_authenticated_requests >= 1);
-    assert!(counters.downstream_tls_handshake_failures_missing_client_cert >= 1);
-
-    server.shutdown_and_wait(Duration::from_secs(5));
-}
-
-#[test]
-fn required_mtls_rejects_client_chain_exceeding_verify_depth() {
-    let dir = temp_dir("rginx-downstream-mtls-verify-depth");
-    std::fs::create_dir_all(&dir).expect("fixture temp dir should be created");
-
-    let ca = generate_ca();
-    let intermediate = generate_intermediate_ca("rginx test intermediate", &ca);
-    let server = generate_leaf_cert("localhost", &ca, ExtendedKeyUsagePurpose::ServerAuth);
-    let client = generate_leaf_cert_with_serial(
-        "client-depth.example.com",
-        &intermediate,
-        ExtendedKeyUsagePurpose::ClientAuth,
-        100,
-    );
-
-    let client_cert_path = dir.join("client-chain.crt");
-    let client_key_path = dir.join("client.key");
-    std::fs::write(&client_cert_path, format!("{}{}", client.cert.pem(), intermediate.cert.pem()))
-        .expect("client chain should be written");
-    std::fs::write(&client_key_path, client.signing_key.serialize_pem())
-        .expect("client key should be written");
-
-    let listen_addr = reserve_loopback_addr();
-    let mut server = ServerHarness::spawn_with_tls(
-        "rginx-downstream-mtls-verify-depth",
-        &server.cert.pem(),
-        &server.signing_key.serialize_pem(),
-        |temp_dir, cert_path, key_path| {
-            let ca_path = temp_dir.join("client-ca.pem");
-            std::fs::write(&ca_path, ca.cert.pem()).expect("CA cert should be written");
-            common_client_auth_config_with_extra(
-                listen_addr,
-                cert_path,
-                key_path,
-                &ca_path,
-                "Required",
-                "verify depth mtls\n",
-                "                verify_depth: Some(1),\n",
-            )
-        },
-    );
-
-    let socket_path = admin_socket_path_for_config(server.config_path());
-    wait_for_admin_socket(&socket_path, Duration::from_secs(5));
-
-    let result = fetch_https_text_response(
-        listen_addr,
-        "localhost",
-        "/",
-        Some((&client_cert_path, &client_key_path)),
-    );
-    assert!(result.is_err(), "client chain deeper than verify_depth should be rejected");
-
-    let status = match query_admin_socket(&socket_path, AdminRequest::GetStatus)
-        .expect("admin status should succeed")
-    {
-        AdminResponse::Status(status) => status,
-        other => panic!("unexpected admin response: {other:?}"),
-    };
-    assert_eq!(status.tls.listeners[0].client_auth_verify_depth, Some(1));
-    assert!(status.mtls.handshake_failures_verify_depth_exceeded >= 1);
-
-    let counters = match query_admin_socket(&socket_path, AdminRequest::GetCounters)
-        .expect("admin counters should succeed")
-    {
-        AdminResponse::Counters(counters) => counters,
-        other => panic!("unexpected admin response: {other:?}"),
-    };
-    assert!(counters.downstream_tls_handshake_failures_verify_depth_exceeded >= 1);
-
-    server.shutdown_and_wait(Duration::from_secs(5));
-}
-
-#[test]
-fn required_mtls_rejects_revoked_client_certificates_via_crl() {
-    let dir = temp_dir("rginx-downstream-mtls-crl");
-    std::fs::create_dir_all(&dir).expect("fixture temp dir should be created");
-
-    let ca = generate_ca();
-    let server_leaf = generate_leaf_cert("localhost", &ca, ExtendedKeyUsagePurpose::ServerAuth);
-    let revoked_client = generate_leaf_cert_with_serial(
-        "client-revoked.example.com",
-        &ca,
-        ExtendedKeyUsagePurpose::ClientAuth,
-        42,
-    );
-    let crl = generate_client_auth_crl(&ca, 42);
-
-    let client_cert_path = dir.join("client.crt");
-    let client_key_path = dir.join("client.key");
-    std::fs::write(&client_cert_path, revoked_client.cert.pem())
-        .expect("client cert should be written");
-    std::fs::write(&client_key_path, revoked_client.signing_key.serialize_pem())
-        .expect("client key should be written");
-
-    let listen_addr = reserve_loopback_addr();
-    let mut server = ServerHarness::spawn_with_tls(
-        "rginx-downstream-mtls-crl",
-        &server_leaf.cert.pem(),
-        &server_leaf.signing_key.serialize_pem(),
-        |temp_dir, cert_path, key_path| {
-            let ca_path = temp_dir.join("client-ca.pem");
-            let crl_path = temp_dir.join("client-auth.crl.pem");
-            std::fs::write(&ca_path, ca.cert.pem()).expect("CA cert should be written");
-            std::fs::write(&crl_path, crl.pem().expect("CRL PEM should encode"))
-                .expect("CRL should be written");
-            common_client_auth_config_with_extra(
-                listen_addr,
-                cert_path,
-                key_path,
-                &ca_path,
-                "Required",
-                "crl mtls\n",
-                &format!("                crl_path: Some({:?}),\n", crl_path.display().to_string()),
-            )
-        },
-    );
-
-    let socket_path = admin_socket_path_for_config(server.config_path());
-    wait_for_admin_socket(&socket_path, Duration::from_secs(5));
-
-    let result = fetch_https_text_response(
-        listen_addr,
-        "localhost",
-        "/",
-        Some((&client_cert_path, &client_key_path)),
-    );
-    assert!(result.is_err(), "revoked client certificate should be rejected");
-
-    let status = match query_admin_socket(&socket_path, AdminRequest::GetStatus)
-        .expect("admin status should succeed")
-    {
-        AdminResponse::Status(status) => status,
-        other => panic!("unexpected admin response: {other:?}"),
-    };
-    assert!(status.tls.listeners[0].client_auth_crl_configured);
-    assert!(status.mtls.handshake_failures_certificate_revoked >= 1);
-
-    let counters = match query_admin_socket(&socket_path, AdminRequest::GetCounters)
-        .expect("admin counters should succeed")
-    {
-        AdminResponse::Counters(counters) => counters,
-        other => panic!("unexpected admin response: {other:?}"),
-    };
-    assert!(counters.downstream_tls_handshake_failures_certificate_revoked >= 1);
-
-    server.shutdown_and_wait(Duration::from_secs(5));
-}
-
-#[test]
-fn mtls_access_log_variables_render_client_identity() {
-    let fixture = TlsFixture::new("rginx-downstream-mtls-access-log");
-    let listen_addr = reserve_loopback_addr();
-    let mut server = ServerHarness::spawn_with_tls(
-        "rginx-downstream-mtls-access-log",
-        &fixture.server_cert_pem,
-        &fixture.server_key_pem,
-        |temp_dir, cert_path, key_path| {
-            let ca_path = temp_dir.join("client-ca.pem");
-            std::fs::write(&ca_path, &fixture.ca_cert_pem).expect("CA cert should be written");
-            format!(
-                "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n        access_log_format: Some(\"mtls=$tls_client_authenticated subject=\\\"$tls_client_subject\\\" issuer=\\\"$tls_client_issuer\\\" serial=\\\"$tls_client_serial\\\" chain=$tls_client_chain_length chain_subjects=\\\"$tls_client_chain_subjects\\\" san=\\\"$tls_client_san_dns_names\\\"\"),\n        tls: Some(ServerTlsConfig(\n            cert_path: {:?},\n            key_path: {:?},\n            client_auth: Some(ServerClientAuthConfig(\n                mode: Optional,\n                ca_cert_path: {:?},\n            )),\n        )),\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Return(\n                status: 200,\n                location: \"\",\n                body: Some(\"optional mtls\\n\"),\n            ),\n        ),\n    ],\n)\n",
-                listen_addr.to_string(),
-                cert_path.display().to_string(),
-                key_path.display().to_string(),
-                ca_path.display().to_string(),
-                ready_route = READY_ROUTE_CONFIG,
-            )
-        },
-    );
-
-    wait_for_https_text_response(
-        &mut server,
-        listen_addr,
-        "localhost",
-        "/",
-        Some((&fixture.client_cert_path, &fixture.client_key_path)),
-        200,
-        "optional mtls\n",
-        Duration::from_secs(5),
-    );
-    let response = fetch_https_text_response(
-        listen_addr,
-        "localhost",
-        "/",
-        Some((&fixture.client_cert_path, &fixture.client_key_path)),
-    )
-    .expect("authenticated request should succeed");
-    assert_eq!(response, (200, "optional mtls\n".to_string()));
-
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        let output = server.combined_output();
-        if output.contains("mtls=true")
-            && output.contains("subject=\"CN=client.example.com\"")
-            && output.contains("issuer=\"CN=rginx test ca\"")
-            && output.contains("serial=")
-            && output.contains("chain=1")
-            && output.contains("chain_subjects=\"CN=client.example.com\"")
-            && output.contains("san=\"client.example.com\"")
-        {
-            break;
-        }
-        if Instant::now() >= deadline {
-            panic!("timed out waiting for mTLS access log line\n{}", output);
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-
-    server.shutdown_and_wait(Duration::from_secs(5));
-}
+#[path = "downstream_mtls/enforcement.rs"]
+mod enforcement;
+#[path = "downstream_mtls/observability.rs"]
+mod observability;
+#[path = "downstream_mtls/validation.rs"]
+mod validation;
 
 struct TlsFixture {
     _dir: PathBuf,

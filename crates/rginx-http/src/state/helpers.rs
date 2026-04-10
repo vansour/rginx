@@ -1,4 +1,4 @@
-fn prepare_state(
+pub(super) fn prepare_state(
     config: ConfigSnapshot,
     peer_health_notifier: Option<HealthChangeNotifier>,
 ) -> Result<PreparedState> {
@@ -15,7 +15,7 @@ fn prepare_state(
     })
 }
 
-fn prepare_listener_tls_acceptors(
+pub(super) fn prepare_listener_tls_acceptors(
     config: &ConfigSnapshot,
 ) -> Result<HashMap<String, Option<TlsAcceptor>>> {
     config
@@ -34,7 +34,7 @@ fn prepare_listener_tls_acceptors(
         .collect::<Result<HashMap<_, _>>>()
 }
 
-fn build_peer_health_notifier(
+pub(super) fn build_peer_health_notifier(
     snapshot_version: Arc<AtomicU64>,
     snapshot_notify: Arc<Notify>,
     snapshot_components: Arc<SnapshotComponentVersions>,
@@ -51,13 +51,13 @@ fn build_peer_health_notifier(
     })
 }
 
-fn unix_time_ms(time: SystemTime) -> u64 {
+pub(super) fn unix_time_ms(time: SystemTime) -> u64 {
     time.duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
         .unwrap_or(0)
 }
 
-fn take_background_tasks(
+pub(super) fn take_background_tasks(
     background_tasks: &Arc<Mutex<Vec<JoinHandle<()>>>>,
 ) -> Vec<JoinHandle<()>> {
     let mut tasks = background_tasks.lock().unwrap_or_else(|poisoned| poisoned.into_inner());

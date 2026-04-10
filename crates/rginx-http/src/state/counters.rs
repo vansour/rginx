@@ -1,5 +1,5 @@
 #[derive(Debug, Default)]
-struct HttpCounters {
+pub(super) struct HttpCounters {
     downstream_connections_accepted: AtomicU64,
     downstream_connections_rejected: AtomicU64,
     downstream_requests: AtomicU64,
@@ -22,7 +22,7 @@ struct HttpCounters {
 }
 
 #[derive(Debug, Default)]
-struct ReloadHistory {
+pub(super) struct ReloadHistory {
     attempts_total: u64,
     successes_total: u64,
     failures_total: u64,
@@ -30,7 +30,7 @@ struct ReloadHistory {
 }
 
 #[derive(Debug, Default)]
-struct UpstreamStats {
+pub(super) struct UpstreamStats {
     downstream_requests_total: AtomicU64,
     peer_attempts_total: AtomicU64,
     peer_successes_total: AtomicU64,
@@ -52,7 +52,7 @@ struct UpstreamStats {
 }
 
 #[derive(Debug, Default)]
-struct UpstreamPeerStats {
+pub(super) struct UpstreamPeerStats {
     attempts_total: AtomicU64,
     successes_total: AtomicU64,
     failures_total: AtomicU64,
@@ -60,7 +60,7 @@ struct UpstreamPeerStats {
 }
 
 #[derive(Debug)]
-struct UpstreamStatsEntry {
+pub(super) struct UpstreamStatsEntry {
     upstream: Arc<rginx_core::Upstream>,
     counters: Arc<UpstreamStats>,
     peers: HashMap<String, Arc<UpstreamPeerStats>>,
@@ -68,7 +68,7 @@ struct UpstreamStatsEntry {
 }
 
 #[derive(Debug, Default)]
-struct ResponseCounters {
+pub(super) struct ResponseCounters {
     downstream_responses: AtomicU64,
     downstream_responses_1xx: AtomicU64,
     downstream_responses_2xx: AtomicU64,
@@ -78,12 +78,12 @@ struct ResponseCounters {
 }
 
 #[derive(Debug, Default)]
-struct RollingCounter {
+pub(super) struct RollingCounter {
     buckets: Mutex<VecDeque<(u64, u64)>>,
 }
 
 #[derive(Debug, Default)]
-struct RecentTrafficStatsCounters {
+pub(super) struct RecentTrafficStatsCounters {
     downstream_requests_total: RollingCounter,
     downstream_responses_total: RollingCounter,
     downstream_responses_2xx_total: RollingCounter,
@@ -93,7 +93,7 @@ struct RecentTrafficStatsCounters {
 }
 
 #[derive(Debug, Default)]
-struct RecentUpstreamStatsCounters {
+pub(super) struct RecentUpstreamStatsCounters {
     downstream_requests_total: RollingCounter,
     peer_attempts_total: RollingCounter,
     completed_responses_total: RollingCounter,
@@ -103,7 +103,7 @@ struct RecentUpstreamStatsCounters {
 }
 
 #[derive(Debug, Default)]
-struct GrpcTrafficCounters {
+pub(super) struct GrpcTrafficCounters {
     requests_total: AtomicU64,
     protocol_grpc_total: AtomicU64,
     protocol_grpc_web_total: AtomicU64,
@@ -120,7 +120,7 @@ struct GrpcTrafficCounters {
 }
 
 #[derive(Debug, Default)]
-struct RequestTrafficCounters {
+pub(super) struct RequestTrafficCounters {
     downstream_requests: AtomicU64,
     unmatched_requests_total: AtomicU64,
     responses: ResponseCounters,
@@ -129,7 +129,7 @@ struct RequestTrafficCounters {
 }
 
 #[derive(Debug, Default)]
-struct ListenerTrafficCounters {
+pub(super) struct ListenerTrafficCounters {
     downstream_connections_accepted: AtomicU64,
     downstream_connections_rejected: AtomicU64,
     downstream_mtls_authenticated_connections: AtomicU64,
@@ -173,7 +173,7 @@ impl TlsHandshakeFailureReason {
 }
 
 #[derive(Debug, Default)]
-struct RouteTrafficCounters {
+pub(super) struct RouteTrafficCounters {
     downstream_requests: AtomicU64,
     responses: ResponseCounters,
     access_denied_total: AtomicU64,
@@ -183,26 +183,26 @@ struct RouteTrafficCounters {
 }
 
 #[derive(Debug)]
-struct ListenerTrafficEntry {
+pub(super) struct ListenerTrafficEntry {
     listener_name: String,
     listen_addr: std::net::SocketAddr,
     counters: Arc<ListenerTrafficCounters>,
 }
 
 #[derive(Debug)]
-struct VhostTrafficEntry {
+pub(super) struct VhostTrafficEntry {
     server_names: Vec<String>,
     counters: Arc<RequestTrafficCounters>,
 }
 
 #[derive(Debug)]
-struct RouteTrafficEntry {
+pub(super) struct RouteTrafficEntry {
     vhost_id: String,
     counters: Arc<RouteTrafficCounters>,
 }
 
 #[derive(Debug, Default)]
-struct TrafficStatsIndex {
+pub(super) struct TrafficStatsIndex {
     listeners: HashMap<String, ListenerTrafficEntry>,
     listener_order: Vec<String>,
     vhosts: HashMap<String, VhostTrafficEntry>,
@@ -212,7 +212,7 @@ struct TrafficStatsIndex {
 }
 
 #[derive(Debug, Default)]
-struct SnapshotComponentVersions {
+pub(super) struct SnapshotComponentVersions {
     status: AtomicU64,
     counters: AtomicU64,
     traffic: AtomicU64,
@@ -221,7 +221,7 @@ struct SnapshotComponentVersions {
 }
 
 #[derive(Debug, Default)]
-struct TrafficComponentVersions {
+pub(super) struct TrafficComponentVersions {
     listeners: HashMap<String, u64>,
     vhosts: HashMap<String, u64>,
     routes: HashMap<String, u64>,
@@ -483,7 +483,7 @@ impl ReloadHistory {
     }
 }
 
-fn build_traffic_stats_index(
+pub(super) fn build_traffic_stats_index(
     config: &ConfigSnapshot,
     existing: Option<&TrafficStatsIndex>,
 ) -> TrafficStatsIndex {
@@ -540,7 +540,7 @@ fn build_traffic_stats_index(
     index
 }
 
-fn build_traffic_component_versions(
+pub(super) fn build_traffic_component_versions(
     config: &ConfigSnapshot,
     existing: Option<&TrafficComponentVersions>,
 ) -> TrafficComponentVersions {
@@ -572,7 +572,7 @@ fn build_traffic_component_versions(
     versions
 }
 
-fn build_upstream_stats_map(
+pub(super) fn build_upstream_stats_map(
     config: &ConfigSnapshot,
     existing: Option<&HashMap<String, UpstreamStatsEntry>>,
 ) -> HashMap<String, UpstreamStatsEntry> {
@@ -608,7 +608,7 @@ fn build_upstream_stats_map(
         .collect()
 }
 
-fn build_upstream_name_versions(
+pub(super) fn build_upstream_name_versions(
     config: &ConfigSnapshot,
     existing: Option<&HashMap<String, u64>>,
 ) -> HashMap<String, u64> {
@@ -622,11 +622,11 @@ fn build_upstream_name_versions(
         .collect()
 }
 
-fn window_now_secs() -> u64 {
+pub(super) fn window_now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|duration| duration.as_secs()).unwrap_or(0)
 }
 
-fn trim_old_buckets(buckets: &mut VecDeque<(u64, u64)>, now_second: u64, window_secs: u64) {
+pub(super) fn trim_old_buckets(buckets: &mut VecDeque<(u64, u64)>, now_second: u64, window_secs: u64) {
     let cutoff = now_second.saturating_sub(window_secs.saturating_sub(1));
     while buckets.front().is_some_and(|(second, _)| *second < cutoff) {
         buckets.pop_front();

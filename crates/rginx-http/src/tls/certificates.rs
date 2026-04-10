@@ -6,6 +6,7 @@ use std::sync::Arc;
 use rginx_core::{Error, Result, ServerCertificateBundle, ServerTls, VirtualHostTls};
 use rustls::RootCertStore;
 use rustls::pki_types::{CertificateDer, CertificateRevocationListDer};
+use x509_parser::parse_x509_crl;
 
 pub(crate) fn load_certified_keys(tls: &ServerTls) -> Result<Vec<Arc<rustls::sign::CertifiedKey>>> {
     load_certified_keys_from_material(
@@ -159,7 +160,25 @@ pub(crate) fn load_certificate_revocation_lists(
         return Ok(crls);
     }
 
-    Ok(vec![CertificateRevocationListDer::from(std::fs::read(path)?)])
+    let der = std::fs::read(path)?;
+    validate_der_crl(path, &der)?;
+    Ok(vec![CertificateRevocationListDer::from(der)])
+}
+
+fn validate_der_crl(path: &Path, der: &[u8]) -> Result<()> {
+    let (remaining, _) = parse_x509_crl(der).map_err(|error| {
+        Error::Server(format!(
+            "failed to parse certificate revocation list `{}` as PEM or DER CRL: {error}",
+            path.display()
+        ))
+    })?;
+    if !remaining.is_empty() {
+        return Err(Error::Server(format!(
+            "certificate revocation list `{}` contains trailing data after the DER CRL payload",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 pub(crate) fn load_private_key_from_path(

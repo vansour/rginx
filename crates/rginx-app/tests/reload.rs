@@ -1,425 +1,35 @@
 #![cfg(unix)]
 
+#[allow(unused_imports)]
 use std::fs;
+#[allow(unused_imports)]
 use std::io::{Read, Write};
+#[allow(unused_imports)]
 use std::net::{SocketAddr, TcpStream};
+#[allow(unused_imports)]
 use std::path::{Path, PathBuf};
+#[allow(unused_imports)]
 use std::process::{Command, Output};
+#[allow(unused_imports)]
 use std::sync::mpsc;
+#[allow(unused_imports)]
 use std::sync::{Mutex, OnceLock};
+#[allow(unused_imports)]
 use std::time::{Duration, Instant};
 
+#[allow(unused_imports)]
 use rcgen::{CertifiedKey, KeyPair};
 
 mod support;
 
 use support::{READY_ROUTE_CONFIG, ServerHarness, reserve_loopback_addr};
 
-#[test]
-fn sighup_reload_applies_updated_routes() {
-    let _guard = test_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let listen_addr = reserve_loopback_addr();
-    let mut server = TestServer::spawn(listen_addr, "before reload\n");
-
-    server.wait_for_body(listen_addr, "before reload\n", Duration::from_secs(5));
-
-    server.write_return_config(listen_addr, "after reload\n");
-    server.send_signal(libc::SIGHUP);
-
-    server.wait_for_body(listen_addr, "after reload\n", Duration::from_secs(5));
-    server.shutdown_and_wait(Duration::from_secs(5));
-}
-
-#[test]
-fn nginx_style_reload_command_applies_updated_routes() {
-    let _guard = test_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let listen_addr = reserve_loopback_addr();
-    let mut server = TestServer::spawn(listen_addr, "before reload\n");
-
-    server.wait_for_body(listen_addr, "before reload\n", Duration::from_secs(5));
-
-    server.write_return_config(listen_addr, "after reload\n");
-    let output = server.send_cli_signal("reload");
-
-    assert!(output.status.success(), "rginx -s reload should succeed: {}", render_output(&output));
-
-    server.wait_for_body(listen_addr, "after reload\n", Duration::from_secs(5));
-    server.shutdown_and_wait(Duration::from_secs(5));
-}
-
-#[test]
-fn nginx_style_quit_command_stops_the_server() {
-    let _guard = test_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let listen_addr = reserve_loopback_addr();
-    let mut server = TestServer::spawn(listen_addr, "before quit\n");
-
-    server.wait_for_body(listen_addr, "before quit\n", Duration::from_secs(5));
-
-    let output = server.send_cli_signal("quit");
-    assert!(output.status.success(), "rginx -s quit should succeed: {}", render_output(&output));
-
-    let status = server.wait_for_exit(Duration::from_secs(5));
-    assert!(status.success(), "rginx should exit cleanly after quit: {status}");
-}
-
-#[test]
-fn sighup_reload_adds_explicit_listener_without_restart() {
-    let _guard = test_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let http_addr = reserve_loopback_addr();
-    let admin_addr = reserve_loopback_addr();
-    let mut server = TestServer::spawn_with_config(
-        "rginx-reload-add-listener",
-        explicit_listeners_config(&[("http", http_addr)], "before add\n"),
-    );
-
-    server.wait_for_body(http_addr, "before add\n", Duration::from_secs(5));
-    assert_unreachable(admin_addr, Duration::from_millis(500));
-
-    server.write_config(explicit_listeners_config(
-        &[("http", http_addr), ("admin", admin_addr)],
-        "after add\n",
-    ));
-    server.send_signal(libc::SIGHUP);
-
-    server.wait_for_body(http_addr, "after add\n", Duration::from_secs(5));
-    server.wait_for_body(admin_addr, "after add\n", Duration::from_secs(5));
-    server.shutdown_and_wait(Duration::from_secs(5));
-}
-
-#[test]
-fn sighup_reload_removes_explicit_listener_without_restart() {
-    let _guard = test_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let http_addr = reserve_loopback_addr();
-    let admin_addr = reserve_loopback_addr();
-    let mut server = TestServer::spawn_with_config(
-        "rginx-reload-remove-listener",
-        explicit_listeners_config(&[("http", http_addr), ("admin", admin_addr)], "before remove\n"),
-    );
-
-    server.wait_for_body(http_addr, "before remove\n", Duration::from_secs(5));
-    server.wait_for_body(admin_addr, "before remove\n", Duration::from_secs(5));
-
-    server.write_config(explicit_listeners_config(&[("http", http_addr)], "after remove\n"));
-    server.send_signal(libc::SIGHUP);
-
-    server.wait_for_body(http_addr, "after remove\n", Duration::from_secs(5));
-    assert_unreachable(admin_addr, Duration::from_secs(2));
-    server.shutdown_and_wait(Duration::from_secs(5));
-}
-
-#[test]
-fn removed_listener_drains_in_flight_request_before_going_unreachable() {
-    let _guard = test_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let http_addr = reserve_loopback_addr();
-    let drain_addr = reserve_loopback_addr();
-    let (ready_tx, ready_rx) = mpsc::channel();
-    let upstream_addr =
-        spawn_delayed_response_server(Duration::from_millis(300), "draining\n", Some(ready_tx));
-    let mut server = TestServer::spawn_with_config(
-        "rginx-reload-drain-listener",
-        explicit_listeners_proxy_config(
-            &[("http", http_addr), ("drain", drain_addr)],
-            upstream_addr,
-        ),
-    );
-
-    server.wait_for_body(http_addr, "draining\n", Duration::from_secs(5));
-    server.wait_for_body(drain_addr, "draining\n", Duration::from_secs(5));
-    while ready_rx.try_recv().is_ok() {}
-
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        tx.send(fetch_text_response_with_timeout(drain_addr, "/", Duration::from_secs(3)))
-            .expect("result channel should remain available");
-    });
-    ready_rx.recv_timeout(Duration::from_secs(5)).expect("in-flight request should reach upstream");
-
-    server.write_config(explicit_listeners_proxy_config(&[("http", http_addr)], upstream_addr));
-    server.send_signal(libc::SIGHUP);
-
-    server.wait_for_body(http_addr, "draining\n", Duration::from_secs(5));
-    let result = rx.recv_timeout(Duration::from_secs(5)).expect("in-flight request should finish");
-    let (status, body) = result.expect("in-flight request should succeed");
-    assert_eq!(status, 200);
-    assert_eq!(body, "draining\n");
-
-    assert_unreachable(drain_addr, Duration::from_secs(2));
-    server.shutdown_and_wait(Duration::from_secs(5));
-}
-
-#[test]
-fn sighup_rejects_listen_address_changes() {
-    let _guard = test_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let initial_addr = reserve_loopback_addr();
-    let rejected_addr = reserve_loopback_addr();
-    let mut server = TestServer::spawn(initial_addr, "stable config\n");
-
-    server.wait_for_body(initial_addr, "stable config\n", Duration::from_secs(5));
-
-    server.write_return_config(rejected_addr, "should not apply\n");
-    server.send_signal(libc::SIGHUP);
-
-    server.wait_for_body(initial_addr, "stable config\n", Duration::from_secs(5));
-    assert_unreachable(rejected_addr, Duration::from_millis(500));
-
-    server.shutdown_and_wait(Duration::from_secs(5));
-}
-
-#[test]
-fn sighup_rejects_accept_worker_changes() {
-    let _guard = test_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let listen_addr = reserve_loopback_addr();
-    let mut server = TestServer::spawn(listen_addr, "stable workers\n");
-
-    server.wait_for_body(listen_addr, "stable workers\n", Duration::from_secs(5));
-
-    server.write_config(return_config_with_runtime(
-        listen_addr,
-        "should not apply\n",
-        "        accept_workers: Some(2),\n",
-    ));
-    server.send_signal(libc::SIGHUP);
-
-    server.wait_for_body(listen_addr, "stable workers\n", Duration::from_secs(5));
-    server.kill_and_wait(Duration::from_secs(5));
-}
-
-#[test]
-fn sighup_rejects_runtime_worker_thread_changes() {
-    let _guard = test_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let listen_addr = reserve_loopback_addr();
-    let mut server = TestServer::spawn(listen_addr, "stable runtime\n");
-
-    server.wait_for_body(listen_addr, "stable runtime\n", Duration::from_secs(5));
-
-    server.write_config(return_config_with_runtime(
-        listen_addr,
-        "should not apply\n",
-        "        worker_threads: Some(2),\n",
-    ));
-    server.send_signal(libc::SIGHUP);
-
-    server.wait_for_body(listen_addr, "stable runtime\n", Duration::from_secs(5));
-    server.kill_and_wait(Duration::from_secs(5));
-}
-
-#[test]
-fn sighup_status_reports_restart_required_fields_for_startup_boundary_changes() {
-    let _guard = test_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let listen_addr = reserve_loopback_addr();
-    let mut server = TestServer::spawn(listen_addr, "stable runtime\n");
-
-    server.wait_for_body(listen_addr, "stable runtime\n", Duration::from_secs(5));
-
-    server.write_config(return_config_with_runtime(
-        listen_addr,
-        "should not apply\n",
-        "        worker_threads: Some(2),\n        accept_workers: Some(2),\n",
-    ));
-    server.send_signal(libc::SIGHUP);
-
-    server.wait_for_body(listen_addr, "stable runtime\n", Duration::from_secs(5));
-    let status_output = server.run_cli_command(["status"]);
-    assert!(
-        status_output.status.success(),
-        "rginx status should succeed after rejected reload: {}",
-        render_output(&status_output)
-    );
-    let stdout = String::from_utf8_lossy(&status_output.stdout);
-    assert!(stdout.contains("reload_failures=1"), "stdout should report reload failure: {stdout}");
-    assert!(
-        stdout.contains("last_reload_active_revision=0"),
-        "stdout should report the preserved active revision: {stdout}"
-    );
-    assert!(
-        stdout.contains("last_reload_rollback_revision=0"),
-        "stdout should report rollback preservation: {stdout}"
-    );
-    assert!(
-        stdout.contains("reload requires restart because these startup-boundary fields changed"),
-        "stdout should explain restart boundary: {stdout}"
-    );
-    assert!(
-        stdout.contains("runtime.worker_threads"),
-        "stdout should mention worker_threads: {stdout}"
-    );
-    assert!(
-        stdout.contains("runtime.accept_workers"),
-        "stdout should mention accept_workers: {stdout}"
-    );
-
-    server.kill_and_wait(Duration::from_secs(5));
-}
-
-#[test]
-fn sighup_reload_picks_up_updated_included_fragments() {
-    let _guard = test_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let listen_addr = reserve_loopback_addr();
-    let mut server = TestServer::spawn_with_setup("rginx-reload-include-test", |temp_dir| {
-        fs::write(temp_dir.join("routes.ron"), return_route_fragment("before include reload\n"))
-            .expect("initial routes fragment should be written");
-        format!(
-            "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        // @include \"routes.ron\"\n    ],\n)\n",
-            listen_addr.to_string(),
-            ready_route = READY_ROUTE_CONFIG,
-        )
-    });
-    let routes_path = server.temp_dir().join("routes.ron");
-
-    server.wait_for_body(listen_addr, "before include reload\n", Duration::from_secs(5));
-
-    fs::write(&routes_path, return_route_fragment("after include reload\n"))
-        .expect("updated routes fragment should be written");
-    server.send_signal(libc::SIGHUP);
-
-    server.wait_for_body(listen_addr, "after include reload\n", Duration::from_secs(5));
-    server.shutdown_and_wait(Duration::from_secs(5));
-}
-
-#[test]
-fn nginx_style_restart_command_applies_listen_address_changes() {
-    let _guard = test_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let initial_addr = reserve_loopback_addr();
-    let restarted_addr = reserve_loopback_addr();
-    let mut server = TestServer::spawn(initial_addr, "before restart\n");
-
-    server.wait_for_body(initial_addr, "before restart\n", Duration::from_secs(5));
-    let old_pid = read_pid_file(&server.pid_path());
-
-    server.write_return_config(restarted_addr, "after restart\n");
-    let output = server.send_cli_signal("restart");
-    assert!(output.status.success(), "rginx -s restart should succeed: {}", render_output(&output));
-
-    let new_pid = wait_for_pid_change(&server.pid_path(), old_pid, Duration::from_secs(10));
-    let status = server.wait_for_exit(Duration::from_secs(10));
-    assert!(status.success(), "old process should exit cleanly after restart: {status}");
-
-    wait_for_body(restarted_addr, "after restart\n", Duration::from_secs(10));
-    assert_unreachable(initial_addr, Duration::from_millis(500));
-
-    let quit = server.send_cli_signal("quit");
-    assert!(
-        quit.status.success(),
-        "rginx -s quit should stop replacement process: {}",
-        render_output(&quit)
-    );
-    wait_for_process_exit(new_pid, Duration::from_secs(10));
-}
-
-#[test]
-fn nginx_style_restart_command_applies_runtime_worker_changes() {
-    let _guard = test_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let listen_addr = reserve_loopback_addr();
-    let mut server = TestServer::spawn(listen_addr, "runtime restart\n");
-
-    server.wait_for_body(listen_addr, "runtime restart\n", Duration::from_secs(5));
-    let old_pid = read_pid_file(&server.pid_path());
-
-    server.write_config(return_config_with_runtime(
-        listen_addr,
-        "runtime restart\n",
-        "        worker_threads: Some(2),\n        accept_workers: Some(2),\n",
-    ));
-    let output = server.send_cli_signal("restart");
-    assert!(output.status.success(), "rginx -s restart should succeed: {}", render_output(&output));
-
-    let new_pid = wait_for_pid_change(&server.pid_path(), old_pid, Duration::from_secs(10));
-    let status = server.wait_for_exit(Duration::from_secs(10));
-    assert!(status.success(), "old process should exit cleanly after restart: {status}");
-
-    wait_for_body(listen_addr, "runtime restart\n", Duration::from_secs(10));
-    let status_output = server.run_cli_command(["status"]);
-    assert!(
-        status_output.status.success(),
-        "rginx status should succeed after restart: {}",
-        render_output(&status_output)
-    );
-    let stdout = String::from_utf8_lossy(&status_output.stdout);
-    assert!(stdout.contains("worker_threads=2"));
-    assert!(stdout.contains("accept_workers=2"));
-
-    let quit = server.send_cli_signal("quit");
-    assert!(
-        quit.status.success(),
-        "rginx -s quit should stop replacement process: {}",
-        render_output(&quit)
-    );
-    wait_for_process_exit(new_pid, Duration::from_secs(10));
-}
-
-#[test]
-fn nginx_style_restart_command_keeps_old_process_running_when_replacement_fails() {
-    let _guard = test_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let listen_addr = reserve_loopback_addr();
-    let mut server = TestServer::spawn(listen_addr, "stable runtime\n");
-
-    server.wait_for_body(listen_addr, "stable runtime\n", Duration::from_secs(5));
-    let old_pid = read_pid_file(&server.pid_path());
-
-    server.write_config(
-        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 0,\n    ),\n    server: ServerConfig(\n        listen: \"127.0.0.1:0\",\n    ),\n    upstreams: [],\n    locations: [],\n)\n".to_string(),
-    );
-    let output = server.send_cli_signal("restart");
-    assert!(
-        output.status.success(),
-        "restart signal delivery should still succeed: {}",
-        render_output(&output)
-    );
-
-    std::thread::sleep(Duration::from_millis(500));
-    assert_eq!(read_pid_file(&server.pid_path()), old_pid);
-    server.wait_for_body(listen_addr, "stable runtime\n", Duration::from_secs(5));
-
-    server.shutdown_and_wait(Duration::from_secs(5));
-}
-
-#[test]
-fn sighup_status_reports_tls_certificate_changes_after_rotation() {
-    let _guard = test_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let listen_addr = reserve_loopback_addr();
-    let initial_cert = generate_cert("localhost");
-    let rotated_cert = generate_cert("localhost");
-    let mut server = ServerHarness::spawn("rginx-reload-tls-rotation", |temp_dir| {
-        let cert_path = temp_dir.join("server.crt");
-        let key_path = temp_dir.join("server.key");
-        fs::write(&cert_path, initial_cert.cert.pem()).expect("initial cert should be written");
-        fs::write(&key_path, initial_cert.signing_key.serialize_pem())
-            .expect("initial key should be written");
-        tls_return_config(listen_addr, &cert_path, &key_path)
-    });
-
-    server.wait_for_https_ready(listen_addr, Duration::from_secs(5));
-
-    let rotated_cert_path = server.temp_dir().join("server-rotated.crt");
-    let rotated_key_path = server.temp_dir().join("server-rotated.key");
-    fs::write(&rotated_cert_path, rotated_cert.cert.pem()).expect("rotated cert should be written");
-    fs::write(&rotated_key_path, rotated_cert.signing_key.serialize_pem())
-        .expect("rotated key should be written");
-    fs::write(
-        server.config_path(),
-        tls_return_config(listen_addr, &rotated_cert_path, &rotated_key_path),
-    )
-    .expect("rotated TLS config should be written");
-    server.send_signal(libc::SIGHUP);
-
-    server.wait_for_https_ready(listen_addr, Duration::from_secs(5));
-    let status_output = run_cli_command(server.config_path(), ["status"]);
-    assert!(
-        status_output.status.success(),
-        "rginx status should succeed after certificate rotation reload: {}",
-        render_output(&status_output)
-    );
-    let stdout = String::from_utf8_lossy(&status_output.stdout);
-    assert!(stdout.contains("reload_successes=1"), "stdout should report reload success: {stdout}");
-    assert!(
-        stdout.contains("last_reload_tls_certificate_changes=")
-            && stdout.contains("listener:default:")
-            && stdout.contains("->"),
-        "stdout should report TLS certificate changes: {stdout}"
-    );
-
-    server.shutdown_and_wait(Duration::from_secs(5));
-}
+#[path = "reload/reload_boundary.rs"]
+mod reload_boundary;
+#[path = "reload/reload_flow.rs"]
+mod reload_flow;
+#[path = "reload/restart_flow.rs"]
+mod restart_flow;
 
 struct TestServer {
     inner: ServerHarness,
@@ -498,6 +108,14 @@ impl TestServer {
             command.arg(arg);
         }
         command.output().expect("rginx command should run")
+    }
+
+    fn wait_for_status_output(
+        &self,
+        predicate: impl Fn(&str) -> bool,
+        timeout: Duration,
+    ) -> String {
+        wait_for_status_output(self.inner.config_path(), predicate, timeout)
     }
 }
 
@@ -770,6 +388,36 @@ fn run_cli_command<'a>(config_path: &Path, args: impl IntoIterator<Item = &'a st
         command.arg(arg);
     }
     command.output().expect("rginx command should run")
+}
+
+fn wait_for_status_output(
+    config_path: &Path,
+    predicate: impl Fn(&str) -> bool,
+    timeout: Duration,
+) -> String {
+    let deadline = Instant::now() + timeout;
+    let mut last_output = String::new();
+
+    while Instant::now() < deadline {
+        let output = run_cli_command(config_path, ["status"]);
+        let rendered = render_output(&output);
+
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            if predicate(&stdout) {
+                return stdout;
+            }
+        }
+
+        last_output = rendered;
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    panic!(
+        "timed out waiting for rginx status on {} to satisfy the expected condition; last output: {}",
+        config_path.display(),
+        last_output
+    );
 }
 
 fn test_lock() -> &'static Mutex<()> {
