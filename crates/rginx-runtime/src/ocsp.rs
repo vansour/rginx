@@ -69,7 +69,7 @@ async fn refresh_ocsp_staples(state: &SharedState, client: &OcspClient) -> Resul
     let config = state.current_config().await;
     let mut tls_acceptors_changed = false;
 
-    for ocsp in rginx_http::tls_runtime_snapshot_for_config(config.as_ref()).ocsp {
+    for ocsp in rginx_http::tls_ocsp_refresh_specs_for_config(config.as_ref()) {
         let Some(ocsp_staple_path) = ocsp.ocsp_staple_path.clone() else {
             continue;
         };

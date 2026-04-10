@@ -329,6 +329,13 @@ fn validate_ocsp_nonce(
     expected_nonce: Option<&[u8]>,
     nonce_mode: OcspNonceMode,
 ) -> Result<()> {
+    if nonce_mode != OcspNonceMode::Disabled && expected_nonce.is_none() {
+        return Err(Error::Server(format!(
+            "OCSP response for certificate `{}` could not validate nonce because the request nonce was unavailable",
+            path.display()
+        )));
+    }
+
     let Some(expected_nonce) = expected_nonce else {
         return Ok(());
     };

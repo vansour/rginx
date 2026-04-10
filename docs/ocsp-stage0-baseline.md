@@ -60,7 +60,7 @@ Stage 0 的目标不是重构实现，而是冻结当前行为基线，确保后
 
 ### 单元测试
 
-来自 [certificates.rs](/root/github/rginx/crates/rginx-http/src/tls/certificates.rs)：
+来自 [certificates.rs](../crates/rginx-http/src/tls/certificates.rs)：
 
 - `validate_ocsp_response_matches_current_certificate`
   - 冻结“当前证书链生成的 response 能被接受”
@@ -71,7 +71,7 @@ Stage 0 的目标不是重构实现，而是冻结当前行为基线，确保后
 
 ### 集成测试
 
-来自 [ocsp.rs](/root/github/rginx/crates/rginx-app/tests/ocsp.rs)：
+来自 [ocsp.rs](../crates/rginx-app/tests/ocsp.rs)：
 
 - `status_and_check_report_dynamic_ocsp_refresh_state`
   - 冻结 runtime refresh 成功时的 admin/check 语义

@@ -24,9 +24,9 @@ RUN apt-get update \
         xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip3 install --break-system-packages grpcio
+RUN pip3 install --no-cache-dir --break-system-packages grpcio==1.71.0
 
-RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal \
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.85.0 --profile minimal \
     && rustc --version \
     && cargo --version
 

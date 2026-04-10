@@ -127,9 +127,9 @@
 
 为了不污染宿主机，仓库里增加一套默认基于 `Debian trixie` 的 Docker 对比流程：
 
-- Dockerfile: [docker/nginx-compare/Dockerfile](/root/github/rginx/docker/nginx-compare/Dockerfile)
-- 容器内对比脚本: [scripts/nginx_compare.py](/root/github/rginx/scripts/nginx_compare.py)
-- 宿主机包装脚本: [scripts/run-nginx-compare-docker.sh](/root/github/rginx/scripts/run-nginx-compare-docker.sh)
+- Dockerfile: [docker/nginx-compare/Dockerfile](../docker/nginx-compare/Dockerfile)
+- 容器内对比脚本: [scripts/nginx_compare.py](../scripts/nginx_compare.py)
+- 宿主机包装脚本: [scripts/run-nginx-compare-docker.sh](../scripts/run-nginx-compare-docker.sh)
 
 这套流程会：
 
@@ -278,8 +278,8 @@ NGINX 官方文档，本文比较时主要参考：
 
 仓库内部参考：
 
-- [README.md](/root/github/rginx/README.md)
-- [crates/rginx-http/src/transition.rs](/root/github/rginx/crates/rginx-http/src/transition.rs)
-- [crates/rginx-runtime/src/admin.rs](/root/github/rginx/crates/rginx-runtime/src/admin.rs)
-- [crates/rginx-http/src/proxy/forward.rs](/root/github/rginx/crates/rginx-http/src/proxy/forward.rs)
-- [crates/rginx-http/src/state.rs](/root/github/rginx/crates/rginx-http/src/state.rs)
+- [README.md](../README.md)
+- [crates/rginx-http/src/transition.rs](../crates/rginx-http/src/transition.rs)
+- [crates/rginx-runtime/src/admin.rs](../crates/rginx-runtime/src/admin.rs)
+- [crates/rginx-http/src/proxy/forward.rs](../crates/rginx-http/src/proxy/forward.rs)
+- [crates/rginx-http/src/state.rs](../crates/rginx-http/src/state.rs)

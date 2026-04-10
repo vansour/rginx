@@ -49,7 +49,8 @@ pub use connections::ActiveConnectionGuard;
 #[cfg(test)]
 pub(crate) use tls_runtime::inspect_certificate;
 pub use tls_runtime::{
-    tls_reloadable_fields, tls_restart_required_fields, tls_runtime_snapshot_for_config,
+    tls_ocsp_refresh_specs_for_config, tls_reloadable_fields, tls_restart_required_fields,
+    tls_runtime_snapshot_for_config,
 };
 
 #[derive(Clone)]

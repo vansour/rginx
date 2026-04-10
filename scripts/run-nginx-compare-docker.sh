@@ -80,6 +80,11 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+OUT_DIR="$(
+    readlink -f "${OUT_DIR}" 2>/dev/null \
+        || realpath "${OUT_DIR}" 2>/dev/null \
+        || python3 -c 'import os,sys; print(os.path.abspath(sys.argv[1]))' "${OUT_DIR}"
+)"
 mkdir -p "${OUT_DIR}"
 
 if [[ "${BUILD_IMAGE}" -eq 1 ]]; then
@@ -94,4 +99,3 @@ docker run --rm \
     "${extra_args[@]}"
 
 log "outputs written to ${OUT_DIR}"
-

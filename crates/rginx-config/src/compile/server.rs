@@ -555,18 +555,23 @@ fn compile_ocsp_config(ocsp: Option<RawOcspConfig>) -> OcspConfig {
     };
 
     OcspConfig {
-        nonce: match ocsp.nonce.unwrap_or(OcspNonceModeConfig::Disabled) {
-            OcspNonceModeConfig::Disabled => OcspNonceMode::Disabled,
-            OcspNonceModeConfig::Preferred => OcspNonceMode::Preferred,
-            OcspNonceModeConfig::Required => OcspNonceMode::Required,
-        },
-        responder_policy: match ocsp
+        nonce: ocsp
+            .nonce
+            .map(|value| match value {
+                OcspNonceModeConfig::Disabled => OcspNonceMode::Disabled,
+                OcspNonceModeConfig::Preferred => OcspNonceMode::Preferred,
+                OcspNonceModeConfig::Required => OcspNonceMode::Required,
+            })
+            .unwrap_or_default(),
+        responder_policy: ocsp
             .responder_policy
-            .unwrap_or(OcspResponderPolicyConfig::IssuerOrDelegated)
-        {
-            OcspResponderPolicyConfig::IssuerOnly => OcspResponderPolicy::IssuerOnly,
-            OcspResponderPolicyConfig::IssuerOrDelegated => OcspResponderPolicy::IssuerOrDelegated,
-        },
+            .map(|value| match value {
+                OcspResponderPolicyConfig::IssuerOnly => OcspResponderPolicy::IssuerOnly,
+                OcspResponderPolicyConfig::IssuerOrDelegated => {
+                    OcspResponderPolicy::IssuerOrDelegated
+                }
+            })
+            .unwrap_or_default(),
     }
 }
 

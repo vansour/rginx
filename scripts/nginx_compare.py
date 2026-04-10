@@ -25,6 +25,7 @@ import time
 
 
 NGINX_REPO_URL = "https://github.com/nginx/nginx"
+DEFAULT_NGINX_REF = "release-1.29.8"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -53,6 +54,24 @@ class ReloadResult:
     reload_apply_ms: float
 
 
+@dataclasses.dataclass
+class ReservedPort:
+    port: int
+    _socket: socket.socket | None
+
+    def release(self) -> None:
+        if self._socket is None:
+            return
+        self._socket.close()
+        self._socket = None
+
+    def __int__(self) -> int:
+        return self.port
+
+    def __str__(self) -> str:
+        return str(self.port)
+
+
 def run(
     command: list[str],
     *,
@@ -77,10 +96,18 @@ def run(
     return completed
 
 
-def reserve_port() -> int:
-    with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
+def reserve_port() -> ReservedPort:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.bind(("127.0.0.1", 0))
+    return ReservedPort(port=sock.getsockname()[1], _socket=sock)
+
+
+def port_number(port: int | ReservedPort, *, release: bool = False) -> int:
+    if isinstance(port, ReservedPort):
+        if release:
+            port.release()
+        return port.port
+    return port
 
 
 class UpstreamHandler(http.server.BaseHTTPRequestHandler):
@@ -103,14 +130,17 @@ class UpstreamHandler(http.server.BaseHTTPRequestHandler):
 
 
 def start_upstream_server() -> tuple[http.server.ThreadingHTTPServer, threading.Thread, int]:
-    port = reserve_port()
+    reserved = reserve_port()
+    port = reserved.port
+    reserved.release()
     server = http.server.ThreadingHTTPServer(("127.0.0.1", port), UpstreamHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server, thread, port
 
 
-def fetch_text_response(port: int, path: str, *, tls_enabled: bool) -> tuple[int, str]:
+def fetch_text_response(port: int | ReservedPort, path: str, *, tls_enabled: bool) -> tuple[int, str]:
+    port = port_number(port)
     with contextlib.closing(socket.create_connection(("127.0.0.1", port), timeout=1.0)) as sock:
         conn: socket.socket | ssl.SSLSocket
         conn = sock
@@ -143,7 +173,8 @@ def fetch_text_response(port: int, path: str, *, tls_enabled: bool) -> tuple[int
     return int(match.group(1)), body.decode("utf-8", errors="replace")
 
 
-def wait_for_ready(port: int, *, tls_enabled: bool, timeout_secs: float = 20.0) -> None:
+def wait_for_ready(port: int | ReservedPort, *, tls_enabled: bool, timeout_secs: float = 20.0) -> None:
+    port = port_number(port)
     deadline = time.time() + timeout_secs
     while time.time() < deadline:
         try:
@@ -733,10 +764,12 @@ def ensure_rginx_binary(workspace: pathlib.Path) -> pathlib.Path:
     return binary
 
 
-def ensure_nginx_checkout(src_dir: pathlib.Path) -> str:
+def ensure_nginx_checkout(src_dir: pathlib.Path, ref: str) -> str:
     if not src_dir.exists():
-        run(["git", "clone", "--depth", "1", NGINX_REPO_URL, str(src_dir)])
-    commit = run(["git", "rev-parse", "--short", "HEAD"], cwd=src_dir, capture_output=True)
+        run(["git", "clone", "--filter=blob:none", NGINX_REPO_URL, str(src_dir)])
+    run(["git", "fetch", "--tags", "--force", "origin"], cwd=src_dir)
+    run(["git", "checkout", "--detach", ref], cwd=src_dir)
+    commit = run(["git", "rev-parse", "HEAD"], cwd=src_dir, capture_output=True)
     return commit.stdout.strip()
 
 
@@ -805,6 +838,8 @@ def spawn_process(
 
 def stop_process(process: subprocess.Popen[str], *, name: str) -> None:
     if process.poll() is not None:
+        if process.returncode not in (0, -15):
+            raise RuntimeError(f"{name} exited with unexpected status {process.returncode}")
         return
     process.terminate()
     try:
@@ -825,9 +860,10 @@ def measure_reload_apply_time(
     launch_env: dict[str, str] | None,
     config_path: pathlib.Path,
     reloaded_config: str,
-    port: int,
+    port: int | ReservedPort,
     work_dir: pathlib.Path,
 ) -> ReloadResult:
+    port = port_number(port, release=True)
     stdout_path = work_dir / f"{server_name}-{scenario_name}.stdout.log"
     stderr_path = work_dir / f"{server_name}-{scenario_name}.stderr.log"
     process, stack = spawn_process(
@@ -877,11 +913,12 @@ def run_single_server_benchmark(
     launch_cwd: pathlib.Path | None,
     launch_env: dict[str, str] | None,
     ready_tls_enabled: bool,
-    port: int,
+    port: int | ReservedPort,
     work_dir: pathlib.Path,
     requests: int,
     concurrency: int,
 ) -> BenchmarkResult:
+    port = port_number(port, release=True)
     stdout_path = work_dir / f"{server_name}-{scenario_name}.stdout.log"
     stderr_path = work_dir / f"{server_name}-{scenario_name}.stderr.log"
     process, stack = spawn_process(
@@ -913,7 +950,7 @@ def run_single_server_curl_benchmark(
     launch_cwd: pathlib.Path | None,
     launch_env: dict[str, str] | None,
     ready_tls_enabled: bool,
-    port: int,
+    port: int | ReservedPort,
     work_dir: pathlib.Path,
     url: str,
     flags: list[str],
@@ -923,6 +960,7 @@ def run_single_server_curl_benchmark(
     requests: int,
     concurrency: int,
 ) -> BenchmarkResult:
+    port = port_number(port, release=True)
     stdout_path = work_dir / f"{server_name}-{scenario_name}.stdout.log"
     stderr_path = work_dir / f"{server_name}-{scenario_name}.stderr.log"
     process, stack = spawn_process(
@@ -992,6 +1030,7 @@ def render_markdown(
     concurrency: int,
     rginx_version_text: str,
     nginx_version_text: str,
+    nginx_ref: str,
     nginx_commit: str,
 ) -> str:
     lines = [
@@ -1000,7 +1039,7 @@ def render_markdown(
         f"- Environment: Docker / Debian trixie",
         f"- Benchmark tools: `ab -k -n {requests} -c {concurrency}` for plain HTTP/1.1, `curl` threadpool for TLS / HTTP2 / gRPC / grpc-web",
         f"- rginx: `{rginx_version_text}`",
-        f"- nginx: `{nginx_version_text}` (source commit `{nginx_commit}`)",
+        f"- nginx: `{nginx_version_text}` (ref `{nginx_ref}`, source commit `{nginx_commit}`)",
         "- nginx build flags: `--without-http_gzip_module`",
         "",
         "## Raw results",
@@ -1080,6 +1119,7 @@ def main() -> int:
     parser.add_argument("--out-dir", type=pathlib.Path, required=True)
     parser.add_argument("--requests", type=int, default=5000)
     parser.add_argument("--concurrency", type=int, default=64)
+    parser.add_argument("--nginx-ref", default=DEFAULT_NGINX_REF)
     parser.add_argument("--nginx-src-dir", type=pathlib.Path, default=None)
     parser.add_argument("--nginx-install-dir", type=pathlib.Path, default=None)
     args = parser.parse_args()
@@ -1102,7 +1142,7 @@ def main() -> int:
         )
 
         rginx_bin = ensure_rginx_binary(workspace)
-        nginx_commit = ensure_nginx_checkout(nginx_src_dir)
+        nginx_commit = ensure_nginx_checkout(nginx_src_dir, args.nginx_ref)
         nginx_bin = ensure_nginx_binary(nginx_src_dir, nginx_install_dir)
 
         rginx_version_text = rginx_version(rginx_bin)
@@ -1120,7 +1160,7 @@ def main() -> int:
         upstream_server, upstream_thread, upstream_port = start_upstream_server()
         grpc_backend_port = reserve_port()
         grpc_backend_server = start_grpc_backend_server(
-            grpc_backend_port,
+            port_number(grpc_backend_port, release=True),
             cert_path=backend_cert,
             key_path=backend_key,
         )
@@ -1529,6 +1569,7 @@ def main() -> int:
             "concurrency": args.concurrency,
             "rginx_version": rginx_version_text,
             "nginx_version": nginx_version_text,
+            "nginx_ref": args.nginx_ref,
             "nginx_commit": nginx_commit,
             "results": [dataclasses.asdict(result) for result in results],
             "unsupported": [dataclasses.asdict(item) for item in unsupported],
@@ -1545,6 +1586,7 @@ def main() -> int:
                 concurrency=args.concurrency,
                 rginx_version_text=rginx_version_text,
                 nginx_version_text=nginx_version_text,
+                nginx_ref=args.nginx_ref,
                 nginx_commit=nginx_commit,
             ),
         )

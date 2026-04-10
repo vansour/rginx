@@ -20,9 +20,10 @@ pub use state::{
     ReloadOutcomeSnapshot, ReloadResultSnapshot, ReloadStatusSnapshot, RouteStatsSnapshot,
     RuntimeStatusSnapshot, SharedState, SnapshotDeltaSnapshot, SnapshotModule,
     TlsCertificateStatusSnapshot, TlsDefaultCertificateBindingSnapshot, TlsListenerStatusSnapshot,
-    TlsOcspStatusSnapshot, TlsReloadBoundarySnapshot, TlsRuntimeSnapshot, TlsSniBindingSnapshot,
-    TlsVhostBindingSnapshot, TrafficStatsSnapshot, UpstreamPeerStatsSnapshot,
-    UpstreamStatsSnapshot, UpstreamTlsStatusSnapshot, VhostStatsSnapshot, tls_reloadable_fields,
+    TlsOcspRefreshSpec, TlsOcspStatusSnapshot, TlsReloadBoundarySnapshot, TlsRuntimeSnapshot,
+    TlsSniBindingSnapshot, TlsVhostBindingSnapshot, TrafficStatsSnapshot,
+    UpstreamPeerStatsSnapshot, UpstreamStatsSnapshot, UpstreamTlsStatusSnapshot,
+    VhostStatsSnapshot, tls_ocsp_refresh_specs_for_config, tls_reloadable_fields,
     tls_restart_required_fields, tls_runtime_snapshot_for_config,
 };
 pub use tls::{

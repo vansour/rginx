@@ -66,17 +66,26 @@ pub(crate) fn load_certified_key_bundle(
 
     if let Some(ocsp_staple_path) = &bundle.ocsp_staple_path {
         let ocsp = std::fs::read(ocsp_staple_path)?;
-        if !ocsp.is_empty()
-            && super::ocsp::validate_ocsp_response_for_certificate_with_options(
+        if !ocsp.is_empty() {
+            match super::ocsp::validate_ocsp_response_for_certificate_with_options(
                 &bundle.cert_path,
                 &ocsp,
                 None,
                 rginx_core::OcspNonceMode::Disabled,
                 bundle.ocsp.responder_policy,
-            )
-            .is_ok()
-        {
-            certified_key.ocsp = Some(ocsp);
+            ) {
+                Ok(()) => {
+                    certified_key.ocsp = Some(ocsp);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        cert_path = %bundle.cert_path.display(),
+                        staple_path = %ocsp_staple_path.display(),
+                        %error,
+                        "ignoring invalid OCSP staple cache file"
+                    );
+                }
+            }
         }
     }
 
