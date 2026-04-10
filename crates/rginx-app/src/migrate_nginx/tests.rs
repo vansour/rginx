@@ -149,3 +149,53 @@ fn migrate_source_does_not_use_insecure_tls_shorthand_when_other_tls_fields_are_
     assert!(migrated.ron.contains("verify_depth: Some(2),"));
     assert!(migrated.ron.contains("crl_path: Some(\"/etc/nginx/upstream.crl\"),"));
 }
+
+#[test]
+fn migrate_source_skips_unsupported_locations_without_failing_the_server() {
+    let migrated = migrate_source(
+        r#"
+        http {
+            upstream backend {
+                server 10.0.0.10:8080;
+            }
+
+            server {
+                listen 8080;
+
+                location /api {
+                    proxy_pass http://backend;
+                }
+
+                location @fallback {
+                    proxy_pass http://backend;
+                }
+
+                location ~ \.php$ {
+                    proxy_pass http://backend;
+                }
+            }
+        }
+        "#,
+        "inline.conf",
+    )
+    .expect("migration should succeed");
+
+    assert!(migrated.ron.contains("matcher: Prefix(\"/api\")"));
+    assert!(!migrated.ron.contains("matcher: Prefix(\"@fallback\")"));
+    assert!(
+        migrated
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("skipped nginx location `@fallback`")),
+        "warnings should mention the skipped named location: {:?}",
+        migrated.warnings
+    );
+    assert!(
+        migrated
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("skipped nginx location `~ \\.php$`")),
+        "warnings should mention the skipped regex location: {:?}",
+        migrated.warnings
+    );
+}

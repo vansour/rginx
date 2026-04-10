@@ -182,7 +182,15 @@ impl ParsedNginxConfig {
                 }
                 Statement::Block { name, args: _, children } if name == "server" => {
                     top_level = true;
-                    parsed.servers.push(parse_server_block(children, &mut parsed.warnings)?);
+                    let server = parse_server_block(children, &mut parsed.warnings)?;
+                    if server.locations.is_empty() {
+                        parsed.warnings.push(
+                            "skipped an nginx `server` block because none of its locations were within the supported reverse-proxy migration subset"
+                                .to_string(),
+                        );
+                    } else {
+                        parsed.servers.push(server);
+                    }
                 }
                 Statement::Directive { name, .. } => {
                     parsed.warnings.push(format!(
@@ -214,7 +222,15 @@ impl ParsedNginxConfig {
                     self.upstreams.push(parse_upstream_block(&args, children, &mut self.warnings)?);
                 }
                 Statement::Block { name, args: _, children } if name == "server" => {
-                    self.servers.push(parse_server_block(children, &mut self.warnings)?);
+                    let server = parse_server_block(children, &mut self.warnings)?;
+                    if server.locations.is_empty() {
+                        self.warnings.push(
+                            "skipped an nginx `server` block because none of its locations were within the supported reverse-proxy migration subset"
+                                .to_string(),
+                        );
+                    } else {
+                        self.servers.push(server);
+                    }
                 }
                 Statement::Directive { name, .. } => {
                     self.warnings.push(format!(
@@ -383,7 +399,13 @@ fn parse_server_block(
                 args,
                 children,
             } if name == "location" => {
-                locations.push(parse_location(&args, children, warnings)?);
+                match parse_location(&args, children, warnings) {
+                    Ok(location) => locations.push(location),
+                    Err(error) => warnings.push(format!(
+                        "skipped nginx location `{}` because it is outside the supported reverse-proxy migration subset: {error}",
+                        args.join(" ")
+                    )),
+                }
             }
             Statement::Directive { name, .. } => warnings.push(format!(
                 "ignored nginx server directive `{name}` because it is outside the supported migration subset"
@@ -479,6 +501,12 @@ fn parse_location(
         }
         _ => bail!("unsupported nginx location syntax: expected `location /path {{ ... }}`"),
     };
+    let matcher_path = match &matcher {
+        ParsedMatcher::Exact(path) | ParsedMatcher::Prefix(path) => path,
+    };
+    if matcher_path.starts_with('@') {
+        bail!("named nginx locations are outside the supported Week 8 migration subset");
+    }
 
     let mut proxy_pass = None;
     let mut preserve_host = false;
