@@ -103,6 +103,8 @@ pub struct TlsOcspStatusSnapshot {
     pub cert_path: PathBuf,
     pub ocsp_staple_path: Option<PathBuf>,
     pub responder_urls: Vec<String>,
+    pub nonce_mode: String,
+    pub responder_policy: String,
     pub cache_loaded: bool,
     pub cache_size_bytes: Option<usize>,
     pub cache_modified_unix_ms: Option<u64>,
@@ -111,6 +113,17 @@ pub struct TlsOcspStatusSnapshot {
     pub refreshes_total: u64,
     pub failures_total: u64,
     pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TlsOcspRefreshSpec {
+    pub scope: String,
+    pub cert_path: PathBuf,
+    pub ocsp_staple_path: Option<PathBuf>,
+    pub responder_urls: Vec<String>,
+    pub auto_refresh_enabled: bool,
+    pub ocsp_nonce_mode: rginx_core::OcspNonceMode,
+    pub ocsp_responder_policy: rginx_core::OcspResponderPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -258,7 +258,7 @@ fn print_check_success(config_path: &Path, summary: CheckSummary) {
     }
     for ocsp in &summary.tls.ocsp {
         println!(
-            "tls_ocsp scope={} cert_path={} staple_path={} responder_urls={} cache_loaded={} cache_size_bytes={} cache_modified_unix_ms={} auto_refresh_enabled={} last_refresh_unix_ms={} refreshes_total={} failures_total={} last_error={}",
+            "tls_ocsp scope={} cert_path={} staple_path={} responder_urls={} nonce_mode={} responder_policy={} cache_loaded={} cache_size_bytes={} cache_modified_unix_ms={} auto_refresh_enabled={} last_refresh_unix_ms={} refreshes_total={} failures_total={} last_error={}",
             ocsp.scope,
             ocsp.cert_path.display(),
             ocsp.ocsp_staple_path
@@ -270,6 +270,8 @@ fn print_check_success(config_path: &Path, summary: CheckSummary) {
             } else {
                 ocsp.responder_urls.join(",")
             },
+            ocsp.nonce_mode,
+            ocsp.responder_policy,
             ocsp.cache_loaded,
             ocsp.cache_size_bytes.map(|value| value.to_string()).unwrap_or_else(|| "-".to_string()),
             ocsp.cache_modified_unix_ms

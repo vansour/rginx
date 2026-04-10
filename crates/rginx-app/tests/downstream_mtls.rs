@@ -9,9 +9,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rcgen::{
     BasicConstraints, CertificateParams, CertificateRevocationList,
-    CertificateRevocationListParams, CertifiedKey, DnType, ExtendedKeyUsagePurpose, IsCa,
-    KeyIdMethod, KeyPair, KeyUsagePurpose, RevocationReason, RevokedCertParams, SerialNumber,
-    date_time_ymd,
+    CertificateRevocationListParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyIdMethod,
+    KeyPair, KeyUsagePurpose, RevocationReason, RevokedCertParams, SerialNumber, date_time_ymd,
 };
 use rginx_runtime::admin::{AdminRequest, AdminResponse, admin_socket_path_for_config};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -191,14 +190,14 @@ fn required_mtls_rejects_client_chain_exceeding_verify_depth() {
     let client_key_path = dir.join("client.key");
     std::fs::write(&client_cert_path, format!("{}{}", client.cert.pem(), intermediate.cert.pem()))
         .expect("client chain should be written");
-    std::fs::write(&client_key_path, client.key_pair.serialize_pem())
+    std::fs::write(&client_key_path, client.signing_key.serialize_pem())
         .expect("client key should be written");
 
     let listen_addr = reserve_loopback_addr();
     let mut server = ServerHarness::spawn_with_tls(
         "rginx-downstream-mtls-verify-depth",
         &server.cert.pem(),
-        &server.key_pair.serialize_pem(),
+        &server.signing_key.serialize_pem(),
         |temp_dir, cert_path, key_path| {
             let ca_path = temp_dir.join("client-ca.pem");
             std::fs::write(&ca_path, ca.cert.pem()).expect("CA cert should be written");
@@ -264,14 +263,14 @@ fn required_mtls_rejects_revoked_client_certificates_via_crl() {
     let client_key_path = dir.join("client.key");
     std::fs::write(&client_cert_path, revoked_client.cert.pem())
         .expect("client cert should be written");
-    std::fs::write(&client_key_path, revoked_client.key_pair.serialize_pem())
+    std::fs::write(&client_key_path, revoked_client.signing_key.serialize_pem())
         .expect("client key should be written");
 
     let listen_addr = reserve_loopback_addr();
     let mut server = ServerHarness::spawn_with_tls(
         "rginx-downstream-mtls-crl",
         &server_leaf.cert.pem(),
-        &server_leaf.key_pair.serialize_pem(),
+        &server_leaf.signing_key.serialize_pem(),
         |temp_dir, cert_path, key_path| {
             let ca_path = temp_dir.join("client-ca.pem");
             let crl_path = temp_dir.join("client-auth.crl.pem");
@@ -407,21 +406,33 @@ impl TlsFixture {
         let client_key_path = dir.join("client.key");
         std::fs::write(&client_cert_path, client.cert.pem())
             .expect("client cert should be written");
-        std::fs::write(&client_key_path, client.key_pair.serialize_pem())
+        std::fs::write(&client_key_path, client.signing_key.serialize_pem())
             .expect("client key should be written");
 
         Self {
             _dir: dir,
             ca_cert_pem: ca.cert.pem(),
             server_cert_pem: server.cert.pem(),
-            server_key_pem: server.key_pair.serialize_pem(),
+            server_key_pem: server.signing_key.serialize_pem(),
             client_cert_path,
             client_key_path,
         }
     }
 }
 
-fn generate_ca() -> CertifiedKey {
+struct TestCertifiedKey {
+    cert: rcgen::Certificate,
+    signing_key: KeyPair,
+    params: CertificateParams,
+}
+
+impl TestCertifiedKey {
+    fn issuer(&self) -> Issuer<'_, &KeyPair> {
+        Issuer::from_params(&self.params, &self.signing_key)
+    }
+}
+
+fn generate_ca() -> TestCertifiedKey {
     let mut params = CertificateParams::default();
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     params.distinguished_name.push(DnType::CommonName, "rginx test ca");
@@ -430,12 +441,12 @@ fn generate_ca() -> CertifiedKey {
         KeyUsagePurpose::DigitalSignature,
         KeyUsagePurpose::CrlSign,
     ];
-    let key_pair = KeyPair::generate().expect("CA keypair should generate");
-    let cert = params.self_signed(&key_pair).expect("CA cert should generate");
-    CertifiedKey { cert, key_pair }
+    let signing_key = KeyPair::generate().expect("CA keypair should generate");
+    let cert = params.self_signed(&signing_key).expect("CA cert should generate");
+    TestCertifiedKey { cert, signing_key, params }
 }
 
-fn generate_intermediate_ca(common_name: &str, issuer: &CertifiedKey) -> CertifiedKey {
+fn generate_intermediate_ca(common_name: &str, issuer: &TestCertifiedKey) -> TestCertifiedKey {
     let mut params = CertificateParams::default();
     params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
     params.distinguished_name.push(DnType::CommonName, common_name);
@@ -444,49 +455,47 @@ fn generate_intermediate_ca(common_name: &str, issuer: &CertifiedKey) -> Certifi
         KeyUsagePurpose::DigitalSignature,
         KeyUsagePurpose::CrlSign,
     ];
-    let key_pair = KeyPair::generate().expect("intermediate keypair should generate");
+    let signing_key = KeyPair::generate().expect("intermediate keypair should generate");
     let cert = params
-        .signed_by(&key_pair, &issuer.cert, &issuer.key_pair)
+        .signed_by(&signing_key, &issuer.issuer())
         .expect("intermediate cert should be signed");
-    CertifiedKey { cert, key_pair }
+    TestCertifiedKey { cert, signing_key, params }
 }
 
 fn generate_leaf_cert(
     dns_name: &str,
-    issuer: &CertifiedKey,
+    issuer: &TestCertifiedKey,
     usage: ExtendedKeyUsagePurpose,
-) -> CertifiedKey {
+) -> TestCertifiedKey {
     let mut params =
         CertificateParams::new(vec![dns_name.to_string()]).expect("leaf params should build");
     params.distinguished_name.push(DnType::CommonName, dns_name);
     params.extended_key_usages = vec![usage];
-    let key_pair = KeyPair::generate().expect("leaf keypair should generate");
-    let cert = params
-        .signed_by(&key_pair, &issuer.cert, &issuer.key_pair)
-        .expect("leaf cert should be signed");
-    CertifiedKey { cert, key_pair }
+    let signing_key = KeyPair::generate().expect("leaf keypair should generate");
+    let cert =
+        params.signed_by(&signing_key, &issuer.issuer()).expect("leaf cert should be signed");
+    TestCertifiedKey { cert, signing_key, params }
 }
 
 fn generate_leaf_cert_with_serial(
     dns_name: &str,
-    issuer: &CertifiedKey,
+    issuer: &TestCertifiedKey,
     usage: ExtendedKeyUsagePurpose,
     serial: u64,
-) -> CertifiedKey {
+) -> TestCertifiedKey {
     let mut params =
         CertificateParams::new(vec![dns_name.to_string()]).expect("leaf params should build");
     params.distinguished_name.push(DnType::CommonName, dns_name);
     params.extended_key_usages = vec![usage];
     params.serial_number = Some(SerialNumber::from(serial));
-    let key_pair = KeyPair::generate().expect("leaf keypair should generate");
-    let cert = params
-        .signed_by(&key_pair, &issuer.cert, &issuer.key_pair)
-        .expect("leaf cert should be signed");
-    CertifiedKey { cert, key_pair }
+    let signing_key = KeyPair::generate().expect("leaf keypair should generate");
+    let cert =
+        params.signed_by(&signing_key, &issuer.issuer()).expect("leaf cert should be signed");
+    TestCertifiedKey { cert, signing_key, params }
 }
 
 fn generate_client_auth_crl(
-    issuer: &CertifiedKey,
+    issuer: &TestCertifiedKey,
     revoked_serial: u64,
 ) -> CertificateRevocationList {
     CertificateRevocationListParams {
@@ -502,7 +511,7 @@ fn generate_client_auth_crl(
         }],
         key_identifier_method: KeyIdMethod::Sha256,
     }
-    .signed_by(&issuer.cert, &issuer.key_pair)
+    .signed_by(&issuer.issuer())
     .expect("CRL should be signed")
 }
 

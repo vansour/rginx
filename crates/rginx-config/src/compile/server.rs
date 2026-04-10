@@ -4,15 +4,15 @@ use std::time::Duration;
 
 use ipnet::IpNet;
 use rginx_core::{
-    AccessLogFormat, Error, Listener, Result, Server, ServerCertificateBundle,
-    ServerClientAuthMode, ServerClientAuthPolicy, ServerTls, TlsCipherSuite, TlsKeyExchangeGroup,
-    TlsVersion, VirtualHostTls,
+    AccessLogFormat, Error, Listener, OcspConfig, OcspNonceMode, OcspResponderPolicy, Result,
+    Server, ServerCertificateBundle, ServerClientAuthMode, ServerClientAuthPolicy, ServerTls,
+    TlsCipherSuite, TlsKeyExchangeGroup, TlsVersion, VirtualHostTls,
 };
 
 use crate::model::{
-    ListenerConfig, ServerCertificateBundleConfig, ServerClientAuthModeConfig, ServerConfig,
-    ServerTlsConfig, TlsCipherSuiteConfig, TlsKeyExchangeGroupConfig, TlsVersionConfig,
-    VirtualHostTlsConfig,
+    ListenerConfig, OcspConfig as RawOcspConfig, OcspNonceModeConfig, OcspResponderPolicyConfig,
+    ServerCertificateBundleConfig, ServerClientAuthModeConfig, ServerConfig, ServerTlsConfig,
+    TlsCipherSuiteConfig, TlsKeyExchangeGroupConfig, TlsVersionConfig, VirtualHostTlsConfig,
 };
 
 pub(super) struct CompiledServer {
@@ -143,6 +143,7 @@ pub(super) fn compile_server_tls(
         key_exchange_groups,
         alpn_protocols,
         ocsp_staple_path,
+        ocsp,
         session_resumption,
         session_tickets,
         session_cache_size,
@@ -159,6 +160,7 @@ pub(super) fn compile_server_tls(
         key_path,
         additional_certificates,
         ocsp_staple_path,
+        ocsp,
         "server TLS",
     )?;
 
@@ -208,6 +210,7 @@ pub(super) fn compile_server_tls(
         key_exchange_groups: compile_tls_key_exchange_groups(key_exchange_groups),
         alpn_protocols: compile_alpn_protocols(alpn_protocols),
         ocsp_staple_path: compiled_identity.ocsp_staple_path,
+        ocsp: compiled_identity.ocsp,
         session_resumption,
         session_tickets,
         session_cache_size: compile_session_cache_size(session_cache_size)?,
@@ -225,6 +228,7 @@ pub(super) fn compile_virtual_host_tls(
         key_path,
         additional_certificates,
         ocsp_staple_path,
+        ocsp,
     }) = tls
     else {
         return Ok(None);
@@ -236,6 +240,7 @@ pub(super) fn compile_virtual_host_tls(
         key_path,
         additional_certificates,
         ocsp_staple_path,
+        ocsp,
         "vhost TLS",
     )?;
 
@@ -244,6 +249,7 @@ pub(super) fn compile_virtual_host_tls(
         key_path: compiled_identity.key_path,
         additional_certificates: compiled_identity.additional_certificates,
         ocsp_staple_path: compiled_identity.ocsp_staple_path,
+        ocsp: compiled_identity.ocsp,
     }))
 }
 
@@ -449,6 +455,7 @@ struct CompiledCertificateMaterial {
     key_path: std::path::PathBuf,
     additional_certificates: Vec<ServerCertificateBundle>,
     ocsp_staple_path: Option<std::path::PathBuf>,
+    ocsp: OcspConfig,
 }
 
 fn compile_certificate_material(
@@ -457,6 +464,7 @@ fn compile_certificate_material(
     key_path: String,
     additional_certificates: Option<Vec<ServerCertificateBundleConfig>>,
     ocsp_staple_path: Option<String>,
+    ocsp: Option<RawOcspConfig>,
     label: &str,
 ) -> Result<CompiledCertificateMaterial> {
     let cert_path = super::resolve_path(base_dir, cert_path);
@@ -476,6 +484,7 @@ fn compile_certificate_material(
     }
 
     let ocsp_staple_path = compile_ocsp_staple_path(base_dir, ocsp_staple_path, label)?;
+    let ocsp = compile_ocsp_config(ocsp);
     let additional_certificates = additional_certificates
         .unwrap_or_default()
         .into_iter()
@@ -489,6 +498,7 @@ fn compile_certificate_material(
         key_path,
         additional_certificates,
         ocsp_staple_path,
+        ocsp,
     })
 }
 
@@ -514,8 +524,9 @@ fn compile_certificate_bundle(
     }
 
     let ocsp_staple_path = compile_ocsp_staple_path(base_dir, bundle.ocsp_staple_path, label)?;
+    let ocsp = compile_ocsp_config(bundle.ocsp);
 
-    Ok(ServerCertificateBundle { cert_path, key_path, ocsp_staple_path })
+    Ok(ServerCertificateBundle { cert_path, key_path, ocsp_staple_path, ocsp })
 }
 
 fn compile_ocsp_staple_path(
@@ -535,6 +546,32 @@ fn compile_ocsp_staple_path(
             Ok(Some(resolved))
         }
         None => Ok(None),
+    }
+}
+
+fn compile_ocsp_config(ocsp: Option<RawOcspConfig>) -> OcspConfig {
+    let Some(ocsp) = ocsp else {
+        return OcspConfig::default();
+    };
+
+    OcspConfig {
+        nonce: ocsp
+            .nonce
+            .map(|value| match value {
+                OcspNonceModeConfig::Disabled => OcspNonceMode::Disabled,
+                OcspNonceModeConfig::Preferred => OcspNonceMode::Preferred,
+                OcspNonceModeConfig::Required => OcspNonceMode::Required,
+            })
+            .unwrap_or_default(),
+        responder_policy: ocsp
+            .responder_policy
+            .map(|value| match value {
+                OcspResponderPolicyConfig::IssuerOnly => OcspResponderPolicy::IssuerOnly,
+                OcspResponderPolicyConfig::IssuerOrDelegated => {
+                    OcspResponderPolicy::IssuerOrDelegated
+                }
+            })
+            .unwrap_or_default(),
     }
 }
 

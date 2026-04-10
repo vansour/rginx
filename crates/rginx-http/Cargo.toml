@@ -15,7 +15,7 @@ description = "HTTP server, routing, and proxying for rginx."
 base64.workspace = true
 brotli.workspace = true
 bytes.workspace = true
-der = { version = "0.7.8", features = ["alloc", "derive", "oid", "std"] }
+chrono.workspace = true
 flate2.workspace = true
 futures-util.workspace = true
 http.workspace = true
@@ -24,6 +24,10 @@ hyper.workspace = true
 hyper-rustls.workspace = true
 hyper-util.workspace = true
 pin-project-lite.workspace = true
+num-bigint = "0.4"
+rasn = "0.28.11"
+rasn-ocsp = "0.28.11"
+rasn-pkix = "0.28.11"
 rginx-config = { path = "../rginx-config" }
 rginx-core = { path = "../rginx-core" }
 rustls.workspace = true
@@ -35,10 +39,8 @@ sha2.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util"] }
 tokio-rustls.workspace = true
 tracing.workspace = true
-x509-ocsp = { version = "0.2.1", features = ["std"] }
 x509-parser.workspace = true
 
 [dev-dependencies]
-rcgen = "0.13"
-spki = { version = "0.7.3", features = ["alloc"] }
-tempfile = "3.14"
+rcgen = { version = "0.14", features = ["x509-parser"] }
+tempfile = "3.27"

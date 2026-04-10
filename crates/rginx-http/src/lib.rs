@@ -20,12 +20,16 @@ pub use state::{
     ReloadOutcomeSnapshot, ReloadResultSnapshot, ReloadStatusSnapshot, RouteStatsSnapshot,
     RuntimeStatusSnapshot, SharedState, SnapshotDeltaSnapshot, SnapshotModule,
     TlsCertificateStatusSnapshot, TlsDefaultCertificateBindingSnapshot, TlsListenerStatusSnapshot,
-    TlsOcspStatusSnapshot, TlsReloadBoundarySnapshot, TlsRuntimeSnapshot, TlsSniBindingSnapshot,
-    TlsVhostBindingSnapshot, TrafficStatsSnapshot, UpstreamPeerStatsSnapshot,
-    UpstreamStatsSnapshot, UpstreamTlsStatusSnapshot, VhostStatsSnapshot, tls_reloadable_fields,
+    TlsOcspRefreshSpec, TlsOcspStatusSnapshot, TlsReloadBoundarySnapshot, TlsRuntimeSnapshot,
+    TlsSniBindingSnapshot, TlsVhostBindingSnapshot, TrafficStatsSnapshot,
+    UpstreamPeerStatsSnapshot, UpstreamStatsSnapshot, UpstreamTlsStatusSnapshot,
+    VhostStatsSnapshot, tls_ocsp_refresh_specs_for_config, tls_reloadable_fields,
     tls_restart_required_fields, tls_runtime_snapshot_for_config,
 };
-pub use tls::{build_ocsp_request_for_certificate, validate_ocsp_response_for_certificate};
+pub use tls::{
+    build_ocsp_request_for_certificate, build_ocsp_request_for_certificate_with_options,
+    validate_ocsp_response_for_certificate, validate_ocsp_response_for_certificate_with_options,
+};
 pub use transition::{
     ConfigTransitionBoundary, ConfigTransitionKind, ConfigTransitionPlan,
     config_transition_boundary, plan_config_transition, validate_config_transition,

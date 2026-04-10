@@ -12,17 +12,22 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
-use der::asn1::{BitString, OctetString};
-use der::{Decode, Encode};
+use chrono::{DateTime, Utc};
+use rasn::types::{BitString, GeneralizedTime, Integer, ObjectIdentifier, OctetString};
+use rasn_ocsp::{
+    BasicOcspResponse as RasnBasicOcspResponse, CertId as RasnCertId, CertStatus as RasnCertStatus,
+    OcspRequest as RasnOcspRequest, OcspResponse as RasnOcspResponse,
+    OcspResponseStatus as RasnOcspResponseStatus, ResponderId as RasnResponderId,
+    ResponseBytes as RasnResponseBytes, ResponseData as RasnResponseData,
+    SingleResponse as RasnSingleResponse,
+};
 use rcgen::{
-    BasicConstraints, CertificateParams, CertifiedKey, CustomExtension, DnType,
-    ExtendedKeyUsagePurpose, IsCa, KeyPair, KeyUsagePurpose,
+    BasicConstraints, CertificateParams, CustomExtension, DnType, ExtendedKeyUsagePurpose, IsCa,
+    Issuer, KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256, PKCS_ED25519, PKCS_RSA_SHA256,
+    SigningKey,
 };
-use spki::AlgorithmIdentifierOwned;
-use x509_ocsp::{
-    BasicOcspResponse, CertId, CertStatus, OcspGeneralizedTime, OcspResponse, ResponderId,
-    ResponseData, SingleResponse, Version,
-};
+use sha1::Digest;
+use x509_parser::prelude::FromDer;
 
 mod support;
 
@@ -48,10 +53,11 @@ fn status_and_check_report_dynamic_ocsp_refresh_state() {
         );
         fs::write(&cert_path, format!("{}{}", leaf.cert.pem(), ca.cert.pem()))
             .expect("certificate chain should be written");
-        fs::write(&key_path, leaf.key_pair.serialize_pem()).expect("private key should be written");
+        fs::write(&key_path, leaf.signing_key.serialize_pem())
+            .expect("private key should be written");
         fs::write(&ocsp_path, b"").expect("empty OCSP cache file should be written");
         *ocsp_response_body.lock().expect("OCSP response body mutex should lock") =
-            build_ocsp_response_for_certificate(&cert_path);
+            build_ocsp_response_for_certificate(&cert_path, &ca);
 
         format!(
             "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n        server_names: [\"localhost\"],\n        tls: Some(ServerTlsConfig(\n            cert_path: {:?},\n            key_path: {:?},\n            ocsp_staple_path: Some({:?}),\n        )),\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Return(\n                status: 200,\n                location: \"\",\n                body: Some(\"ok\\n\"),\n            ),\n        ),\n    ],\n)\n",
@@ -111,7 +117,8 @@ fn invalid_dynamic_ocsp_response_is_rejected_before_cache_write() {
         );
         fs::write(&cert_path, format!("{}{}", leaf.cert.pem(), ca.cert.pem()))
             .expect("certificate chain should be written");
-        fs::write(&key_path, leaf.key_pair.serialize_pem()).expect("private key should be written");
+        fs::write(&key_path, leaf.signing_key.serialize_pem())
+            .expect("private key should be written");
         fs::write(&ocsp_path, b"").expect("empty OCSP cache file should be written");
 
         format!(
@@ -164,11 +171,13 @@ fn expired_ocsp_cache_is_cleared_when_refresh_fails() {
         );
         fs::write(&cert_path, format!("{}{}", leaf.cert.pem(), ca.cert.pem()))
             .expect("certificate chain should be written");
-        fs::write(&key_path, leaf.key_pair.serialize_pem()).expect("private key should be written");
+        fs::write(&key_path, leaf.signing_key.serialize_pem())
+            .expect("private key should be written");
         fs::write(
             &ocsp_path,
             build_ocsp_response_for_certificate_with_offsets(
                 &cert_path,
+                &ca,
                 TimeOffset::Before(Duration::from_secs(2 * 24 * 60 * 60)),
                 TimeOffset::Before(Duration::from_secs(24 * 60 * 60)),
             ),
@@ -272,22 +281,34 @@ fn render_output(output: &Output) -> String {
     )
 }
 
-fn generate_ca_cert(common_name: &str) -> CertifiedKey {
+struct TestCertifiedKey {
+    cert: rcgen::Certificate,
+    signing_key: KeyPair,
+    params: CertificateParams,
+}
+
+impl TestCertifiedKey {
+    fn issuer(&self) -> Issuer<'_, &KeyPair> {
+        Issuer::from_params(&self.params, &self.signing_key)
+    }
+}
+
+fn generate_ca_cert(common_name: &str) -> TestCertifiedKey {
     let mut params =
         CertificateParams::new(vec![common_name.to_string()]).expect("CA params should build");
     params.distinguished_name.push(DnType::CommonName, common_name);
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
-    let key_pair = KeyPair::generate().expect("CA keypair should generate");
-    let cert = params.self_signed(&key_pair).expect("CA certificate should self-sign");
-    CertifiedKey { cert, key_pair }
+    let signing_key = KeyPair::generate().expect("CA keypair should generate");
+    let cert = params.self_signed(&signing_key).expect("CA certificate should self-sign");
+    TestCertifiedKey { cert, signing_key, params }
 }
 
 fn generate_leaf_cert_with_ocsp_aia(
     dns_name: &str,
-    issuer: &CertifiedKey,
+    issuer: &TestCertifiedKey,
     responder_url: &str,
-) -> CertifiedKey {
+) -> TestCertifiedKey {
     let mut params =
         CertificateParams::new(vec![dns_name.to_string()]).expect("leaf params should build");
     params.distinguished_name.push(DnType::CommonName, dns_name);
@@ -296,11 +317,11 @@ fn generate_leaf_cert_with_ocsp_aia(
         &[1, 3, 6, 1, 5, 5, 7, 1, 1],
         authority_info_access_extension_value(responder_url),
     ));
-    let key_pair = KeyPair::generate().expect("leaf keypair should generate");
+    let signing_key = KeyPair::generate().expect("leaf keypair should generate");
     let cert = params
-        .signed_by(&key_pair, &issuer.cert, &issuer.key_pair)
+        .signed_by(&signing_key, &issuer.issuer())
         .expect("leaf certificate should be signed");
-    CertifiedKey { cert, key_pair }
+    TestCertifiedKey { cert, signing_key, params }
 }
 
 fn authority_info_access_extension_value(responder_url: &str) -> Vec<u8> {
@@ -338,9 +359,10 @@ fn der_length(length: usize) -> Vec<u8> {
     encoded
 }
 
-fn build_ocsp_response_for_certificate(cert_path: &Path) -> Vec<u8> {
+fn build_ocsp_response_for_certificate(cert_path: &Path, issuer: &TestCertifiedKey) -> Vec<u8> {
     build_ocsp_response_for_certificate_with_offsets(
         cert_path,
+        issuer,
         TimeOffset::Before(Duration::from_secs(24 * 60 * 60)),
         TimeOffset::After(Duration::from_secs(24 * 60 * 60)),
     )
@@ -348,6 +370,7 @@ fn build_ocsp_response_for_certificate(cert_path: &Path) -> Vec<u8> {
 
 fn build_ocsp_response_for_certificate_with_offsets(
     cert_path: &Path,
+    issuer: &TestCertifiedKey,
     this_update_offset: TimeOffset,
     next_update_offset: TimeOffset,
 ) -> Vec<u8> {
@@ -357,40 +380,42 @@ fn build_ocsp_response_for_certificate_with_offsets(
     let now = SystemTime::now();
     let this_update = ocsp_time_with_offset(now, this_update_offset);
     let next_update = ocsp_time_with_offset(now, next_update_offset);
-    let basic = BasicOcspResponse {
-        tbs_response_data: ResponseData {
-            version: Version::V1,
-            responder_id: ResponderId::ByKey(
-                OctetString::new(vec![1; 20]).expect("responder key hash should encode"),
-            ),
-            produced_at: this_update,
-            responses: vec![SingleResponse {
-                cert_id,
-                cert_status: CertStatus::good(),
-                this_update,
-                next_update: Some(next_update),
-                single_extensions: None,
-            }],
-            response_extensions: None,
-        },
-        // sha256WithRSAEncryption AlgorithmIdentifier (OID 1.2.840.113549.1.1.11 with NULL params)
-        signature_algorithm: AlgorithmIdentifierOwned::from_der(&[
-            0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b, 0x05,
-            0x00,
-        ])
-        .expect("signature algorithm should decode"),
-        signature: BitString::from_bytes(&[0x01]).expect("signature should encode"),
+    let tbs_response_data = RasnResponseData {
+        version: Integer::from(0),
+        responder_id: responder_id_for_certificate(issuer.cert.der().as_ref()),
+        produced_at: this_update,
+        responses: vec![RasnSingleResponse {
+            cert_id,
+            cert_status: RasnCertStatus::Good,
+            this_update,
+            next_update: Some(next_update),
+            single_extensions: None,
+        }],
+        response_extensions: None,
+    };
+    let tbs_der =
+        rasn::der::encode(&tbs_response_data).expect("response data should encode for signing");
+    let signature = issuer.signing_key.sign(&tbs_der).expect("OCSP response should sign");
+    let basic = RasnBasicOcspResponse {
+        tbs_response_data,
+        signature_algorithm: test_signature_algorithm(&issuer.signing_key),
+        signature: BitString::from_slice(&signature),
         certs: None,
     };
-    OcspResponse::successful(basic)
-        .expect("OCSP response should build")
-        .to_der()
-        .expect("OCSP response should encode")
+    let basic_der = rasn::der::encode(&basic).expect("basic OCSP response should encode");
+    rasn::der::encode(&RasnOcspResponse {
+        status: RasnOcspResponseStatus::Successful,
+        bytes: Some(RasnResponseBytes {
+            r#type: basic_ocsp_response_type_oid(),
+            response: OctetString::from_slice(&basic_der),
+        }),
+    })
+    .expect("OCSP response should encode")
 }
 
-fn extract_ocsp_cert_id_from_request(request_der: &[u8]) -> CertId {
-    let request =
-        x509_ocsp::OcspRequest::from_der(request_der).expect("OCSP request should decode");
+fn extract_ocsp_cert_id_from_request(request_der: &[u8]) -> RasnCertId {
+    let request: RasnOcspRequest =
+        rasn::der::decode(request_der).expect("OCSP request should decode");
     request
         .tbs_request
         .request_list
@@ -404,12 +429,44 @@ enum TimeOffset {
     After(Duration),
 }
 
-fn ocsp_time_with_offset(base: SystemTime, offset: TimeOffset) -> OcspGeneralizedTime {
+fn ocsp_time_with_offset(base: SystemTime, offset: TimeOffset) -> GeneralizedTime {
     let time = match offset {
         TimeOffset::Before(duration) => {
             base.checked_sub(duration).expect("time offset should stay after unix epoch")
         }
         TimeOffset::After(duration) => base + duration,
     };
-    OcspGeneralizedTime::try_from(time).expect("OCSP test time should be encodable")
+    generalized_time_from_system_time(time)
+}
+
+fn basic_ocsp_response_type_oid() -> ObjectIdentifier {
+    ObjectIdentifier::new(vec![1, 3, 6, 1, 5, 5, 7, 48, 1, 1])
+        .expect("basic OCSP response type OID should be valid")
+}
+
+fn generalized_time_from_system_time(time: SystemTime) -> GeneralizedTime {
+    let utc = DateTime::<Utc>::from(time);
+    utc.fixed_offset()
+}
+
+fn responder_id_for_certificate(cert_der: &[u8]) -> RasnResponderId {
+    let (_, cert) = x509_parser::prelude::X509Certificate::from_der(cert_der)
+        .expect("certificate should decode");
+    RasnResponderId::ByKey(OctetString::from(
+        sha1::Sha1::digest(cert.public_key().subject_public_key.data.as_ref()).to_vec(),
+    ))
+}
+
+fn test_signature_algorithm(key: &KeyPair) -> rasn_pkix::AlgorithmIdentifier {
+    let der = if key.algorithm() == &PKCS_ECDSA_P256_SHA256 {
+        &[0x30, 0x0a, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02][..]
+    } else if key.algorithm() == &PKCS_RSA_SHA256 {
+        &[0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b, 0x05, 0x00]
+            [..]
+    } else if key.algorithm() == &PKCS_ED25519 {
+        &[0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70][..]
+    } else {
+        panic!("unsupported OCSP test signature algorithm");
+    };
+    rasn::der::decode(der).expect("signature algorithm should decode")
 }
