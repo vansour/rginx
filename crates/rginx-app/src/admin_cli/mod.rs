@@ -1,7 +1,6 @@
 pub(super) use std::io::{BufReader, Read, Write};
 pub(super) use std::os::unix::net::UnixStream;
 pub(super) use std::path::Path;
-pub(super) use std::time::UNIX_EPOCH;
 
 pub(super) use anyhow::{Context, anyhow};
 pub(super) use rginx_runtime::admin::{

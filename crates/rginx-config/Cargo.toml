@@ -18,3 +18,6 @@ ron.workspace = true
 rginx-core = { path = "../rginx-core" }
 rustls.workspace = true
 serde.workspace = true
+
+[dev-dependencies]
+tempfile = "3.27"

@@ -1,6 +1,5 @@
 use std::fs;
 use std::time::Duration;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::model::{
     Config, HandlerConfig, ListenerConfig, LocationConfig, MatcherConfig, RuntimeConfig,
@@ -8,6 +7,7 @@ use crate::model::{
     UpstreamLoadBalanceConfig, UpstreamPeerConfig, UpstreamProtocolConfig, UpstreamTlsConfig,
     VirtualHostConfig,
 };
+use tempfile::TempDir;
 
 use super::{
     DEFAULT_HEALTH_CHECK_INTERVAL_SECS, DEFAULT_HEALTH_CHECK_TIMEOUT_SECS,
@@ -16,6 +16,10 @@ use super::{
     DEFAULT_UPSTREAM_HTTP2_KEEP_ALIVE_TIMEOUT_SECS, DEFAULT_UPSTREAM_POOL_IDLE_TIMEOUT_SECS,
     DEFAULT_UPSTREAM_REQUEST_TIMEOUT_SECS, compile, compile_with_base,
 };
+
+fn temp_base_dir(prefix: &str) -> TempDir {
+    tempfile::Builder::new().prefix(prefix).tempdir().expect("temp base dir should be created")
+}
 
 #[test]
 fn compile_accepts_https_upstreams() {
@@ -823,13 +827,8 @@ fn compile_uses_default_pool_idle_timeout() {
 
 #[test]
 fn compile_resolves_custom_ca_relative_to_config_base() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time should be after unix epoch")
-        .as_nanos();
-    let base_dir = std::env::temp_dir().join(format!("rginx-config-test-{unique}"));
-    fs::create_dir_all(&base_dir).expect("temp base dir should be created");
-    let ca_path = base_dir.join("dev-ca.pem");
+    let base_dir = temp_base_dir("rginx-config-test-");
+    let ca_path = base_dir.path().join("dev-ca.pem");
     fs::write(&ca_path, b"placeholder").expect("temp CA file should be written");
 
     let config = Config {
@@ -917,7 +916,8 @@ fn compile_resolves_custom_ca_relative_to_config_base() {
         servers: Vec::new(),
     };
 
-    let snapshot = compile_with_base(config, &base_dir).expect("custom CA config should compile");
+    let snapshot =
+        compile_with_base(config, base_dir.path()).expect("custom CA config should compile");
     let proxy = match &snapshot.default_vhost.routes[0].action {
         rginx_core::RouteAction::Proxy(proxy) => proxy,
         _ => panic!("expected proxy route"),
@@ -943,22 +943,14 @@ fn compile_resolves_custom_ca_relative_to_config_base() {
     assert_eq!(active_health.interval, Duration::from_secs(7));
     assert_eq!(active_health.timeout, Duration::from_secs(3));
     assert_eq!(active_health.healthy_successes_required, 4);
-
-    fs::remove_file(&ca_path).expect("temp CA file should be removed");
-    fs::remove_dir(&base_dir).expect("temp base dir should be removed");
 }
 
 #[test]
 fn compile_resolves_upstream_mtls_identity_and_tls_versions_relative_to_config_base() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time should be after unix epoch")
-        .as_nanos();
-    let base_dir = std::env::temp_dir().join(format!("rginx-upstream-mtls-config-test-{unique}"));
-    fs::create_dir_all(&base_dir).expect("temp base dir should be created");
-    let ca_path = base_dir.join("upstream-ca.pem");
-    let client_cert_path = base_dir.join("client.crt");
-    let client_key_path = base_dir.join("client.key");
+    let base_dir = temp_base_dir("rginx-upstream-mtls-config-test-");
+    let ca_path = base_dir.path().join("upstream-ca.pem");
+    let client_cert_path = base_dir.path().join("client.crt");
+    let client_key_path = base_dir.path().join("client.key");
     fs::write(&ca_path, b"placeholder").expect("temp CA file should be written");
     fs::write(&client_cert_path, b"placeholder").expect("temp client cert file should be written");
     fs::write(&client_key_path, b"placeholder").expect("temp client key file should be written");
@@ -1047,7 +1039,7 @@ fn compile_resolves_upstream_mtls_identity_and_tls_versions_relative_to_config_b
     };
 
     let snapshot =
-        compile_with_base(config, &base_dir).expect("upstream mTLS config should compile");
+        compile_with_base(config, base_dir.path()).expect("upstream mTLS config should compile");
     let proxy = match &snapshot.default_vhost.routes[0].action {
         rginx_core::RouteAction::Proxy(proxy) => proxy,
         _ => panic!("expected proxy route"),
@@ -1065,11 +1057,6 @@ fn compile_resolves_upstream_mtls_identity_and_tls_versions_relative_to_config_b
         proxy.upstream.client_identity.as_ref().expect("client identity should compile");
     assert_eq!(client_identity.cert_path, client_cert_path);
     assert_eq!(client_identity.key_path, client_key_path);
-
-    fs::remove_file(&ca_path).expect("temp CA file should be removed");
-    fs::remove_file(&client_cert_path).expect("temp client cert should be removed");
-    fs::remove_file(&client_key_path).expect("temp client key should be removed");
-    fs::remove_dir(&base_dir).expect("temp base dir should be removed");
 }
 
 #[test]
@@ -1512,14 +1499,9 @@ fn compile_generates_distinct_route_and_vhost_ids() {
 
 #[test]
 fn compile_resolves_server_tls_paths_relative_to_config_base() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time should be after unix epoch")
-        .as_nanos();
-    let base_dir = std::env::temp_dir().join(format!("rginx-server-tls-config-test-{unique}"));
-    fs::create_dir_all(&base_dir).expect("temp base dir should be created");
-    let cert_path = base_dir.join("server.crt");
-    let key_path = base_dir.join("server.key");
+    let base_dir = temp_base_dir("rginx-server-tls-config-test-");
+    let cert_path = base_dir.path().join("server.crt");
+    let key_path = base_dir.path().join("server.key");
     fs::write(&cert_path, b"placeholder").expect("temp cert file should be written");
     fs::write(&key_path, b"placeholder").expect("temp key file should be written");
 
@@ -1581,26 +1563,17 @@ fn compile_resolves_server_tls_paths_relative_to_config_base() {
         servers: Vec::new(),
     };
 
-    let snapshot = compile_with_base(config, &base_dir).expect("server TLS should compile");
+    let snapshot = compile_with_base(config, base_dir.path()).expect("server TLS should compile");
     let tls = snapshot.server.tls.expect("compiled server TLS should exist");
     assert_eq!(tls.cert_path, cert_path);
     assert_eq!(tls.key_path, key_path);
-
-    fs::remove_file(cert_path).expect("temp cert file should be removed");
-    fs::remove_file(key_path).expect("temp key file should be removed");
-    fs::remove_dir(base_dir).expect("temp base dir should be removed");
 }
 
 #[test]
 fn compile_preserves_server_tls_policy_fields() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time should be after unix epoch")
-        .as_nanos();
-    let base_dir = std::env::temp_dir().join(format!("rginx-server-tls-policy-test-{unique}"));
-    fs::create_dir_all(&base_dir).expect("temp base dir should be created");
-    let cert_path = base_dir.join("server.crt");
-    let key_path = base_dir.join("server.key");
+    let base_dir = temp_base_dir("rginx-server-tls-policy-test-");
+    let cert_path = base_dir.path().join("server.crt");
+    let key_path = base_dir.path().join("server.key");
     fs::write(&cert_path, b"placeholder").expect("temp cert file should be written");
     fs::write(&key_path, b"placeholder").expect("temp key file should be written");
 
@@ -1660,7 +1633,7 @@ fn compile_preserves_server_tls_policy_fields() {
         servers: Vec::new(),
     };
 
-    let snapshot = compile_with_base(config, &base_dir).expect("server TLS should compile");
+    let snapshot = compile_with_base(config, base_dir.path()).expect("server TLS should compile");
     let tls = snapshot.server.tls.expect("compiled server TLS should exist");
     assert_eq!(tls.versions, Some(vec![rginx_core::TlsVersion::Tls13]));
     assert_eq!(tls.cipher_suites, Some(vec![rginx_core::TlsCipherSuite::Tls13Aes128GcmSha256]));
@@ -1670,23 +1643,14 @@ fn compile_preserves_server_tls_policy_fields() {
     assert_eq!(tls.session_tickets, Some(false));
     assert_eq!(tls.session_cache_size, Some(512));
     assert_eq!(tls.session_ticket_count, None);
-
-    fs::remove_file(cert_path).expect("temp cert file should be removed");
-    fs::remove_file(key_path).expect("temp key file should be removed");
-    fs::remove_dir(base_dir).expect("temp base dir should be removed");
 }
 
 #[test]
 fn compile_preserves_server_tls_ocsp_policy_fields() {
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time should be after unix epoch")
-        .as_nanos();
-    let base_dir = std::env::temp_dir().join(format!("rginx-server-ocsp-policy-test-{unique}"));
-    fs::create_dir_all(&base_dir).expect("temp base dir should be created");
-    let cert_path = base_dir.join("server.crt");
-    let key_path = base_dir.join("server.key");
-    let ocsp_path = base_dir.join("server.ocsp");
+    let base_dir = temp_base_dir("rginx-server-ocsp-policy-test-");
+    let cert_path = base_dir.path().join("server.crt");
+    let key_path = base_dir.path().join("server.key");
+    let ocsp_path = base_dir.path().join("server.ocsp");
     fs::write(&cert_path, b"placeholder").expect("temp cert file should be written");
     fs::write(&key_path, b"placeholder").expect("temp key file should be written");
     fs::write(&ocsp_path, b"").expect("temp ocsp file should be written");
@@ -1750,15 +1714,10 @@ fn compile_preserves_server_tls_ocsp_policy_fields() {
         servers: Vec::new(),
     };
 
-    let snapshot = compile_with_base(config, &base_dir).expect("server TLS should compile");
+    let snapshot = compile_with_base(config, base_dir.path()).expect("server TLS should compile");
     let tls = snapshot.server.tls.expect("compiled server TLS should exist");
     assert_eq!(tls.ocsp.nonce, rginx_core::OcspNonceMode::Required);
     assert_eq!(tls.ocsp.responder_policy, rginx_core::OcspResponderPolicy::IssuerOnly);
-
-    fs::remove_file(cert_path).expect("temp cert file should be removed");
-    fs::remove_file(key_path).expect("temp key file should be removed");
-    fs::remove_file(ocsp_path).expect("temp ocsp file should be removed");
-    fs::remove_dir(base_dir).expect("temp base dir should be removed");
 }
 
 #[test]

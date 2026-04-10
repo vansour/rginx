@@ -3,6 +3,7 @@ use std::io::BufReader;
 use std::path::Path;
 
 use super::*;
+use crate::tls::certificates::load_certificate_revocation_lists;
 use rginx_core::{ClientIdentity, TlsVersion};
 use rustls::client::WebPkiServerVerifier;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -120,23 +121,6 @@ fn load_native_root_store() -> Result<RootCertStore, Error> {
         return Err(Error::Server("no valid native TLS roots were loaded".to_string()));
     }
     Ok(roots)
-}
-
-fn load_certificate_revocation_lists(
-    path: &Path,
-) -> Result<Vec<rustls::pki_types::CertificateRevocationListDer<'static>>, Error> {
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
-    let crls =
-        rustls_pemfile::crls(&mut reader).collect::<Result<Vec<_>, _>>().map_err(|error| {
-            Error::Server(format!("failed to parse CRLs from `{}`: {error}", path.display()))
-        })?;
-
-    if !crls.is_empty() {
-        return Ok(crls);
-    }
-
-    Ok(vec![rustls::pki_types::CertificateRevocationListDer::from(std::fs::read(path)?)])
 }
 
 fn load_certificate_chain(path: &Path) -> Result<Vec<CertificateDer<'static>>, Error> {

@@ -1,5 +1,3 @@
-use super::*;
-
 pub(super) fn render_last_reload(result: Option<&rginx_http::ReloadResultSnapshot>) -> String {
     let Some(result) = result else {
         return "-".to_string();
@@ -8,9 +6,7 @@ pub(super) fn render_last_reload(result: Option<&rginx_http::ReloadResultSnapsho
     let finished_at = result
         .finished_at_unix_ms
         .checked_div(1000)
-        .and_then(|seconds| UNIX_EPOCH.checked_add(std::time::Duration::from_secs(seconds)))
-        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| duration.as_secs().to_string())
+        .map(|seconds| seconds.to_string())
         .unwrap_or_else(|| result.finished_at_unix_ms.to_string());
 
     match &result.outcome {
