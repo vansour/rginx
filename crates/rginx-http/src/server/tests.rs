@@ -70,9 +70,8 @@ fn parse_tls_client_identity_preserves_leaf_fields_and_chain_order() {
         .expect("leaf params should build");
     leaf_params.distinguished_name.push(DnType::CommonName, "client.example.com");
     let leaf_key = KeyPair::generate().expect("leaf keypair should generate");
-    let leaf_cert = leaf_params
-        .signed_by(&leaf_key, &ca_issuer)
-        .expect("leaf cert should be signed by CA");
+    let leaf_cert =
+        leaf_params.signed_by(&leaf_key, &ca_issuer).expect("leaf cert should be signed by CA");
 
     let pem = format!("{}{}", leaf_cert.pem(), _ca_cert.pem());
     let mut reader = std::io::Cursor::new(pem.as_bytes());
@@ -84,7 +83,12 @@ fn parse_tls_client_identity_preserves_leaf_fields_and_chain_order() {
 
     assert_eq!(identity.chain_length, 2);
     assert_eq!(identity.san_dns_names, vec!["client.example.com".to_string()]);
-    assert!(identity.subject.as_deref().is_some_and(|subject| subject.contains("CN=client.example.com")));
+    assert!(
+        identity
+            .subject
+            .as_deref()
+            .is_some_and(|subject| subject.contains("CN=client.example.com"))
+    );
     assert!(identity.issuer.as_deref().is_some_and(|issuer| issuer.contains("CN=rginx test root")));
     assert_eq!(identity.chain_subjects.len(), 2);
     assert!(identity.chain_subjects[0].contains("CN=client.example.com"));

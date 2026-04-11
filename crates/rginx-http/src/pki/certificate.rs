@@ -103,9 +103,8 @@ pub(crate) fn parse_tls_client_identity<'a>(
             if index == 0 {
                 identity.subject = Some(subject);
                 identity.issuer = Some(name_to_string(&cert.tbs_certificate.issuer));
-                identity.serial_number = Some(integer_to_serial_string(
-                    &cert.tbs_certificate.serial_number,
-                ));
+                identity.serial_number =
+                    Some(integer_to_serial_string(&cert.tbs_certificate.serial_number));
                 identity.san_dns_names = subject_alt_dns_names(extensions);
             }
         }
@@ -168,19 +167,18 @@ pub(crate) fn inspect_certificate(path: &Path) -> Option<InspectedCertificate> {
             chain_diagnostics.push("leaf_key_usage_may_not_allow_tls_server_auth".to_string());
         }
         if index == 0
-            && extended_key_usage
-                .as_ref()
-                .is_some_and(|usage| !usage.iter().any(|value| value == "any" || value == "server_auth"))
+            && extended_key_usage.as_ref().is_some_and(|usage| {
+                !usage.iter().any(|value| value == "any" || value == "server_auth")
+            })
         {
             chain_diagnostics.push("leaf_missing_server_auth_eku".to_string());
         }
-        if index > 0
-            && !basic_constraints.as_ref().is_some_and(|constraints| constraints.ca)
-        {
+        if index > 0 && !basic_constraints.as_ref().is_some_and(|constraints| constraints.ca) {
             chain_diagnostics.push(format!("cert[{index}] intermediate_or_root_not_marked_as_ca"));
         }
         if index > 0 && key_usage.as_ref().is_some_and(|usage| !usage.key_cert_sign) {
-            chain_diagnostics.push(format!("cert[{index}] intermediate_or_root_missing_key_cert_sign"));
+            chain_diagnostics
+                .push(format!("cert[{index}] intermediate_or_root_missing_key_cert_sign"));
         }
 
         chain_subjects.push(subject.clone());
@@ -281,9 +279,7 @@ fn load_certificate_chain_der(path: &Path) -> std::io::Result<Vec<Vec<u8>>> {
 
 fn name_to_string(name: &Name) -> String {
     let mut components = Vec::new();
-    let rdns = match name {
-        Name::RdnSequence(rdns) => rdns,
-    };
+    let Name::RdnSequence(rdns) = name;
     for rdn in rdns {
         let mut rdn_components = rdn
             .to_vec()
@@ -329,7 +325,9 @@ fn decode_directory_or_string(bytes: &[u8]) -> String {
             DirectoryString::Printable(value) => bytes_to_lossy_string(value.as_bytes()),
             DirectoryString::Utf8(value) => value,
             DirectoryString::Teletex(value) => codepoints_to_string(value.iter().copied()),
-            DirectoryString::Bmp(value) => codepoints_to_string(value.iter().map(|&ch| u32::from(ch))),
+            DirectoryString::Bmp(value) => {
+                codepoints_to_string(value.iter().map(|&ch| u32::from(ch)))
+            }
             DirectoryString::Universal(value) => value.to_string(),
         };
     }

@@ -160,8 +160,8 @@ fn build_ocsp_request_from_chain(
     Ok((request, request_nonce))
 }
 
-fn parse_leaf_and_issuer_certificates<'a>(
-    certs: &'a [CertificateDer<'static>],
+fn parse_leaf_and_issuer_certificates(
+    certs: &[CertificateDer<'static>],
     path: &Path,
     context: &str,
 ) -> Result<(RasnCertificate, RasnCertificate)> {
@@ -517,12 +517,13 @@ fn responder_id_matches_certificate(
                     path.display()
                 ))
             })?;
-            let subject_der = rasn::der::encode(&cert.tbs_certificate.subject).map_err(|error| {
-                Error::Server(format!(
-                    "failed to encode responder certificate subject for `{}`: {error}",
-                    path.display()
-                ))
-            })?;
+            let subject_der =
+                rasn::der::encode(&cert.tbs_certificate.subject).map_err(|error| {
+                    Error::Server(format!(
+                        "failed to encode responder certificate subject for `{}`: {error}",
+                        path.display()
+                    ))
+                })?;
             Ok(encoded_name.as_slice() == subject_der.as_slice())
         }
         RasnResponderId::ByKey(key_hash) => {
@@ -590,10 +591,7 @@ fn authorize_ocsp_signer(
             path.display()
         )));
     };
-    if !extended_key_usage
-        .iter()
-        .any(|oid| oid.to_string() == "1.3.6.1.5.5.7.3.9")
-    {
+    if !extended_key_usage.iter().any(|oid| oid.to_string() == "1.3.6.1.5.5.7.3.9") {
         return Err(Error::Server(format!(
             "OCSP response for certificate `{}` uses a delegated responder certificate without an OCSP signing extended key usage",
             path.display()
@@ -624,9 +622,7 @@ fn find_certificate_extension<'a>(
     cert: &'a RasnCertificate,
     oid: &str,
 ) -> Option<&'a rasn_pkix::Extension> {
-    certificate_extensions(cert)?
-        .iter()
-        .find(|extension| extension.extn_id.to_string() == oid)
+    certificate_extensions(cert)?.iter().find(|extension| extension.extn_id.to_string() == oid)
 }
 
 fn certificate_extended_key_usage(cert: &RasnCertificate) -> Result<Option<ExtKeyUsageSyntax>> {
@@ -758,11 +754,9 @@ fn verify_signature_with_webpki(
         }
     }
 
-    let error = last_public_key_mismatch.expect("candidates should produce an error when none verify");
-    Err(Error::Server(format!(
-        "{scope_prefix} `{}` {error_suffix}: {error}",
-        path.display()
-    )))
+    let error =
+        last_public_key_mismatch.expect("candidates should produce an error when none verify");
+    Err(Error::Server(format!("{scope_prefix} `{}` {error_suffix}: {error}", path.display())))
 }
 
 fn hex_string(bytes: &[u8]) -> String {
@@ -841,9 +835,9 @@ mod tests {
         ResponseData as RasnResponseData, SingleResponse as RasnSingleResponse,
     };
     use rcgen::{
-        BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer,
-        KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256, PKCS_ED25519, PKCS_RSA_SHA256,
-        SigningKey, CustomExtension,
+        BasicConstraints, CertificateParams, CustomExtension, DnType, ExtendedKeyUsagePurpose,
+        IsCa, Issuer, KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256, PKCS_ED25519,
+        PKCS_RSA_SHA256, SigningKey,
     };
     use rginx_core::ServerCertificateBundle;
 
@@ -1464,8 +1458,7 @@ mod tests {
     }
 
     fn responder_id_for_certificate(cert_der: &[u8]) -> RasnResponderId {
-        let cert: RasnCertificate =
-            rasn::der::decode(cert_der).expect("certificate should decode");
+        let cert: RasnCertificate = rasn::der::decode(cert_der).expect("certificate should decode");
         RasnResponderId::ByKey(OctetString::from(
             Sha1::digest(subject_public_key_bytes(&cert)).to_vec(),
         ))
