@@ -11,6 +11,6 @@ pub use config::{
     RuntimeSettings, Server, ServerCertificateBundle, ServerClientAuthMode, ServerClientAuthPolicy,
     ServerNameMatch, ServerTls, TlsCipherSuite, TlsKeyExchangeGroup, TlsVersion, Upstream,
     UpstreamLoadBalance, UpstreamPeer, UpstreamProtocol, UpstreamSettings, UpstreamTls,
-    VirtualHost, VirtualHostTls, match_server_name,
+    VirtualHost, VirtualHostTls, best_matching_server_name_pattern, match_server_name,
 };
 pub use error::{Error, Result};

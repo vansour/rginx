@@ -28,9 +28,28 @@ case "$1" in
             chown rginx:rginx /var/lib/rginx >/dev/null 2>&1 || true
         fi
 
-        if command -v systemctl >/dev/null 2>&1; then
-            systemctl daemon-reload >/dev/null 2>&1 || true
-            systemctl preset rginx.service >/dev/null 2>&1 || true
+        if [ -x /usr/bin/deb-systemd-helper ]; then
+            deb-systemd-helper unmask 'rginx.service' >/dev/null || true
+
+            if deb-systemd-helper --quiet was-enabled 'rginx.service'; then
+                deb-systemd-helper enable 'rginx.service' >/dev/null || true
+            else
+                deb-systemd-helper update-state 'rginx.service' >/dev/null || true
+            fi
+        fi
+
+        if [ -d /run/systemd/system ]; then
+            systemctl --system daemon-reload >/dev/null || true
+            if [ -n "$2" ]; then
+                action=restart
+            else
+                action=start
+            fi
+            if [ -x /usr/bin/deb-systemd-invoke ]; then
+                deb-systemd-invoke "$action" 'rginx.service' >/dev/null || true
+            else
+                systemctl --system "$action" rginx.service >/dev/null 2>&1 || true
+            fi
         fi
         ;;
 esac

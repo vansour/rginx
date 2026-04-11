@@ -32,7 +32,9 @@ fn check_succeeds_without_binding_listener() {
     assert!(stdout.contains("configuration is valid"));
     assert!(stdout.contains("listener_model=legacy"));
     assert!(stdout.contains("listeners=1"));
-    assert!(stdout.contains(&listen_addr.to_string()));
+    assert!(stdout.contains(&format!("listen_addrs={listen_addr}")));
+    assert!(stdout.contains("check_listener id=default name=default"));
+    assert!(stdout.contains(&format!("listen={listen_addr}")));
     assert!(stdout.contains("worker_threads=auto"));
     assert!(stdout.contains("accept_workers=1"));
     assert!(stdout.contains(
@@ -63,7 +65,8 @@ fn nginx_style_t_flag_succeeds_without_binding_listener() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("configuration is valid"));
     assert!(stdout.contains("listener_model=legacy"));
-    assert!(stdout.contains(&listen_addr.to_string()));
+    assert!(stdout.contains(&format!("listen_addrs={listen_addr}")));
+    assert!(stdout.contains(&format!("listen={listen_addr}")));
 
     drop(reserved);
     let _ = fs::remove_dir_all(temp_dir);
@@ -198,7 +201,9 @@ fn check_reports_explicit_listener_summary_and_reload_boundary() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("listener_model=explicit"));
     assert!(stdout.contains("listeners=2"));
-    assert!(stdout.contains("listen=127.0.0.1:18080"));
+    assert!(stdout.contains("listen_addrs=127.0.0.1:18080,127.0.0.1:18443"));
+    assert!(stdout.contains("check_listener id=listener:http name=http listen=127.0.0.1:18080"));
+    assert!(stdout.contains("check_listener id=listener:https name=https listen=127.0.0.1:18443"));
     assert!(stdout.contains("worker_threads=3"));
     assert!(stdout.contains("accept_workers=2"));
     assert!(stdout.contains(

@@ -13,5 +13,4 @@ cargo test -p rginx --locked \
   --test check \
   --test reload \
   --test ocsp \
-  --test migrate \
   -- --test-threads=1

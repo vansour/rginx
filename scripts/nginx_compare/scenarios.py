@@ -10,7 +10,7 @@ import tempfile
 
 from build import ensure_nginx_binary, ensure_rginx_binary, nginx_version, rginx_version
 from checkout import ensure_nginx_checkout
-from common import UnsupportedScenario, reserve_port, write_text
+from common import BenchmarkResult, ReloadResult, UnsupportedScenario, reserve_port, write_text
 from configs import (
     grpc_frame,
     nginx_grpc_proxy_config,
@@ -26,6 +26,8 @@ from configs import (
 )
 from launch import (
     generate_self_signed_cert,
+    median_benchmark_result,
+    median_reload_result,
     measure_reload_apply_time,
     run_single_server_benchmark,
     run_single_server_curl_benchmark,
@@ -41,6 +43,7 @@ def run_comparison(
     out_dir: pathlib.Path,
     requests: int,
     concurrency: int,
+    rounds: int,
     nginx_ref: str,
     nginx_src_dir: pathlib.Path | None,
     nginx_install_dir: pathlib.Path | None,
@@ -80,13 +83,11 @@ def run_comparison(
         generate_self_signed_cert(backend_cert, backend_key)
 
         upstream_server, upstream_thread, upstream_port = start_upstream_server()
-        grpc_backend_port = reserve_port()
-        grpc_backend_server = start_grpc_backend_server(
-            int(grpc_backend_port),
+        grpc_backend_server, grpc_backend_port = start_grpc_backend_server(
+            0,
             cert_path=backend_cert,
             key_path=backend_key,
         )
-        grpc_backend_port.release()
         try:
             port_plan = {
                 "return": {"rginx": reserve_port(), "nginx": reserve_port()},
@@ -139,7 +140,7 @@ def run_comparison(
                     int(port_plan["grpc"]["rginx"]),
                     frontend_cert,
                     frontend_key,
-                    int(grpc_backend_port),
+                    grpc_backend_port,
                 ),
             )
             write_text(
@@ -168,7 +169,7 @@ def run_comparison(
                     int(port_plan["grpc"]["nginx"]),
                     frontend_cert,
                     frontend_key,
-                    int(grpc_backend_port),
+                    grpc_backend_port,
                 ),
             )
             write_text(
@@ -179,9 +180,27 @@ def run_comparison(
             results = []
             unsupported = []
             reload_results = []
+            round_results = []
+            round_reload_results = []
+
+            def collect_rounds(run_once) -> BenchmarkResult:
+                per_round = [run_once() for _ in range(rounds)]
+                round_results.extend(
+                    {"round": index + 1, **dataclasses.asdict(result)}
+                    for index, result in enumerate(per_round)
+                )
+                return median_benchmark_result(per_round)
+
+            def collect_reload_rounds(run_once) -> ReloadResult:
+                per_round = [run_once() for _ in range(rounds)]
+                round_reload_results.extend(
+                    {"round": index + 1, **dataclasses.asdict(result)}
+                    for index, result in enumerate(per_round)
+                )
+                return median_reload_result(per_round)
 
             results.append(
-                run_single_server_benchmark(
+                collect_rounds(lambda: run_single_server_benchmark(
                     server_name="rginx",
                     scenario_name="return_200",
                     launch_command=[str(rginx_bin), "--config", str(rginx_return_path)],
@@ -192,10 +211,10 @@ def run_comparison(
                     work_dir=out_dir,
                     requests=requests,
                     concurrency=concurrency,
-                )
+                ))
             )
             results.append(
-                run_single_server_benchmark(
+                collect_rounds(lambda: run_single_server_benchmark(
                     server_name="nginx",
                     scenario_name="return_200",
                     launch_command=[
@@ -214,10 +233,10 @@ def run_comparison(
                     work_dir=out_dir,
                     requests=requests,
                     concurrency=concurrency,
-                )
+                ))
             )
             results.append(
-                run_single_server_benchmark(
+                collect_rounds(lambda: run_single_server_benchmark(
                     server_name="rginx",
                     scenario_name="proxy_http1",
                     launch_command=[str(rginx_bin), "--config", str(rginx_proxy_path)],
@@ -228,10 +247,10 @@ def run_comparison(
                     work_dir=out_dir,
                     requests=requests,
                     concurrency=concurrency,
-                )
+                ))
             )
             results.append(
-                run_single_server_benchmark(
+                collect_rounds(lambda: run_single_server_benchmark(
                     server_name="nginx",
                     scenario_name="proxy_http1",
                     launch_command=[
@@ -250,7 +269,7 @@ def run_comparison(
                     work_dir=out_dir,
                     requests=requests,
                     concurrency=concurrency,
-                )
+                ))
             )
 
             https_flags = ["--http1.1", "--insecure"]
@@ -261,7 +280,7 @@ def run_comparison(
             grpc_web_flags = ["--http1.1", "--insecure", "--request", "POST", "--data-binary", "@-"]
 
             results.append(
-                run_single_server_curl_benchmark(
+                collect_rounds(lambda: run_single_server_curl_benchmark(
                     server_name="rginx",
                     scenario_name="https_return_200",
                     launch_command=[str(rginx_bin), "--config", str(rginx_tls_return_path)],
@@ -277,10 +296,10 @@ def run_comparison(
                     timeout_secs=10.0,
                     requests=requests,
                     concurrency=concurrency,
-                )
+                ))
             )
             results.append(
-                run_single_server_curl_benchmark(
+                collect_rounds(lambda: run_single_server_curl_benchmark(
                     server_name="nginx",
                     scenario_name="https_return_200",
                     launch_command=[
@@ -304,10 +323,10 @@ def run_comparison(
                     timeout_secs=10.0,
                     requests=requests,
                     concurrency=concurrency,
-                )
+                ))
             )
             results.append(
-                run_single_server_curl_benchmark(
+                collect_rounds(lambda: run_single_server_curl_benchmark(
                     server_name="rginx",
                     scenario_name="http2_tls_return_200",
                     launch_command=[str(rginx_bin), "--config", str(rginx_tls_return_path)],
@@ -323,10 +342,10 @@ def run_comparison(
                     timeout_secs=10.0,
                     requests=requests,
                     concurrency=concurrency,
-                )
+                ))
             )
             results.append(
-                run_single_server_curl_benchmark(
+                collect_rounds(lambda: run_single_server_curl_benchmark(
                     server_name="nginx",
                     scenario_name="http2_tls_return_200",
                     launch_command=[
@@ -350,10 +369,10 @@ def run_comparison(
                     timeout_secs=10.0,
                     requests=requests,
                     concurrency=concurrency,
-                )
+                ))
             )
             results.append(
-                run_single_server_curl_benchmark(
+                collect_rounds(lambda: run_single_server_curl_benchmark(
                     server_name="rginx",
                     scenario_name="grpc_unary",
                     launch_command=[str(rginx_bin), "--config", str(rginx_grpc_path)],
@@ -370,10 +389,10 @@ def run_comparison(
                     requests=requests,
                     concurrency=concurrency,
                     grpc_mode="grpc",
-                )
+                ))
             )
             results.append(
-                run_single_server_curl_benchmark(
+                collect_rounds(lambda: run_single_server_curl_benchmark(
                     server_name="nginx",
                     scenario_name="grpc_unary",
                     launch_command=[
@@ -398,10 +417,10 @@ def run_comparison(
                     requests=requests,
                     concurrency=concurrency,
                     grpc_mode="grpc",
-                )
+                ))
             )
             results.append(
-                run_single_server_curl_benchmark(
+                collect_rounds(lambda: run_single_server_curl_benchmark(
                     server_name="rginx",
                     scenario_name="grpc_web_binary",
                     launch_command=[str(rginx_bin), "--config", str(rginx_grpc_path)],
@@ -418,10 +437,10 @@ def run_comparison(
                     requests=requests,
                     concurrency=concurrency,
                     grpc_mode="grpc-web-binary",
-                )
+                ))
             )
             results.append(
-                run_single_server_curl_benchmark(
+                collect_rounds(lambda: run_single_server_curl_benchmark(
                     server_name="rginx",
                     scenario_name="grpc_web_text",
                     launch_command=[str(rginx_bin), "--config", str(rginx_grpc_path)],
@@ -438,7 +457,7 @@ def run_comparison(
                     requests=requests,
                     concurrency=concurrency,
                     grpc_mode="grpc-web-text",
-                )
+                ))
             )
 
             unsupported.extend(
@@ -457,37 +476,57 @@ def run_comparison(
             )
 
             reload_results.append(
-                measure_reload_apply_time(
-                    server_name="rginx",
-                    scenario_name="reload_return_body",
-                    launch_command=[str(rginx_bin), "--config", str(rginx_reload_path)],
-                    launch_cwd=workspace,
-                    launch_env=rginx_env,
-                    config_path=rginx_reload_path,
-                    reloaded_config=rginx_reload_config(int(port_plan["reload"]["rginx"]), "new\\n"),
-                    port=port_plan["reload"]["rginx"],
-                    work_dir=out_dir,
+                collect_reload_rounds(
+                    lambda: (
+                        write_text(
+                            rginx_reload_path,
+                            rginx_reload_config(int(port_plan["reload"]["rginx"]), "old\\n"),
+                        ),
+                        measure_reload_apply_time(
+                            server_name="rginx",
+                            scenario_name="reload_return_body",
+                            launch_command=[str(rginx_bin), "--config", str(rginx_reload_path)],
+                            launch_cwd=workspace,
+                            launch_env=rginx_env,
+                            config_path=rginx_reload_path,
+                            reloaded_config=rginx_reload_config(
+                                int(port_plan["reload"]["rginx"]), "new\\n"
+                            ),
+                            port=port_plan["reload"]["rginx"],
+                            work_dir=out_dir,
+                        ),
+                    )[1]
                 )
             )
             reload_results.append(
-                measure_reload_apply_time(
-                    server_name="nginx",
-                    scenario_name="reload_return_body",
-                    launch_command=[
-                        str(nginx_bin),
-                        "-p",
-                        str(nginx_reload_dir),
-                        "-c",
-                        str(nginx_reload_dir / "nginx.conf"),
-                        "-g",
-                        "daemon off;",
-                    ],
-                    launch_cwd=nginx_reload_dir,
-                    launch_env=nginx_env,
-                    config_path=nginx_reload_dir / "nginx.conf",
-                    reloaded_config=nginx_reload_config(int(port_plan["reload"]["nginx"]), "new\\n"),
-                    port=port_plan["reload"]["nginx"],
-                    work_dir=out_dir,
+                collect_reload_rounds(
+                    lambda: (
+                        write_text(
+                            nginx_reload_dir / "nginx.conf",
+                            nginx_reload_config(int(port_plan["reload"]["nginx"]), "old\\n"),
+                        ),
+                        measure_reload_apply_time(
+                            server_name="nginx",
+                            scenario_name="reload_return_body",
+                            launch_command=[
+                                str(nginx_bin),
+                                "-p",
+                                str(nginx_reload_dir),
+                                "-c",
+                                str(nginx_reload_dir / "nginx.conf"),
+                                "-g",
+                                "daemon off;",
+                            ],
+                            launch_cwd=nginx_reload_dir,
+                            launch_env=nginx_env,
+                            config_path=nginx_reload_dir / "nginx.conf",
+                            reloaded_config=nginx_reload_config(
+                                int(port_plan["reload"]["nginx"]), "new\\n"
+                            ),
+                            port=port_plan["reload"]["nginx"],
+                            work_dir=out_dir,
+                        ),
+                    )[1]
                 )
             )
         finally:
@@ -500,13 +539,16 @@ def run_comparison(
             "environment": "docker-trixie",
             "requests": requests,
             "concurrency": concurrency,
+            "rounds": rounds,
             "rginx_version": rginx_version_text,
             "nginx_version": nginx_version_text,
             "nginx_ref": nginx_ref,
             "nginx_commit": nginx_commit,
             "results": [dataclasses.asdict(result) for result in results],
+            "round_results": round_results,
             "unsupported": [dataclasses.asdict(item) for item in unsupported],
             "reload": [dataclasses.asdict(item) for item in reload_results],
+            "reload_round_results": round_reload_results,
         }
         write_text(out_dir / "performance-results.json", json.dumps(payload, indent=2) + "\n")
         write_text(
@@ -517,6 +559,7 @@ def run_comparison(
                 reload_results=reload_results,
                 requests=requests,
                 concurrency=concurrency,
+                rounds=rounds,
                 rginx_version_text=rginx_version_text,
                 nginx_version_text=nginx_version_text,
                 nginx_ref=nginx_ref,

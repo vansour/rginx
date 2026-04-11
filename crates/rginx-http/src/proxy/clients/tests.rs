@@ -74,7 +74,6 @@ fn peer_health_snapshot_delegates_to_registry() {
             worker_threads: None,
             accept_workers: 1,
         },
-        server: server.clone(),
         listeners: vec![Listener {
             id: "default".to_string(),
             name: "default".to_string(),

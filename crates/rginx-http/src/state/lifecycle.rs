@@ -28,7 +28,21 @@ impl SharedState {
         RuntimeStatusSnapshot {
             revision,
             config_path: self.config_path.as_deref().cloned(),
-            listen_addr: config.server.listen_addr,
+            listeners: config
+                .listeners
+                .iter()
+                .map(|listener| RuntimeListenerSnapshot {
+                    listener_id: listener.id.clone(),
+                    listener_name: listener.name.clone(),
+                    listen_addr: listener.server.listen_addr,
+                    tls_enabled: listener.tls_enabled(),
+                    proxy_protocol_enabled: listener.proxy_protocol_enabled,
+                    default_certificate: listener.server.default_certificate.clone(),
+                    keep_alive: listener.server.keep_alive,
+                    max_connections: listener.server.max_connections,
+                    access_log_format_configured: listener.server.access_log_format.is_some(),
+                })
+                .collect(),
             worker_threads: config.runtime.worker_threads,
             accept_workers: config.runtime.accept_workers,
             total_vhosts: config.total_vhost_count(),

@@ -48,22 +48,13 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
     } = raw;
     let runtime = runtime::compile_runtime_settings(runtime)?;
     let any_vhost_tls = raw_servers.iter().any(|vhost| vhost.tls.is_some());
-    let (listeners, primary_server, default_server_names) = if raw_listeners.is_empty() {
+    let (listeners, default_server_names) = if raw_listeners.is_empty() {
         let compiled_server = server::compile_legacy_server(server, base_dir, any_vhost_tls)?;
-        (
-            vec![compiled_server.listener.clone()],
-            compiled_server.listener.server.clone(),
-            compiled_server.server_names,
-        )
+        (vec![compiled_server.listener.clone()], compiled_server.server_names)
     } else {
         let default_server_names = server.server_names;
         let listeners = server::compile_listeners(raw_listeners, base_dir)?;
-        let primary_server = listeners
-            .first()
-            .expect("at least one explicit listener should be compiled")
-            .server
-            .clone();
-        (listeners, primary_server, default_server_names)
+        (listeners, default_server_names)
     };
     let upstreams = upstream::compile_upstreams(raw_upstreams, base_dir)?;
 
@@ -87,14 +78,7 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
         })
         .collect::<Result<Vec<_>>>()?;
 
-    Ok(ConfigSnapshot {
-        runtime,
-        server: primary_server,
-        listeners,
-        default_vhost,
-        vhosts,
-        upstreams,
-    })
+    Ok(ConfigSnapshot { runtime, listeners, default_vhost, vhosts, upstreams })
 }
 #[cfg(test)]
 mod tests;

@@ -2,7 +2,7 @@
 
 `rginx` 是一个面向中小规模部署的 Rust 入口反向代理。
 
-当前版本：`v0.1.3-rc.8`
+当前版本：`v0.1.3-rc.9`
 
 它的目标很收口：
 
@@ -68,7 +68,6 @@
 - `SIGHUP` 热重载
 - Linux 下显式 fd 继承式优雅重启
 - `rginx check`
-- `rginx migrate-nginx`
 - 本地只读运维面：`snapshot / snapshot-version / delta / wait / status / counters / traffic / peers / upstreams`
 
 ## 仓库结构
@@ -183,7 +182,7 @@ curl -fsSL https://raw.githubusercontent.com/vansour/rginx/main/scripts/install.
 - 二进制：`/usr/sbin/rginx`
 - 主配置：`/etc/rginx/rginx.ron`
 - 站点片段：`/etc/rginx/conf.d/*.ron`
-- pid：`/run/rginx.pid`
+- pid：`/run/rginx/rginx.pid`
 - admin socket：`/run/rginx/admin.sock`
 
 卸载：
@@ -237,13 +236,13 @@ sudo apt purge rginx
 注意：
 
 - APT 安装场景下不要再用 `rginx-uninstall`，应该让 `apt remove/purge` 接管整个生命周期
-- 包的 `postinst` 会创建 `rginx` system user，并执行 `systemctl daemon-reload`
-- 是否 `enable --now rginx` 仍建议由你显式控制
+- 包的 `postinst` 会创建 `rginx` system user，并按 Debian `nginx` 包的方式完成 `daemon-reload`、enable 状态维护，以及首次安装启动 / 升级重启
+- systemd unit 会在 `ExecStartPre` 先做一次 `rginx -t`
+- 安装后的默认服务用户仍是 `rginx`，并通过 `CAP_NET_BIND_SERVICE` 支持绑定 `80/443`
 
-首次启用服务：
+安装完成后可直接查看服务状态：
 
 ```bash
-sudo systemctl enable --now rginx
 sudo systemctl status rginx
 ```
 
@@ -311,7 +310,7 @@ sudo apt install rginx
 
 当前约定：
 
-- 预发布 tag，例如 `v0.1.3-rc.8`：发布 GitHub Release 资产，但不更新 APT 仓库
+- 预发布 tag，例如 `v0.1.3-rc.9`：发布 GitHub Release 资产，但不更新 APT 仓库
 - 稳定 tag，例如 `v0.1.3`：同时发布 GitHub Release 和 GitHub Pages APT 仓库
 
 要让稳定版自动发布 APT 仓库，还需要一次性配置：
@@ -614,7 +613,6 @@ rginx check --config /etc/rginx/rginx.ron
 - 上游 HTTPS / mTLS / HTTP2 / SNI 通过
 - access log / admin / check 的 TLS 可观测性通过
 - reload / restart 边界没有回归
-- `migrate-nginx` 对常见 SSL 指令仍能给出稳定结果或 warning
 
 ## 部署
 

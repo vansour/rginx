@@ -40,7 +40,6 @@ fn snapshot(listen: &str) -> ConfigSnapshot {
             worker_threads: None,
             accept_workers: 1,
         },
-        server: server.clone(),
         listeners: vec![Listener {
             id: "default".to_string(),
             name: "default".to_string(),
@@ -174,7 +173,13 @@ async fn status_snapshot_reports_runtime_summary() {
     let status = shared.status_snapshot().await;
     assert_eq!(status.revision, 0);
     assert_eq!(status.config_path, Some(PathBuf::from("/etc/rginx/rginx.ron")));
-    assert_eq!(status.listen_addr, "127.0.0.1:8080".parse().unwrap());
+    assert_eq!(status.listeners.len(), 1);
+    assert_eq!(status.listeners[0].listener_id, "default");
+    assert_eq!(status.listeners[0].listener_name, "default");
+    assert_eq!(status.listeners[0].listen_addr, "127.0.0.1:8080".parse().unwrap());
+    assert!(!status.listeners[0].tls_enabled);
+    assert!(!status.listeners[0].proxy_protocol_enabled);
+    assert!(!status.listeners[0].access_log_format_configured);
     assert_eq!(status.total_vhosts, 1);
     assert_eq!(status.total_routes, 0);
     assert_eq!(status.total_upstreams, 0);

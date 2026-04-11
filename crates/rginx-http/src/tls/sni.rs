@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use rginx_core::best_matching_server_name_pattern;
+#[cfg(test)]
 use rginx_core::{ServerNameMatch, match_server_name};
 use rustls::SignatureScheme;
 use rustls::server::{ClientHello, ResolvesServerCert};
@@ -25,10 +27,11 @@ impl ResolvesServerCert for SniCertificateResolver {
     fn resolve(&self, client_hello: ClientHello) -> Option<Arc<rustls::sign::CertifiedKey>> {
         if let Some(name) = client_hello.server_name() {
             let name_lower = name.to_lowercase();
-            if let Some(certs) = self.by_name.get(&name_lower) {
-                return select_compatible_certified_key(certs, client_hello.signature_schemes());
-            }
-            if let Some(certs) = best_matching_wildcard_certificates(&self.by_name, &name_lower) {
+            if let Some((pattern, _)) = best_matching_server_name_pattern(
+                self.by_name.keys().map(String::as_str),
+                &name_lower,
+            ) && let Some(certs) = self.by_name.get(pattern)
+            {
                 return select_compatible_certified_key(certs, client_hello.signature_schemes());
             }
         }
@@ -46,6 +49,7 @@ pub(super) fn register_server_name_certificates(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn best_matching_wildcard_certificates<'a>(
     by_name: &'a HashMap<String, Vec<Arc<rustls::sign::CertifiedKey>>>,
     server_name: &str,

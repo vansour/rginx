@@ -45,7 +45,23 @@ pub fn select_vhost<'a>(
     default: &'a VirtualHost,
     host: &str,
 ) -> &'a VirtualHost {
-    vhosts.iter().find(|vhost| vhost.matches_host(host)).unwrap_or(default)
+    let mut selected = None::<((u8, usize), &VirtualHost)>;
+
+    for vhost in vhosts {
+        let Some(matched) = vhost.best_server_name_match(host) else {
+            continue;
+        };
+        let priority = matched.priority();
+        match selected {
+            None => selected = Some((priority, vhost)),
+            Some((current_priority, _)) if priority > current_priority => {
+                selected = Some((priority, vhost))
+            }
+            Some(_) => {}
+        }
+    }
+
+    selected.map(|(_, vhost)| vhost).unwrap_or(default)
 }
 
 /// 在指定虚拟主机内选择路由

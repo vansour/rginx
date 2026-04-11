@@ -1,5 +1,6 @@
 [Unit]
 Description=rginx edge reverse proxy
+ConditionFileIsExecutable=/usr/sbin/rginx
 After=network-online.target
 Wants=network-online.target
 
@@ -10,17 +11,24 @@ Group=rginx
 WorkingDirectory=/etc/rginx
 RuntimeDirectory=rginx
 RuntimeDirectoryMode=0755
+StateDirectory=rginx
+PIDFile=/run/rginx/rginx.pid
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+ExecStartPre=/usr/sbin/rginx --config /etc/rginx/rginx.ron -t
 ExecStart=/usr/sbin/rginx --config /etc/rginx/rginx.ron
 ExecReload=/usr/sbin/rginx --config /etc/rginx/rginx.ron -s reload
-ExecStop=/usr/sbin/rginx --config /etc/rginx/rginx.ron -s quit
+ExecStop=-/usr/sbin/rginx --config /etc/rginx/rginx.ron -s quit
 Restart=on-failure
 RestartSec=2
+TimeoutStopSec=5
+KillMode=mixed
 LimitNOFILE=65535
 NoNewPrivileges=yes
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/etc/rginx /run
+ReadWritePaths=/etc/rginx /run/rginx /var/lib/rginx
 
 [Install]
 WantedBy=multi-user.target

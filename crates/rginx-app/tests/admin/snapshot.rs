@@ -40,12 +40,20 @@ fn snapshot_command_returns_aggregate_json_snapshot() {
     let AdminResponse::Snapshot(snapshot) = response else {
         panic!("admin socket should return aggregate snapshot");
     };
-    assert_eq!(snapshot.schema_version, 10);
+    assert_eq!(snapshot.schema_version, 11);
     assert!(snapshot.captured_at_unix_ms > 0);
     assert!(snapshot.pid > 0);
     assert_eq!(snapshot.binary_version, env!("CARGO_PKG_VERSION"));
     assert_eq!(snapshot.included_modules, rginx_http::SnapshotModule::all());
-    assert_eq!(snapshot.status.as_ref().map(|status| status.listen_addr), Some(listen_addr));
+    assert_eq!(snapshot.status.as_ref().map(|status| status.listeners.len()), Some(1));
+    assert_eq!(
+        snapshot
+            .status
+            .as_ref()
+            .and_then(|status| status.listeners.first())
+            .map(|listener| listener.listen_addr),
+        Some(listen_addr)
+    );
     assert_eq!(snapshot.status.as_ref().map(|status| status.tls.listeners.len()), Some(1));
     assert!(snapshot.counters.as_ref().map(|c| c.downstream_requests).unwrap_or(0) >= 1);
     assert_eq!(snapshot.traffic.as_ref().map(|t| t.listeners.len()), Some(1));
@@ -57,11 +65,15 @@ fn snapshot_command_returns_aggregate_json_snapshot() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let snapshot: serde_json::Value =
         serde_json::from_str(&stdout).expect("snapshot command should print valid JSON");
-    assert_eq!(snapshot["schema_version"], serde_json::Value::from(10));
+    assert_eq!(snapshot["schema_version"], serde_json::Value::from(11));
     assert!(snapshot["captured_at_unix_ms"].as_u64().unwrap_or(0) > 0);
     assert!(snapshot["pid"].as_u64().unwrap_or(0) > 0);
     assert_eq!(snapshot["binary_version"], serde_json::Value::from(env!("CARGO_PKG_VERSION")));
-    assert_eq!(snapshot["status"]["listen_addr"], serde_json::Value::from(listen_addr.to_string()));
+    assert_eq!(snapshot["status"]["listeners"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        snapshot["status"]["listeners"][0]["listen_addr"],
+        serde_json::Value::from(listen_addr.to_string())
+    );
     assert_eq!(snapshot["status"]["tls"]["listeners"].as_array().map(Vec::len), Some(1));
     assert!(snapshot["counters"]["downstream_requests"].as_u64().unwrap_or(0) >= 1);
     assert_eq!(snapshot["traffic"]["listeners"].as_array().map(Vec::len), Some(1));

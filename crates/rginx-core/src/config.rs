@@ -31,10 +31,18 @@ pub enum ServerNameMatch {
     Wildcard { suffix_len: usize },
 }
 
+impl ServerNameMatch {
+    pub fn priority(self) -> (u8, usize) {
+        match self {
+            Self::Exact => (2, 0),
+            Self::Wildcard { suffix_len } => (1, suffix_len),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ConfigSnapshot {
     pub runtime: RuntimeSettings,
-    pub server: Server,
     pub listeners: Vec<Listener>,
     pub default_vhost: VirtualHost,
     pub vhosts: Vec<VirtualHost>,
@@ -89,11 +97,25 @@ pub struct VirtualHost {
 
 impl VirtualHost {
     pub fn matches_host(&self, host: &str) -> bool {
-        if self.server_names.is_empty() {
-            return true;
-        }
-        self.server_names.iter().any(|pattern| match_server_name(pattern, host).is_some())
+        self.server_names.is_empty() || self.best_server_name_match(host).is_some()
     }
+
+    pub fn best_server_name_match(&self, host: &str) -> Option<ServerNameMatch> {
+        best_matching_server_name_pattern(self.server_names.iter().map(String::as_str), host)
+            .map(|(_, matched)| matched)
+    }
+}
+
+pub fn best_matching_server_name_pattern<'a>(
+    patterns: impl IntoIterator<Item = &'a str>,
+    host: &str,
+) -> Option<(&'a str, ServerNameMatch)> {
+    patterns
+        .into_iter()
+        .filter_map(|pattern| match_server_name(pattern, host).map(|matched| (pattern, matched)))
+        .max_by(|left, right| {
+            left.1.priority().cmp(&right.1.priority()).then_with(|| right.0.cmp(left.0))
+        })
 }
 
 pub fn match_server_name(pattern: &str, host: &str) -> Option<ServerNameMatch> {

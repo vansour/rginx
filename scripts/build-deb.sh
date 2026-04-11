@@ -163,9 +163,9 @@ rm -rf "${STAGE_DIR}"
 install -d \
     "${DEBIAN_DIR}" \
     "${STAGE_DIR}/usr/sbin" \
+    "${STAGE_DIR}/lib/systemd/system" \
     "${STAGE_DIR}/usr/share/doc/${PACKAGE_NAME}" \
-    "${STAGE_DIR}/etc/rginx/conf.d" \
-    "${STAGE_DIR}/lib/systemd/system"
+    "${STAGE_DIR}/etc/rginx/conf.d"
 
 install -m 755 "${BINARY_PATH}" "${STAGE_DIR}/usr/sbin/rginx"
 install -m 644 "${ROOT_DIR}/configs/rginx.ron" "${STAGE_DIR}/etc/rginx/rginx.ron"
