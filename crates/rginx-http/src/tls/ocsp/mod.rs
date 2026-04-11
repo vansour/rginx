@@ -768,6 +768,9 @@ fn algorithm_identifier_value_bytes(
     algorithm: &AlgorithmIdentifier,
     context: &str,
 ) -> Result<Vec<u8>> {
+    // webpki::SignatureVerificationAlgorithm compares against the raw
+    // AlgorithmIdentifier value bytes (SEQUENCE contents), not the outer DER
+    // wrapping of the SEQUENCE itself.
     let mut value = rasn::der::encode(&algorithm.algorithm).map_err(|error| {
         Error::Server(format!("{context} for certificate `{}`: {error}", path.display()))
     })?;
