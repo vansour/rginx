@@ -1,6 +1,5 @@
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
-use std::io::BufReader;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock as StdRwLock};
@@ -9,12 +8,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use http::StatusCode;
 use rginx_core::{ConfigSnapshot, Listener, Result};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use tokio::sync::{Notify, RwLock, watch};
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
-use x509_parser::extensions::{GeneralName, ParsedExtension};
-use x509_parser::prelude::{FromDer, X509Certificate};
 
 use crate::proxy::{HealthChangeNotifier, ProxyClients, UpstreamHealthSnapshot};
 use crate::rate_limit::RateLimiters;

@@ -39,8 +39,8 @@ sha2.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util"] }
 tokio-rustls.workspace = true
 tracing.workspace = true
-x509-parser.workspace = true
+webpki.workspace = true
 
 [dev-dependencies]
-rcgen = { version = "0.14", features = ["x509-parser"] }
+rcgen = "0.14"
 tempfile = "3.27"

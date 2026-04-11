@@ -38,11 +38,10 @@ hyper-util.workspace = true
 libc = "0.2"
 rustls.workspace = true
 rustls-pemfile.workspace = true
-rcgen = { version = "0.14", features = ["x509-parser"] }
+rcgen = "0.14"
 rasn = "0.28.11"
 rasn-ocsp = "0.28.11"
 rasn-pkix = "0.28.11"
 serde_json.workspace = true
 sha1.workspace = true
 tokio-rustls.workspace = true
-x509-parser.workspace = true
