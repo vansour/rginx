@@ -4,7 +4,7 @@ Section: net
 Priority: optional
 Architecture: @ARCH@
 Maintainer: @MAINTAINER@
-Depends: adduser
+Depends: adduser, init-system-helpers
 Recommends: systemd
 Installed-Size: @INSTALLED_SIZE@
 Homepage: @HOMEPAGE@

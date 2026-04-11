@@ -3,6 +3,9 @@ from __future__ import annotations
 import pathlib
 import textwrap
 
+BENCHMARK_WORKERS = 4
+BENCHMARK_UPSTREAM_KEEPALIVE = 256
+
 
 def rginx_return_config(port: int) -> str:
     return textwrap.dedent(
@@ -10,8 +13,8 @@ def rginx_return_config(port: int) -> str:
         Config(
             runtime: RuntimeConfig(
                 shutdown_timeout_secs: 5,
-                worker_threads: Some(1),
-                accept_workers: Some(1),
+                worker_threads: Some({BENCHMARK_WORKERS}),
+                accept_workers: Some({BENCHMARK_WORKERS}),
             ),
             server: ServerConfig(
                 listen: "127.0.0.1:{port}",
@@ -48,8 +51,8 @@ def rginx_proxy_config(port: int, upstream_port: int) -> str:
         Config(
             runtime: RuntimeConfig(
                 shutdown_timeout_secs: 5,
-                worker_threads: Some(1),
-                accept_workers: Some(1),
+                worker_threads: Some({BENCHMARK_WORKERS}),
+                accept_workers: Some({BENCHMARK_WORKERS}),
             ),
             server: ServerConfig(
                 listen: "127.0.0.1:{port}",
@@ -61,6 +64,7 @@ def rginx_proxy_config(port: int, upstream_port: int) -> str:
                     peers: [UpstreamPeerConfig(url: "http://127.0.0.1:{upstream_port}")],
                     protocol: Http1,
                     load_balance: RoundRobin,
+                    pool_max_idle_per_host: Some(0),
                 ),
             ],
             locations: [
@@ -89,8 +93,8 @@ def rginx_tls_return_config(port: int, cert_path: pathlib.Path, key_path: pathli
         Config(
             runtime: RuntimeConfig(
                 shutdown_timeout_secs: 5,
-                worker_threads: Some(1),
-                accept_workers: Some(1),
+                worker_threads: Some({BENCHMARK_WORKERS}),
+                accept_workers: Some({BENCHMARK_WORKERS}),
             ),
             server: ServerConfig(
                 listen: "127.0.0.1:{port}",
@@ -136,8 +140,8 @@ def rginx_grpc_proxy_config(
         Config(
             runtime: RuntimeConfig(
                 shutdown_timeout_secs: 5,
-                worker_threads: Some(1),
-                accept_workers: Some(1),
+                worker_threads: Some({BENCHMARK_WORKERS}),
+                accept_workers: Some({BENCHMARK_WORKERS}),
             ),
             server: ServerConfig(
                 listen: "127.0.0.1:{port}",
@@ -181,8 +185,8 @@ def rginx_reload_config(port: int, body: str) -> str:
         Config(
             runtime: RuntimeConfig(
                 shutdown_timeout_secs: 5,
-                worker_threads: Some(1),
-                accept_workers: Some(1),
+                worker_threads: Some({BENCHMARK_WORKERS}),
+                accept_workers: Some({BENCHMARK_WORKERS}),
             ),
             server: ServerConfig(
                 listen: "127.0.0.1:{port}",
@@ -216,7 +220,7 @@ def rginx_reload_config(port: int, body: str) -> str:
 def nginx_return_config(port: int) -> str:
     return textwrap.dedent(
         f"""\
-        worker_processes 1;
+        worker_processes {BENCHMARK_WORKERS};
         error_log logs/error.log warn;
         pid logs/nginx.pid;
 
@@ -249,7 +253,7 @@ def nginx_return_config(port: int) -> str:
 def nginx_tls_return_config(port: int, cert_path: pathlib.Path, key_path: pathlib.Path) -> str:
     return textwrap.dedent(
         f"""\
-        worker_processes 1;
+        worker_processes {BENCHMARK_WORKERS};
         error_log logs/error.log warn;
         pid logs/nginx.pid;
 
@@ -289,7 +293,7 @@ def nginx_grpc_proxy_config(
 ) -> str:
     return textwrap.dedent(
         f"""\
-        worker_processes 1;
+        worker_processes {BENCHMARK_WORKERS};
         error_log logs/error.log warn;
         pid logs/nginx.pid;
 
@@ -325,7 +329,7 @@ def nginx_grpc_proxy_config(
 def nginx_reload_config(port: int, body: str) -> str:
     return textwrap.dedent(
         f"""\
-        worker_processes 1;
+        worker_processes {BENCHMARK_WORKERS};
         error_log logs/error.log warn;
         pid logs/nginx.pid;
 
@@ -358,7 +362,7 @@ def nginx_reload_config(port: int, body: str) -> str:
 def nginx_proxy_config(port: int, upstream_port: int) -> str:
     return textwrap.dedent(
         f"""\
-        worker_processes 1;
+        worker_processes {BENCHMARK_WORKERS};
         error_log logs/error.log warn;
         pid logs/nginx.pid;
 

@@ -83,7 +83,6 @@ fn config_snapshot_counts_routes_across_all_vhosts() {
             worker_threads: None,
             accept_workers: 1,
         },
-        server: server.clone(),
         listeners: vec![Listener {
             id: "default".to_string(),
             name: "default".to_string(),

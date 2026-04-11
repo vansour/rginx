@@ -17,6 +17,14 @@ use super::{
     DEFAULT_UPSTREAM_REQUEST_TIMEOUT_SECS, compile, compile_with_base,
 };
 
+fn default_listener_server(snapshot: &rginx_core::ConfigSnapshot) -> &rginx_core::Server {
+    &snapshot
+        .listeners
+        .first()
+        .expect("compiled snapshot should contain at least one listener")
+        .server
+}
+
 fn temp_base_dir(prefix: &str) -> TempDir {
     tempfile::Builder::new().prefix(prefix).tempdir().expect("temp base dir should be created")
 }
@@ -1564,7 +1572,8 @@ fn compile_resolves_server_tls_paths_relative_to_config_base() {
     };
 
     let snapshot = compile_with_base(config, base_dir.path()).expect("server TLS should compile");
-    let tls = snapshot.server.tls.expect("compiled server TLS should exist");
+    let tls =
+        default_listener_server(&snapshot).tls.clone().expect("compiled server TLS should exist");
     assert_eq!(tls.cert_path, cert_path);
     assert_eq!(tls.key_path, key_path);
 }
@@ -1634,7 +1643,8 @@ fn compile_preserves_server_tls_policy_fields() {
     };
 
     let snapshot = compile_with_base(config, base_dir.path()).expect("server TLS should compile");
-    let tls = snapshot.server.tls.expect("compiled server TLS should exist");
+    let tls =
+        default_listener_server(&snapshot).tls.clone().expect("compiled server TLS should exist");
     assert_eq!(tls.versions, Some(vec![rginx_core::TlsVersion::Tls13]));
     assert_eq!(tls.cipher_suites, Some(vec![rginx_core::TlsCipherSuite::Tls13Aes128GcmSha256]));
     assert_eq!(tls.key_exchange_groups, Some(vec![rginx_core::TlsKeyExchangeGroup::Secp256r1]));
@@ -1715,7 +1725,8 @@ fn compile_preserves_server_tls_ocsp_policy_fields() {
     };
 
     let snapshot = compile_with_base(config, base_dir.path()).expect("server TLS should compile");
-    let tls = snapshot.server.tls.expect("compiled server TLS should exist");
+    let tls =
+        default_listener_server(&snapshot).tls.clone().expect("compiled server TLS should exist");
     assert_eq!(tls.ocsp.nonce, rginx_core::OcspNonceMode::Required);
     assert_eq!(tls.ocsp.responder_policy, rginx_core::OcspResponderPolicy::IssuerOnly);
 }
@@ -1766,9 +1777,9 @@ fn compile_normalizes_trusted_proxy_ips_and_cidrs() {
     };
 
     let snapshot = compile(config).expect("trusted proxies should compile");
-    assert_eq!(snapshot.server.trusted_proxies.len(), 2);
-    assert!(snapshot.server.is_trusted_proxy("10.1.2.3".parse().unwrap()));
-    assert!(snapshot.server.is_trusted_proxy("127.0.0.1".parse().unwrap()));
+    assert_eq!(default_listener_server(&snapshot).trusted_proxies.len(), 2);
+    assert!(default_listener_server(&snapshot).is_trusted_proxy("10.1.2.3".parse().unwrap()));
+    assert!(default_listener_server(&snapshot).is_trusted_proxy("127.0.0.1".parse().unwrap()));
 }
 
 #[test]
@@ -1819,15 +1830,26 @@ fn compile_attaches_server_hardening_settings() {
     let snapshot = compile(config).expect("server hardening settings should compile");
     assert_eq!(snapshot.runtime.worker_threads, Some(3));
     assert_eq!(snapshot.runtime.accept_workers, 2);
-    assert!(!snapshot.server.keep_alive);
-    assert_eq!(snapshot.server.max_headers, Some(32));
-    assert_eq!(snapshot.server.max_request_body_bytes, Some(1024));
-    assert_eq!(snapshot.server.max_connections, Some(256));
-    assert_eq!(snapshot.server.header_read_timeout, Some(Duration::from_secs(3)));
-    assert_eq!(snapshot.server.request_body_read_timeout, Some(Duration::from_secs(4)));
-    assert_eq!(snapshot.server.response_write_timeout, Some(Duration::from_secs(5)));
-    let access_log_format =
-        snapshot.server.access_log_format.as_ref().expect("access log format should compile");
+    assert!(!default_listener_server(&snapshot).keep_alive);
+    assert_eq!(default_listener_server(&snapshot).max_headers, Some(32));
+    assert_eq!(default_listener_server(&snapshot).max_request_body_bytes, Some(1024));
+    assert_eq!(default_listener_server(&snapshot).max_connections, Some(256));
+    assert_eq!(
+        default_listener_server(&snapshot).header_read_timeout,
+        Some(Duration::from_secs(3))
+    );
+    assert_eq!(
+        default_listener_server(&snapshot).request_body_read_timeout,
+        Some(Duration::from_secs(4))
+    );
+    assert_eq!(
+        default_listener_server(&snapshot).response_write_timeout,
+        Some(Duration::from_secs(5))
+    );
+    let access_log_format = default_listener_server(&snapshot)
+        .access_log_format
+        .as_ref()
+        .expect("access log format should compile");
     assert_eq!(access_log_format.template(), "$request_id $status $request");
 }
 
@@ -2033,7 +2055,7 @@ fn compile_supports_explicit_multi_listener_configs() {
     let snapshot = compile(config).expect("explicit multi-listener config should compile");
     assert_eq!(snapshot.listeners.len(), 2);
     assert_eq!(snapshot.total_listener_count(), 2);
-    assert_eq!(snapshot.server.listen_addr, "127.0.0.1:8080".parse().unwrap());
+    assert_eq!(snapshot.listeners[0].server.listen_addr, "127.0.0.1:8080".parse().unwrap());
     assert_eq!(snapshot.listeners[0].name, "http");
     assert_eq!(snapshot.listeners[1].name, "https");
     assert_eq!(snapshot.listeners[1].server.max_connections, Some(20));

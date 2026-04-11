@@ -94,6 +94,7 @@ fi
 
 log "running comparison in Docker"
 docker run --rm \
+    --ulimit nofile=65535:65535 \
     -v "${OUT_DIR}:/out" \
     "${IMAGE_TAG}" \
     "${extra_args[@]}"

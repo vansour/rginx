@@ -148,7 +148,6 @@ fn snapshot_with_upstreams_map(
             worker_threads: None,
             accept_workers: 1,
         },
-        server: server.clone(),
         listeners: vec![default_listener(server)],
         default_vhost: default_vhost(),
         vhosts: Vec::new(),

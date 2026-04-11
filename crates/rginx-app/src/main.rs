@@ -1,18 +1,16 @@
 mod admin_cli;
 mod cli;
-mod migrate_nginx;
 
 #[cfg(not(target_os = "linux"))]
 compile_error!("rginx supports Linux only");
 
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, anyhow};
 use clap::Parser;
 
-use crate::cli::{Cli, Command, MigrateNginxArgs, SignalCommand, pid_path_for_config};
+use crate::cli::{Cli, Command, SignalCommand, pid_path_for_config};
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -32,11 +30,6 @@ fn main() -> anyhow::Result<()> {
 
     if let Some(command) = cli.command.as_ref() {
         if admin_cli::run_admin_command(&cli.config, command)? {
-            return Ok(());
-        }
-
-        if let Command::MigrateNginx(args) = command {
-            run_migrate_nginx(args)?;
             return Ok(());
         }
     }
@@ -61,7 +54,7 @@ fn main() -> anyhow::Result<()> {
                         config.listeners.first().map(|listener| listener.name.as_str()),
                     ),
                     listener_count: config.total_listener_count(),
-                    listen_addr: config.server.listen_addr,
+                    listeners: check_listener_summaries(&config),
                     tls_enabled: config.tls_enabled(),
                     total_vhost_count: config.total_vhost_count(),
                     total_route_count: config.total_route_count(),
@@ -86,7 +79,7 @@ fn main() -> anyhow::Result<()> {
                         config.listeners.first().map(|listener| listener.name.as_str()),
                     ),
                     listener_count: config.total_listener_count(),
-                    listen_addr: config.server.listen_addr,
+                    listeners: check_listener_summaries(&config),
                     tls_enabled: config.tls_enabled(),
                     total_vhost_count: config.total_vhost_count(),
                     total_route_count: config.total_route_count(),
@@ -117,37 +110,11 @@ fn main() -> anyhow::Result<()> {
             | Command::Counters
             | Command::Traffic(_)
             | Command::Peers
-            | Command::Upstreams(_)
-            | Command::MigrateNginx(_),
+            | Command::Upstreams(_),
         ) => {
             unreachable!("admin subcommands return before runtime initialization")
         }
     }
-}
-
-fn run_migrate_nginx(args: &MigrateNginxArgs) -> anyhow::Result<()> {
-    let migrated = migrate_nginx::migrate_file(&args.input)?;
-
-    if let Some(output) = &args.output {
-        fs::write(output, &migrated.ron)
-            .with_context(|| format!("failed to write migrated config {}", output.display()))?;
-        eprintln!(
-            "wrote migrated rginx config to {} (warnings: {})",
-            output.display(),
-            migrated.warnings.len()
-        );
-    } else {
-        print!("{}", migrated.ron);
-    }
-
-    if !migrated.warnings.is_empty() {
-        eprintln!("migration warnings:");
-        for warning in &migrated.warnings {
-            eprintln!("- {warning}");
-        }
-    }
-
-    Ok(())
 }
 
 fn build_runtime(worker_threads: Option<usize>) -> anyhow::Result<tokio::runtime::Runtime> {
@@ -162,7 +129,7 @@ fn build_runtime(worker_threads: Option<usize>) -> anyhow::Result<tokio::runtime
 struct CheckSummary {
     listener_model: &'static str,
     listener_count: usize,
-    listen_addr: std::net::SocketAddr,
+    listeners: Vec<CheckListenerSummary>,
     tls_enabled: bool,
     total_vhost_count: usize,
     total_route_count: usize,
@@ -170,6 +137,18 @@ struct CheckSummary {
     worker_threads: Option<usize>,
     accept_workers: usize,
     tls: TlsCheckDetails,
+}
+
+struct CheckListenerSummary {
+    id: String,
+    name: String,
+    listen_addr: std::net::SocketAddr,
+    tls_enabled: bool,
+    proxy_protocol_enabled: bool,
+    default_certificate: Option<String>,
+    keep_alive: bool,
+    max_connections: Option<usize>,
+    access_log_format_configured: bool,
 }
 
 struct TlsCheckDetails {
@@ -205,12 +184,22 @@ struct TlsDefaultCertificateBindingCheck {
 }
 
 fn print_check_success(config_path: &Path, summary: CheckSummary) {
+    let listen_addrs = if summary.listeners.is_empty() {
+        "-".to_string()
+    } else {
+        summary
+            .listeners
+            .iter()
+            .map(|listener| listener.listen_addr.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    };
     println!(
-        "configuration is valid: config={} listener_model={} listeners={} listen={} tls={} vhosts={} routes={} upstreams={} worker_threads={} accept_workers={}",
+        "configuration is valid: config={} listener_model={} listeners={} listen_addrs={} tls={} vhosts={} routes={} upstreams={} worker_threads={} accept_workers={}",
         config_path.display(),
         summary.listener_model,
         summary.listener_count,
-        summary.listen_addr,
+        listen_addrs,
         if summary.tls_enabled { "enabled" } else { "disabled" },
         summary.total_vhost_count,
         summary.total_route_count,
@@ -221,6 +210,23 @@ fn print_check_success(config_path: &Path, summary: CheckSummary) {
             .unwrap_or_else(|| "auto".to_string()),
         summary.accept_workers,
     );
+    for listener in &summary.listeners {
+        println!(
+            "check_listener id={} name={} listen={} tls={} proxy_protocol={} default_certificate={} keep_alive={} max_connections={} access_log_format_configured={}",
+            listener.id,
+            listener.name,
+            listener.listen_addr,
+            if listener.tls_enabled { "enabled" } else { "disabled" },
+            listener.proxy_protocol_enabled,
+            listener.default_certificate.as_deref().unwrap_or("-"),
+            listener.keep_alive,
+            listener
+                .max_connections
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            listener.access_log_format_configured,
+        );
+    }
     println!("reload_requires_restart_for={}", summary.tls.restart_required_fields.join(","));
     println!(
         "tls_details=listener_profiles={} vhost_overrides={} sni_names={} certificate_bundles={}",
@@ -369,6 +375,24 @@ fn listener_model(
     }
 }
 
+fn check_listener_summaries(config: &rginx_config::ConfigSnapshot) -> Vec<CheckListenerSummary> {
+    config
+        .listeners
+        .iter()
+        .map(|listener| CheckListenerSummary {
+            id: listener.id.clone(),
+            name: listener.name.clone(),
+            listen_addr: listener.server.listen_addr,
+            tls_enabled: listener.tls_enabled(),
+            proxy_protocol_enabled: listener.proxy_protocol_enabled,
+            default_certificate: listener.server.default_certificate.clone(),
+            keep_alive: listener.server.keep_alive,
+            max_connections: listener.server.max_connections,
+            access_log_format_configured: listener.server.access_log_format.is_some(),
+        })
+        .collect()
+}
+
 fn tls_check_details(config: &rginx_config::ConfigSnapshot) -> TlsCheckDetails {
     let tls = rginx_http::tls_runtime_snapshot_for_config(config);
     let listener_tls_profiles =
@@ -420,8 +444,37 @@ fn tls_check_details(config: &rginx_config::ConfigSnapshot) -> TlsCheckDetails {
                 .and_then(|days| (days <= 30).then(|| format!("{}:{}d", certificate.scope, days)))
         })
         .collect();
-    let (sni_bindings, sni_conflicts, default_certificate_bindings) =
-        tls_sni_diagnostics(config, &tls.certificates);
+    let (sni_bindings, sni_conflicts, default_certificate_bindings) = (
+        tls.sni_bindings
+            .iter()
+            .map(|binding| TlsSniBindingCheck {
+                listener_name: binding.listener_name.clone(),
+                server_name: binding.server_name.clone(),
+                fingerprints: binding.fingerprints.clone(),
+                scopes: binding.certificate_scopes.clone(),
+                default_selected: binding.default_selected,
+            })
+            .collect(),
+        tls.sni_conflicts
+            .iter()
+            .map(|binding| TlsSniBindingCheck {
+                listener_name: binding.listener_name.clone(),
+                server_name: binding.server_name.clone(),
+                fingerprints: binding.fingerprints.clone(),
+                scopes: binding.certificate_scopes.clone(),
+                default_selected: binding.default_selected,
+            })
+            .collect(),
+        tls.default_certificate_bindings
+            .iter()
+            .map(|binding| TlsDefaultCertificateBindingCheck {
+                listener_name: binding.listener_name.clone(),
+                server_name: binding.server_name.clone(),
+                fingerprints: binding.fingerprints.clone(),
+                scopes: binding.certificate_scopes.clone(),
+            })
+            .collect(),
+    );
 
     TlsCheckDetails {
         listener_tls_profiles,
@@ -440,114 +493,6 @@ fn tls_check_details(config: &rginx_config::ConfigSnapshot) -> TlsCheckDetails {
         default_certificate_bindings,
     }
 }
-
-fn tls_sni_diagnostics(
-    config: &rginx_config::ConfigSnapshot,
-    certificates: &[rginx_http::TlsCertificateStatusSnapshot],
-) -> (Vec<TlsSniBindingCheck>, Vec<TlsSniBindingCheck>, Vec<TlsDefaultCertificateBindingCheck>) {
-    let fingerprint_by_scope = certificates
-        .iter()
-        .map(|certificate| {
-            (
-                certificate.scope.clone(),
-                certificate.fingerprint_sha256.clone().unwrap_or_else(|| "-".to_string()),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-
-    let mut bindings = BTreeMap::<(String, String), TlsSniBindingCheck>::new();
-    for listener in &config.listeners {
-        if !listener.tls_enabled() {
-            continue;
-        }
-
-        if listener.server.tls.is_some() {
-            let scope = format!("listener:{}", listener.name);
-            let fingerprint =
-                fingerprint_by_scope.get(&scope).cloned().unwrap_or_else(|| "-".to_string());
-            for server_name in &config.default_vhost.server_names {
-                let binding = bindings
-                    .entry((listener.name.clone(), server_name.clone()))
-                    .or_insert_with(|| TlsSniBindingCheck {
-                        listener_name: listener.name.clone(),
-                        server_name: server_name.clone(),
-                        fingerprints: Vec::new(),
-                        scopes: Vec::new(),
-                        default_selected: false,
-                    });
-                if !binding.fingerprints.iter().any(|value| value == &fingerprint) {
-                    binding.fingerprints.push(fingerprint.clone());
-                }
-                if !binding.scopes.iter().any(|value| value == &scope) {
-                    binding.scopes.push(scope.clone());
-                }
-            }
-        }
-
-        for vhost in &config.vhosts {
-            if vhost.tls.is_none() {
-                continue;
-            }
-            let scope = format!("vhost:{}", vhost.id);
-            let fingerprint =
-                fingerprint_by_scope.get(&scope).cloned().unwrap_or_else(|| "-".to_string());
-            for server_name in &vhost.server_names {
-                let binding = bindings
-                    .entry((listener.name.clone(), server_name.clone()))
-                    .or_insert_with(|| TlsSniBindingCheck {
-                        listener_name: listener.name.clone(),
-                        server_name: server_name.clone(),
-                        fingerprints: Vec::new(),
-                        scopes: Vec::new(),
-                        default_selected: false,
-                    });
-                if !binding.fingerprints.iter().any(|value| value == &fingerprint) {
-                    binding.fingerprints.push(fingerprint.clone());
-                }
-                if !binding.scopes.iter().any(|value| value == &scope) {
-                    binding.scopes.push(scope.clone());
-                }
-            }
-        }
-    }
-
-    let mut default_certificate_bindings = Vec::new();
-    for listener in &config.listeners {
-        let Some(default_certificate) = listener.server.default_certificate.as_ref() else {
-            continue;
-        };
-        if let Some(binding) =
-            bindings.get_mut(&(listener.name.clone(), default_certificate.clone()))
-        {
-            binding.default_selected = true;
-            default_certificate_bindings.push(TlsDefaultCertificateBindingCheck {
-                listener_name: listener.name.clone(),
-                server_name: default_certificate.clone(),
-                fingerprints: binding.fingerprints.clone(),
-                scopes: binding.scopes.clone(),
-            });
-        }
-    }
-
-    let mut sni_bindings = bindings.into_values().collect::<Vec<_>>();
-    sni_bindings.sort_by(|left, right| {
-        left.listener_name.cmp(&right.listener_name).then(left.server_name.cmp(&right.server_name))
-    });
-    let sni_conflicts = sni_bindings
-        .iter()
-        .filter(|binding| binding.fingerprints.len() > 1)
-        .map(|binding| TlsSniBindingCheck {
-            listener_name: binding.listener_name.clone(),
-            server_name: binding.server_name.clone(),
-            fingerprints: binding.fingerprints.clone(),
-            scopes: binding.scopes.clone(),
-            default_selected: binding.default_selected,
-        })
-        .collect();
-
-    (sni_bindings, sni_conflicts, default_certificate_bindings)
-}
-
 struct PidFileGuard {
     path: PathBuf,
 }

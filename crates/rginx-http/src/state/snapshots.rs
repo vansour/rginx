@@ -269,7 +269,7 @@ impl SnapshotModule {
 pub struct RuntimeStatusSnapshot {
     pub revision: u64,
     pub config_path: Option<PathBuf>,
-    pub listen_addr: std::net::SocketAddr,
+    pub listeners: Vec<RuntimeListenerSnapshot>,
     pub worker_threads: Option<usize>,
     pub accept_workers: usize,
     pub total_vhosts: usize,
@@ -281,6 +281,19 @@ pub struct RuntimeStatusSnapshot {
     pub upstream_tls: Vec<UpstreamTlsStatusSnapshot>,
     pub active_connections: usize,
     pub reload: ReloadStatusSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeListenerSnapshot {
+    pub listener_id: String,
+    pub listener_name: String,
+    pub listen_addr: std::net::SocketAddr,
+    pub tls_enabled: bool,
+    pub proxy_protocol_enabled: bool,
+    pub default_certificate: Option<String>,
+    pub keep_alive: bool,
+    pub max_connections: Option<usize>,
+    pub access_log_format_configured: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

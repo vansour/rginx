@@ -8,6 +8,16 @@ use super::*;
 pub(super) fn print_admin_status(config_path: &Path) -> anyhow::Result<()> {
     match query_admin_socket(config_path, AdminRequest::GetStatus)? {
         AdminResponse::Status(status) => {
+            let listen_addrs = if status.listeners.is_empty() {
+                "-".to_string()
+            } else {
+                status
+                    .listeners
+                    .iter()
+                    .map(|listener| listener.listen_addr.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
             print_record(
                 "status",
                 [
@@ -21,7 +31,8 @@ pub(super) fn print_admin_status(config_path: &Path) -> anyhow::Result<()> {
                             .map(|value| value.to_string())
                             .unwrap_or_else(|| "-".to_string()),
                     ),
-                    ("listen", status.listen_addr.to_string()),
+                    ("listeners", status.listeners.len().to_string()),
+                    ("listen_addrs", listen_addrs),
                     (
                         "worker_threads",
                         status
@@ -89,6 +100,37 @@ pub(super) fn print_admin_status(config_path: &Path) -> anyhow::Result<()> {
                     ),
                 ],
             );
+            for listener in &status.listeners {
+                print_record(
+                    "status_listener",
+                    [
+                        ("listener", listener.listener_name.clone()),
+                        ("listener_id", listener.listener_id.clone()),
+                        ("listen", listener.listen_addr.to_string()),
+                        (
+                            "tls",
+                            if listener.tls_enabled { "enabled" } else { "disabled" }.to_string(),
+                        ),
+                        ("proxy_protocol", listener.proxy_protocol_enabled.to_string()),
+                        (
+                            "default_certificate",
+                            listener.default_certificate.clone().unwrap_or_else(|| "-".to_string()),
+                        ),
+                        ("keep_alive", listener.keep_alive.to_string()),
+                        (
+                            "max_connections",
+                            listener
+                                .max_connections
+                                .map(|value| value.to_string())
+                                .unwrap_or_else(|| "-".to_string()),
+                        ),
+                        (
+                            "access_log_format_configured",
+                            listener.access_log_format_configured.to_string(),
+                        ),
+                    ],
+                );
+            }
             for certificate in &status.tls.certificates {
                 print_record(
                     "status_tls_certificate",

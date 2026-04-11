@@ -11,7 +11,10 @@ use rginx_core::{
 };
 
 use super::access_log::{AccessLogContext, render_access_log_line};
-use super::dispatch::{authorize_route, response_body_bytes_sent, select_route_for_request};
+use super::dispatch::{
+    authorize_route, finalize_downstream_response, response_body_bytes_sent,
+    select_route_for_request,
+};
 use super::grpc::{
     GrpcObservability, GrpcWebObservabilityParser, decode_grpc_web_text_observability_final,
     grpc_observability, grpc_request_metadata,
@@ -119,6 +122,66 @@ fn select_route_for_request_supports_wildcard_hosts() {
     )
     .expect("wildcard host should match vhost route");
     assert_eq!(route.id, "servers[0]/routes[0]|exact:/healthz");
+}
+
+#[test]
+fn select_route_for_request_prefers_exact_host_over_wildcard_host() {
+    let config = test_config(
+        test_vhost("server", Vec::new(), Vec::new()),
+        vec![
+            test_vhost(
+                "servers[0]",
+                vec!["*.example.com"],
+                vec![test_route(
+                    "servers[0]/routes[0]|exact:/",
+                    RouteMatcher::Exact("/".to_string()),
+                )],
+            ),
+            test_vhost(
+                "servers[1]",
+                vec!["api.example.com"],
+                vec![test_route(
+                    "servers[1]/routes[0]|exact:/",
+                    RouteMatcher::Exact("/".to_string()),
+                )],
+            ),
+        ],
+    );
+
+    let route =
+        select_route_for_request(&config, &host_headers("api.example.com"), &request_uri("/"))
+            .expect("exact host should match");
+    assert_eq!(route.id, "servers[1]/routes[0]|exact:/");
+}
+
+#[test]
+fn select_route_for_request_prefers_more_specific_wildcard_host() {
+    let config = test_config(
+        test_vhost("server", Vec::new(), Vec::new()),
+        vec![
+            test_vhost(
+                "servers[0]",
+                vec!["*.example.com"],
+                vec![test_route(
+                    "servers[0]/routes[0]|exact:/",
+                    RouteMatcher::Exact("/".to_string()),
+                )],
+            ),
+            test_vhost(
+                "servers[1]",
+                vec!["*.api.example.com"],
+                vec![test_route(
+                    "servers[1]/routes[0]|exact:/",
+                    RouteMatcher::Exact("/".to_string()),
+                )],
+            ),
+        ],
+    );
+
+    let route =
+        select_route_for_request(&config, &host_headers("edge.api.example.com"), &request_uri("/"))
+            .expect("more specific wildcard should match");
+    assert_eq!(route.id, "servers[1]/routes[0]|exact:/");
 }
 
 #[test]
@@ -513,6 +576,103 @@ fn response_body_bytes_sent_returns_zero_for_head_requests() {
     assert_eq!(response_body_bytes_sent("GET", &response), Some(5));
 }
 
+#[tokio::test]
+async fn finalize_downstream_response_compresses_plain_text_responses() {
+    let mut request_headers = HeaderMap::new();
+    request_headers.insert(http::header::ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+
+    let finalized = finalize_downstream_response(
+        &http::Method::GET,
+        &request_headers,
+        HeaderValue::from_static("req-plain"),
+        text_response(
+            StatusCode::OK,
+            "text/plain; charset=utf-8",
+            "hello compression pipeline\n".repeat(32),
+        ),
+        None,
+    )
+    .await;
+
+    assert!(finalized.grpc.is_none());
+    assert_eq!(
+        finalized
+            .response
+            .headers()
+            .get(http::header::CONTENT_ENCODING)
+            .and_then(|value| value.to_str().ok()),
+        Some("gzip")
+    );
+    assert_eq!(
+        finalized.response.headers().get("x-request-id").and_then(|value| value.to_str().ok()),
+        Some("req-plain")
+    );
+}
+
+#[tokio::test]
+async fn finalize_downstream_response_skips_compression_for_grpc_responses() {
+    let mut request_headers = HeaderMap::new();
+    request_headers.insert(http::header::ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+    request_headers
+        .insert(http::header::CONTENT_TYPE, HeaderValue::from_static("application/grpc"));
+
+    let finalized = finalize_downstream_response(
+        &http::Method::POST,
+        &request_headers,
+        HeaderValue::from_static("req-grpc"),
+        text_response(StatusCode::OK, "application/grpc", "hello grpc pipeline\n".repeat(32)),
+        grpc_request_metadata(&request_headers, "/grpc.health.v1.Health/Check"),
+    )
+    .await;
+
+    assert!(finalized.grpc.is_some());
+    assert!(finalized.response.headers().get(http::header::CONTENT_ENCODING).is_none());
+    assert_eq!(
+        finalized.response.headers().get("x-request-id").and_then(|value| value.to_str().ok()),
+        Some("req-grpc")
+    );
+}
+
+#[tokio::test]
+async fn finalize_downstream_response_strips_head_body_after_final_transforms() {
+    let mut request_headers = HeaderMap::new();
+    request_headers.insert(http::header::ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+
+    let finalized = finalize_downstream_response(
+        &http::Method::HEAD,
+        &request_headers,
+        HeaderValue::from_static("req-head"),
+        text_response(
+            StatusCode::OK,
+            "text/plain; charset=utf-8",
+            "hello head pipeline\n".repeat(32),
+        ),
+        None,
+    )
+    .await;
+
+    assert!(finalized.grpc.is_none());
+    assert!(finalized.response.headers().get(http::header::CONTENT_ENCODING).is_none());
+    assert_eq!(finalized.body_bytes_sent, Some(0));
+    let content_length = finalized
+        .response
+        .headers()
+        .get(http::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .expect("HEAD response should preserve content length")
+        .parse::<usize>()
+        .expect("content length should parse");
+    let body = finalized
+        .response
+        .into_body()
+        .collect()
+        .await
+        .expect("HEAD body should collect")
+        .to_bytes();
+    assert!(content_length > 0);
+    assert!(body.is_empty());
+}
+
 fn grpc_web_observability_body() -> Vec<u8> {
     let mut body = Vec::new();
     body.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x02]);
@@ -546,7 +706,6 @@ fn test_config(default_vhost: VirtualHost, vhosts: Vec<VirtualHost>) -> ConfigSn
             worker_threads: None,
             accept_workers: 1,
         },
-        server: server.clone(),
         listeners: vec![rginx_core::Listener {
             id: "default".to_string(),
             name: "default".to_string(),

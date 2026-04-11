@@ -19,5 +19,8 @@ def ensure_nginx_checkout(src_dir: pathlib.Path, ref: str) -> str:
 
 
 def current_git_head(path: pathlib.Path) -> str:
-    completed = run(["git", "rev-parse", "HEAD"], cwd=path, capture_output=True)
+    try:
+        completed = run(["git", "rev-parse", "HEAD"], cwd=path, capture_output=True)
+    except RuntimeError:
+        return "workspace-without-git-metadata"
     return completed.stdout.strip()

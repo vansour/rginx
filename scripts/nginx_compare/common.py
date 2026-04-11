@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import dataclasses
 import pathlib
+import resource
 import socket
 import subprocess
+
+BENCHMARK_NOFILE = 65535
 
 
 @dataclasses.dataclass(frozen=True)
@@ -30,6 +33,21 @@ class ReloadResult:
     server: str
     scenario: str
     reload_apply_ms: float
+
+
+def ensure_nofile_limit(target: int = BENCHMARK_NOFILE) -> None:
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        desired_hard = hard if hard == resource.RLIM_INFINITY else max(hard, target)
+        desired_soft = target if desired_hard == resource.RLIM_INFINITY else min(target, desired_hard)
+        if soft >= desired_soft:
+            return
+        resource.setrlimit(resource.RLIMIT_NOFILE, (desired_soft, desired_hard))
+    except (OSError, ValueError):
+        return
+
+
+ensure_nofile_limit()
 
 
 @dataclasses.dataclass

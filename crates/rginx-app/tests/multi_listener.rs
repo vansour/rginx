@@ -2,7 +2,12 @@
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::sync::Arc;
 use std::time::Duration;
+
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{ClientConfig, ClientConnection, DigitallySignedStruct, SignatureScheme, StreamOwned};
 
 mod support;
 
@@ -141,6 +146,49 @@ fn max_connections_are_scoped_per_listener() {
     server.shutdown_and_wait(Duration::from_secs(5));
 }
 
+#[test]
+fn listener_specific_access_log_formats_are_honored() {
+    let http_addr = reserve_loopback_addr();
+    let https_addr = reserve_loopback_addr();
+    let mut server = ServerHarness::spawn_with_tls(
+        "rginx-multi-listener-access-log",
+        TEST_SERVER_CERT_PEM,
+        TEST_SERVER_KEY_PEM,
+        |_, cert_path, key_path| {
+            multi_listener_access_log_config(http_addr, https_addr, cert_path, key_path)
+        },
+    );
+
+    server.wait_for_http_ready(http_addr, Duration::from_secs(5));
+    server.wait_for_https_ready(https_addr, Duration::from_secs(5));
+
+    let http_response =
+        send_http_request(http_addr, "example.com", "/", "http-log-42").expect("http request");
+    assert!(
+        http_response.starts_with("HTTP/1.1 200"),
+        "unexpected http response: {http_response:?}"
+    );
+
+    let https_response =
+        send_https_request(https_addr, "example.com", "/", "https-log-42").expect("https request");
+    assert!(
+        https_response.starts_with("HTTP/1.1 200"),
+        "unexpected https response: {https_response:?}"
+    );
+
+    server.terminate_and_wait(Duration::from_secs(5));
+
+    let output = server.combined_output();
+    assert!(
+        output.contains("ACCESS listener=http rid=http-log-42"),
+        "expected http listener access log line\n{output}"
+    );
+    assert!(
+        output.contains("ACCESS listener=https rid=https-log-42"),
+        "expected https listener access log line\n{output}"
+    );
+}
+
 fn multi_listener_config(
     http_addr: SocketAddr,
     https_addr: SocketAddr,
@@ -160,4 +208,136 @@ fn multi_listener_config(
         ready_route = READY_ROUTE_CONFIG,
         max_connections = max_connections,
     )
+}
+
+fn multi_listener_access_log_config(
+    http_addr: SocketAddr,
+    https_addr: SocketAddr,
+    cert_path: &std::path::Path,
+    key_path: &std::path::Path,
+) -> String {
+    format!(
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    listeners: [\n        ListenerConfig(\n            name: \"http\",\n            listen: {:?},\n            access_log_format: Some(\"ACCESS listener=http rid=$request_id\"),\n        ),\n        ListenerConfig(\n            name: \"https\",\n            listen: {:?},\n            access_log_format: Some(\"ACCESS listener=https rid=$request_id\"),\n            tls: Some(ServerTlsConfig(\n                cert_path: {:?},\n                key_path: {:?},\n            )),\n        ),\n    ],\n    server: ServerConfig(\n        server_names: [\"example.com\"],\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Return(\n                status: 200,\n                location: \"\",\n                body: Some(\"multi listener\\n\"),\n            ),\n        ),\n    ],\n)\n",
+        http_addr.to_string(),
+        https_addr.to_string(),
+        cert_path.display().to_string(),
+        key_path.display().to_string(),
+        ready_route = READY_ROUTE_CONFIG,
+    )
+}
+
+fn send_http_request(
+    listen_addr: SocketAddr,
+    host: &str,
+    path: &str,
+    request_id: &str,
+) -> Result<String, String> {
+    let mut stream = TcpStream::connect_timeout(&listen_addr, Duration::from_millis(200))
+        .map_err(|error| format!("failed to connect to {listen_addr}: {error}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(|error| format!("failed to set read timeout: {error}"))?;
+    stream
+        .set_write_timeout(Some(Duration::from_millis(500)))
+        .map_err(|error| format!("failed to set write timeout: {error}"))?;
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: {host}\r\nX-Request-ID: {request_id}\r\nConnection: close\r\n\r\n"
+    )
+    .map_err(|error| format!("failed to write request: {error}"))?;
+    stream.flush().map_err(|error| format!("failed to flush request: {error}"))?;
+
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|error| format!("failed to read response: {error}"))?;
+    Ok(response)
+}
+
+fn send_https_request(
+    listen_addr: SocketAddr,
+    host: &str,
+    path: &str,
+    request_id: &str,
+) -> Result<String, String> {
+    let tcp = TcpStream::connect_timeout(&listen_addr, Duration::from_millis(200))
+        .map_err(|error| format!("failed to connect to {listen_addr}: {error}"))?;
+    tcp.set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(|error| format!("failed to set read timeout: {error}"))?;
+    tcp.set_write_timeout(Some(Duration::from_millis(500)))
+        .map_err(|error| format!("failed to set write timeout: {error}"))?;
+
+    let mut config = ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(InsecureServerCertVerifier::new()))
+        .with_no_client_auth();
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let server_name = ServerName::try_from("localhost".to_string())
+        .map_err(|error| format!("invalid TLS server name: {error}"))?;
+    let connection = ClientConnection::new(Arc::new(config), server_name)
+        .map_err(|error| format!("failed to build TLS client: {error}"))?;
+    let mut stream = StreamOwned::new(connection, tcp);
+
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: {host}\r\nX-Request-ID: {request_id}\r\nConnection: close\r\n\r\n"
+    )
+    .map_err(|error| format!("failed to write HTTPS request: {error}"))?;
+    stream.flush().map_err(|error| format!("failed to flush HTTPS request: {error}"))?;
+
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|error| format!("failed to read HTTPS response: {error}"))?;
+    Ok(response)
+}
+
+#[derive(Debug)]
+struct InsecureServerCertVerifier {
+    supported_schemes: Vec<SignatureScheme>,
+}
+
+impl InsecureServerCertVerifier {
+    fn new() -> Self {
+        Self {
+            supported_schemes: rustls::crypto::aws_lc_rs::default_provider()
+                .signature_verification_algorithms
+                .supported_schemes(),
+        }
+    }
+}
+
+impl ServerCertVerifier for InsecureServerCertVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.supported_schemes.clone()
+    }
 }

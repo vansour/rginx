@@ -1,18 +1,24 @@
 #!/bin/sh
 set -e
 
-if command -v systemctl >/dev/null 2>&1; then
-    systemctl daemon-reload >/dev/null 2>&1 || true
-fi
-
 case "$1" in
     purge)
-        if command -v systemctl >/dev/null 2>&1; then
-            systemctl disable rginx.service >/dev/null 2>&1 || true
-        fi
-        rm -f /run/rginx.pid /run/rginx/admin.sock >/dev/null 2>&1 || true
+        rm -f /run/rginx/rginx.pid /run/rginx/admin.sock >/dev/null 2>&1 || true
+        rm -rf /run/rginx >/dev/null 2>&1 || true
         rm -rf /var/lib/rginx >/dev/null 2>&1 || true
         ;;
 esac
+
+if [ "$1" = remove ] && [ -d /run/systemd/system ]; then
+    systemctl --system daemon-reload >/dev/null || true
+fi
+
+if [ "$1" = purge ]; then
+    if [ -x /usr/bin/deb-systemd-helper ]; then
+        deb-systemd-helper purge 'rginx.service' >/dev/null || true
+    elif command -v systemctl >/dev/null 2>&1; then
+        systemctl disable rginx.service >/dev/null 2>&1 || true
+    fi
+fi
 
 exit 0

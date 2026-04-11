@@ -1,12 +1,12 @@
 #!/bin/sh
 set -e
 
-case "$1" in
-    remove|deconfigure|upgrade|failed-upgrade)
-        if command -v systemctl >/dev/null 2>&1; then
-            systemctl --no-reload stop rginx.service >/dev/null 2>&1 || true
-        fi
-        ;;
-esac
+if [ -z "$DPKG_ROOT" ] && [ "$1" = remove ] && [ -d /run/systemd/system ]; then
+    if [ -x /usr/bin/deb-systemd-invoke ]; then
+        deb-systemd-invoke stop 'rginx.service' >/dev/null || true
+    else
+        systemctl --no-reload stop rginx.service >/dev/null 2>&1 || true
+    fi
+fi
 
 exit 0

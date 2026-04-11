@@ -724,7 +724,6 @@ mod tests {
                 worker_threads: None,
                 accept_workers: 1,
             },
-            server: server.clone(),
             listeners: vec![rginx_core::Listener {
                 id: "default".to_string(),
                 name: "default".to_string(),

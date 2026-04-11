@@ -35,16 +35,6 @@ pub enum Command {
     Traffic(WindowArgs),
     Peers,
     Upstreams(WindowArgs),
-    MigrateNginx(MigrateNginxArgs),
-}
-
-#[derive(Debug, Clone, Args)]
-pub struct MigrateNginxArgs {
-    #[arg(long)]
-    pub input: PathBuf,
-
-    #[arg(long)]
-    pub output: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -148,7 +138,7 @@ fn installed_config_path(executable: &Path) -> Option<PathBuf> {
 
 pub fn pid_path_for_config(config_path: &Path) -> PathBuf {
     if config_path == Path::new("/etc/rginx/rginx.ron") {
-        return PathBuf::from("/run/rginx.pid");
+        return PathBuf::from("/run/rginx/rginx.pid");
     }
 
     config_path.with_extension("pid")
@@ -161,8 +151,8 @@ mod tests {
     use clap::Parser;
 
     use super::{
-        Cli, Command, DeltaArgs, MigrateNginxArgs, SignalCommand, SnapshotArgs, SnapshotModuleArg,
-        WaitArgs, WindowArgs, installed_config_path, pid_path_for_config,
+        Cli, Command, DeltaArgs, SignalCommand, SnapshotArgs, SnapshotModuleArg, WaitArgs,
+        WindowArgs, installed_config_path, pid_path_for_config,
     };
 
     #[test]
@@ -190,7 +180,7 @@ mod tests {
     fn pid_path_for_installed_config_uses_run_directory() {
         assert_eq!(
             pid_path_for_config(Path::new("/etc/rginx/rginx.ron")),
-            PathBuf::from("/run/rginx.pid")
+            PathBuf::from("/run/rginx/rginx.pid")
         );
     }
 
@@ -316,20 +306,5 @@ mod tests {
         let cli = Cli::try_parse_from(["rginx", "upstreams"]).expect("cli should parse");
 
         assert!(matches!(cli.command, Some(Command::Upstreams(WindowArgs { window_secs: None }))));
-    }
-
-    #[test]
-    fn cli_accepts_migrate_nginx_subcommand() {
-        let cli = Cli::try_parse_from([
-            "rginx",
-            "migrate-nginx",
-            "--input",
-            "nginx.conf",
-            "--output",
-            "rginx.ron",
-        ])
-        .expect("cli should parse");
-
-        assert!(matches!(cli.command, Some(Command::MigrateNginx(MigrateNginxArgs { .. }))));
     }
 }

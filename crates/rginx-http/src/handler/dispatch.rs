@@ -16,6 +16,13 @@ struct ListenerRequestContext<'a> {
     max_request_body_bytes: Option<usize>,
 }
 
+pub(super) struct FinalizedDownstreamResponse {
+    pub(super) response: HttpResponse,
+    pub(super) status: StatusCode,
+    pub(super) body_bytes_sent: Option<u64>,
+    pub(super) grpc: Option<super::grpc::GrpcObservability>,
+}
+
 pub async fn handle(
     request: Request<Incoming>,
     state: SharedState,
@@ -30,6 +37,7 @@ pub async fn handle(
         .listener(listener_id)
         .cloned()
         .expect("listener id should remain available while serving requests");
+    let access_log_format = listener.server.access_log_format.clone();
     let method = request.method().clone();
     let request_version = request.version();
     let request_headers = request.headers().clone();
@@ -94,7 +102,7 @@ pub async fn handle(
         request_body_read_timeout: listener.server.request_body_read_timeout,
         max_request_body_bytes: listener.server.max_request_body_bytes,
     };
-    let mut response = match selected_route {
+    let response = match selected_route {
         Some(route) => {
             if let Some(response) = authorize_route(&request_headers, &route, &client_address) {
                 state.record_route_access_denied(&route.id);
@@ -128,13 +136,15 @@ pub async fn handle(
                 })
         }
     };
-    response = crate::compression::maybe_encode_response(&method, &request_headers, response).await;
-    if method == Method::HEAD {
-        response = strip_response_body(response);
-    }
-    response.headers_mut().insert("x-request-id", request_id_header);
-
-    let status = response.status();
+    let finalized = finalize_downstream_response(
+        &method,
+        &request_headers,
+        request_id_header,
+        response,
+        grpc_request,
+    )
+    .await;
+    let status = finalized.status;
     state.record_downstream_response(
         listener_id,
         &selected_vhost_id,
@@ -142,10 +152,10 @@ pub async fn handle(
         status,
     );
     let elapsed_ms = started.elapsed().as_millis() as u64;
-    let body_bytes_sent = response_body_bytes_sent(method.as_str(), &response);
+    let body_bytes_sent = finalized.body_bytes_sent;
+    let response = finalized.response;
 
-    if let Some(grpc) = grpc_observability(grpc_request, response.headers()) {
-        let format = config.server.access_log_format.clone();
+    if let Some(grpc) = finalized.grpc {
         let context = OwnedAccessLogContext {
             request_id,
             method: method.as_str().to_string(),
@@ -167,7 +177,7 @@ pub async fn handle(
         };
         return wrap_grpc_observability_response(
             response,
-            format,
+            access_log_format,
             context,
             grpc,
             Some(GrpcStatsContext {
@@ -180,7 +190,7 @@ pub async fn handle(
     }
 
     log_access_event(
-        config.server.access_log_format.as_ref(),
+        access_log_format.as_ref(),
         AccessLogContext {
             request_id: &request_id,
             method: method.as_str(),
@@ -204,6 +214,33 @@ pub async fn handle(
     );
 
     response
+}
+
+pub(super) async fn finalize_downstream_response(
+    method: &Method,
+    request_headers: &HeaderMap,
+    request_id_header: HeaderValue,
+    mut response: HttpResponse,
+    grpc_request: Option<GrpcRequestMetadata<'_>>,
+) -> FinalizedDownstreamResponse {
+    // The final response pipeline is intentionally explicit:
+    // 1. Detect gRPC early from response headers.
+    // 2. Apply generic transforms only to non-gRPC, non-HEAD responses.
+    // 3. Strip HEAD bodies last so headers still describe the payload shape.
+    // 4. Add request-id after transforms so every returned response carries it.
+    let grpc = grpc_observability(grpc_request, response.headers());
+    if grpc.is_none() && *method != Method::HEAD {
+        response =
+            crate::compression::maybe_encode_response(method, request_headers, response).await;
+    }
+    if *method == Method::HEAD {
+        response = strip_response_body(response);
+    }
+    response.headers_mut().insert("x-request-id", request_id_header);
+
+    let status = response.status();
+    let body_bytes_sent = response_body_bytes_sent(method.as_str(), &response);
+    FinalizedDownstreamResponse { response, status, body_bytes_sent, grpc }
 }
 
 pub(super) fn response_body_bytes_sent(method: &str, response: &HttpResponse) -> Option<u64> {

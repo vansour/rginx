@@ -13,6 +13,10 @@ fn status_command_reads_local_admin_socket() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("kind=status"));
     assert!(stdout.contains("revision=0"));
+    assert!(stdout.contains("listeners=1"));
+    assert!(stdout.contains(&format!("listen_addrs={listen_addr}")));
+    assert!(stdout.contains("kind=status_listener"));
+    assert!(stdout.contains("listener=default"));
     assert!(stdout.contains(&format!("listen={listen_addr}")));
     assert!(stdout.contains("tls_listeners=1"));
     assert!(stdout.contains("tls_certificates=0"));
@@ -21,6 +25,39 @@ fn status_command_reads_local_admin_socket() {
     assert!(stdout.contains("mtls_listeners=0"));
     assert!(stdout.contains("reload_attempts=0"));
     assert!(stdout.contains("last_reload=-"));
+
+    server.shutdown_and_wait(Duration::from_secs(5));
+}
+
+#[test]
+fn status_command_reports_explicit_listener_inventory() {
+    let http_addr = reserve_loopback_addr();
+    let https_addr = reserve_loopback_addr();
+    let mut server = ServerHarness::spawn("rginx-admin-status-explicit", |_| {
+        explicit_listeners_config(&[("http", http_addr), ("https", https_addr)], "ok\n")
+    });
+    server.wait_for_http_ready(http_addr, Duration::from_secs(5));
+    server.wait_for_http_text_response(
+        https_addr,
+        "example.com",
+        "/",
+        200,
+        "ok\n",
+        Duration::from_secs(5),
+    );
+    let socket_path = admin_socket_path_for_config(server.config_path());
+    wait_for_admin_socket(&socket_path, Duration::from_secs(5));
+
+    let output = run_rginx(["--config", server.config_path().to_str().unwrap(), "status"]);
+    assert!(output.status.success(), "status command should succeed: {}", render_output(&output));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("listeners=2"));
+    assert!(stdout.contains(&format!("listen_addrs={http_addr},{https_addr}")));
+    assert!(stdout.contains("kind=status_listener"));
+    assert!(stdout.contains("listener=http"));
+    assert!(stdout.contains("listener=https"));
+    assert!(stdout.contains(&format!("listen={http_addr}")));
+    assert!(stdout.contains(&format!("listen={https_addr}")));
 
     server.shutdown_and_wait(Duration::from_secs(5));
 }

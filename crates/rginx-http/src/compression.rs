@@ -67,7 +67,10 @@ pub async fn maybe_encode_response(
         Ok(collected) => collected.to_bytes(),
         Err(error) => {
             tracing::warn!(%error, encoding = content_coding.label(), "failed to collect response body for compression");
-            return Response::from_parts(parts, full_body(Bytes::new()));
+            return Response::from_parts(
+                parts_without_compression_metadata(parts),
+                full_body(Bytes::new()),
+            );
         }
     };
 
@@ -81,7 +84,7 @@ pub async fn maybe_encode_response(
     };
 
     parts.headers.insert(CONTENT_ENCODING, HeaderValue::from_static(content_coding.header_value()));
-    parts.headers.insert(VARY, HeaderValue::from_static("Accept-Encoding"));
+    merge_vary_header(&mut parts.headers, "Accept-Encoding");
     parts.headers.insert(
         CONTENT_LENGTH,
         HeaderValue::from_str(&compressed.len().to_string())
@@ -90,6 +93,13 @@ pub async fn maybe_encode_response(
     parts.headers.remove(ACCEPT_RANGES);
 
     Response::from_parts(parts, full_body(compressed))
+}
+
+fn parts_without_compression_metadata(mut parts: http::response::Parts) -> http::response::Parts {
+    parts.headers.remove(CONTENT_ENCODING);
+    parts.headers.remove(CONTENT_LENGTH);
+    parts.headers.remove(ACCEPT_RANGES);
+    parts
 }
 
 fn response_is_eligible(headers: &HeaderMap, status: StatusCode) -> bool {
@@ -119,6 +129,31 @@ fn parse_content_length(headers: &HeaderMap) -> Option<usize> {
         .get(CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<usize>().ok())
+}
+
+fn merge_vary_header(headers: &mut HeaderMap, token: &str) {
+    let mut values = Vec::<String>::new();
+
+    for value in headers.get_all(VARY).iter() {
+        let Ok(value) = value.to_str() else {
+            continue;
+        };
+        for item in value.split(',').map(str::trim).filter(|item| !item.is_empty()) {
+            if !values.iter().any(|existing| existing.eq_ignore_ascii_case(item)) {
+                values.push(item.to_string());
+            }
+        }
+    }
+
+    if !values.iter().any(|existing| existing.eq_ignore_ascii_case(token)) {
+        values.push(token.to_string());
+    }
+
+    if let Ok(value) = HeaderValue::from_str(&values.join(", ")) {
+        headers.insert(VARY, value);
+    } else {
+        headers.append(VARY, HeaderValue::from_static("Accept-Encoding"));
+    }
 }
 
 fn preferred_response_encoding(headers: &HeaderMap) -> Option<ContentCoding> {
@@ -236,16 +271,47 @@ fn gzip_bytes(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
     use brotli::Decompressor;
     use bytes::Bytes;
     use flate2::read::GzDecoder;
-    use http::header::{ACCEPT_ENCODING, ACCEPT_RANGES, CONTENT_ENCODING, CONTENT_TYPE};
+    use http::header::{
+        ACCEPT_ENCODING, ACCEPT_RANGES, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, VARY,
+    };
     use http::{HeaderMap, HeaderValue, Method, Response, StatusCode};
     use http_body_util::BodyExt;
+    use hyper::body::{Frame, SizeHint};
     use std::io::Read;
 
     use super::{ContentCoding, maybe_encode_response, preferred_response_encoding};
-    use crate::handler::text_response;
+    use crate::handler::{BoxError, text_response};
+
+    #[derive(Debug, Default)]
+    struct CollectErrorBody;
+
+    impl hyper::body::Body for CollectErrorBody {
+        type Data = Bytes;
+        type Error = std::io::Error;
+
+        fn poll_frame(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+            Poll::Ready(Some(Err(std::io::Error::other("collect failed"))))
+        }
+
+        fn is_end_stream(&self) -> bool {
+            false
+        }
+
+        fn size_hint(&self) -> SizeHint {
+            let mut hint = SizeHint::new();
+            hint.set_exact(512);
+            hint
+        }
+    }
 
     #[test]
     fn preferred_response_encoding_honors_quality_values() {
@@ -358,5 +424,69 @@ mod tests {
             .expect("binary response should build");
         let binary = maybe_encode_response(&Method::GET, &request_headers, binary).await;
         assert!(binary.headers().get(CONTENT_ENCODING).is_none());
+    }
+
+    #[tokio::test]
+    async fn maybe_encode_response_merges_existing_vary_header() {
+        let mut request_headers = HeaderMap::new();
+        request_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+            .header(CONTENT_LENGTH, "640")
+            .header(VARY, "Origin")
+            .body(crate::handler::full_body(Bytes::from(vec![b'a'; 640])))
+            .expect("response should build");
+
+        let response = maybe_encode_response(&Method::GET, &request_headers, response).await;
+        let vary = response
+            .headers()
+            .get(VARY)
+            .and_then(|value| value.to_str().ok())
+            .expect("compressed response should keep vary");
+
+        assert!(vary.contains("Origin"), "vary should retain existing dimensions: {vary}");
+        assert!(
+            vary.contains("Accept-Encoding"),
+            "vary should advertise compression negotiation: {vary}"
+        );
+    }
+
+    #[tokio::test]
+    async fn maybe_encode_response_does_not_leave_stale_content_length_on_collect_failure() {
+        let mut request_headers = HeaderMap::new();
+        request_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+            .header(CONTENT_LENGTH, "512")
+            .body(CollectErrorBody.map_err(|error| -> BoxError { Box::new(error) }).boxed_unsync())
+            .expect("response should build");
+
+        let response = maybe_encode_response(&Method::GET, &request_headers, response).await;
+        let advertised_length = response
+            .headers()
+            .get(CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<usize>().ok());
+
+        match response.into_body().collect().await {
+            Ok(collected) => {
+                let body = collected.to_bytes();
+                assert_eq!(
+                    advertised_length.unwrap_or(body.len()),
+                    body.len(),
+                    "collect failure should not degrade into an empty body with stale content-length",
+                );
+            }
+            Err(_) => {
+                assert!(
+                    advertised_length.is_none(),
+                    "erroring fallback responses should not retain a stale content-length"
+                );
+            }
+        }
     }
 }

@@ -4,6 +4,7 @@ import base64
 import concurrent.futures
 import contextlib
 import http.server
+import http.client
 import os
 import pathlib
 import re
@@ -38,13 +39,18 @@ class UpstreamHandler(http.server.BaseHTTPRequestHandler):
         return
 
 
+class BenchmarkThreadingHTTPServer(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+    request_queue_size = 1024
+
+
 def start_upstream_server() -> tuple[http.server.ThreadingHTTPServer, threading.Thread, int]:
     from common import reserve_port
 
     reserved = reserve_port()
     port = reserved.port
     reserved.release()
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", port), UpstreamHandler)
+    server = BenchmarkThreadingHTTPServer(("127.0.0.1", port), UpstreamHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server, thread, port
@@ -200,6 +206,33 @@ def parse_ab_output(output: str, *, server: str, scenario: str) -> BenchmarkResu
     )
 
 
+def run_http1_keepalive_session(
+    *,
+    port: int,
+    path: str,
+    requests: int,
+) -> list[float]:
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30.0)
+    durations: list[float] = []
+    try:
+        for _ in range(requests):
+            started = time.perf_counter()
+            connection.putrequest("GET", path, skip_host=True, skip_accept_encoding=True)
+            connection.putheader("Host", "localhost")
+            connection.putheader("Connection", "keep-alive")
+            connection.endheaders()
+            response = connection.getresponse()
+            body = response.read()
+            if response.status != 200 or body != b"ok\n":
+                raise RuntimeError(
+                    f"unexpected HTTP/1.1 benchmark response: status={response.status} body={body!r}"
+                )
+            durations.append(time.perf_counter() - started)
+    finally:
+        connection.close()
+    return durations
+
+
 def benchmark_named_http(
     port: int,
     *,
@@ -208,20 +241,82 @@ def benchmark_named_http(
     server: str,
     scenario: str,
 ) -> BenchmarkResult:
-    completed = run(
-        [
-            "ab",
-            "-k",
-            "-q",
-            "-n",
-            str(requests),
-            "-c",
-            str(concurrency),
-            f"http://127.0.0.1:{port}/",
-        ],
-        capture_output=True,
+    worker_count = min(concurrency, requests)
+    request_counts = [
+        requests // worker_count + (1 if index < requests % worker_count else 0)
+        for index in range(worker_count)
+    ]
+    durations: list[float] = []
+    started = time.perf_counter()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = [
+            executor.submit(
+                run_http1_keepalive_session,
+                port=port,
+                path="/",
+                requests=request_count,
+            )
+            for request_count in request_counts
+            if request_count > 0
+        ]
+        for future in concurrent.futures.as_completed(futures):
+            durations.extend(future.result())
+
+    wall_elapsed = max(time.perf_counter() - started, 1e-9)
+    return BenchmarkResult(
+        server=server,
+        scenario=scenario,
+        tool="python-http1-keepalive",
+        complete_requests=requests,
+        failed_requests=0,
+        requests_per_sec=round(requests / wall_elapsed, 2),
+        time_per_request_ms=round(statistics.mean(durations) * 1000, 3),
+        transfer_rate_kb_sec=None,
     )
-    return parse_ab_output(completed.stdout, server=server, scenario=scenario)
+
+
+def warmup_request_count(*, requests: int, concurrency: int) -> int:
+    return min(requests, max(64, min(256, concurrency * 2)))
+
+
+def warmup_named_http(port: int, *, requests: int, concurrency: int) -> None:
+    warmup_concurrency = min(concurrency, requests, 16)
+    benchmark_named_http(
+        port,
+        requests=requests,
+        concurrency=warmup_concurrency,
+        server="warmup",
+        scenario="warmup",
+    )
+
+
+def warmup_named_curl(
+    *,
+    url: str,
+    flags: list[str],
+    headers: list[str],
+    body: bytes | None,
+    requests: int,
+    concurrency: int,
+    timeout_secs: float,
+    grpc_mode: str | None = None,
+) -> None:
+    warmup_concurrency = min(concurrency, requests, 16)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=warmup_concurrency) as executor:
+        futures = [
+            executor.submit(
+                run_curl_request,
+                url=url,
+                flags=flags,
+                headers=headers,
+                body=body,
+                timeout_secs=timeout_secs,
+                grpc_mode=grpc_mode,
+            )
+            for _ in range(requests)
+        ]
+        for future in concurrent.futures.as_completed(futures):
+            future.result()
 
 
 def benchmark_named_curl(
@@ -268,12 +363,36 @@ def benchmark_named_curl(
     )
 
 
+def median_benchmark_result(results: list[BenchmarkResult]) -> BenchmarkResult:
+    first = results[0]
+    kb_values = [result.transfer_rate_kb_sec for result in results if result.transfer_rate_kb_sec is not None]
+    return BenchmarkResult(
+        server=first.server,
+        scenario=first.scenario,
+        tool=first.tool,
+        complete_requests=int(statistics.median(result.complete_requests for result in results)),
+        failed_requests=int(statistics.median(result.failed_requests for result in results)),
+        requests_per_sec=statistics.median(result.requests_per_sec for result in results),
+        time_per_request_ms=statistics.median(result.time_per_request_ms for result in results),
+        transfer_rate_kb_sec=statistics.median(kb_values) if kb_values else None,
+    )
+
+
+def median_reload_result(results: list[ReloadResult]) -> ReloadResult:
+    first = results[0]
+    return ReloadResult(
+        server=first.server,
+        scenario=first.scenario,
+        reload_apply_ms=statistics.median(result.reload_apply_ms for result in results),
+    )
+
+
 def start_grpc_backend_server(
     port: int,
     *,
     cert_path: pathlib.Path,
     key_path: pathlib.Path,
-):
+) -> tuple[object, int]:
     import grpc
 
     with cert_path.open("rb") as cert_file:
@@ -296,12 +415,14 @@ def start_grpc_backend_server(
             ),
         )
     )
-    server.add_secure_port(
+    bound_port = server.add_secure_port(
         f"127.0.0.1:{port}",
         grpc.ssl_server_credentials(((key_pem, cert_pem),)),
     )
+    if bound_port == 0:
+        raise RuntimeError(f"failed to bind gRPC backend to 127.0.0.1:{port}")
     server.start()
-    return server
+    return server, bound_port
 
 
 def spawn_process(
@@ -420,6 +541,11 @@ def run_single_server_benchmark(
     )
     try:
         wait_for_ready(port, tls_enabled=ready_tls_enabled)
+        warmup_named_http(
+            port,
+            requests=warmup_request_count(requests=requests, concurrency=concurrency),
+            concurrency=concurrency,
+        )
         return benchmark_named_http(
             port,
             requests=requests,
@@ -463,6 +589,16 @@ def run_single_server_curl_benchmark(
     )
     try:
         wait_for_ready(port, tls_enabled=ready_tls_enabled)
+        warmup_named_curl(
+            url=url,
+            flags=flags,
+            headers=headers,
+            body=body,
+            timeout_secs=timeout_secs,
+            grpc_mode=grpc_mode,
+            requests=warmup_request_count(requests=requests, concurrency=concurrency),
+            concurrency=concurrency,
+        )
         return benchmark_named_curl(
             url=url,
             flags=flags,
