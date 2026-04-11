@@ -13,7 +13,7 @@ use listeners::tls_listener_status_snapshots;
 use ocsp::tls_ocsp_status_snapshots;
 
 #[cfg(test)]
-pub(crate) use certificates::inspect_certificate;
+pub(crate) use crate::pki::inspect_certificate;
 pub use ocsp::tls_ocsp_refresh_specs_for_config;
 pub use reload_boundary::{tls_reloadable_fields, tls_restart_required_fields};
 

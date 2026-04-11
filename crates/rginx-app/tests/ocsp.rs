@@ -27,7 +27,6 @@ use rcgen::{
     SigningKey,
 };
 use sha1::Digest;
-use x509_parser::prelude::FromDer;
 
 mod support;
 
@@ -450,10 +449,10 @@ fn generalized_time_from_system_time(time: SystemTime) -> GeneralizedTime {
 }
 
 fn responder_id_for_certificate(cert_der: &[u8]) -> RasnResponderId {
-    let (_, cert) = x509_parser::prelude::X509Certificate::from_der(cert_der)
-        .expect("certificate should decode");
+    let cert: rasn_pkix::Certificate = rasn::der::decode(cert_der).expect("certificate should decode");
     RasnResponderId::ByKey(OctetString::from(
-        sha1::Sha1::digest(cert.public_key().subject_public_key.data.as_ref()).to_vec(),
+        sha1::Sha1::digest(cert.tbs_certificate.subject_public_key_info.subject_public_key.as_raw_slice())
+            .to_vec(),
     ))
 }
 

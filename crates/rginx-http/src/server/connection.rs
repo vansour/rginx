@@ -3,10 +3,9 @@ use std::sync::Arc;
 
 use tokio::sync::watch;
 use tokio_rustls::TlsAcceptor;
-use x509_parser::extensions::GeneralName;
-use x509_parser::prelude::{FromDer, X509Certificate};
 
 use crate::client_ip::{ConnectionPeerAddrs, TlsClientIdentity};
+use crate::pki::parse_tls_client_identity as parse_pki_client_identity;
 use crate::state::TlsHandshakeFailureReason;
 use crate::timeout::WriteTimeoutIo;
 
@@ -165,40 +164,7 @@ fn extract_tls_client_identity(
 pub(super) fn parse_tls_client_identity<'a>(
     der_chain: impl IntoIterator<Item = &'a [u8]>,
 ) -> TlsClientIdentity {
-    let mut identity = TlsClientIdentity {
-        subject: None,
-        issuer: None,
-        serial_number: None,
-        san_dns_names: Vec::new(),
-        chain_length: 0,
-        chain_subjects: Vec::new(),
-    };
-
-    for (index, der) in der_chain.into_iter().enumerate() {
-        identity.chain_length += 1;
-        if let Ok((_, cert)) = X509Certificate::from_der(der) {
-            let subject = format!("{}", cert.subject());
-            identity.chain_subjects.push(subject.clone());
-            if index == 0 {
-                identity.subject = Some(subject);
-                identity.issuer = Some(format!("{}", cert.issuer()));
-                identity.serial_number = Some(cert.tbs_certificate.raw_serial_as_string());
-                if let Ok(Some(san)) = cert.subject_alternative_name() {
-                    identity.san_dns_names = san
-                        .value
-                        .general_names
-                        .iter()
-                        .filter_map(|name| match name {
-                            GeneralName::DNSName(dns) => Some(dns.to_string()),
-                            _ => None,
-                        })
-                        .collect();
-                }
-            }
-        }
-    }
-
-    identity
+    parse_pki_client_identity(der_chain).into()
 }
 
 fn tls_protocol_version(
