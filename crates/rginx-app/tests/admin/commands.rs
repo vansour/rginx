@@ -52,7 +52,19 @@ fn status_command_reports_explicit_listener_inventory() {
     assert!(output.status.success(), "status command should succeed: {}", render_output(&output));
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("listeners=2"));
-    assert!(stdout.contains(&format!("listen_addrs={http_addr},{https_addr}")));
+    let status_line = stdout
+        .lines()
+        .find(|line| line.contains("kind=status"))
+        .expect("status line should exist");
+    let listen_addrs = status_line
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix("listen_addrs="))
+        .expect("listen_addrs field should exist");
+    let mut actual = listen_addrs.split(',').map(str::to_string).collect::<Vec<_>>();
+    actual.sort();
+    let mut expected = vec![http_addr.to_string(), https_addr.to_string()];
+    expected.sort();
+    assert_eq!(actual, expected);
     assert!(stdout.contains("kind=status_listener"));
     assert!(stdout.contains("listener=http"));
     assert!(stdout.contains("listener=https"));

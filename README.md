@@ -2,7 +2,7 @@
 
 `rginx` 是一个面向中小规模部署的 Rust 入口反向代理。
 
-当前版本：`v0.1.3-rc.8`
+当前版本：`v0.1.3-rc.9`
 
 它的目标很收口：
 
@@ -217,7 +217,7 @@ sudo apt install ./target/debian/rginx_<version>_<arch>.deb
 安装后：
 
 - 二进制：`/usr/sbin/rginx`
-- systemd unit：`/usr/lib/systemd/system/rginx.service`
+- systemd unit：`/lib/systemd/system/rginx.service`
 - 主配置：`/etc/rginx/rginx.ron`
 - 站点片段：`/etc/rginx/conf.d/*.ron`
 
@@ -310,7 +310,7 @@ sudo apt install rginx
 
 当前约定：
 
-- 预发布 tag，例如 `v0.1.3-rc.8`：发布 GitHub Release 资产，但不更新 APT 仓库
+- 预发布 tag，例如 `v0.1.3-rc.9`：发布 GitHub Release 资产，但不更新 APT 仓库
 - 稳定 tag，例如 `v0.1.3`：同时发布 GitHub Release 和 GitHub Pages APT 仓库
 
 要让稳定版自动发布 APT 仓库，还需要一次性配置：

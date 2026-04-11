@@ -7,15 +7,22 @@ from checkout import DEFAULT_NGINX_REF
 from scenarios import run_comparison
 
 
+def positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be > 0")
+    return parsed
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Compare rginx and nginx inside a reproducible local harness."
     )
     parser.add_argument("--workspace", type=pathlib.Path, required=True)
     parser.add_argument("--out-dir", type=pathlib.Path, required=True)
-    parser.add_argument("--requests", type=int, default=20000)
-    parser.add_argument("--concurrency", type=int, default=64)
-    parser.add_argument("--rounds", type=int, default=3)
+    parser.add_argument("--requests", type=positive_int, default=20000)
+    parser.add_argument("--concurrency", type=positive_int, default=64)
+    parser.add_argument("--rounds", type=positive_int, default=3)
     parser.add_argument("--nginx-ref", default=DEFAULT_NGINX_REF)
     parser.add_argument("--nginx-src-dir", type=pathlib.Path, default=None)
     parser.add_argument("--nginx-install-dir", type=pathlib.Path, default=None)

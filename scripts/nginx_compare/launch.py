@@ -364,6 +364,8 @@ def benchmark_named_curl(
 
 
 def median_benchmark_result(results: list[BenchmarkResult]) -> BenchmarkResult:
+    if not results:
+        raise ValueError("median_benchmark_result() requires at least one result")
     first = results[0]
     kb_values = [result.transfer_rate_kb_sec for result in results if result.transfer_rate_kb_sec is not None]
     return BenchmarkResult(
@@ -379,6 +381,8 @@ def median_benchmark_result(results: list[BenchmarkResult]) -> BenchmarkResult:
 
 
 def median_reload_result(results: list[ReloadResult]) -> ReloadResult:
+    if not results:
+        raise ValueError("median_reload_result() requires at least one result")
     first = results[0]
     return ReloadResult(
         server=first.server,

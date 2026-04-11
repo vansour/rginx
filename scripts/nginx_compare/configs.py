@@ -64,7 +64,7 @@ def rginx_proxy_config(port: int, upstream_port: int) -> str:
                     peers: [UpstreamPeerConfig(url: "http://127.0.0.1:{upstream_port}")],
                     protocol: Http1,
                     load_balance: RoundRobin,
-                    pool_max_idle_per_host: Some(0),
+                    pool_max_idle_per_host: Some({BENCHMARK_UPSTREAM_KEEPALIVE}),
                 ),
             ],
             locations: [

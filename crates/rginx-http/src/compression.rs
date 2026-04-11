@@ -67,8 +67,10 @@ pub async fn maybe_encode_response(
         Ok(collected) => collected.to_bytes(),
         Err(error) => {
             tracing::warn!(%error, encoding = content_coding.label(), "failed to collect response body for compression");
+            let mut parts = parts_without_compression_metadata(parts);
+            parts.status = StatusCode::INTERNAL_SERVER_ERROR;
             return Response::from_parts(
-                parts_without_compression_metadata(parts),
+                parts,
                 full_body(Bytes::new()),
             );
         }
@@ -139,6 +141,10 @@ fn merge_vary_header(headers: &mut HeaderMap, token: &str) {
             continue;
         };
         for item in value.split(',').map(str::trim).filter(|item| !item.is_empty()) {
+            if item == "*" {
+                headers.insert(VARY, HeaderValue::from_static("*"));
+                return;
+            }
             if !values.iter().any(|existing| existing.eq_ignore_ascii_case(item)) {
                 values.push(item.to_string());
             }
@@ -454,6 +460,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn maybe_encode_response_preserves_vary_wildcard() {
+        let mut request_headers = HeaderMap::new();
+        request_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+            .header(CONTENT_LENGTH, "640")
+            .header(VARY, "*")
+            .body(crate::handler::full_body(Bytes::from(vec![b'a'; 640])))
+            .expect("response should build");
+
+        let response = maybe_encode_response(&Method::GET, &request_headers, response).await;
+        assert_eq!(response.headers().get(VARY).and_then(|value| value.to_str().ok()), Some("*"));
+    }
+
+    #[tokio::test]
     async fn maybe_encode_response_does_not_leave_stale_content_length_on_collect_failure() {
         let mut request_headers = HeaderMap::new();
         request_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
@@ -466,6 +489,7 @@ mod tests {
             .expect("response should build");
 
         let response = maybe_encode_response(&Method::GET, &request_headers, response).await;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let advertised_length = response
             .headers()
             .get(CONTENT_LENGTH)

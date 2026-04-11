@@ -163,7 +163,7 @@ rm -rf "${STAGE_DIR}"
 install -d \
     "${DEBIAN_DIR}" \
     "${STAGE_DIR}/usr/sbin" \
-    "${STAGE_DIR}/usr/lib/systemd/system" \
+    "${STAGE_DIR}/lib/systemd/system" \
     "${STAGE_DIR}/usr/share/doc/${PACKAGE_NAME}" \
     "${STAGE_DIR}/etc/rginx/conf.d"
 
@@ -177,7 +177,7 @@ if compgen -G "${ROOT_DIR}/configs/conf.d/*.ron" >/dev/null; then
 fi
 
 install -m 644 "${ROOT_DIR}/deploy/systemd/rginx.service" \
-    "${STAGE_DIR}/usr/lib/systemd/system/rginx.service"
+    "${STAGE_DIR}/lib/systemd/system/rginx.service"
 
 install_doc_if_exists "${ROOT_DIR}/README.md" "${STAGE_DIR}/usr/share/doc/${PACKAGE_NAME}"
 install_doc_if_exists "${ROOT_DIR}/LICENSE" "${STAGE_DIR}/usr/share/doc/${PACKAGE_NAME}"

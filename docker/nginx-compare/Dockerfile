@@ -4,6 +4,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV CARGO_HOME=/usr/local/cargo
 ENV RUSTUP_HOME=/usr/local/rustup
 ENV PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ARG RUST_TOOLCHAIN=1.85.0
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -26,7 +27,7 @@ RUN apt-get update \
 
 RUN pip3 install --no-cache-dir --break-system-packages grpcio==1.71.0
 
-RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal \
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain "${RUST_TOOLCHAIN}" --profile minimal \
     && rustc --version \
     && cargo --version
 

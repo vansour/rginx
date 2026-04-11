@@ -38,8 +38,8 @@ class ReloadResult:
 def ensure_nofile_limit(target: int = BENCHMARK_NOFILE) -> None:
     try:
         soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-        desired_hard = hard if hard == resource.RLIM_INFINITY else max(hard, target)
-        desired_soft = target if desired_hard == resource.RLIM_INFINITY else min(target, desired_hard)
+        desired_hard = hard
+        desired_soft = target if hard == resource.RLIM_INFINITY else min(target, hard)
         if soft >= desired_soft:
             return
         resource.setrlimit(resource.RLIMIT_NOFILE, (desired_soft, desired_hard))
