@@ -69,10 +69,7 @@ pub async fn maybe_encode_response(
             tracing::warn!(%error, encoding = content_coding.label(), "failed to collect response body for compression");
             let mut parts = parts_without_compression_metadata(parts);
             parts.status = StatusCode::INTERNAL_SERVER_ERROR;
-            return Response::from_parts(
-                parts,
-                full_body(Bytes::new()),
-            );
+            return Response::from_parts(parts, full_body(Bytes::new()));
         }
     };
 

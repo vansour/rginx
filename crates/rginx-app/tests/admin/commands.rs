@@ -52,10 +52,8 @@ fn status_command_reports_explicit_listener_inventory() {
     assert!(output.status.success(), "status command should succeed: {}", render_output(&output));
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("listeners=2"));
-    let status_line = stdout
-        .lines()
-        .find(|line| line.contains("kind=status"))
-        .expect("status line should exist");
+    let status_line =
+        stdout.lines().find(|line| line.contains("kind=status")).expect("status line should exist");
     let listen_addrs = status_line
         .split_whitespace()
         .find_map(|field| field.strip_prefix("listen_addrs="))
