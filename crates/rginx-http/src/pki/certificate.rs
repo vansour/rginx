@@ -142,7 +142,7 @@ pub(crate) fn inspect_certificate(path: &Path) -> Option<InspectedCertificate> {
         let subject = name_to_string(&cert.tbs_certificate.subject);
         let issuer = name_to_string(&cert.tbs_certificate.issuer);
         let expires_in_days = time_to_unix_secs(cert.tbs_certificate.validity.not_after)
-            .map(|not_after| (not_after - now_secs) / 86_400);
+            .map(|not_after| (not_after - now_secs).div_euclid(86_400));
         let basic_constraints = basic_constraints(extensions);
         let key_usage = key_usage(extensions);
         let extended_key_usage = extended_key_usage(extensions);
@@ -207,36 +207,42 @@ pub(crate) fn inspect_certificate(path: &Path) -> Option<InspectedCertificate> {
         });
     }
 
-    for index in 0..chain_entries.len().saturating_sub(1) {
-        let issuer = chain_entries[index].issuer.as_deref();
-        let next_subject = chain_entries[index + 1].subject.as_deref();
-        if issuer != next_subject {
-            chain_diagnostics.push(format!(
-                "chain_link_mismatch cert[{index}]_issuer_to_cert[{}]_subject",
-                index + 1
-            ));
-        }
-        if let (Some(aki), Some(ski)) = (
-            chain_entries[index].authority_key_identifier.as_deref(),
-            chain_entries[index + 1].subject_key_identifier.as_deref(),
-        ) && aki != ski
-        {
-            chain_diagnostics
-                .push(format!("chain_aki_ski_mismatch cert[{index}]_to_cert[{}]", index + 1));
-        }
-        if let Some(path_len_constraint) = chain_entries[index + 1].path_len_constraint {
-            let remaining_ca_certs =
-                chain_entries[index + 2..].iter().filter(|entry| entry.is_ca == Some(true)).count()
-                    as u32;
-            if remaining_ca_certs > path_len_constraint {
+    if chain_entries.len() == certs.len() {
+        for index in 0..chain_entries.len().saturating_sub(1) {
+            let issuer = chain_entries[index].issuer.as_deref();
+            let next_subject = chain_entries[index + 1].subject.as_deref();
+            if issuer != next_subject {
                 chain_diagnostics.push(format!(
-                    "cert[{}] path_len_constraint_exceeded remaining_ca_certs={} path_len_constraint={}",
-                    index + 1,
-                    remaining_ca_certs,
-                    path_len_constraint
+                    "chain_link_mismatch cert[{index}]_issuer_to_cert[{}]_subject",
+                    index + 1
                 ));
             }
+            if let (Some(aki), Some(ski)) = (
+                chain_entries[index].authority_key_identifier.as_deref(),
+                chain_entries[index + 1].subject_key_identifier.as_deref(),
+            ) && aki != ski
+            {
+                chain_diagnostics
+                    .push(format!("chain_aki_ski_mismatch cert[{index}]_to_cert[{}]", index + 1));
+            }
+            if let Some(path_len_constraint) = chain_entries[index + 1].path_len_constraint {
+                let descendant_ca_certs = chain_entries[..index + 1]
+                    .iter()
+                    .filter(|entry| entry.is_ca == Some(true))
+                    .count() as u32;
+                if descendant_ca_certs > path_len_constraint {
+                    chain_diagnostics.push(format!(
+                        "cert[{}] path_len_constraint_exceeded descendant_ca_certs={} path_len_constraint={}",
+                        index + 1,
+                        descendant_ca_certs,
+                        path_len_constraint
+                    ));
+                }
+            }
         }
+    } else if certs.len() > 1 {
+        chain_diagnostics
+            .push("chain_link_checks_skipped_due_to_unparseable_certificate".to_string());
     }
 
     if let Some(leaf) = chain_entries.first() {
