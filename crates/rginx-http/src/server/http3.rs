@@ -210,6 +210,7 @@ pub fn bind_http3_endpoint(
         None => return Ok(None),
     };
     let socket = std::net::UdpSocket::bind(listen_addr).map_err(Error::Io)?;
+    socket.set_nonblocking(true).map_err(Error::Io)?;
     bind_http3_endpoint_with_socket(listener, default_vhost, vhosts, socket).map(Some)
 }
 

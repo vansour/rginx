@@ -91,7 +91,7 @@ jobs:
         run: ./scripts/run-tls-gate.sh
 
   clippy:
-    name: Clippy Gate
+    name: Clippy
     runs-on: ubuntu-24.04
     steps:
       - name: Check Out Source
