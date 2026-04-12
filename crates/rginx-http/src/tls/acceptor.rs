@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use rginx_core::{Error, Result, ServerClientAuthMode, ServerTls, VirtualHost};
+use rginx_core::{Error, Result, ServerClientAuthMode, ServerTls, TlsVersion, VirtualHost};
 use rustls::ServerConfig;
 use rustls::server::WebPkiClientVerifier;
 use tokio_rustls::TlsAcceptor;
@@ -23,6 +23,54 @@ pub fn build_tls_acceptor(
     default_vhost: &VirtualHost,
     vhosts: &[VirtualHost],
 ) -> Result<Option<TlsAcceptor>> {
+    build_tls_server_config(
+        default_tls,
+        default_certificate,
+        tls_termination_enabled,
+        default_vhost,
+        vhosts,
+        default_tls
+            .and_then(|tls| tls.alpn_protocols.clone())
+            .unwrap_or_else(|| vec!["h2".to_string(), "http/1.1".to_string()]),
+        false,
+    )
+    .map(|config| config.map(TlsAcceptor::from))
+}
+
+pub fn build_http3_server_config(
+    default_tls: Option<&ServerTls>,
+    default_certificate: Option<&str>,
+    tls_termination_enabled: bool,
+    default_vhost: &VirtualHost,
+    vhosts: &[VirtualHost],
+) -> Result<Option<Arc<ServerConfig>>> {
+    if default_tls.and_then(|tls| tls.client_auth.as_ref()).is_some() {
+        return Err(Error::Config(
+            "http3 currently does not support downstream client_auth on the same listener"
+                .to_string(),
+        ));
+    }
+
+    build_tls_server_config(
+        default_tls,
+        default_certificate,
+        tls_termination_enabled,
+        default_vhost,
+        vhosts,
+        vec!["h3".to_string()],
+        true,
+    )
+}
+
+fn build_tls_server_config(
+    default_tls: Option<&ServerTls>,
+    default_certificate: Option<&str>,
+    tls_termination_enabled: bool,
+    default_vhost: &VirtualHost,
+    vhosts: &[VirtualHost],
+    alpn_protocols: Vec<String>,
+    http3_only: bool,
+) -> Result<Option<Arc<ServerConfig>>> {
     if !tls_termination_enabled {
         return Ok(None);
     }
@@ -74,7 +122,7 @@ pub fn build_tls_acceptor(
     }
 
     let resolver = Arc::new(SniCertificateResolver::new(default_certs, all_certs));
-    let builder = build_server_config_builder(default_tls)?;
+    let builder = build_server_config_builder(default_tls, http3_only)?;
     let mut config = if let Some(client_auth) = default_tls.and_then(|tls| tls.client_auth.as_ref())
     {
         let roots = load_ca_cert_store(&client_auth.ca_cert_path)?;
@@ -106,23 +154,35 @@ pub fn build_tls_acceptor(
     } else {
         builder.with_no_client_auth().with_cert_resolver(resolver)
     };
-    config.alpn_protocols = default_tls
-        .and_then(|tls| tls.alpn_protocols.clone())
-        .unwrap_or_else(|| vec!["h2".to_string(), "http/1.1".to_string()])
-        .into_iter()
-        .map(String::into_bytes)
-        .collect();
+    config.alpn_protocols = alpn_protocols.into_iter().map(String::into_bytes).collect();
     apply_session_policy(&mut config, default_tls)?;
 
-    Ok(Some(TlsAcceptor::from(Arc::new(config))))
+    Ok(Some(Arc::new(config)))
 }
 
 fn build_server_config_builder(
     tls: Option<&ServerTls>,
+    http3_only: bool,
 ) -> Result<rustls::ConfigBuilder<ServerConfig, rustls::WantsVerifier>> {
     let provider =
         tls.map(build_crypto_provider).transpose()?.unwrap_or_else(default_crypto_provider);
     let builder = ServerConfig::builder_with_provider(Arc::new(provider));
+    if http3_only {
+        if let Some(versions) = tls.and_then(|tls| tls.versions.as_deref())
+            && !versions.contains(&TlsVersion::Tls13)
+        {
+            return Err(Error::Config(
+                "http3 requires TLS1.3 to remain enabled on the same listener".to_string(),
+            ));
+        }
+
+        return builder.with_protocol_versions(&[&rustls::version::TLS13]).map_err(|error| {
+            Error::Server(format!(
+                "failed to configure server TLS protocol versions for http3: {error}"
+            ))
+        });
+    }
+
     match tls.and_then(|tls| tls.versions.as_deref()) {
         Some(versions) => {
             builder.with_protocol_versions(&rustls_versions(versions)).map_err(|error| {

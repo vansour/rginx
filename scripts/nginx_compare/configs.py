@@ -129,6 +129,53 @@ def rginx_tls_return_config(port: int, cert_path: pathlib.Path, key_path: pathli
     )
 
 
+def rginx_http3_return_config(port: int, cert_path: pathlib.Path, key_path: pathlib.Path) -> str:
+    return textwrap.dedent(
+        f"""\
+        Config(
+            runtime: RuntimeConfig(
+                shutdown_timeout_secs: 5,
+                worker_threads: Some({BENCHMARK_WORKERS}),
+                accept_workers: Some({BENCHMARK_WORKERS}),
+            ),
+            server: ServerConfig(
+                listen: "127.0.0.1:{port}",
+                keep_alive: Some(true),
+                server_names: ["localhost"],
+                tls: Some(ServerTlsConfig(
+                    cert_path: "{cert_path}",
+                    key_path: "{key_path}",
+                )),
+                http3: Some(Http3Config(
+                    advertise_alt_svc: Some(true),
+                    alt_svc_max_age_secs: Some(7200),
+                )),
+            ),
+            upstreams: [],
+            locations: [
+                LocationConfig(
+                    matcher: Exact("/-/ready"),
+                    handler: Return(
+                        status: 200,
+                        location: "",
+                        body: Some("ready\\n"),
+                    ),
+                ),
+                LocationConfig(
+                    matcher: Exact("/"),
+                    handler: Return(
+                        status: 200,
+                        location: "",
+                        body: Some("ok\\n"),
+                    ),
+                ),
+            ],
+            servers: [],
+        )
+        """
+    )
+    
+
 def rginx_grpc_proxy_config(
     port: int,
     cert_path: pathlib.Path,

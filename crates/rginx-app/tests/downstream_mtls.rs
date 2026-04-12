@@ -26,6 +26,8 @@ use rginx_runtime::admin::{AdminRequest, AdminResponse, admin_socket_path_for_co
 #[allow(unused_imports)]
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 #[allow(unused_imports)]
+use rustls::pki_types::pem::PemObject;
+#[allow(unused_imports)]
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 #[allow(unused_imports)]
 use rustls::{ClientConfig, ClientConnection, DigitallySignedStruct, SignatureScheme, StreamOwned};
@@ -262,21 +264,15 @@ fn fetch_https_text_response(
 }
 
 fn load_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>, String> {
-    let file = std::fs::File::open(path)
-        .map_err(|error| format!("failed to open cert `{}`: {error}", path.display()))?;
-    let mut reader = std::io::BufReader::new(file);
-    rustls_pemfile::certs(&mut reader)
+    CertificateDer::pem_file_iter(path)
+        .map_err(|error| format!("failed to open cert `{}`: {error}", path.display()))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("failed to parse cert `{}`: {error}", path.display()))
 }
 
 fn load_private_key(path: &Path) -> Result<rustls::pki_types::PrivateKeyDer<'static>, String> {
-    let file = std::fs::File::open(path)
-        .map_err(|error| format!("failed to open key `{}`: {error}", path.display()))?;
-    let mut reader = std::io::BufReader::new(file);
-    rustls_pemfile::private_key(&mut reader)
-        .map_err(|error| format!("failed to parse key `{}`: {error}", path.display()))?
-        .ok_or_else(|| format!("no private key found in `{}`", path.display()))
+    rustls::pki_types::PrivateKeyDer::from_pem_file(path)
+        .map_err(|error| format!("failed to parse key `{}`: {error}", path.display()))
 }
 
 fn required_client_auth_config(

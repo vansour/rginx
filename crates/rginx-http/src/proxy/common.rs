@@ -195,6 +195,7 @@ pub(super) fn connection_header_contains_token(headers: &HeaderMap, token: &str)
 
 pub(super) fn upstream_request_version(protocol: UpstreamProtocol) -> Version {
     match protocol {
+        UpstreamProtocol::Http3 => Version::HTTP_3,
         UpstreamProtocol::Http2 => Version::HTTP_2,
         UpstreamProtocol::Auto | UpstreamProtocol::Http1 => Version::HTTP_11,
     }

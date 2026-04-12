@@ -58,8 +58,11 @@ fi
 matrix=(
     "phase1|HTTP/1.1 request ID and plain proxy path"
     "http2|TLS termination and inbound HTTP/2"
+    "http3|downstream HTTP/3 ingress, Alt-Svc, and middleware parity"
     "upstream_http2|HTTPS upstream ALPN HTTP/2"
+    "upstream_http3|explicit HTTP/3 upstream proxy path"
     "grpc_proxy|gRPC and grpc-web proxy path"
+    "grpc_http3|gRPC, grpc-web, and health checks over HTTP/3"
     "upgrade|Upgrade and WebSocket tunnel path"
     "reload|reload and restart handoff stability"
     "dns_refresh|hostname upstream DNS refresh"

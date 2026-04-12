@@ -5,9 +5,9 @@ use ipnet::IpNet;
 use rginx_core::{Error, Result};
 
 use crate::model::{
-    ListenerConfig, ServerCertificateBundleConfig, ServerClientAuthConfig, ServerConfig,
-    ServerTlsConfig, TlsCipherSuiteConfig, TlsKeyExchangeGroupConfig, TlsVersionConfig,
-    VirtualHostConfig,
+    Http3Config, ListenerConfig, ServerCertificateBundleConfig, ServerClientAuthConfig,
+    ServerConfig, ServerTlsConfig, TlsCipherSuiteConfig, TlsKeyExchangeGroupConfig,
+    TlsVersionConfig, VirtualHostConfig,
 };
 
 pub(super) fn validate_server(server: &ServerConfig) -> Result<()> {
@@ -25,6 +25,7 @@ pub(super) fn validate_server(server: &ServerConfig) -> Result<()> {
         response_write_timeout_secs: server.response_write_timeout_secs,
         access_log_format: server.access_log_format.as_deref(),
         tls: server.tls.as_ref(),
+        http3: server.http3.as_ref(),
         require_listen: false,
     })?;
 
@@ -53,6 +54,7 @@ pub(super) fn validate_listeners(
     }
 
     let mut all_listener_names = HashSet::new();
+    let mut all_listener_bindings = HashSet::new();
     for (index, listener) in listeners.iter().enumerate() {
         let owner = format!("listeners[{index}]");
         let normalized_name = listener.name.trim().to_ascii_lowercase();
@@ -80,8 +82,35 @@ pub(super) fn validate_listeners(
             response_write_timeout_secs: listener.response_write_timeout_secs,
             access_log_format: listener.access_log_format.as_deref(),
             tls: listener.tls.as_ref(),
+            http3: listener.http3.as_ref(),
             require_listen: true,
         })?;
+
+        let tcp_listen_addr = listener.listen.parse::<std::net::SocketAddr>().map_err(|error| {
+            Error::Config(format!("{owner} listen `{}` is invalid: {error}", listener.listen))
+        })?;
+        if !all_listener_bindings.insert((rginx_core::ListenerTransportKind::Tcp, tcp_listen_addr))
+        {
+            return Err(Error::Config(format!(
+                "duplicate tcp listener bind `{tcp_listen_addr}` across listeners"
+            )));
+        }
+
+        if let Some(http3) = listener.http3.as_ref() {
+            let udp_listen_addr = match http3.listen.as_deref() {
+                Some(listen) => listen.parse::<std::net::SocketAddr>().map_err(|error| {
+                    Error::Config(format!("{owner} http3 listen `{listen}` is invalid: {error}"))
+                })?,
+                None => tcp_listen_addr,
+            };
+            if !all_listener_bindings
+                .insert((rginx_core::ListenerTransportKind::Udp, udp_listen_addr))
+            {
+                return Err(Error::Config(format!(
+                    "duplicate udp listener bind `{udp_listen_addr}` across listeners"
+                )));
+            }
+        }
     }
 
     let any_listener_tls = listeners.iter().any(|listener| listener.tls.is_some());
@@ -146,6 +175,7 @@ struct ListenerLikeRef<'a> {
     response_write_timeout_secs: Option<u64>,
     access_log_format: Option<&'a str>,
     tls: Option<&'a ServerTlsConfig>,
+    http3: Option<&'a Http3Config>,
     require_listen: bool,
 }
 
@@ -217,6 +247,10 @@ fn validate_listener_like(config: ListenerLikeRef<'_>) -> Result<()> {
             "{} access_log_format must not be empty",
             config.owner_label
         )));
+    }
+
+    if let Some(http3) = config.http3 {
+        validate_http3(config.owner_label, http3, config.tls)?;
     }
 
     if let Some(ServerTlsConfig {
@@ -312,6 +346,46 @@ fn validate_listener_like(config: ListenerLikeRef<'_>) -> Result<()> {
                 )));
             }
         }
+    }
+
+    Ok(())
+}
+
+fn validate_http3(
+    owner_label: &str,
+    http3: &Http3Config,
+    tls: Option<&ServerTlsConfig>,
+) -> Result<()> {
+    let Some(tls) = tls else {
+        return Err(Error::Config(format!(
+            "{owner_label} http3 requires tls to be configured on the same listener"
+        )));
+    };
+
+    if http3.listen.as_deref().is_some_and(|listen| listen.trim().is_empty()) {
+        return Err(Error::Config(format!(
+            "{owner_label} http3 listen must not be empty when provided"
+        )));
+    }
+
+    if http3.alt_svc_max_age_secs.is_some_and(|value| value == 0) {
+        return Err(Error::Config(format!(
+            "{owner_label} http3 alt_svc_max_age_secs must be greater than 0"
+        )));
+    }
+
+    if tls.client_auth.is_some() {
+        return Err(Error::Config(format!(
+            "{owner_label} http3 currently does not support tls.client_auth on the same listener"
+        )));
+    }
+
+    if let Some(versions) = tls.versions.as_deref()
+        && !versions.contains(&TlsVersionConfig::Tls13)
+    {
+        return Err(Error::Config(format!(
+            "{owner_label} http3 requires TLS1.3 to remain enabled on the same listener"
+        )));
     }
 
     Ok(())
@@ -516,7 +590,8 @@ fn legacy_server_listener_fields(server: &ServerConfig) -> Option<()> {
         || server.request_body_read_timeout_secs.is_some()
         || server.response_write_timeout_secs.is_some()
         || server.access_log_format.is_some()
-        || server.tls.is_some())
+        || server.tls.is_some()
+        || server.http3.is_some())
     .then_some(())
 }
 

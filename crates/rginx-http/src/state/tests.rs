@@ -15,7 +15,7 @@ use rginx_core::{
 };
 
 use super::{
-    ConfigSnapshot, ReloadOutcomeSnapshot, SharedState, TlsHandshakeFailureReason,
+    ConfigSnapshot, ReloadOutcomeSnapshot, SharedState, SnapshotModule, TlsHandshakeFailureReason,
     inspect_certificate, validate_config_transition,
 };
 
@@ -46,6 +46,7 @@ fn snapshot(listen: &str) -> ConfigSnapshot {
             server,
             tls_termination_enabled: false,
             proxy_protocol_enabled: false,
+            http3: None,
         }],
         default_vhost: VirtualHost {
             id: "server".to_string(),
@@ -119,6 +120,23 @@ fn snapshot_with_routes(listen: &str) -> ConfigSnapshot {
     snapshot
 }
 
+fn snapshot_with_routes_and_upstream(listen: &str) -> ConfigSnapshot {
+    let mut snapshot = snapshot_with_upstream(listen);
+    snapshot.default_vhost.routes = vec![Route {
+        id: "server/routes[0]|exact:/".to_string(),
+        matcher: RouteMatcher::Exact("/".to_string()),
+        grpc_match: None,
+        action: RouteAction::Return(ReturnAction {
+            status: StatusCode::OK,
+            location: String::new(),
+            body: Some("ok\n".to_string()),
+        }),
+        access_control: RouteAccessControl::default(),
+        rate_limit: None,
+    }];
+    snapshot
+}
+
 #[test]
 fn validate_config_transition_allows_unchanged_listener() {
     let current = snapshot("127.0.0.1:8080");
@@ -177,14 +195,23 @@ async fn status_snapshot_reports_runtime_summary() {
     assert_eq!(status.listeners[0].listener_id, "default");
     assert_eq!(status.listeners[0].listener_name, "default");
     assert_eq!(status.listeners[0].listen_addr, "127.0.0.1:8080".parse().unwrap());
+    assert_eq!(status.listeners[0].binding_count, 1);
+    assert!(!status.listeners[0].http3_enabled);
     assert!(!status.listeners[0].tls_enabled);
     assert!(!status.listeners[0].proxy_protocol_enabled);
     assert!(!status.listeners[0].access_log_format_configured);
+    assert_eq!(status.listeners[0].bindings.len(), 1);
+    assert_eq!(status.listeners[0].bindings[0].transport, "tcp");
+    assert_eq!(status.listeners[0].bindings[0].protocols, vec!["http1".to_string()]);
     assert_eq!(status.total_vhosts, 1);
     assert_eq!(status.total_routes, 0);
     assert_eq!(status.total_upstreams, 0);
     assert!(!status.tls_enabled);
     assert_eq!(status.tls.listeners.len(), 1);
+    assert!(!status.tls.listeners[0].http3_enabled);
+    assert_eq!(status.tls.listeners[0].http3_listen_addr, None);
+    assert!(status.tls.listeners[0].http3_versions.is_empty());
+    assert!(status.tls.listeners[0].http3_alpn_protocols.is_empty());
     assert_eq!(status.tls.listeners[0].session_resumption_enabled, None);
     assert_eq!(status.tls.listeners[0].session_tickets_enabled, None);
     assert_eq!(status.tls.listeners[0].session_cache_size, None);
@@ -195,6 +222,38 @@ async fn status_snapshot_reports_runtime_summary() {
     assert_eq!(status.mtls.authenticated_requests, 0);
     assert_eq!(status.active_connections, 0);
     assert_eq!(status.reload.attempts_total, 0);
+}
+
+#[tokio::test]
+async fn status_snapshot_reports_http3_listener_bindings() {
+    let mut config = snapshot("127.0.0.1:8443");
+    config.listeners[0].tls_termination_enabled = true;
+    config.listeners[0].http3 = Some(rginx_core::ListenerHttp3 {
+        listen_addr: "127.0.0.1:8443".parse().unwrap(),
+        advertise_alt_svc: true,
+        alt_svc_max_age: Duration::from_secs(7200),
+    });
+    let shared = SharedState::from_config(config).expect("shared state should build");
+
+    let status = shared.status_snapshot().await;
+    assert_eq!(status.listeners.len(), 1);
+    assert_eq!(status.listeners[0].binding_count, 2);
+    assert!(status.listeners[0].http3_enabled);
+    assert_eq!(status.listeners[0].bindings.len(), 2);
+    assert_eq!(status.listeners[0].bindings[0].transport, "tcp");
+    assert_eq!(
+        status.listeners[0].bindings[0].protocols,
+        vec!["http1".to_string(), "http2".to_string()]
+    );
+    assert_eq!(status.listeners[0].bindings[1].transport, "udp");
+    assert_eq!(status.listeners[0].bindings[1].protocols, vec!["http3".to_string()]);
+    assert_eq!(status.listeners[0].bindings[1].advertise_alt_svc, Some(true));
+    assert_eq!(status.listeners[0].bindings[1].alt_svc_max_age_secs, Some(7200));
+    assert_eq!(status.tls.listeners.len(), 1);
+    assert!(status.tls.listeners[0].http3_enabled);
+    assert_eq!(status.tls.listeners[0].http3_listen_addr, Some("127.0.0.1:8443".parse().unwrap()));
+    assert_eq!(status.tls.listeners[0].http3_versions, vec!["TLS1.3".to_string()]);
+    assert_eq!(status.tls.listeners[0].http3_alpn_protocols, vec!["h3".to_string()]);
 }
 
 #[test]
@@ -259,6 +318,113 @@ async fn mtls_status_snapshot_excludes_non_mtls_listener_handshake_failures() {
     assert_eq!(counters.downstream_tls_handshake_failures, 1);
     assert_eq!(status.mtls.configured_listeners, 0);
     assert_eq!(status.mtls.handshake_failures_total, 0);
+}
+
+#[tokio::test]
+async fn current_listener_returns_retired_listener_and_exposes_runtime_metadata() {
+    let config_path = PathBuf::from("/etc/rginx/rginx.ron");
+    let shared = SharedState::from_config_path(config_path.clone(), snapshot("127.0.0.1:8080"))
+        .expect("shared state should build");
+
+    let mut retired = snapshot("127.0.0.1:9090")
+        .listeners
+        .into_iter()
+        .next()
+        .expect("snapshot should contain a listener");
+    retired.id = "retired".to_string();
+    retired.name = "retired".to_string();
+    shared.retire_listener_runtime(&retired);
+
+    let expected_path = config_path;
+    assert_eq!(shared.config_path().map(|path| path.as_path()), Some(expected_path.as_path()));
+    assert_eq!(shared.current_revision().await, 0);
+
+    let listener =
+        shared.current_listener("retired").await.expect("retired listener should be returned");
+    assert_eq!(listener.id, "retired");
+    assert_eq!(listener.name, "retired");
+    assert_eq!(listener.server.listen_addr, "127.0.0.1:9090".parse().unwrap());
+}
+
+#[tokio::test]
+async fn wait_for_snapshot_change_returns_after_state_update() {
+    let shared = SharedState::from_config(snapshot_with_upstream("127.0.0.1:8080"))
+        .expect("shared state should build");
+
+    let since_version = shared.current_snapshot_version();
+    let waiter = {
+        let shared = shared.clone();
+        tokio::spawn(async move {
+            shared.wait_for_snapshot_change(since_version, Some(Duration::from_secs(1))).await
+        })
+    };
+
+    tokio::task::yield_now().await;
+    shared.record_upstream_request("backend");
+
+    let changed_version = waiter.await.expect("wait task should complete");
+    assert!(changed_version > since_version);
+    assert_eq!(changed_version, shared.current_snapshot_version());
+}
+
+#[tokio::test]
+async fn wait_for_snapshot_change_returns_current_version_after_timeout() {
+    let shared =
+        SharedState::from_config(snapshot("127.0.0.1:8080")).expect("shared state should build");
+
+    shared.record_reload_success(1, Vec::new());
+    let since_version = shared.current_snapshot_version();
+
+    let changed_version =
+        shared.wait_for_snapshot_change(since_version, Some(Duration::from_millis(20))).await;
+
+    assert_eq!(changed_version, since_version);
+}
+
+#[test]
+fn snapshot_delta_since_filters_modules_and_reports_changed_targets() {
+    let shared = SharedState::from_config(snapshot_with_routes_and_upstream("127.0.0.1:8080"))
+        .expect("shared state should build");
+
+    let since_version = shared.current_snapshot_version();
+    shared.record_ocsp_refresh_success("listener:default");
+    shared.record_downstream_request("default", "server", Some("server/routes[0]|exact:/"));
+    shared.record_upstream_request("backend");
+
+    let delta = shared.snapshot_delta_since(
+        since_version,
+        Some(&[SnapshotModule::Status, SnapshotModule::Traffic, SnapshotModule::Upstreams]),
+        Some(30),
+    );
+
+    assert_eq!(
+        delta.included_modules,
+        vec![SnapshotModule::Status, SnapshotModule::Traffic, SnapshotModule::Upstreams]
+    );
+    assert_eq!(delta.since_version, since_version);
+    assert_eq!(delta.current_snapshot_version, shared.current_snapshot_version());
+    assert_eq!(delta.recent_window_secs, Some(30));
+    assert!(delta.status_version.expect("status version should be present") > since_version);
+    assert!(delta.traffic_version.expect("traffic version should be present") > since_version);
+    assert!(delta.upstreams_version.expect("upstream version should be present") > since_version);
+    assert_eq!(delta.counters_version, None);
+    assert_eq!(delta.peer_health_version, None);
+    assert_eq!(delta.status_changed, Some(true));
+    assert_eq!(delta.counters_changed, None);
+    assert_eq!(delta.traffic_changed, Some(true));
+    assert_eq!(delta.traffic_recent_changed, Some(true));
+    assert_eq!(delta.peer_health_changed, None);
+    assert_eq!(delta.upstreams_changed, Some(true));
+    assert_eq!(delta.upstreams_recent_changed, Some(true));
+    assert_eq!(delta.changed_listener_ids, Some(vec!["default".to_string()]));
+    assert_eq!(delta.changed_vhost_ids, Some(vec!["server".to_string()]));
+    assert_eq!(delta.changed_route_ids, Some(vec!["server/routes[0]|exact:/".to_string()]));
+    assert_eq!(delta.changed_recent_listener_ids, Some(vec!["default".to_string()]));
+    assert_eq!(delta.changed_recent_vhost_ids, Some(vec!["server".to_string()]));
+    assert_eq!(delta.changed_recent_route_ids, Some(vec!["server/routes[0]|exact:/".to_string()]));
+    assert_eq!(delta.changed_peer_health_upstream_names, None);
+    assert_eq!(delta.changed_upstream_names, Some(vec!["backend".to_string()]));
+    assert_eq!(delta.changed_recent_upstream_names, Some(vec!["backend".to_string()]));
 }
 
 #[test]

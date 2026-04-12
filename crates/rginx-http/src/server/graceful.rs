@@ -28,7 +28,13 @@ pub(super) async fn serve_h1_connection_io<T>(
         let connection_addrs = service_connection_addrs.clone();
         async move {
             Ok::<_, Infallible>(
-                crate::handler::handle(request, state, connection_addrs, &listener_id).await,
+                crate::handler::handle(
+                    request.map(crate::handler::boxed_body),
+                    state,
+                    connection_addrs,
+                    &listener_id,
+                )
+                .await,
             )
         }
     });
@@ -92,7 +98,13 @@ pub(super) async fn serve_h2_connection_io<T>(
         let connection_addrs = service_connection_addrs.clone();
         async move {
             Ok::<_, Infallible>(
-                crate::handler::handle(request, state, connection_addrs, &listener_id).await,
+                crate::handler::handle(
+                    request.map(crate::handler::boxed_body),
+                    state,
+                    connection_addrs,
+                    &listener_id,
+                )
+                .await,
             )
         }
     });

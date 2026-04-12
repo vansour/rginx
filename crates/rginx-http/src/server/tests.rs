@@ -1,5 +1,5 @@
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair};
-use rustls_pemfile::certs;
+use rustls::pki_types::{CertificateDer, pem::PemObject};
 
 use super::connection::parse_tls_client_identity;
 use super::proxy_protocol::parse_proxy_protocol_v1;
@@ -41,8 +41,7 @@ fn parse_tls_client_identity_extracts_subject_and_dns_san() {
     let key_pair = KeyPair::generate().expect("keypair should generate");
     let cert = params.self_signed(&key_pair).expect("cert should generate");
     let pem = cert.pem();
-    let mut reader = std::io::Cursor::new(pem.as_bytes());
-    let cert = certs(&mut reader)
+    let cert = CertificateDer::pem_slice_iter(pem.as_bytes())
         .collect::<Result<Vec<_>, _>>()
         .expect("certificate PEM should parse")
         .remove(0);
@@ -74,8 +73,7 @@ fn parse_tls_client_identity_preserves_leaf_fields_and_chain_order() {
         leaf_params.signed_by(&leaf_key, &ca_issuer).expect("leaf cert should be signed by CA");
 
     let pem = format!("{}{}", leaf_cert.pem(), _ca_cert.pem());
-    let mut reader = std::io::Cursor::new(pem.as_bytes());
-    let certs = certs(&mut reader)
+    let certs = CertificateDer::pem_slice_iter(pem.as_bytes())
         .collect::<Result<Vec<_>, _>>()
         .expect("certificate PEM chain should parse");
 

@@ -18,6 +18,7 @@ pub(super) async fn handle_reload_signal(
 ) {
     match runtime_reload::prepare_reload(state).await {
         Ok(pending) => match prepare_added_listener_bindings(
+            &pending.next_config,
             &pending.next_config.listeners,
             pending.next_config.runtime.accept_workers,
             active_listener_groups,

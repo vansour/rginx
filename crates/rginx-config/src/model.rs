@@ -24,6 +24,16 @@ pub struct RuntimeConfig {
     pub accept_workers: Option<u64>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct Http3Config {
+    #[serde(default)]
+    pub listen: Option<String>,
+    #[serde(default)]
+    pub advertise_alt_svc: Option<bool>,
+    #[serde(default)]
+    pub alt_svc_max_age_secs: Option<u64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub listen: Option<String>,
@@ -40,6 +50,7 @@ pub struct ServerConfig {
     pub response_write_timeout_secs: Option<u64>,
     pub access_log_format: Option<String>,
     pub tls: Option<ServerTlsConfig>,
+    pub http3: Option<Http3Config>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -70,6 +81,8 @@ pub struct ListenerConfig {
     pub access_log_format: Option<String>,
     #[serde(default)]
     pub tls: Option<ServerTlsConfig>,
+    #[serde(default)]
+    pub http3: Option<Http3Config>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -282,6 +295,7 @@ pub enum UpstreamProtocolConfig {
     Auto,
     Http1,
     Http2,
+    Http3,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -380,6 +394,8 @@ impl<'de> Deserialize<'de> for ServerConfig {
             access_log_format: Option<String>,
             #[serde(default)]
             tls: Option<ServerTlsConfig>,
+            #[serde(default)]
+            http3: Option<Http3Config>,
         }
 
         let server = ServerConfigDe::deserialize(deserializer)?;
@@ -398,6 +414,7 @@ impl<'de> Deserialize<'de> for ServerConfig {
             response_write_timeout_secs: server.response_write_timeout_secs,
             access_log_format: server.access_log_format,
             tls: server.tls,
+            http3: server.http3,
         })
     }
 }

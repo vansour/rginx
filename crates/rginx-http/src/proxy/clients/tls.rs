@@ -1,13 +1,16 @@
-use std::fs::File;
-use std::io::BufReader;
 use std::path::Path;
+use std::sync::Arc;
 
 use super::*;
 use crate::tls::certificates::load_certificate_revocation_lists;
+use quinn::crypto::rustls::QuicClientConfig;
 use rginx_core::{ClientIdentity, TlsVersion};
 use rustls::client::WebPkiServerVerifier;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::pki_types::{
+    CertificateDer, PrivateKeyDer, ServerName, UnixTime,
+    pem::{Error as PemError, PemObject},
+};
 use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
 use rustls_native_certs::load_native_certs;
 
@@ -47,6 +50,37 @@ pub(super) fn build_tls_config(
     }?;
     config.enable_sni = server_name;
     Ok(config)
+}
+
+pub(super) fn build_http3_client_config(
+    tls: &UpstreamTls,
+    versions: Option<&[TlsVersion]>,
+    server_verify_depth: Option<u32>,
+    server_crl_path: Option<&Path>,
+    client_identity: Option<&ClientIdentity>,
+    server_name: bool,
+) -> Result<quinn::ClientConfig, Error> {
+    if let Some(versions) = versions
+        && !versions.contains(&TlsVersion::Tls13)
+    {
+        return Err(Error::Config("upstream http3 requires TLS1.3 to remain enabled".to_string()));
+    }
+
+    let mut tls_config = build_tls_config(
+        tls,
+        Some(&[TlsVersion::Tls13]),
+        server_verify_depth,
+        server_crl_path,
+        client_identity,
+        server_name,
+    )?;
+    tls_config.alpn_protocols = vec![b"h3".to_vec()];
+
+    let quic_config = QuicClientConfig::try_from(tls_config).map_err(|error| {
+        Error::Server(format!("failed to build quic client config for upstream http3: {error}"))
+    })?;
+
+    Ok(quinn::ClientConfig::new(Arc::new(quic_config)))
 }
 
 fn build_server_cert_verifier(
@@ -124,15 +158,10 @@ fn load_native_root_store() -> Result<RootCertStore, Error> {
 }
 
 fn load_certificate_chain(path: &Path) -> Result<Vec<CertificateDer<'static>>, Error> {
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
-    let certs =
-        rustls_pemfile::certs(&mut reader).collect::<Result<Vec<_>, _>>().map_err(|error| {
-            Error::Server(format!(
-                "failed to parse certificates from `{}`: {error}",
-                path.display()
-            ))
-        })?;
+    let certs = CertificateDer::pem_file_iter(path)
+        .map_err(|error| map_pem_error(path, "certificates", error))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| map_pem_error(path, "certificates", error))?;
 
     if certs.is_empty() {
         let der = std::fs::read(path)?;
@@ -143,18 +172,23 @@ fn load_certificate_chain(path: &Path) -> Result<Vec<CertificateDer<'static>>, E
 }
 
 fn load_private_key(path: &Path) -> Result<rustls::pki_types::PrivateKeyDer<'static>, Error> {
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
-    rustls_pemfile::private_key(&mut reader)
-        .map_err(|error| {
-            Error::Server(format!("failed to parse private key `{}`: {error}", path.display()))
-        })?
-        .ok_or_else(|| {
-            Error::Server(format!(
-                "private key file `{}` did not contain a supported PEM private key",
-                path.display()
-            ))
-        })
+    match PrivateKeyDer::from_pem_file(path) {
+        Ok(key) => Ok(key),
+        Err(PemError::NoItemsFound) => Err(Error::Server(format!(
+            "private key file `{}` did not contain a supported PEM private key",
+            path.display()
+        ))),
+        Err(error) => Err(map_pem_error(path, "private key", error)),
+    }
+}
+
+fn map_pem_error(path: &Path, item: &str, error: PemError) -> Error {
+    match error {
+        PemError::Io(error) => Error::Io(error),
+        other => {
+            Error::Server(format!("failed to parse {item} from `{}`: {other}", path.display()))
+        }
+    }
 }
 
 fn rustls_versions(versions: &[TlsVersion]) -> Vec<&'static rustls::SupportedProtocolVersion> {

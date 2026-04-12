@@ -121,7 +121,7 @@ jobs:
         run: ./scripts/run-tls-gate.sh
 
       - name: Run Clippy
-        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+        run: ./scripts/run-clippy-gate.sh
 
   build:
     name: Build ${{ matrix.asset_name }} Assets

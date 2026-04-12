@@ -11,6 +11,7 @@ mod sni;
 #[cfg(test)]
 mod tests;
 
+pub use acceptor::build_http3_server_config;
 pub use acceptor::build_tls_acceptor;
 #[cfg(test)]
 pub(crate) use sni::best_matching_wildcard_certificates;

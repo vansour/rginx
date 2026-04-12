@@ -126,6 +126,7 @@ fn default_listener(server: rginx_core::Server) -> rginx_core::Listener {
         server,
         tls_termination_enabled: false,
         proxy_protocol_enabled: false,
+        http3: None,
     }
 }
 

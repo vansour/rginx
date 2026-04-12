@@ -1,11 +1,12 @@
-use std::fs::File;
-use std::io::BufReader;
 use std::path::Path;
 use std::sync::Arc;
 
 use rginx_core::{Error, Result, ServerCertificateBundle, ServerTls, VirtualHostTls};
 use rustls::RootCertStore;
-use rustls::pki_types::{CertificateDer, CertificateRevocationListDer};
+use rustls::pki_types::{
+    CertificateDer, CertificateRevocationListDer, PrivateKeyDer,
+    pem::{Error as PemError, PemObject},
+};
 
 use crate::pki::validate_der_certificate_revocation_list;
 
@@ -105,11 +106,10 @@ pub(crate) fn load_certified_key_bundle(
 pub(crate) fn load_certificate_chain_from_path(
     path: &Path,
 ) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
-    let certs = rustls_pemfile::certs(&mut reader)
+    let certs = CertificateDer::pem_file_iter(path)
+        .map_err(|error| map_pem_error(path, "certificates", error))?
         .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(Error::Io)?;
+        .map_err(|error| map_pem_error(path, "certificates", error))?;
 
     if certs.is_empty() {
         return Err(Error::Server(format!(
@@ -122,11 +122,10 @@ pub(crate) fn load_certificate_chain_from_path(
 }
 
 pub(crate) fn load_ca_cert_store(path: &Path) -> Result<RootCertStore> {
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
-    let certs = rustls_pemfile::certs(&mut reader)
+    let certs = CertificateDer::pem_file_iter(path)
+        .map_err(|error| map_pem_error(path, "CA certificates", error))?
         .collect::<std::result::Result<Vec<CertificateDer<'static>>, _>>()
-        .map_err(Error::Io)?;
+        .map_err(|error| map_pem_error(path, "CA certificates", error))?;
 
     let mut roots = RootCertStore::empty();
     if certs.is_empty() {
@@ -151,11 +150,10 @@ pub(crate) fn load_ca_cert_store(path: &Path) -> Result<RootCertStore> {
 pub(crate) fn load_certificate_revocation_lists(
     path: &Path,
 ) -> Result<Vec<CertificateRevocationListDer<'static>>> {
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
-    let crls = rustls_pemfile::crls(&mut reader)
+    let crls = CertificateRevocationListDer::pem_file_iter(path)
+        .map_err(|error| map_pem_error(path, "certificate revocation lists", error))?
         .collect::<std::result::Result<Vec<CertificateRevocationListDer<'static>>, _>>()
-        .map_err(Error::Io)?;
+        .map_err(|error| map_pem_error(path, "certificate revocation lists", error))?;
 
     if !crls.is_empty() {
         return Ok(crls);
@@ -173,14 +171,23 @@ fn validate_der_crl(path: &Path, der: &[u8]) -> Result<()> {
 pub(crate) fn load_private_key_from_path(
     path: &Path,
 ) -> Result<rustls::pki_types::PrivateKeyDer<'static>> {
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
-    rustls_pemfile::private_key(&mut reader).map_err(Error::Io)?.ok_or_else(|| {
-        Error::Server(format!(
+    match PrivateKeyDer::from_pem_file(path) {
+        Ok(key) => Ok(key),
+        Err(PemError::NoItemsFound) => Err(Error::Server(format!(
             "server TLS private key file `{}` did not contain a supported PEM private key",
             path.display()
-        ))
-    })
+        ))),
+        Err(error) => Err(map_pem_error(path, "private key", error)),
+    }
+}
+
+fn map_pem_error(path: &Path, item: &str, error: PemError) -> Error {
+    match error {
+        PemError::Io(error) => Error::Io(error),
+        other => {
+            Error::Server(format!("failed to parse {item} from `{}`: {other}", path.display()))
+        }
+    }
 }
 
 #[cfg(test)]

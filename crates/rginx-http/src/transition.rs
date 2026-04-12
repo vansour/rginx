@@ -1,16 +1,26 @@
 use rginx_core::{ConfigSnapshot, Error, Result};
 
-const RELOADABLE_FIELDS: [&str; 6] = [
+const RELOADABLE_FIELDS: [&str; 10] = [
     "server.tls",
+    "server.http3.advertise_alt_svc",
+    "server.http3.alt_svc_max_age_secs",
     "listeners[].tls",
+    "listeners[].http3.advertise_alt_svc",
+    "listeners[].http3.alt_svc_max_age_secs",
     "servers[].tls",
     "upstreams[].tls",
     "upstreams[].server_name",
     "upstreams[].server_name_override",
 ];
 
-const RESTART_REQUIRED_FIELDS: [&str; 4] =
-    ["listen", "listeners[].listen", "runtime.worker_threads", "runtime.accept_workers"];
+const RESTART_REQUIRED_FIELDS: [&str; 6] = [
+    "listen",
+    "server.http3.listen",
+    "listeners[].listen",
+    "listeners[].http3.listen",
+    "runtime.worker_threads",
+    "runtime.accept_workers",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigTransitionKind {
@@ -76,15 +86,30 @@ pub fn plan_config_transition(
         .collect::<std::collections::HashMap<_, _>>();
 
     for current_listener in &current.listeners {
-        if let Some(next_listener) = next_by_id.get(current_listener.id.as_str())
-            && current_listener.server.listen_addr != next_listener.server.listen_addr
-        {
-            changes.push(format!(
-                "{}.listen {} -> {}",
-                current_listener.id,
-                current_listener.server.listen_addr,
-                next_listener.server.listen_addr
-            ));
+        if let Some(next_listener) = next_by_id.get(current_listener.id.as_str()) {
+            if current_listener.server.listen_addr != next_listener.server.listen_addr {
+                changes.push(format!(
+                    "{}.listen {} -> {}",
+                    current_listener.id,
+                    current_listener.server.listen_addr,
+                    next_listener.server.listen_addr
+                ));
+            }
+
+            let current_http3 = current_listener.http3.as_ref().map(|http3| http3.listen_addr);
+            let next_http3 = next_listener_http3(Some(next_listener));
+            if current_http3 != next_http3 {
+                changes.push(format!(
+                    "{}.http3.listen {} -> {}",
+                    current_listener.id,
+                    current_http3
+                        .map(|listen_addr| listen_addr.to_string())
+                        .unwrap_or_else(|| "-".to_string()),
+                    next_http3
+                        .map(|listen_addr| listen_addr.to_string())
+                        .unwrap_or_else(|| "-".to_string()),
+                ));
+            }
         }
     }
 
@@ -110,6 +135,10 @@ pub fn plan_config_transition(
     };
 
     ConfigTransitionPlan { kind, boundary, changed_restart_required_fields: changes }
+}
+
+fn next_listener_http3(listener: Option<&rginx_core::Listener>) -> Option<std::net::SocketAddr> {
+    listener.and_then(|listener| listener.http3.as_ref()).map(|http3| http3.listen_addr)
 }
 
 pub fn validate_config_transition(current: &ConfigSnapshot, next: &ConfigSnapshot) -> Result<()> {
@@ -159,6 +188,7 @@ mod tests {
                 server,
                 tls_termination_enabled: false,
                 proxy_protocol_enabled: false,
+                http3: None,
             }],
             default_vhost: VirtualHost {
                 id: "server".to_string(),
@@ -178,7 +208,11 @@ mod tests {
             boundary.reloadable_fields,
             vec![
                 "server.tls".to_string(),
+                "server.http3.advertise_alt_svc".to_string(),
+                "server.http3.alt_svc_max_age_secs".to_string(),
                 "listeners[].tls".to_string(),
+                "listeners[].http3.advertise_alt_svc".to_string(),
+                "listeners[].http3.alt_svc_max_age_secs".to_string(),
                 "servers[].tls".to_string(),
                 "upstreams[].tls".to_string(),
                 "upstreams[].server_name".to_string(),
@@ -189,7 +223,9 @@ mod tests {
             boundary.restart_required_fields,
             vec![
                 "listen".to_string(),
+                "server.http3.listen".to_string(),
                 "listeners[].listen".to_string(),
+                "listeners[].http3.listen".to_string(),
                 "runtime.worker_threads".to_string(),
                 "runtime.accept_workers".to_string(),
             ]
@@ -252,6 +288,7 @@ mod tests {
                 },
                 tls_termination_enabled: false,
                 proxy_protocol_enabled: false,
+                http3: None,
             },
         ];
 
@@ -260,5 +297,30 @@ mod tests {
         assert!(plan.changed_restart_required_fields.is_empty());
         validate_config_transition(&current, &next)
             .expect("listener add/remove should stay within the hot-reload boundary");
+    }
+
+    #[test]
+    fn planner_reports_restart_required_http3_listener_binding_changes() {
+        let mut current = snapshot("127.0.0.1:8443");
+        current.listeners[0].tls_termination_enabled = true;
+        current.listeners[0].http3 = Some(rginx_core::ListenerHttp3 {
+            listen_addr: "127.0.0.1:8443".parse().unwrap(),
+            advertise_alt_svc: true,
+            alt_svc_max_age: Duration::from_secs(3600),
+        });
+
+        let mut next = snapshot("127.0.0.1:8443");
+        next.listeners[0].tls_termination_enabled = true;
+        next.listeners[0].http3 = Some(rginx_core::ListenerHttp3 {
+            listen_addr: "127.0.0.1:9443".parse().unwrap(),
+            advertise_alt_svc: true,
+            alt_svc_max_age: Duration::from_secs(3600),
+        });
+
+        let plan = plan_config_transition(&current, &next);
+        assert_eq!(plan.kind, ConfigTransitionKind::RestartRequired);
+        assert!(plan.changed_restart_required_fields.iter().any(|change| {
+            change.contains("default.http3.listen 127.0.0.1:8443 -> 127.0.0.1:9443")
+        }));
     }
 }

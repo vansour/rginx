@@ -112,7 +112,10 @@ pub(super) fn validate_upstreams(upstreams: &[UpstreamConfig]) -> Result<HashSet
             )));
         }
 
-        if matches!(upstream.protocol, UpstreamProtocolConfig::Http2) {
+        if matches!(
+            upstream.protocol,
+            UpstreamProtocolConfig::Http2 | UpstreamProtocolConfig::Http3
+        ) {
             for peer in &upstream.peers {
                 let uri = peer.url.parse::<http::Uri>().map_err(|error| {
                     Error::Config(format!(
@@ -123,8 +126,13 @@ pub(super) fn validate_upstreams(upstreams: &[UpstreamConfig]) -> Result<HashSet
 
                 if uri.scheme_str() != Some("https") {
                     return Err(Error::Config(format!(
-                        "upstream `{}` protocol `Http2` currently requires all peers to use `https://`; cleartext h2c upstreams are not supported",
-                        upstream.name
+                        "upstream `{}` protocol `{}` currently requires all peers to use `https://`; cleartext upstreams are not supported",
+                        upstream.name,
+                        match upstream.protocol {
+                            UpstreamProtocolConfig::Http2 => "Http2",
+                            UpstreamProtocolConfig::Http3 => "Http3",
+                            _ => unreachable!("guarded by matches!"),
+                        }
                     )));
                 }
             }

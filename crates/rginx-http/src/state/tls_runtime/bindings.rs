@@ -219,6 +219,7 @@ mod tests {
             },
             tls_termination_enabled,
             proxy_protocol_enabled: false,
+            http3: None,
         }
     }
 

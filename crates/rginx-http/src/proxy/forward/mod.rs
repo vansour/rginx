@@ -35,7 +35,7 @@ pub struct DownstreamRequestContext<'a> {
 pub async fn forward_request(
     state: SharedState,
     clients: ProxyClients,
-    mut request: Request<Incoming>,
+    mut request: Request<HttpBody>,
     listener_id: &str,
     target: &ProxyTarget,
     client_address: ClientAddress,
@@ -85,6 +85,13 @@ pub async fn forward_request(
     } else {
         None
     };
+    if downstream_upgrade.is_some() && target.upstream.protocol == UpstreamProtocol::Http3 {
+        state.record_upstream_bad_gateway_response(&target.upstream_name);
+        return bad_gateway(
+            &request_headers,
+            format!("upstream `{}` does not support upgrade over http3\n", target.upstream_name),
+        );
+    }
 
     let mut prepared_request = match PreparedProxyRequest::from_request(
         request,
@@ -199,7 +206,7 @@ pub async fn forward_request(
             upstream_request_timeout,
             &target.upstream_name,
             "request",
-            client.request(upstream_request),
+            client.request(target.upstream.as_ref(), peer, upstream_request),
         )
         .await
         {

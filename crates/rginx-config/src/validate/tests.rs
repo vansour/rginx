@@ -1,8 +1,8 @@
 use crate::model::{
-    Config, HandlerConfig, ListenerConfig, LocationConfig, MatcherConfig, RuntimeConfig,
-    ServerConfig, ServerTlsConfig, TlsCipherSuiteConfig, TlsKeyExchangeGroupConfig, UpstreamConfig,
-    UpstreamLoadBalanceConfig, UpstreamPeerConfig, UpstreamProtocolConfig, VirtualHostConfig,
-    VirtualHostTlsConfig,
+    Config, HandlerConfig, Http3Config, ListenerConfig, LocationConfig, MatcherConfig,
+    RuntimeConfig, ServerConfig, ServerTlsConfig, TlsCipherSuiteConfig, TlsKeyExchangeGroupConfig,
+    UpstreamConfig, UpstreamLoadBalanceConfig, UpstreamPeerConfig, UpstreamProtocolConfig,
+    VirtualHostConfig, VirtualHostTlsConfig,
 };
 
 use super::{DEFAULT_GRPC_HEALTH_CHECK_PATH, validate};
@@ -407,6 +407,19 @@ fn validate_rejects_empty_server_access_log_format() {
 }
 
 #[test]
+fn validate_rejects_http3_without_tls_on_same_listener() {
+    let mut config = base_config();
+    config.server.http3 = Some(Http3Config {
+        listen: None,
+        advertise_alt_svc: Some(true),
+        alt_svc_max_age_secs: Some(3600),
+    });
+
+    let error = validate(&config).expect_err("http3 should require tls on the same listener");
+    assert!(error.to_string().contains("http3 requires tls to be configured on the same listener"));
+}
+
+#[test]
 fn validate_rejects_zero_server_max_headers() {
     let mut config = base_config();
     config.server.max_headers = Some(0);
@@ -699,6 +712,20 @@ fn validate_rejects_http2_upstream_protocol_for_cleartext_peers() {
 }
 
 #[test]
+fn validate_rejects_http3_upstream_protocol_for_cleartext_peers() {
+    let mut config = base_config();
+    config.upstreams[0].protocol = UpstreamProtocolConfig::Http3;
+
+    let error =
+        validate(&config).expect_err("cleartext peers should be rejected for upstream http3");
+    assert!(
+        error
+            .to_string()
+            .contains("protocol `Http3` currently requires all peers to use `https://`")
+    );
+}
+
+#[test]
 fn validate_rejects_invalid_http2_upstream_peer_uri() {
     let mut config = base_config();
     config.upstreams[0].protocol = UpstreamProtocolConfig::Http2;
@@ -798,6 +825,7 @@ fn validate_accepts_explicit_listeners_when_legacy_listener_fields_are_empty() {
             response_write_timeout_secs: None,
             access_log_format: None,
             tls: None,
+            http3: None,
         },
         ListenerConfig {
             name: "https".to_string(),
@@ -829,6 +857,7 @@ fn validate_accepts_explicit_listeners_when_legacy_listener_fields_are_empty() {
                 session_ticket_count: None,
                 client_auth: None,
             }),
+            http3: None,
         },
     ];
 
@@ -855,6 +884,7 @@ fn validate_rejects_duplicate_listener_names_after_ascii_normalization() {
             response_write_timeout_secs: None,
             access_log_format: None,
             tls: None,
+            http3: None,
         },
         ListenerConfig {
             name: "http".to_string(),
@@ -871,6 +901,7 @@ fn validate_rejects_duplicate_listener_names_after_ascii_normalization() {
             response_write_timeout_secs: None,
             access_log_format: None,
             tls: None,
+            http3: None,
         },
     ];
 
@@ -896,6 +927,7 @@ fn validate_rejects_mixing_legacy_listener_fields_with_explicit_listeners() {
         response_write_timeout_secs: None,
         access_log_format: None,
         tls: None,
+        http3: None,
     }];
 
     let error = validate(&config).expect_err("mixed legacy and explicit listeners should fail");
@@ -921,6 +953,7 @@ fn validate_rejects_vhost_tls_without_any_tls_listener() {
         response_write_timeout_secs: None,
         access_log_format: None,
         tls: None,
+        http3: None,
     }];
     config.servers = vec![VirtualHostConfig {
         server_names: vec!["api.example.com".to_string()],
@@ -974,6 +1007,7 @@ fn base_config() -> Config {
             response_write_timeout_secs: None,
             access_log_format: None,
             tls: None,
+            http3: None,
         },
         upstreams: vec![UpstreamConfig {
             name: "backend".to_string(),

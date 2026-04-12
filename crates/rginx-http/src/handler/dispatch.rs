@@ -24,7 +24,7 @@ pub(super) struct FinalizedDownstreamResponse {
 }
 
 pub async fn handle(
-    request: Request<Incoming>,
+    request: Request<HttpBody>,
     state: SharedState,
     connection: Arc<ConnectionPeerAddrs>,
     listener_id: &str,
@@ -67,6 +67,7 @@ pub async fn handle(
     let started = Instant::now();
     let tls_version = connection.tls_version.clone();
     let tls_alpn = connection.tls_alpn.clone();
+    let alt_svc_header = alt_svc_header_value(&listener, request_version);
     let client_address =
         resolve_client_address(request.headers(), &listener.server, connection.as_ref());
     let downstream_scheme = if listener.tls_enabled() { "https" } else { "http" };
@@ -142,6 +143,7 @@ pub async fn handle(
         request_id_header,
         response,
         grpc_request,
+        alt_svc_header,
     )
     .await;
     let status = finalized.status;
@@ -222,6 +224,7 @@ pub(super) async fn finalize_downstream_response(
     request_id_header: HeaderValue,
     mut response: HttpResponse,
     grpc_request: Option<GrpcRequestMetadata<'_>>,
+    alt_svc_header: Option<HeaderValue>,
 ) -> FinalizedDownstreamResponse {
     // The final response pipeline is intentionally explicit:
     // 1. Detect gRPC early from response headers.
@@ -235,6 +238,9 @@ pub(super) async fn finalize_downstream_response(
     }
     if *method == Method::HEAD {
         response = strip_response_body(response);
+    }
+    if let Some(alt_svc_header) = alt_svc_header {
+        response.headers_mut().insert(http::header::ALT_SVC, alt_svc_header);
     }
     response.headers_mut().insert("x-request-id", request_id_header);
 
@@ -363,7 +369,7 @@ pub(super) fn enforce_rate_limit(
 }
 
 async fn build_route_response(
-    request: Request<Incoming>,
+    request: Request<HttpBody>,
     state: SharedState,
     action: RouteAction,
     active: ActiveState,
@@ -416,4 +422,22 @@ async fn build_route_response(
 fn strip_response_body(response: HttpResponse) -> HttpResponse {
     let (parts, _body) = response.into_parts();
     Response::from_parts(parts, full_body(Bytes::new()))
+}
+
+fn alt_svc_header_value(
+    listener: &rginx_core::Listener,
+    request_version: Version,
+) -> Option<HeaderValue> {
+    if request_version == Version::HTTP_3 || !listener.tls_enabled() {
+        return None;
+    }
+
+    let http3 = listener.http3.as_ref()?;
+    if !http3.advertise_alt_svc {
+        return None;
+    }
+
+    let value =
+        format!("h3=\":{}\"; ma={}", http3.listen_addr.port(), http3.alt_svc_max_age.as_secs());
+    HeaderValue::from_str(&value).ok()
 }

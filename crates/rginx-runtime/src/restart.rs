@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::io::{self, Write};
-use std::net::{SocketAddr, TcpListener as StdTcpListener};
+use std::net::{SocketAddr, TcpListener as StdTcpListener, UdpSocket as StdUdpSocket};
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::Path;
@@ -23,26 +23,50 @@ const CHILD_READY_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct ListenerHandle {
     pub listener: Listener,
     pub std_listener: Arc<StdTcpListener>,
+    pub std_udp_socket: Option<Arc<StdUdpSocket>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum InheritedSocketKind {
+    Tcp,
+    Udp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct InheritedListenerFd {
+    kind: InheritedSocketKind,
     listen_addr: SocketAddr,
     fd: RawFd,
 }
 
+pub struct InheritedListeners {
+    pub tcp: HashMap<SocketAddr, StdTcpListener>,
+    pub udp: HashMap<SocketAddr, StdUdpSocket>,
+}
+
 pub async fn restart(config_path: &Path, listener_handles: &[ListenerHandle]) -> Result<()> {
     let executable = env::current_exe().map_err(Error::Io)?;
-    let inherited = listener_handles
-        .iter()
-        .map(|handle| {
-            set_fd_inheritable(handle.std_listener.as_raw_fd())?;
-            Ok(InheritedListenerFd {
-                listen_addr: handle.listener.server.listen_addr,
-                fd: handle.std_listener.as_raw_fd(),
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let mut inherited = Vec::new();
+    for handle in listener_handles {
+        set_fd_inheritable(handle.std_listener.as_raw_fd())?;
+        inherited.push(InheritedListenerFd {
+            kind: InheritedSocketKind::Tcp,
+            listen_addr: handle.listener.server.listen_addr,
+            fd: handle.std_listener.as_raw_fd(),
+        });
+
+        if let Some(http3) = &handle.listener.http3
+            && let Some(std_udp_socket) = &handle.std_udp_socket
+        {
+            set_fd_inheritable(std_udp_socket.as_raw_fd())?;
+            inherited.push(InheritedListenerFd {
+                kind: InheritedSocketKind::Udp,
+                listen_addr: http3.listen_addr,
+                fd: std_udp_socket.as_raw_fd(),
+            });
+        }
+    }
 
     let (ready_parent, ready_child) = StdUnixStream::pair().map_err(Error::Io)?;
     set_fd_inheritable(ready_child.as_raw_fd())?;
@@ -92,9 +116,9 @@ pub async fn restart(config_path: &Path, listener_handles: &[ListenerHandle]) ->
     }
 }
 
-pub fn take_inherited_listeners_from_env() -> Result<HashMap<SocketAddr, StdTcpListener>> {
+pub fn take_inherited_listeners_from_env() -> Result<InheritedListeners> {
     let Some(raw) = env::var_os(INHERITED_LISTENERS_ENV) else {
-        return Ok(HashMap::new());
+        return Ok(InheritedListeners { tcp: HashMap::new(), udp: HashMap::new() });
     };
     let raw = raw
         .into_string()
@@ -102,17 +126,26 @@ pub fn take_inherited_listeners_from_env() -> Result<HashMap<SocketAddr, StdTcpL
     let inherited = serde_json::from_str::<Vec<InheritedListenerFd>>(&raw)
         .map_err(|error| Error::Server(format!("failed to decode inherited listeners: {error}")))?;
 
-    let mut by_addr = HashMap::new();
+    let mut tcp = HashMap::new();
+    let mut udp = HashMap::new();
     for entry in inherited {
-        let listener = unsafe { StdTcpListener::from_raw_fd(entry.fd) };
-        listener.set_nonblocking(true)?;
-        by_addr.insert(entry.listen_addr, listener);
+        match entry.kind {
+            InheritedSocketKind::Tcp => {
+                let listener = unsafe { StdTcpListener::from_raw_fd(entry.fd) };
+                listener.set_nonblocking(true)?;
+                tcp.insert(entry.listen_addr, listener);
+            }
+            InheritedSocketKind::Udp => {
+                let socket = unsafe { StdUdpSocket::from_raw_fd(entry.fd) };
+                udp.insert(entry.listen_addr, socket);
+            }
+        }
     }
 
     unsafe {
         env::remove_var(INHERITED_LISTENERS_ENV);
     }
-    Ok(by_addr)
+    Ok(InheritedListeners { tcp, udp })
 }
 
 pub fn notify_ready_if_requested() -> Result<()> {
@@ -152,11 +185,14 @@ fn set_fd_inheritable(fd: RawFd) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use std::env;
-    use std::net::{SocketAddr, TcpListener as StdTcpListener};
+    use std::net::{SocketAddr, TcpListener as StdTcpListener, UdpSocket as StdUdpSocket};
     use std::os::fd::AsRawFd;
     use std::sync::Mutex;
 
-    use super::{INHERITED_LISTENERS_ENV, InheritedListenerFd, take_inherited_listeners_from_env};
+    use super::{
+        INHERITED_LISTENERS_ENV, InheritedListenerFd, InheritedSocketKind,
+        take_inherited_listeners_from_env,
+    };
 
     static INHERITED_LISTENERS_ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -169,7 +205,8 @@ mod tests {
 
         let inherited =
             take_inherited_listeners_from_env().expect("inherited listeners should load");
-        assert!(inherited.is_empty());
+        assert!(inherited.tcp.is_empty());
+        assert!(inherited.udp.is_empty());
     }
 
     #[test]
@@ -180,16 +217,30 @@ mod tests {
         let listen_addr: SocketAddr = listener.local_addr().expect("listener addr should exist");
         let fd = listener.as_raw_fd();
         std::mem::forget(listener);
+        let udp_socket = StdUdpSocket::bind(("127.0.0.1", 0)).expect("udp socket should bind");
+        let udp_listen_addr: SocketAddr =
+            udp_socket.local_addr().expect("udp socket addr should exist");
+        let udp_fd = udp_socket.as_raw_fd();
+        std::mem::forget(udp_socket);
 
-        let encoded = serde_json::to_string(&vec![InheritedListenerFd { listen_addr, fd }])
-            .expect("listener map should encode");
+        let encoded = serde_json::to_string(&vec![
+            InheritedListenerFd { kind: InheritedSocketKind::Tcp, listen_addr, fd },
+            InheritedListenerFd {
+                kind: InheritedSocketKind::Udp,
+                listen_addr: udp_listen_addr,
+                fd: udp_fd,
+            },
+        ])
+        .expect("listener map should encode");
         unsafe {
             env::set_var(INHERITED_LISTENERS_ENV, encoded);
         }
 
         let inherited =
             take_inherited_listeners_from_env().expect("inherited listeners should load");
-        assert_eq!(inherited.len(), 1);
-        assert!(inherited.contains_key(&listen_addr));
+        assert_eq!(inherited.tcp.len(), 1);
+        assert_eq!(inherited.udp.len(), 1);
+        assert!(inherited.tcp.contains_key(&listen_addr));
+        assert!(inherited.udp.contains_key(&udp_listen_addr));
     }
 }

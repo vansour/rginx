@@ -12,9 +12,21 @@ log() {
 cd "${ROOT_DIR}"
 
 log "running fast unit and crate-local tests"
-cargo test -p rginx-core --lib --locked --quiet -- --test-threads=1
-cargo test -p rginx-config --lib --locked --quiet -- --test-threads=1
-cargo test -p rginx-http --lib --locked --quiet -- --test-threads=1
-cargo test -p rginx-runtime --lib --locked --quiet -- --test-threads=1
-cargo test -p rginx-observability --lib --locked --quiet -- --test-threads=1
+
+matrix=(
+    "rginx-core|crate-local core model and config invariants"
+    "rginx-config|config compile and validate paths, including HTTP/3 listener metadata"
+    "rginx-http|transport, proxy, TLS, and HTTP/3 runtime unit coverage"
+    "rginx-runtime|reload/restart orchestration and listener bootstrap coverage"
+    "rginx-observability|logging and tracing setup"
+)
+
+for entry in "${matrix[@]}"; do
+    crate_name="${entry%%|*}"
+    label="${entry#*|}"
+    log "running ${crate_name}: ${label}"
+    cargo test -p "${crate_name}" --lib --locked --quiet -- --test-threads=1
+done
+
+log "running rginx binary unit tests"
 cargo test -p rginx --bin rginx --locked --quiet -- --test-threads=1

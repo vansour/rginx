@@ -7,6 +7,7 @@ use super::health::{
 use super::*;
 use rginx_core::{ClientIdentity, TlsVersion};
 
+mod http3;
 #[cfg(test)]
 mod tests;
 mod tls;
@@ -14,7 +15,7 @@ mod tls;
 #[cfg(test)]
 pub(super) use tls::load_custom_ca_store;
 
-pub type ProxyClient = Client<HttpsConnector<HttpConnector>, HttpBody>;
+pub type HyperProxyClient = Client<HttpsConnector<HttpConnector>, HttpBody>;
 pub(crate) type HealthChangeNotifier = Arc<dyn Fn(&str) + Send + Sync + 'static>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -66,6 +67,12 @@ pub struct ProxyClients {
     health: PeerHealthRegistry,
 }
 
+#[derive(Clone)]
+pub(crate) enum ProxyClient {
+    Http(Box<HyperProxyClient>),
+    Http3(http3::Http3Client),
+}
+
 impl ProxyClients {
     pub fn from_config(config: &ConfigSnapshot) -> Result<Self, Error> {
         Self::from_config_with_health_notifier(config, None)
@@ -96,7 +103,7 @@ impl ProxyClients {
         Ok(Self { clients: Arc::new(clients), health })
     }
 
-    pub fn for_upstream(&self, upstream: &Upstream) -> Result<ProxyClient, Error> {
+    pub(crate) fn for_upstream(&self, upstream: &Upstream) -> Result<ProxyClient, Error> {
         let profile = UpstreamClientProfile::from_upstream(upstream);
         self.clients.get(&profile).cloned().ok_or_else(|| {
             Error::Server(format!(
@@ -158,7 +165,40 @@ impl ProxyClients {
     }
 }
 
+impl ProxyClient {
+    pub async fn request(
+        &self,
+        upstream: &Upstream,
+        peer: &UpstreamPeer,
+        request: Request<HttpBody>,
+    ) -> Result<Response<HttpBody>, Error> {
+        match self {
+            Self::Http(client) => client
+                .request(request)
+                .await
+                .map(|response| response.map(crate::handler::boxed_body))
+                .map_err(|error| Error::Server(format!("upstream request failed: {error}"))),
+            Self::Http3(client) => client.request(upstream, peer, request).await,
+        }
+    }
+}
+
 fn build_client_for_profile(profile: &UpstreamClientProfile) -> Result<ProxyClient, Error> {
+    if profile.protocol == UpstreamProtocol::Http3 {
+        let client_config = tls::build_http3_client_config(
+            &profile.tls,
+            profile.tls_versions.as_deref(),
+            profile.server_verify_depth,
+            profile.server_crl_path.as_deref(),
+            profile.client_identity.as_ref(),
+            profile.server_name,
+        )?;
+        return Ok(ProxyClient::Http3(http3::Http3Client::new(
+            client_config,
+            profile.connect_timeout,
+        )));
+    }
+
     let mut connector = HttpConnector::new();
     connector.enforce_http(false);
     connector.set_connect_timeout(Some(profile.connect_timeout));
@@ -188,6 +228,7 @@ fn build_client_for_profile(profile: &UpstreamClientProfile) -> Result<ProxyClie
         UpstreamProtocol::Auto => builder.enable_all_versions().wrap_connector(connector),
         UpstreamProtocol::Http1 => builder.enable_http1().wrap_connector(connector),
         UpstreamProtocol::Http2 => builder.enable_http2().wrap_connector(connector),
+        UpstreamProtocol::Http3 => unreachable!("handled before hyper connector construction"),
     };
 
     let mut client_builder = Client::builder(TokioExecutor::new());
@@ -205,5 +246,5 @@ fn build_client_for_profile(profile: &UpstreamClientProfile) -> Result<ProxyClie
         client_builder.http2_only(true);
     }
 
-    Ok(client_builder.build(connector))
+    Ok(ProxyClient::Http(Box::new(client_builder.build(connector))))
 }

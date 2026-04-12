@@ -35,12 +35,34 @@ impl SharedState {
                     listener_id: listener.id.clone(),
                     listener_name: listener.name.clone(),
                     listen_addr: listener.server.listen_addr,
+                    binding_count: listener.binding_count(),
+                    http3_enabled: listener.http3_enabled(),
                     tls_enabled: listener.tls_enabled(),
                     proxy_protocol_enabled: listener.proxy_protocol_enabled,
                     default_certificate: listener.server.default_certificate.clone(),
                     keep_alive: listener.server.keep_alive,
                     max_connections: listener.server.max_connections,
                     access_log_format_configured: listener.server.access_log_format.is_some(),
+                    bindings: listener
+                        .transport_bindings()
+                        .into_iter()
+                        .map(|binding| crate::state::RuntimeListenerBindingSnapshot {
+                            binding_name: binding.name.to_string(),
+                            transport: binding.kind.as_str().to_string(),
+                            listen_addr: binding.listen_addr,
+                            protocols: binding
+                                .protocols
+                                .into_iter()
+                                .map(|protocol| protocol.as_str().to_string())
+                                .collect(),
+                            advertise_alt_svc: binding
+                                .alt_svc_max_age
+                                .map(|_| binding.advertise_alt_svc),
+                            alt_svc_max_age_secs: binding
+                                .alt_svc_max_age
+                                .map(|max_age| max_age.as_secs()),
+                        })
+                        .collect(),
                 })
                 .collect(),
             worker_threads: config.runtime.worker_threads,

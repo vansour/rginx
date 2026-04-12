@@ -19,6 +19,7 @@ pub enum UpstreamProtocol {
     Auto,
     Http1,
     Http2,
+    Http3,
 }
 
 impl UpstreamProtocol {
@@ -27,6 +28,7 @@ impl UpstreamProtocol {
             Self::Auto => "auto",
             Self::Http1 => "http1",
             Self::Http2 => "http2",
+            Self::Http3 => "http3",
         }
     }
 }

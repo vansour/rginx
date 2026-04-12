@@ -20,19 +20,19 @@ flate2.workspace = true
 futures-util.workspace = true
 http.workspace = true
 http-body-util.workspace = true
+h3.workspace = true
+h3-quinn.workspace = true
 hyper.workspace = true
 hyper-rustls.workspace = true
 hyper-util.workspace = true
 pin-project-lite.workspace = true
-num-bigint = "0.4"
+quinn.workspace = true
 rasn = "0.28.11"
 rasn-ocsp = "0.28.11"
 rasn-pkix = "0.28.11"
-rginx-config = { path = "../rginx-config" }
 rginx-core = { path = "../rginx-core" }
 rustls.workspace = true
 rustls-native-certs.workspace = true
-rustls-pemfile.workspace = true
 serde.workspace = true
 sha1.workspace = true
 sha2.workspace = true

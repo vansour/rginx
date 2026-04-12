@@ -63,13 +63,70 @@ impl ConfigSnapshot {
         self.listeners.len()
     }
 
+    pub fn total_listener_binding_count(&self) -> usize {
+        self.listeners.iter().map(Listener::binding_count).sum()
+    }
+
     pub fn tls_enabled(&self) -> bool {
         self.listeners.iter().any(Listener::tls_enabled)
+    }
+
+    pub fn http3_enabled(&self) -> bool {
+        self.listeners.iter().any(Listener::http3_enabled)
     }
 
     pub fn listener(&self, id: &str) -> Option<&Listener> {
         self.listeners.iter().find(|listener| listener.id == id)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ListenerTransportKind {
+    Tcp,
+    Udp,
+}
+
+impl ListenerTransportKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Tcp => "tcp",
+            Self::Udp => "udp",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ListenerApplicationProtocol {
+    Http1,
+    Http2,
+    Http3,
+}
+
+impl ListenerApplicationProtocol {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Http1 => "http1",
+            Self::Http2 => "http2",
+            Self::Http3 => "http3",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ListenerHttp3 {
+    pub listen_addr: SocketAddr,
+    pub advertise_alt_svc: bool,
+    pub alt_svc_max_age: Duration,
+}
+
+#[derive(Debug, Clone)]
+pub struct ListenerTransportBinding {
+    pub name: &'static str,
+    pub kind: ListenerTransportKind,
+    pub listen_addr: SocketAddr,
+    pub protocols: Vec<ListenerApplicationProtocol>,
+    pub advertise_alt_svc: bool,
+    pub alt_svc_max_age: Option<Duration>,
 }
 
 #[derive(Debug, Clone)]
@@ -79,11 +136,48 @@ pub struct Listener {
     pub server: Server,
     pub tls_termination_enabled: bool,
     pub proxy_protocol_enabled: bool,
+    pub http3: Option<ListenerHttp3>,
 }
 
 impl Listener {
     pub fn tls_enabled(&self) -> bool {
         self.tls_termination_enabled
+    }
+
+    pub fn http3_enabled(&self) -> bool {
+        self.http3.is_some()
+    }
+
+    pub fn binding_count(&self) -> usize {
+        1 + usize::from(self.http3.is_some())
+    }
+
+    pub fn transport_bindings(&self) -> Vec<ListenerTransportBinding> {
+        let mut bindings = vec![ListenerTransportBinding {
+            name: "tcp",
+            kind: ListenerTransportKind::Tcp,
+            listen_addr: self.server.listen_addr,
+            protocols: if self.tls_enabled() {
+                vec![ListenerApplicationProtocol::Http1, ListenerApplicationProtocol::Http2]
+            } else {
+                vec![ListenerApplicationProtocol::Http1]
+            },
+            advertise_alt_svc: false,
+            alt_svc_max_age: None,
+        }];
+
+        if let Some(http3) = &self.http3 {
+            bindings.push(ListenerTransportBinding {
+                name: "udp",
+                kind: ListenerTransportKind::Udp,
+                listen_addr: http3.listen_addr,
+                protocols: vec![ListenerApplicationProtocol::Http3],
+                advertise_alt_svc: http3.advertise_alt_svc,
+                alt_svc_max_age: Some(http3.alt_svc_max_age),
+            });
+        }
+
+        bindings
     }
 }
 

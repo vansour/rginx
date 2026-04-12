@@ -25,8 +25,7 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
     let inherited_listeners = crate::restart::take_inherited_listeners_from_env()?;
     let drain_completion_notify = Arc::new(Notify::new());
     let mut active_listener_groups = build_initial_listener_groups(
-        &current_config.listeners,
-        current_config.runtime.accept_workers,
+        current_config.as_ref(),
         inherited_listeners,
         state.http.clone(),
         drain_completion_notify.clone(),

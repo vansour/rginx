@@ -591,6 +591,7 @@ async fn finalize_downstream_response_compresses_plain_text_responses() {
             "hello compression pipeline\n".repeat(32),
         ),
         None,
+        None,
     )
     .await;
 
@@ -622,6 +623,7 @@ async fn finalize_downstream_response_skips_compression_for_grpc_responses() {
         HeaderValue::from_static("req-grpc"),
         text_response(StatusCode::OK, "application/grpc", "hello grpc pipeline\n".repeat(32)),
         grpc_request_metadata(&request_headers, "/grpc.health.v1.Health/Check"),
+        None,
     )
     .await;
 
@@ -648,6 +650,7 @@ async fn finalize_downstream_response_strips_head_body_after_final_transforms() 
             "hello head pipeline\n".repeat(32),
         ),
         None,
+        None,
     )
     .await;
 
@@ -671,6 +674,30 @@ async fn finalize_downstream_response_strips_head_body_after_final_transforms() 
         .to_bytes();
     assert!(content_length > 0);
     assert!(body.is_empty());
+}
+
+#[tokio::test]
+async fn finalize_downstream_response_injects_alt_svc_when_provided() {
+    let request_headers = HeaderMap::new();
+
+    let finalized = finalize_downstream_response(
+        &http::Method::GET,
+        &request_headers,
+        HeaderValue::from_static("req-alt-svc"),
+        text_response(StatusCode::OK, "text/plain; charset=utf-8", "hello"),
+        None,
+        Some(HeaderValue::from_static("h3=\":443\"; ma=7200")),
+    )
+    .await;
+
+    assert_eq!(
+        finalized
+            .response
+            .headers()
+            .get(http::header::ALT_SVC)
+            .and_then(|value| value.to_str().ok()),
+        Some("h3=\":443\"; ma=7200")
+    );
 }
 
 fn grpc_web_observability_body() -> Vec<u8> {
@@ -712,6 +739,7 @@ fn test_config(default_vhost: VirtualHost, vhosts: Vec<VirtualHost>) -> ConfigSn
             server,
             tls_termination_enabled: false,
             proxy_protocol_enabled: false,
+            http3: None,
         }],
         default_vhost,
         vhosts,

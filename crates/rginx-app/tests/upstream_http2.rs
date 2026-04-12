@@ -1,7 +1,7 @@
 use std::convert::Infallible;
 use std::env;
-use std::fs::{self, File};
-use std::io::{BufReader, Read, Write};
+use std::fs;
+use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,6 +15,7 @@ use hyper::server::conn::http2;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode, Version};
 use hyper_util::rt::{TokioExecutor, TokioIo};
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -141,19 +142,14 @@ fn proxy_config(listen_addr: SocketAddr, upstream_addr: SocketAddr) -> String {
 }
 
 fn load_certs(path: &Path) -> Vec<CertificateDer<'static>> {
-    let file = File::open(path).expect("certificate file should open");
-    let mut reader = BufReader::new(file);
-    rustls_pemfile::certs(&mut reader)
+    CertificateDer::pem_file_iter(path)
+        .expect("certificate file should open")
         .collect::<Result<Vec<_>, _>>()
         .expect("certificate PEM should parse")
 }
 
 fn load_private_key(path: &Path) -> PrivateKeyDer<'static> {
-    let file = File::open(path).expect("private key file should open");
-    let mut reader = BufReader::new(file);
-    rustls_pemfile::private_key(&mut reader)
-        .expect("private key PEM should parse")
-        .expect("private key PEM should include at least one key")
+    PrivateKeyDer::from_pem_file(path).expect("private key PEM should parse")
 }
 
 fn fetch_text_response(listen_addr: SocketAddr, path: &str) -> Result<(u16, String), String> {

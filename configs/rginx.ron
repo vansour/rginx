@@ -14,31 +14,18 @@ Config(
         //     ocsp_staple_path: Some("/var/cache/rginx/default.ocsp"),
         //     session_tickets: Some(false),
         // )),
+        // Fresh installs should work without any upstream dependencies.
+        // Reverse-proxy examples live in `example/rginx.ron`.
         // For per-vhost certificate overrides, see `configs/conf.d/default.ron`.
     ),
-    upstreams: [
-        UpstreamConfig(
-            name: "backend",
-            peers: [
-                UpstreamPeerConfig(
-                    url: "http://127.0.0.1:9000",
-                ),
-            ],
-            connect_timeout_secs: Some(3),
-            read_timeout_secs: Some(30),
-            write_timeout_secs: Some(30),
-            idle_timeout_secs: Some(60),
-            pool_idle_timeout_secs: Some(90),
-            pool_max_idle_per_host: Some(64),
-            tcp_keepalive_secs: Some(30),
-            tcp_nodelay: Some(true),
-        ),
-    ],
+    upstreams: [],
     locations: [
         LocationConfig(
             matcher: Exact("/"),
-            handler: Proxy(
-                upstream: "backend",
+            handler: Return(
+                status: 200,
+                location: "",
+                body: Some("Welcome to rginx!\nIf you see this page, the rginx web server is successfully installed and working.\n"),
             ),
         ),
         LocationConfig(
@@ -48,14 +35,6 @@ Config(
                 location: "",
                 body: Some("ok\n"),
             ),
-        ),
-        LocationConfig(
-            matcher: Prefix("/api"),
-            handler: Proxy(
-                upstream: "backend",
-            ),
-            requests_per_sec: Some(20),
-            burst: Some(10),
         ),
     ],
     servers: [
