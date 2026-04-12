@@ -18,10 +18,8 @@ pub(super) fn print_admin_status(config_path: &Path) -> anyhow::Result<()> {
                     .collect::<Vec<_>>()
                     .join(",")
             };
-            let bind_addrs = if status.listeners.is_empty() {
-                "-".to_string()
-            } else {
-                status
+            let bind_addrs = {
+                let bind_addrs = status
                     .listeners
                     .iter()
                     .flat_map(|listener| {
@@ -29,8 +27,8 @@ pub(super) fn print_admin_status(config_path: &Path) -> anyhow::Result<()> {
                             format!("{}://{}", binding.transport, binding.listen_addr)
                         })
                     })
-                    .collect::<Vec<_>>()
-                    .join(",")
+                    .collect::<Vec<_>>();
+                if bind_addrs.is_empty() { "-".to_string() } else { bind_addrs.join(",") }
             };
             print_record(
                 "status",

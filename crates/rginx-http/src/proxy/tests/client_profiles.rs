@@ -175,19 +175,13 @@ fn proxy_clients_cache_distinguishes_upstream_protocol() {
     );
     let http2 = Upstream::new(
         "http2".to_string(),
-        vec![peer],
+        vec![peer.clone()],
         UpstreamTls::NativeRoots,
         upstream_settings(UpstreamProtocol::Http2),
     );
     let http3 = Upstream::new(
         "http3".to_string(),
-        vec![UpstreamPeer {
-            url: "https://127.0.0.1:9444".to_string(),
-            scheme: "https".to_string(),
-            authority: "127.0.0.1:9444".to_string(),
-            weight: 1,
-            backup: false,
-        }],
+        vec![peer.clone()],
         UpstreamTls::NativeRoots,
         upstream_settings(UpstreamProtocol::Http3),
     );

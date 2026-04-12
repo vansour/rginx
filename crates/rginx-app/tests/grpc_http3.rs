@@ -31,15 +31,14 @@ const GRPC_RESPONSE_FRAME: &[u8] = b"\x00\x00\x00\x00\x02ok";
 #[tokio::test(flavor = "multi_thread")]
 async fn proxies_basic_grpc_over_http3_to_http3_upstreams_with_response_trailers() {
     let cert = generate_cert("localhost");
-    let shared_dir = temp_dir("rginx-grpc-http3-shared");
-    fs::create_dir_all(&shared_dir).expect("shared temp dir should be created");
-    let server_cert_path = shared_dir.join("server.crt");
-    let server_key_path = shared_dir.join("server.key");
+    let shared_dir = TempDirGuard::new("rginx-grpc-http3-shared");
+    let server_cert_path = shared_dir.path().join("server.crt");
+    let server_key_path = shared_dir.path().join("server.key");
     fs::write(&server_cert_path, cert.cert.pem()).expect("server cert should be written");
     fs::write(&server_key_path, cert.signing_key.serialize_pem())
         .expect("server key should be written");
 
-    let (upstream_addr, observed_rx, upstream_task, upstream_temp_dir) =
+    let (upstream_addr, observed_rx, upstream_task, _upstream_temp_dir) =
         spawn_h3_grpc_upstream(&server_cert_path, &server_key_path, UpstreamMode::Immediate).await;
 
     let listen_addr = reserve_loopback_addr();
@@ -104,22 +103,19 @@ async fn proxies_basic_grpc_over_http3_to_http3_upstreams_with_response_trailers
 
     server.shutdown_and_wait(Duration::from_secs(5));
     upstream_task.await.expect("upstream h3 grpc task should finish");
-    fs::remove_dir_all(upstream_temp_dir).expect("upstream temp dir should be removed");
-    fs::remove_dir_all(shared_dir).expect("shared temp dir should be removed");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn proxies_grpc_web_binary_over_http3_to_http3_upstreams() {
     let cert = generate_cert("localhost");
-    let shared_dir = temp_dir("rginx-grpc-web-http3-shared");
-    fs::create_dir_all(&shared_dir).expect("shared temp dir should be created");
-    let server_cert_path = shared_dir.join("server.crt");
-    let server_key_path = shared_dir.join("server.key");
+    let shared_dir = TempDirGuard::new("rginx-grpc-web-http3-shared");
+    let server_cert_path = shared_dir.path().join("server.crt");
+    let server_key_path = shared_dir.path().join("server.key");
     fs::write(&server_cert_path, cert.cert.pem()).expect("server cert should be written");
     fs::write(&server_key_path, cert.signing_key.serialize_pem())
         .expect("server key should be written");
 
-    let (upstream_addr, _observed_rx, upstream_task, upstream_temp_dir) =
+    let (upstream_addr, _observed_rx, upstream_task, _upstream_temp_dir) =
         spawn_h3_grpc_upstream(&server_cert_path, &server_key_path, UpstreamMode::Immediate).await;
 
     let listen_addr = reserve_loopback_addr();
@@ -157,22 +153,19 @@ async fn proxies_grpc_web_binary_over_http3_to_http3_upstreams() {
 
     server.shutdown_and_wait(Duration::from_secs(5));
     upstream_task.await.expect("upstream h3 grpc task should finish");
-    fs::remove_dir_all(upstream_temp_dir).expect("upstream temp dir should be removed");
-    fs::remove_dir_all(shared_dir).expect("shared temp dir should be removed");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn grpc_timeout_over_http3_upstream_returns_deadline_exceeded() {
     let cert = generate_cert("localhost");
-    let shared_dir = temp_dir("rginx-grpc-http3-timeout-shared");
-    fs::create_dir_all(&shared_dir).expect("shared temp dir should be created");
-    let server_cert_path = shared_dir.join("server.crt");
-    let server_key_path = shared_dir.join("server.key");
+    let shared_dir = TempDirGuard::new("rginx-grpc-http3-timeout-shared");
+    let server_cert_path = shared_dir.path().join("server.crt");
+    let server_key_path = shared_dir.path().join("server.key");
     fs::write(&server_cert_path, cert.cert.pem()).expect("server cert should be written");
     fs::write(&server_key_path, cert.signing_key.serialize_pem())
         .expect("server key should be written");
 
-    let (upstream_addr, _observed_rx, upstream_task, upstream_temp_dir) = spawn_h3_grpc_upstream(
+    let (upstream_addr, _observed_rx, upstream_task, _upstream_temp_dir) = spawn_h3_grpc_upstream(
         &server_cert_path,
         &server_key_path,
         UpstreamMode::DelayHeaders(Duration::from_secs(2)),
@@ -208,22 +201,19 @@ async fn grpc_timeout_over_http3_upstream_returns_deadline_exceeded() {
     server.shutdown_and_wait(Duration::from_secs(5));
     upstream_task.abort();
     let _ = upstream_task.await;
-    fs::remove_dir_all(upstream_temp_dir).expect("upstream temp dir should be removed");
-    fs::remove_dir_all(shared_dir).expect("shared temp dir should be removed");
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn active_grpc_health_checks_can_target_http3_upstreams() {
     let cert = generate_cert("localhost");
-    let shared_dir = temp_dir("rginx-grpc-http3-health-shared");
-    fs::create_dir_all(&shared_dir).expect("shared temp dir should be created");
-    let server_cert_path = shared_dir.join("server.crt");
-    let server_key_path = shared_dir.join("server.key");
+    let shared_dir = TempDirGuard::new("rginx-grpc-http3-health-shared");
+    let server_cert_path = shared_dir.path().join("server.crt");
+    let server_key_path = shared_dir.path().join("server.key");
     fs::write(&server_cert_path, cert.cert.pem()).expect("server cert should be written");
     fs::write(&server_key_path, cert.signing_key.serialize_pem())
         .expect("server key should be written");
 
-    let (upstream_addr, health_seen_rx, upstream_task, upstream_temp_dir) =
+    let (upstream_addr, health_seen_rx, upstream_task, _upstream_temp_dir) =
         spawn_h3_grpc_health_upstream(&server_cert_path, &server_key_path).await;
 
     let listen_addr = reserve_loopback_addr();
@@ -240,14 +230,35 @@ async fn active_grpc_health_checks_can_target_http3_upstreams() {
     server.shutdown_and_wait(Duration::from_secs(5));
     upstream_task.abort();
     let _ = upstream_task.await;
-    fs::remove_dir_all(upstream_temp_dir).expect("upstream temp dir should be removed");
-    fs::remove_dir_all(shared_dir).expect("shared temp dir should be removed");
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ObservedGrpcRequest {
     path: String,
     content_type: Option<String>,
+}
+
+#[derive(Debug)]
+struct TempDirGuard {
+    path: PathBuf,
+}
+
+impl TempDirGuard {
+    fn new(prefix: &str) -> Self {
+        let path = temp_dir(prefix);
+        fs::create_dir_all(&path).expect("shared temp dir should be created");
+        Self { path }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
 }
 
 #[derive(Debug)]
@@ -301,7 +312,7 @@ async fn h3_request(
         client::new(h3_quinn::Connection::new(connection))
             .await
             .map_err(|error| format!("failed to initialize http3 client: {error}"))?;
-    let driver_task = tokio::spawn(async move {
+    let mut driver_task = tokio::spawn(async move {
         let _ = std::future::poll_fn(|cx| driver.poll_close(cx)).await;
     });
 
@@ -351,7 +362,10 @@ async fn h3_request(
         .await
         .map_err(|error| format!("failed to receive http3 response trailers: {error}"))?;
 
-    driver_task.abort();
+    if tokio::time::timeout(Duration::from_millis(50), &mut driver_task).await.is_err() {
+        driver_task.abort();
+        let _ = driver_task.await;
+    }
     endpoint.close(quinn::VarInt::from_u32(0), b"done");
 
     Ok(H3Response { status, headers, body: response_body.freeze(), trailers })
@@ -361,9 +375,8 @@ async fn spawn_h3_grpc_upstream(
     cert_path: &Path,
     key_path: &Path,
     mode: UpstreamMode,
-) -> (SocketAddr, oneshot::Receiver<ObservedGrpcRequest>, JoinHandle<()>, PathBuf) {
-    let temp_dir = temp_dir("rginx-grpc-http3-upstream");
-    fs::create_dir_all(&temp_dir).expect("upstream temp dir should be created");
+) -> (SocketAddr, oneshot::Receiver<ObservedGrpcRequest>, JoinHandle<()>, TempDirGuard) {
+    let temp_dir = TempDirGuard::new("rginx-grpc-http3-upstream");
 
     let mut server_crypto = rustls::ServerConfig::builder_with_provider(Arc::new(
         rustls::crypto::aws_lc_rs::default_provider(),
@@ -441,9 +454,8 @@ async fn spawn_h3_grpc_upstream(
 async fn spawn_h3_grpc_health_upstream(
     cert_path: &Path,
     key_path: &Path,
-) -> (SocketAddr, oneshot::Receiver<()>, JoinHandle<()>, PathBuf) {
-    let temp_dir = temp_dir("rginx-grpc-http3-health-upstream");
-    fs::create_dir_all(&temp_dir).expect("upstream temp dir should be created");
+) -> (SocketAddr, oneshot::Receiver<()>, JoinHandle<()>, TempDirGuard) {
+    let temp_dir = TempDirGuard::new("rginx-grpc-http3-health-upstream");
 
     let mut server_crypto = rustls::ServerConfig::builder_with_provider(Arc::new(
         rustls::crypto::aws_lc_rs::default_provider(),

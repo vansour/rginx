@@ -426,7 +426,9 @@ fn bind_std_listener(listen_addr: std::net::SocketAddr) -> Result<StdTcpListener
 }
 
 fn bind_std_udp_socket(listen_addr: std::net::SocketAddr) -> Result<StdUdpSocket> {
-    StdUdpSocket::bind(listen_addr).map_err(Error::Io)
+    let socket = StdUdpSocket::bind(listen_addr)?;
+    socket.set_nonblocking(true)?;
+    Ok(socket)
 }
 
 #[cfg(test)]

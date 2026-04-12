@@ -123,11 +123,14 @@ fn snapshot_reports_http3_listener_bindings() {
     assert_eq!(listener.binding_count, 2);
     assert!(listener.http3_enabled);
     assert_eq!(listener.bindings.len(), 2);
-    assert_eq!(listener.bindings[0].transport, "tcp");
-    assert_eq!(listener.bindings[1].transport, "udp");
-    assert_eq!(listener.bindings[1].protocols, vec!["http3".to_string()]);
-    assert_eq!(listener.bindings[1].advertise_alt_svc, Some(true));
-    assert_eq!(listener.bindings[1].alt_svc_max_age_secs, Some(7200));
+    let udp_binding = listener
+        .bindings
+        .iter()
+        .find(|binding| binding.transport == "udp")
+        .expect("snapshot should include udp binding");
+    assert_eq!(udp_binding.protocols, vec!["http3".to_string()]);
+    assert_eq!(udp_binding.advertise_alt_svc, Some(true));
+    assert_eq!(udp_binding.alt_svc_max_age_secs, Some(7200));
     let tls_listener = snapshot
         .status
         .as_ref()
@@ -145,14 +148,13 @@ fn snapshot_reports_http3_listener_bindings() {
         serde_json::from_str(&stdout).expect("snapshot command should print valid JSON");
     assert_eq!(snapshot["status"]["listeners"][0]["binding_count"], serde_json::Value::from(2));
     assert_eq!(snapshot["status"]["listeners"][0]["http3_enabled"], serde_json::Value::from(true));
-    assert_eq!(
-        snapshot["status"]["listeners"][0]["bindings"][1]["transport"],
-        serde_json::Value::from("udp")
-    );
-    assert_eq!(
-        snapshot["status"]["listeners"][0]["bindings"][1]["protocols"][0],
-        serde_json::Value::from("http3")
-    );
+    let udp_json = snapshot["status"]["listeners"][0]["bindings"]
+        .as_array()
+        .and_then(|bindings| {
+            bindings.iter().find(|binding| binding["transport"].as_str() == Some("udp"))
+        })
+        .expect("snapshot JSON should include udp binding");
+    assert_eq!(udp_json["protocols"][0], serde_json::Value::from("http3"));
     assert_eq!(
         snapshot["status"]["tls"]["listeners"][0]["http3_enabled"],
         serde_json::Value::from(true)

@@ -16,10 +16,13 @@ use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair};
 use rustls::crypto::aws_lc_rs;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use rustls::server::WebPkiClientVerifier;
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
-use rustls::{DigitallySignedStruct, DistinguishedName, ProtocolVersion, SignatureScheme};
+use rustls::{
+    DigitallySignedStruct, DistinguishedName, ProtocolVersion, RootCertStore, SignatureScheme,
+};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
@@ -47,7 +50,7 @@ async fn proxies_plain_http_requests_to_http3_upstreams() {
         .expect("server key should be written");
 
     let (upstream_addr, observed_rx, upstream_task, upstream_temp_dir) =
-        spawn_http3_upstream(&server_cert_path, &server_key_path, None, None, false).await;
+        spawn_http3_upstream(&server_cert_path, &server_key_path, None, false).await;
 
     let listen_addr = reserve_loopback_addr();
     let mut server = ServerHarness::spawn("rginx-upstream-http3-basic", |_| {
@@ -102,14 +105,8 @@ async fn upstream_http3_honors_server_name_override_and_client_identity() {
     fs::write(&client_key_path, client.signing_key.serialize_pem())
         .expect("client key should be written");
 
-    let (upstream_addr, observed_rx, upstream_task, upstream_temp_dir) = spawn_http3_upstream(
-        &server_cert_path,
-        &server_key_path,
-        Some("localhost"),
-        Some(&ca_path),
-        true,
-    )
-    .await;
+    let (upstream_addr, observed_rx, upstream_task, upstream_temp_dir) =
+        spawn_http3_upstream(&server_cert_path, &server_key_path, Some(&ca_path), true).await;
 
     let listen_addr = reserve_loopback_addr();
     let mut server = ServerHarness::spawn("rginx-upstream-http3-mtls", |_| {
@@ -144,8 +141,7 @@ async fn upstream_http3_honors_server_name_override_and_client_identity() {
 async fn spawn_http3_upstream(
     cert_path: &Path,
     key_path: &Path,
-    default_server_name: Option<&str>,
-    _client_ca_path: Option<&Path>,
+    client_ca_path: Option<&Path>,
     require_client_cert: bool,
 ) -> (SocketAddr, oneshot::Receiver<ObservedHttp3Request>, JoinHandle<()>, PathBuf) {
     let temp_dir = temp_dir("rginx-upstream-http3-server");
@@ -153,11 +149,8 @@ async fn spawn_http3_upstream(
 
     let certified_key = Arc::new(load_certified_key(cert_path, key_path));
     let observed_sni = Arc::new(Mutex::new(None::<String>));
-    let resolver = Arc::new(CapturingResolver {
-        certified_key,
-        default_server_name: default_server_name.map(str::to_string),
-        observed_sni: observed_sni.clone(),
-    });
+    let resolver =
+        Arc::new(CapturingResolver { certified_key, observed_sni: observed_sni.clone() });
     let client_cert_seen = Arc::new(AtomicBool::new(false));
 
     let builder = rustls::ServerConfig::builder_with_provider(Arc::new(
@@ -166,7 +159,10 @@ async fn spawn_http3_upstream(
     .with_protocol_versions(&[&rustls::version::TLS13])
     .expect("server TLS1.3 builder should succeed");
     let mut server_crypto = if require_client_cert {
-        let verifier = Arc::new(RequireAnyClientCertVerifier::new(client_cert_seen.clone()));
+        let verifier = Arc::new(RequireTrustedClientCertVerifier::new(
+            client_ca_path.expect("client CA should be provided when client certs are required"),
+            client_cert_seen.clone(),
+        ));
         builder.with_client_cert_verifier(verifier).with_cert_resolver(resolver)
     } else {
         builder.with_no_client_auth().with_cert_resolver(resolver)
@@ -275,7 +271,6 @@ fn temp_dir(prefix: &str) -> PathBuf {
 
 struct CapturingResolver {
     certified_key: Arc<CertifiedKey>,
-    default_server_name: Option<String>,
     observed_sni: Arc<Mutex<Option<String>>>,
 }
 
@@ -287,69 +282,69 @@ impl fmt::Debug for CapturingResolver {
 
 impl ResolvesServerCert for CapturingResolver {
     fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-        let observed = client_hello
-            .server_name()
-            .map(str::to_string)
-            .or_else(|| self.default_server_name.clone());
-        *self.observed_sni.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = observed;
+        if let Some(server_name) = client_hello.server_name() {
+            *self.observed_sni.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                Some(server_name.to_string());
+        }
         Some(self.certified_key.clone())
     }
 }
 
 #[derive(Debug)]
-struct RequireAnyClientCertVerifier {
-    root_hints: Vec<DistinguishedName>,
-    supported_schemes: Vec<SignatureScheme>,
+struct RequireTrustedClientCertVerifier {
+    inner: Arc<dyn ClientCertVerifier>,
     client_cert_seen: Arc<AtomicBool>,
 }
 
-impl RequireAnyClientCertVerifier {
-    fn new(client_cert_seen: Arc<AtomicBool>) -> Self {
-        Self {
-            root_hints: Vec::new(),
-            supported_schemes: rustls::crypto::aws_lc_rs::default_provider()
-                .signature_verification_algorithms
-                .supported_schemes(),
-            client_cert_seen,
+impl RequireTrustedClientCertVerifier {
+    fn new(ca_path: &Path, client_cert_seen: Arc<AtomicBool>) -> Self {
+        let mut roots = RootCertStore::empty();
+        for cert in load_certs(ca_path) {
+            roots.add(cert).expect("client CA certificate should load into root store");
         }
+        let inner = WebPkiClientVerifier::builder(roots.into())
+            .build()
+            .expect("client verifier should build");
+        Self { inner, client_cert_seen }
     }
 }
 
-impl ClientCertVerifier for RequireAnyClientCertVerifier {
+impl ClientCertVerifier for RequireTrustedClientCertVerifier {
     fn root_hint_subjects(&self) -> &[DistinguishedName] {
-        &self.root_hints
+        self.inner.root_hint_subjects()
     }
 
     fn verify_client_cert(
         &self,
-        _end_entity: &CertificateDer<'_>,
-        _intermediates: &[CertificateDer<'_>],
-        _now: rustls::pki_types::UnixTime,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        now: rustls::pki_types::UnixTime,
     ) -> Result<ClientCertVerified, rustls::Error> {
+        let verified = self.inner.verify_client_cert(end_entity, intermediates, now)?;
         self.client_cert_seen.store(true, Ordering::Relaxed);
-        Ok(ClientCertVerified::assertion())
+        Ok(verified)
     }
 
     fn verify_tls12_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        self.inner.verify_tls12_signature(message, cert, dss)
     }
 
     fn verify_tls13_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        self.inner.verify_tls13_signature(message, cert, dss)
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.supported_schemes.clone()
+        self.inner.supported_verify_schemes()
     }
 }
 

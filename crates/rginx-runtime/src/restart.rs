@@ -137,6 +137,7 @@ pub fn take_inherited_listeners_from_env() -> Result<InheritedListeners> {
             }
             InheritedSocketKind::Udp => {
                 let socket = unsafe { StdUdpSocket::from_raw_fd(entry.fd) };
+                socket.set_nonblocking(true)?;
                 udp.insert(entry.listen_addr, socket);
             }
         }

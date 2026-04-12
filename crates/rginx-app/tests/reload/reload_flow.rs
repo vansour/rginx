@@ -309,7 +309,7 @@ async fn http3_get_body(
         client::new(h3_quinn::Connection::new(connection))
             .await
             .map_err(|error| format!("failed to initialize http3 client: {error}"))?;
-    let driver_task = tokio::spawn(async move {
+    let mut driver_task = tokio::spawn(async move {
         let _ = std::future::poll_fn(|cx| driver.poll_close(cx)).await;
     });
 
@@ -348,7 +348,10 @@ async fn http3_get_body(
         .await
         .map_err(|error| format!("failed to receive http3 response trailers: {error}"))?;
 
-    driver_task.abort();
+    if tokio::time::timeout(Duration::from_millis(50), &mut driver_task).await.is_err() {
+        driver_task.abort();
+        let _ = driver_task.await;
+    }
     endpoint.close(quinn::VarInt::from_u32(0), b"done");
     String::from_utf8(body.to_vec()).map_err(|error| format!("http3 body was not utf-8: {error}"))
 }

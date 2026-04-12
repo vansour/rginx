@@ -114,14 +114,14 @@ jobs:
       - name: Run Fast Test Layer
         run: ./scripts/test-fast.sh
 
+      - name: Run Clippy
+        run: ./scripts/run-clippy-gate.sh
+
       - name: Run Slow Test Layer
         run: ./scripts/test-slow.sh
 
       - name: Run TLS Release Gate
         run: ./scripts/run-tls-gate.sh
-
-      - name: Run Clippy
-        run: ./scripts/run-clippy-gate.sh
 
   build:
     name: Build ${{ matrix.asset_name }} Assets

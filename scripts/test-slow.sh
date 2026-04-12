@@ -30,7 +30,11 @@ for test_name in "${required_http3_targets[@]}"; do
 done
 
 mapfile -t tests < <(
-    find "${ROOT_DIR}/crates/rginx-app/tests" -maxdepth 1 -type f -name '*.rs' -printf '%f\n' |
+    find "${ROOT_DIR}/crates/rginx-app/tests" -maxdepth 1 -type f -name '*.rs' |
+        while IFS= read -r path; do
+            file_name="${path##*/}"
+            printf '%s\n' "${file_name%.rs}"
+        done |
         sed 's/\.rs$//' |
         sort
 )

@@ -426,12 +426,15 @@ mod tests {
         Client::builder(TokioExecutor::new()).build(connector)
     }
 
-    fn spawn_http_responder(status: &str, body: Vec<u8>) -> SocketAddr {
+    fn spawn_http_responder(
+        status: &str,
+        body: Vec<u8>,
+    ) -> (SocketAddr, std::thread::JoinHandle<()>) {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("test responder should bind");
         let listen_addr = listener.local_addr().expect("responder addr should exist");
         let status = status.to_string();
 
-        thread::spawn(move || {
+        let handle = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("request should connect");
             let mut buffer = [0_u8; 1024];
             let _ = stream.read(&mut buffer);
@@ -444,13 +447,14 @@ mod tests {
             stream.flush().expect("response should flush");
         });
 
-        listen_addr
+        (listen_addr, handle)
     }
 
     #[tokio::test]
     async fn fetch_ocsp_response_from_url_rejects_non_success_status() {
         let client = test_ocsp_client();
-        let responder = spawn_http_responder("500 Internal Server Error", b"fail".to_vec());
+        let (responder, responder_handle) =
+            spawn_http_responder("500 Internal Server Error", b"fail".to_vec());
 
         let error = fetch_ocsp_response_from_url(
             &client,
@@ -461,12 +465,13 @@ mod tests {
         .expect_err("HTTP 500 should be rejected");
 
         assert!(error.contains("responder returned HTTP 500"));
+        responder_handle.join().expect("responder thread should join");
     }
 
     #[tokio::test]
     async fn fetch_ocsp_response_from_url_rejects_empty_body() {
         let client = test_ocsp_client();
-        let responder = spawn_http_responder("200 OK", Vec::new());
+        let (responder, responder_handle) = spawn_http_responder("200 OK", Vec::new());
 
         let error = fetch_ocsp_response_from_url(
             &client,
@@ -477,13 +482,16 @@ mod tests {
         .expect_err("empty OCSP body should be rejected");
 
         assert!(error.contains("empty OCSP response body"));
+        responder_handle.join().expect("responder thread should join");
     }
 
     #[tokio::test]
     async fn fetch_ocsp_response_tries_multiple_responders_until_one_succeeds() {
         let client = test_ocsp_client();
-        let first = spawn_http_responder("500 Internal Server Error", b"nope".to_vec());
-        let second = spawn_http_responder("200 OK", b"valid-ocsp-response".to_vec());
+        let (first, first_handle) =
+            spawn_http_responder("500 Internal Server Error", b"nope".to_vec());
+        let (second, second_handle) =
+            spawn_http_responder("200 OK", b"valid-ocsp-response".to_vec());
 
         let response = fetch_ocsp_response(
             &client,
@@ -494,6 +502,8 @@ mod tests {
         .expect("second responder should succeed");
 
         assert_eq!(response, b"valid-ocsp-response".to_vec());
+        first_handle.join().expect("first responder thread should join");
+        second_handle.join().expect("second responder thread should join");
     }
 
     #[tokio::test]
