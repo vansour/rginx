@@ -347,6 +347,15 @@ fn compile_protocol(
 
             Ok(UpstreamProtocol::Http2)
         }
+        UpstreamProtocolConfig::Http3 => {
+            if peers.iter().any(|peer| peer.scheme != "https") {
+                return Err(Error::Config(format!(
+                    "upstream `{upstream_name}` protocol `Http3` currently requires all peers to use `https://`; cleartext upstreams are not supported"
+                )));
+            }
+
+            Ok(UpstreamProtocol::Http3)
+        }
     }
 }
 

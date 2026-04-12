@@ -11,7 +11,7 @@ pub(super) use http::header::{
 };
 pub(super) use http::{Method, Request, Response, StatusCode, Uri, Version};
 pub(super) use http_body_util::BodyExt;
-pub(super) use hyper::body::{Body as _, Frame, Incoming, SizeHint};
+pub(super) use hyper::body::{Body as _, Frame, SizeHint};
 pub(super) use hyper::upgrade::OnUpgrade;
 pub(super) use hyper_rustls::{FixedServerNameResolver, HttpsConnector, HttpsConnectorBuilder};
 pub(super) use hyper_util::client::legacy::Client;
@@ -52,7 +52,7 @@ const GRPC_TIMEOUT_HEADER: &str = "grpc-timeout";
 const MAX_GRPC_TIMEOUT_DIGITS: usize = 8;
 
 pub(crate) use clients::HealthChangeNotifier;
-pub use clients::{ProxyClient, ProxyClients};
+pub use clients::ProxyClients;
 pub use forward::{DownstreamRequestContext, DownstreamRequestOptions, forward_request};
 pub use health::probe_upstream_peer;
 pub use health::{PeerHealthSnapshot, UpstreamHealthSnapshot};

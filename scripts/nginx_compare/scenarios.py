@@ -19,6 +19,7 @@ from configs import (
     nginx_return_config,
     nginx_tls_return_config,
     rginx_grpc_proxy_config,
+    rginx_http3_return_config,
     rginx_proxy_config,
     rginx_reload_config,
     rginx_return_config,
@@ -93,6 +94,7 @@ def run_comparison(
                 "return": {"rginx": reserve_port(), "nginx": reserve_port()},
                 "proxy": {"rginx": reserve_port(), "nginx": reserve_port()},
                 "https_return": {"rginx": reserve_port(), "nginx": reserve_port()},
+                "http3_return": {"rginx": reserve_port()},
                 "grpc": {"rginx": reserve_port(), "nginx": reserve_port()},
                 "reload": {"rginx": reserve_port(), "nginx": reserve_port()},
             }
@@ -100,6 +102,7 @@ def run_comparison(
             rginx_return_path = build_root / "rginx-return.ron"
             rginx_proxy_path = build_root / "rginx-proxy.ron"
             rginx_tls_return_path = build_root / "rginx-tls-return.ron"
+            rginx_http3_return_path = build_root / "rginx-http3-return.ron"
             rginx_grpc_path = build_root / "rginx-grpc.ron"
             rginx_reload_path = build_root / "rginx-reload.ron"
             nginx_return_dir = build_root / "nginx-return"
@@ -130,6 +133,14 @@ def run_comparison(
                 rginx_tls_return_path,
                 rginx_tls_return_config(
                     int(port_plan["https_return"]["rginx"]),
+                    frontend_cert,
+                    frontend_key,
+                ),
+            )
+            write_text(
+                rginx_http3_return_path,
+                rginx_http3_return_config(
+                    int(port_plan["http3_return"]["rginx"]),
                     frontend_cert,
                     frontend_key,
                 ),
@@ -274,6 +285,7 @@ def run_comparison(
 
             https_flags = ["--http1.1", "--insecure"]
             http2_flags = ["--http2", "--insecure"]
+            http3_flags = ["--http3-only", "--insecure"]
             grpc_flags = ["--http2", "--insecure", "--request", "POST", "--data-binary", "@-"]
             grpc_headers = ["content-type: application/grpc", "te: trailers"]
             grpc_body = grpc_frame(b"ping")
@@ -374,6 +386,25 @@ def run_comparison(
             results.append(
                 collect_rounds(lambda: run_single_server_curl_benchmark(
                     server_name="rginx",
+                    scenario_name="http3_return_200",
+                    launch_command=[str(rginx_bin), "--config", str(rginx_http3_return_path)],
+                    launch_cwd=workspace,
+                    launch_env=rginx_env,
+                    ready_tls_enabled=True,
+                    port=port_plan["http3_return"]["rginx"],
+                    work_dir=out_dir,
+                    url=f"https://127.0.0.1:{port_plan['http3_return']['rginx']}/",
+                    flags=http3_flags,
+                    headers=[],
+                    body=None,
+                    timeout_secs=10.0,
+                    requests=requests,
+                    concurrency=concurrency,
+                ))
+            )
+            results.append(
+                collect_rounds(lambda: run_single_server_curl_benchmark(
+                    server_name="rginx",
                     scenario_name="grpc_unary",
                     launch_command=[str(rginx_bin), "--config", str(rginx_grpc_path)],
                     launch_cwd=workspace,
@@ -462,6 +493,11 @@ def run_comparison(
 
             unsupported.extend(
                 [
+                    UnsupportedScenario(
+                        server="nginx",
+                        scenario="http3_return_200",
+                        reason="nginx compare harness does not build QUIC/HTTP/3 support",
+                    ),
                     UnsupportedScenario(
                         server="nginx",
                         scenario="grpc_web_binary",

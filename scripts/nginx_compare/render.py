@@ -48,7 +48,7 @@ def render_markdown(
         "# rginx vs nginx performance snapshot",
         "",
         "- Environment: Docker / Debian trixie",
-        f"- Benchmark tools: Python HTTP/1.1 keepalive runner for {requests} requests / concurrency {concurrency}, `curl` threadpool for TLS / HTTP2 / gRPC / grpc-web",
+        f"- Benchmark tools: Python HTTP/1.1 keepalive runner for {requests} requests / concurrency {concurrency}, `curl` threadpool for TLS / HTTP2 / HTTP3 / gRPC / grpc-web",
         f"- Reported values: median of {rounds} rounds",
         f"- rginx: `{rginx_version_text}`",
         f"- nginx: `{nginx_version_text}` (ref `{nginx_ref}`, source commit `{nginx_commit}`)",
@@ -116,7 +116,8 @@ def render_markdown(
             "",
             "- The goal is repeatable relative comparison inside the same trixie container, not a universal headline benchmark.",
             "- Reported throughput, latency, and reload numbers are medians across repeated rounds rather than a single sample.",
-            "- HTTP/1.1 direct/proxy scenarios use a built-in Python keepalive client; TLS, HTTP/2, gRPC, and grpc-web scenarios use concurrent `curl` processes.",
+            "- HTTP/1.1 direct/proxy scenarios use a built-in Python keepalive client; TLS, HTTP/2, HTTP/3, gRPC, and grpc-web scenarios use concurrent `curl` processes.",
+            "- HTTP/3 is currently benchmarked only for `rginx`; the nginx comparison build in this harness does not include QUIC/HTTP/3 support.",
             "- `grpc-web` is currently benchmarked only for `rginx`; `NGINX OSS` is recorded as unsupported because it has no native grpc-web translation path.",
             "- Add larger samples, repeated runs, TLS upstream verification variants, RSS/CPU sampling, and reload drain behavior before turning these numbers into external claims.",
         ]

@@ -73,6 +73,52 @@ fn status_command_reports_explicit_listener_inventory() {
 }
 
 #[test]
+fn status_command_reports_http3_listener_bindings() {
+    let cert = generate_cert("localhost");
+    let listen_addr = reserve_loopback_addr();
+    let mut server = ServerHarness::spawn_with_tls(
+        "rginx-admin-status-http3",
+        &cert.cert.pem(),
+        &cert.signing_key.serialize_pem(),
+        |_, cert_path, key_path| {
+            format!(
+                "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n        server_names: [\"localhost\"],\n        tls: Some(ServerTlsConfig(\n            cert_path: {:?},\n            key_path: {:?},\n        )),\n        http3: Some(Http3Config(\n            advertise_alt_svc: Some(true),\n            alt_svc_max_age_secs: Some(7200),\n        )),\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Return(\n                status: 200,\n                location: \"\",\n                body: Some(\"ok\\n\"),\n            ),\n        ),\n    ],\n)\n",
+                listen_addr.to_string(),
+                cert_path.display().to_string(),
+                key_path.display().to_string(),
+                ready_route = READY_ROUTE_CONFIG,
+            )
+        },
+    );
+    server.wait_for_https_ready(listen_addr, Duration::from_secs(5));
+    let socket_path = admin_socket_path_for_config(server.config_path());
+    wait_for_admin_socket(&socket_path, Duration::from_secs(5));
+
+    let output = run_rginx(["--config", server.config_path().to_str().unwrap(), "status"]);
+    assert!(output.status.success(), "status command should succeed: {}", render_output(&output));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("listener_bindings=2"));
+    assert!(stdout.contains("bind_addrs=tcp://"));
+    assert!(stdout.contains("udp://"));
+    assert!(stdout.contains("http3=enabled"));
+    assert!(stdout.contains("kind=status_listener"));
+    assert!(stdout.contains("transport_bindings=2"));
+    assert!(stdout.contains("kind=status_listener_binding"));
+    assert!(stdout.contains("binding=tcp"));
+    assert!(stdout.contains("binding=udp"));
+    assert!(stdout.contains("transport=udp"));
+    assert!(stdout.contains("protocols=http3"));
+    assert!(stdout.contains("advertise_alt_svc=true"));
+    assert!(stdout.contains("alt_svc_max_age_secs=7200"));
+    assert!(stdout.contains("kind=status_tls_listener"));
+    assert!(stdout.contains("http3_enabled=true"));
+    assert!(stdout.contains("http3_versions=TLS1.3"));
+    assert!(stdout.contains("http3_alpn_protocols=h3"));
+
+    server.shutdown_and_wait(Duration::from_secs(5));
+}
+
+#[test]
 fn counters_command_reports_local_connection_and_response_counters() {
     let listen_addr = reserve_loopback_addr();
     let mut server = ServerHarness::spawn("rginx-admin-counters", |_| return_config(listen_addr));

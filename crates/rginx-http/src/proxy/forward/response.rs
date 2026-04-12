@@ -12,7 +12,7 @@ pub(super) struct GrpcResponseDeadline {
 }
 
 pub(super) fn build_downstream_response(
-    response: Response<Incoming>,
+    response: Response<HttpBody>,
     upstream_name: &str,
     peer_url: &str,
     idle_timeout: Duration,

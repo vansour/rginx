@@ -150,9 +150,9 @@ WORKSPACE_VERSION="$(workspace_version)"
 
 run_step cargo fmt --all --check
 run_step ./scripts/test-fast.sh
+run_step ./scripts/run-clippy-gate.sh
 run_step ./scripts/test-slow.sh
 run_step ./scripts/run-tls-gate.sh
-run_step cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
 log "running: cargo run -p rginx -- --version"
 VERSION_OUTPUT="$(cargo run -p rginx -- --version | tail -n 1)"

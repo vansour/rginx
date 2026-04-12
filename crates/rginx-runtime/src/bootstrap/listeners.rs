@@ -1,21 +1,23 @@
 use std::collections::{HashMap, HashSet};
-use std::net::TcpListener as StdTcpListener;
+use std::net::{TcpListener as StdTcpListener, UdpSocket as StdUdpSocket};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use rginx_core::{ConfigSnapshot, Error, Listener, Result};
+use rginx_core::{ConfigSnapshot, Error, Listener, Result, VirtualHost};
 use tokio::net::TcpListener;
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 
-use crate::restart::ListenerHandle;
+use crate::restart::{InheritedListeners, ListenerHandle};
 
 pub(super) type ListenerGroupMap = HashMap<String, ListenerWorkerGroup>;
 
 pub(super) struct PreparedListenerWorkerGroup {
     listener: Listener,
     std_listener: Arc<StdTcpListener>,
+    std_udp_socket: Option<Arc<StdUdpSocket>>,
     worker_listeners: Vec<TcpListener>,
+    http3_endpoint: Option<quinn::Endpoint>,
 }
 
 pub(super) struct WorkerDrainGuard {
@@ -34,13 +36,18 @@ impl Drop for WorkerDrainGuard {
 pub(super) struct ListenerWorkerGroup {
     pub(super) listener: Listener,
     std_listener: Arc<StdTcpListener>,
+    std_udp_socket: Option<Arc<StdUdpSocket>>,
     shutdown_tx: watch::Sender<bool>,
     tasks: Vec<JoinHandle<Result<()>>>,
 }
 
 impl ListenerWorkerGroup {
     pub(super) fn restart_handle(&self) -> ListenerHandle {
-        ListenerHandle { listener: self.listener.clone(), std_listener: self.std_listener.clone() }
+        ListenerHandle {
+            listener: self.listener.clone(),
+            std_listener: self.std_listener.clone(),
+            std_udp_socket: self.std_udp_socket.clone(),
+        }
     }
 
     pub(super) fn initiate_shutdown(&self) {
@@ -59,23 +66,32 @@ impl ListenerWorkerGroup {
 }
 
 pub(super) async fn build_initial_listener_groups(
-    listeners: &[Listener],
-    accept_workers: usize,
-    mut inherited: HashMap<std::net::SocketAddr, StdTcpListener>,
+    config: &ConfigSnapshot,
+    mut inherited: InheritedListeners,
     http_state: rginx_http::SharedState,
     drain_completion_notify: Arc<Notify>,
 ) -> Result<ListenerGroupMap> {
     let mut groups = HashMap::new();
 
-    for listener in listeners {
-        let std_listener = match inherited.remove(&listener.server.listen_addr) {
+    for listener in &config.listeners {
+        let std_listener = match inherited.tcp.remove(&listener.server.listen_addr) {
             Some(listener_socket) => listener_socket,
             None => bind_std_listener(listener.server.listen_addr)?,
+        };
+        let std_udp_socket = match &listener.http3 {
+            Some(http3) => match inherited.udp.remove(&http3.listen_addr) {
+                Some(socket) => Some(Arc::new(socket)),
+                None => Some(Arc::new(bind_std_udp_socket(http3.listen_addr)?)),
+            },
+            None => None,
         };
         let prepared = prepare_listener_worker_group(
             listener.clone(),
             Arc::new(std_listener),
-            accept_workers,
+            std_udp_socket,
+            config.runtime.accept_workers,
+            &config.default_vhost,
+            &config.vhosts,
         )?;
         let group = activate_prepared_listener_worker_group(
             prepared,
@@ -89,6 +105,7 @@ pub(super) async fn build_initial_listener_groups(
 }
 
 pub(super) fn prepare_added_listener_bindings(
+    next_config: &ConfigSnapshot,
     next_listeners: &[Listener],
     accept_workers: usize,
     active_listener_groups: &ListenerGroupMap,
@@ -101,11 +118,23 @@ pub(super) fn prepare_added_listener_bindings(
         .collect::<HashSet<_>>();
     let active_addrs = active_listener_groups
         .values()
-        .map(|group| group.listener.server.listen_addr)
+        .flat_map(|group| {
+            group
+                .listener
+                .transport_bindings()
+                .into_iter()
+                .map(|binding| (binding.kind, binding.listen_addr))
+        })
         .collect::<HashSet<_>>();
     let draining_addrs = draining_listener_groups
         .iter()
-        .map(|group| group.listener.server.listen_addr)
+        .flat_map(|group| {
+            group
+                .listener
+                .transport_bindings()
+                .into_iter()
+                .map(|binding| (binding.kind, binding.listen_addr))
+        })
         .collect::<HashSet<_>>();
 
     let mut prepared = Vec::new();
@@ -119,18 +148,29 @@ pub(super) fn prepare_added_listener_bindings(
                 listener.name
             )));
         }
-        if active_addrs.contains(&listener.server.listen_addr)
-            || draining_addrs.contains(&listener.server.listen_addr)
-        {
-            return Err(Error::Server(format!(
-                "listener `{}` reuses listen address `{}` with a different listener identity during reload",
-                listener.name, listener.server.listen_addr
-            )));
+        for binding in listener.transport_bindings() {
+            let key = (binding.kind, binding.listen_addr);
+            if active_addrs.contains(&key) || draining_addrs.contains(&key) {
+                return Err(Error::Server(format!(
+                    "listener `{}` reuses {} listen address `{}` with a different listener identity during reload",
+                    listener.name,
+                    binding.kind.as_str(),
+                    binding.listen_addr
+                )));
+            }
         }
         prepared.push(prepare_listener_worker_group(
             listener.clone(),
             Arc::new(bind_std_listener(listener.server.listen_addr)?),
+            listener
+                .http3
+                .as_ref()
+                .map(|http3| bind_std_udp_socket(http3.listen_addr))
+                .transpose()?
+                .map(Arc::new),
             accept_workers,
+            &next_config.default_vhost,
+            &next_config.vhosts,
         )?);
     }
 
@@ -267,14 +307,32 @@ pub(super) async fn join_aborted_listener_worker_groups(
 fn prepare_listener_worker_group(
     listener: Listener,
     std_listener: Arc<StdTcpListener>,
+    std_udp_socket: Option<Arc<StdUdpSocket>>,
     accept_workers: usize,
+    default_vhost: &VirtualHost,
+    vhosts: &[VirtualHost],
 ) -> Result<PreparedListenerWorkerGroup> {
     let mut worker_listeners = Vec::new();
     for _worker_index in 0..accept_workers {
         worker_listeners.push(TcpListener::from_std(std_listener.try_clone()?)?);
     }
+    let http3_endpoint = match &std_udp_socket {
+        Some(socket) => Some(rginx_http::server::bind_http3_endpoint_with_socket(
+            &listener,
+            default_vhost,
+            vhosts,
+            socket.try_clone()?,
+        )?),
+        None => rginx_http::server::bind_http3_endpoint(&listener, default_vhost, vhosts)?,
+    };
 
-    Ok(PreparedListenerWorkerGroup { listener, std_listener, worker_listeners })
+    Ok(PreparedListenerWorkerGroup {
+        listener,
+        std_listener,
+        std_udp_socket,
+        worker_listeners,
+        http3_endpoint,
+    })
 }
 
 fn activate_prepared_listener_worker_group(
@@ -284,7 +342,9 @@ fn activate_prepared_listener_worker_group(
 ) -> ListenerWorkerGroup {
     let (shutdown_tx, _shutdown_rx) = watch::channel(false);
     let mut tasks = Vec::new();
-    let remaining_workers = Arc::new(AtomicUsize::new(prepared.worker_listeners.len()));
+    let remaining_workers = Arc::new(AtomicUsize::new(
+        prepared.worker_listeners.len() + usize::from(prepared.http3_endpoint.is_some()),
+    ));
 
     for (worker_index, listener_socket) in prepared.worker_listeners.into_iter().enumerate() {
         tracing::info!(
@@ -304,9 +364,32 @@ fn activate_prepared_listener_worker_group(
         }));
     }
 
+    if let Some(endpoint) = prepared.http3_endpoint {
+        tracing::info!(
+            listener = %prepared.listener.name,
+            listen = %prepared
+                .listener
+                .http3
+                .as_ref()
+                .map(|http3| http3.listen_addr)
+                .unwrap_or(prepared.listener.server.listen_addr),
+            "starting http3 accept worker"
+        );
+        let listener_id = prepared.listener.id.clone();
+        let http_state = http_state.clone();
+        let shutdown = shutdown_tx.subscribe();
+        let remaining_workers = remaining_workers.clone();
+        let drain_completion_notify = drain_completion_notify.clone();
+        tasks.push(tokio::spawn(async move {
+            let _drain_guard = WorkerDrainGuard { remaining_workers, drain_completion_notify };
+            rginx_http::server::serve_http3(endpoint, listener_id, http_state, shutdown).await
+        }));
+    }
+
     ListenerWorkerGroup {
         listener: prepared.listener,
         std_listener: prepared.std_listener,
+        std_udp_socket: prepared.std_udp_socket,
         shutdown_tx,
         tasks,
     }
@@ -342,6 +425,12 @@ fn bind_std_listener(listen_addr: std::net::SocketAddr) -> Result<StdTcpListener
     Ok(socket)
 }
 
+fn bind_std_udp_socket(listen_addr: std::net::SocketAddr) -> Result<StdUdpSocket> {
+    let socket = StdUdpSocket::bind(listen_addr)?;
+    socket.set_nonblocking(true)?;
+    Ok(socket)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -371,6 +460,26 @@ mod tests {
             },
             tls_termination_enabled: false,
             proxy_protocol_enabled: false,
+            http3: None,
+        }
+    }
+
+    fn config_with_listeners(listeners: Vec<Listener>) -> ConfigSnapshot {
+        ConfigSnapshot {
+            runtime: rginx_core::RuntimeSettings {
+                shutdown_timeout: std::time::Duration::from_secs(1),
+                worker_threads: None,
+                accept_workers: 1,
+            },
+            listeners,
+            default_vhost: rginx_core::VirtualHost {
+                id: "server".to_string(),
+                server_names: Vec::new(),
+                routes: Vec::new(),
+                tls: None,
+            },
+            vhosts: Vec::new(),
+            upstreams: HashMap::new(),
         }
     }
 
@@ -382,6 +491,7 @@ mod tests {
         ListenerWorkerGroup {
             listener,
             std_listener: Arc::new(std_listener),
+            std_udp_socket: None,
             shutdown_tx,
             tasks: Vec::new(),
         }
@@ -398,7 +508,10 @@ mod tests {
             active_listener.id.clone(),
             listener_group_with_socket(active_listener, std_listener),
         )]);
+        let next_config =
+            config_with_listeners(vec![listener("listener-b", "listener-b", listen_addr)]);
         let error = match prepare_added_listener_bindings(
+            &next_config,
             &[listener("listener-b", "listener-b", listen_addr)],
             1,
             &active_groups,
@@ -408,7 +521,7 @@ mod tests {
             Err(error) => error,
         };
 
-        assert!(error.to_string().contains("reuses listen address"));
+        assert!(error.to_string().contains("reuses tcp listen address"));
     }
 
     #[test]
@@ -421,7 +534,10 @@ mod tests {
             listener("listener-a", "listener-a", listen_addr),
             std_listener,
         )];
+        let next_config =
+            config_with_listeners(vec![listener("listener-b", "listener-b", listen_addr)]);
         let error = match prepare_added_listener_bindings(
+            &next_config,
             &[listener("listener-b", "listener-b", listen_addr)],
             1,
             &HashMap::new(),
@@ -431,6 +547,6 @@ mod tests {
             Err(error) => error,
         };
 
-        assert!(error.to_string().contains("reuses listen address"));
+        assert!(error.to_string().contains("reuses tcp listen address"));
     }
 }

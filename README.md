@@ -2,7 +2,7 @@
 
 `rginx` 是一个面向中小规模部署的 Rust 入口反向代理。
 
-当前版本：`v0.1.3-rc.9`
+当前版本：`v0.1.3-rc.10`
 
 它的目标很收口：
 
@@ -33,6 +33,15 @@
 - peer `weight` / `backup`
 - 幂等或可重放请求的 failover
 - 入站 HTTP/2（TLS / ALPN）
+- 入站 HTTP/3（TLS / QUIC / Alt-Svc）
+- HTTP/3 下游路由级 ACL / 限流 / 压缩 / request-id / access log / traffic 统计
+- 上游 HTTP/3（显式 `protocol: Http3`）
+- gRPC / grpc-web over HTTP/3
+- HTTP/3 下的 gRPC trailers / deadline 语义
+- 面向 HTTP/3 upstream 的主动 gRPC health check
+- HTTP/3 listener 的 TLS / SNI / OCSP 诊断
+- HTTP/3 listener 的 reload / restart / drain 语义
+- HTTP/3 已纳入默认 fast/slow test gate、TLS gate、soak 和 benchmark 入口
 - 下游 TLS 版本控制（`TLS1.2` / `TLS1.3`）
 - 下游 ALPN 控制
 - 无 SNI 客户端的默认证书回退
@@ -69,6 +78,28 @@
 - Linux 下显式 fd 继承式优雅重启
 - `rginx check`
 - 本地只读运维面：`snapshot / snapshot-version / delta / wait / status / counters / traffic / peers / upstreams`
+
+## HTTP/3 规划
+
+当前仓库已经完成 HTTP/3 的全部八个阶段：
+
+- 下游 HTTP/3 ingress
+- `Return` / 基础 `Proxy`
+- `Alt-Svc` 广播
+- ACL / 限流 / 压缩 / request-id / access log / traffic 统计
+- 上游 HTTP/3 基础代理
+- 上游 HTTP/3 `server_name_override` / client identity
+- gRPC over HTTP/3
+- grpc-web over HTTP/3
+- HTTP/3 下的 gRPC deadline / trailers 行为
+- 面向 HTTP/3 upstream 的主动 gRPC health check
+- HTTP/3 listener 的 TLS / SNI / OCSP 诊断
+- HTTP/3 listener 的 reload / restart / drain 语义
+- HTTP/3 已纳入默认 fast/slow test gate、TLS gate、soak 和 benchmark 入口
+
+- 分阶段实施计划见 `ARCHITECTURE_HTTP3_PLAN.md`
+- 阶段 0 语义冻结见 `ARCHITECTURE_HTTP3_PHASE0_FREEZE.md`
+- 当前已完成阶段：Phase 0、Phase 1、Phase 2、Phase 3、Phase 4、Phase 5、Phase 6、Phase 7、Phase 8
 
 ## 仓库结构
 
@@ -127,12 +158,14 @@ cargo build -p rginx
 
 ```bash
 ./scripts/test-fast.sh
+./scripts/run-clippy-gate.sh
 ./scripts/test-slow.sh
 ```
 
-- `test-fast.sh` 运行 `rginx-core`、`rginx-config`、`rginx-http`、`rginx-runtime`、`rginx-observability` 的 crate 内测试，以及 `rginx` 二进制本身的单测。
-- `test-slow.sh` 运行 `crates/rginx-app/tests/` 下的集成测试。
-- `scripts/run-tls-gate.sh` 继续保留给 TLS 相关回归门禁和发布前检查。
+- `test-fast.sh` 运行 `rginx-core`、`rginx-config`、`rginx-http`、`rginx-runtime`、`rginx-observability` 的 crate 内测试，以及 `rginx` 二进制本身的单测；其中已经包含 HTTP/3 运行时与控制面单测。
+- `run-clippy-gate.sh` 运行 workspace 级 `cargo clippy --all-targets --all-features -- -D warnings`，并读取仓库根目录的 `clippy.toml` 作为默认 lint 基线。
+- `test-slow.sh` 顺序执行 `crates/rginx-app/tests/` 下的全部集成测试目标，并显式要求 `http3`、`upstream_http3`、`grpc_http3`、`reload`、`admin`、`check` 这些 HTTP/3 gate 目标存在。
+- `scripts/run-tls-gate.sh` 继续保留给 TLS 相关回归门禁和发布前检查；现在也包含 downstream / upstream / gRPC over HTTP/3 回归。
 
 ### 热更新边界
 
@@ -310,7 +343,7 @@ sudo apt install rginx
 
 当前约定：
 
-- 预发布 tag，例如 `v0.1.3-rc.9`：发布 GitHub Release 资产，但不更新 APT 仓库
+- 预发布 tag，例如 `v0.1.3-rc.10`：发布 GitHub Release 资产，但不更新 APT 仓库
 - 稳定 tag，例如 `v0.1.3`：同时发布 GitHub Release 和 GitHub Pages APT 仓库
 
 要让稳定版自动发布 APT 仓库，还需要一次性配置：
@@ -573,7 +606,9 @@ python3 scripts/run-benchmark-matrix.py \
   --http1-url http://127.0.0.1:18080/ \
   --https-url https://127.0.0.1:18443/ \
   --http2-url https://127.0.0.1:18443/ \
+  --http3-url https://127.0.0.1:18443/ \
   --grpc-url https://127.0.0.1:18443/grpc.health.v1.Health/Check \
+  --grpc-http3-url https://127.0.0.1:18443/grpc.health.v1.Health/Check \
   --grpc-web-url http://127.0.0.1:18080/grpc.health.v1.Health/Check \
   --grpc-web-text-url http://127.0.0.1:18080/grpc.health.v1.Health/Check \
   --requests 200 \
@@ -590,9 +625,20 @@ python3 scripts/run-benchmark-matrix.py \
 
 ```bash
 ./scripts/test-fast.sh
+./scripts/run-clippy-gate.sh
 ./scripts/test-slow.sh
 ./scripts/run-soak.sh --iterations 1
 ```
+
+如果你需要本地对比 `rginx` 和 `nginx` 的基准结果，可以继续用：
+
+```bash
+python3 scripts/nginx_compare/main.py \
+  --workspace . \
+  --out-dir target/nginx-compare
+```
+
+当前 compare harness 会实际跑 `rginx` 的 HTTP/3 场景；`nginx` 一侧在这套本地构建配置下会被标记为 unsupported，因为当前 harness 没有启用 QUIC/HTTP/3 构建链路。
 
 ### TLS Release Gate
 
@@ -600,6 +646,7 @@ python3 scripts/run-benchmark-matrix.py \
 
 ```bash
 ./scripts/test-fast.sh
+./scripts/run-clippy-gate.sh
 ./scripts/test-slow.sh
 ./scripts/run-tls-gate.sh
 ./scripts/run-soak.sh --iterations 1
@@ -609,6 +656,7 @@ rginx check --config /etc/rginx/rginx.ron
 建议把这几项当成 TLS 子系统的最小发布门槛：
 
 - 下游 TLS / SNI / 默认证书回退通过
+- downstream / upstream / gRPC over HTTP/3 regression 通过
 - 下游 mTLS 通过
 - 上游 HTTPS / mTLS / HTTP2 / SNI 通过
 - access log / admin / check 的 TLS 可观测性通过

@@ -10,7 +10,7 @@ use http::header::{
 use http::{Method, StatusCode, Uri, Version};
 use http_body_util::BodyExt;
 use http_body_util::combinators::UnsyncBoxBody;
-use hyper::body::{Frame, Incoming, SizeHint};
+use hyper::body::{Body, Frame, SizeHint};
 use hyper::{Request, Response};
 use rginx_core::{
     AccessLogFormat, AccessLogValues, ConfigSnapshot, Route, RouteAction, VirtualHost,
@@ -32,6 +32,14 @@ mod response;
 pub use dispatch::handle;
 pub(crate) use grpc::{GrpcStatusCode, grpc_error_response};
 pub(crate) use response::{full_body, text_response};
+
+pub(crate) fn boxed_body<B>(body: B) -> HttpBody
+where
+    B: Body<Data = Bytes> + Send + 'static,
+    B::Error: Into<BoxError> + 'static,
+{
+    body.map_err(Into::into).boxed_unsync()
+}
 
 pub(crate) fn attach_connection_metadata<B>(
     request: &mut Request<B>,

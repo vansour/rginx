@@ -226,6 +226,7 @@ mod tests {
                 server,
                 tls_termination_enabled: false,
                 proxy_protocol_enabled: false,
+                http3: None,
             }],
             default_vhost: VirtualHost {
                 id: "server".to_string(),

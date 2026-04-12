@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::io::BufReader;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -8,6 +7,7 @@ use rasn_pkix::{
     AuthorityKeyIdentifier, BasicConstraints, Certificate, DirectoryString, ExtKeyUsageSyntax,
     Extension, GeneralName, KeyUsage, Name, SubjectAltName, SubjectKeyIdentifier, Time,
 };
+use rustls::pki_types::{CertificateDer, pem::PemObject};
 use sha2::{Digest, Sha256};
 
 use crate::client_ip::TlsClientIdentity;
@@ -272,15 +272,21 @@ fn decode_certificate(bytes: &[u8]) -> Option<Certificate> {
 }
 
 fn load_certificate_chain_der(path: &Path) -> std::io::Result<Vec<Vec<u8>>> {
-    let file = std::fs::File::open(path)?;
-    let mut reader = BufReader::new(file);
-    let certs = rustls_pemfile::certs(&mut reader)
+    let certs = CertificateDer::pem_file_iter(path)
+        .map_err(pem_error_to_io_error)?
         .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        .map_err(pem_error_to_io_error)?;
     if !certs.is_empty() {
         return Ok(certs.into_iter().map(|cert| cert.as_ref().to_vec()).collect());
     }
     Ok(vec![std::fs::read(path)?])
+}
+
+fn pem_error_to_io_error(error: rustls::pki_types::pem::Error) -> std::io::Error {
+    match error {
+        rustls::pki_types::pem::Error::Io(error) => error,
+        other => std::io::Error::new(std::io::ErrorKind::InvalidData, other),
+    }
 }
 
 fn name_to_string(name: &Name) -> String {

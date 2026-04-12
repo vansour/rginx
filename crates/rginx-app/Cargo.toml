@@ -16,7 +16,6 @@ categories = ["network-programming", "web-programming::http-server"]
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
-http.workspace = true
 libc = "0.2"
 rginx-config = { path = "../rginx-config" }
 rginx-http = { path = "../rginx-http" }
@@ -31,13 +30,15 @@ brotli.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 flate2.workspace = true
+h3.workspace = true
+h3-quinn.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-rustls.workspace = true
 hyper-util.workspace = true
 libc = "0.2"
+quinn.workspace = true
 rustls.workspace = true
-rustls-pemfile.workspace = true
 rcgen = "0.14"
 rasn = "0.28.11"
 rasn-ocsp = "0.28.11"

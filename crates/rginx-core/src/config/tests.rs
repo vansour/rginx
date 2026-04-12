@@ -5,9 +5,9 @@ use std::time::Duration;
 use http::StatusCode;
 
 use super::{
-    AccessLogFormat, AccessLogValues, ConfigSnapshot, Listener, ReturnAction, Route,
-    RouteAccessControl, RouteAction, RouteMatcher, RuntimeSettings, Server, VirtualHost,
-    match_server_name,
+    AccessLogFormat, AccessLogValues, ConfigSnapshot, Listener, ListenerApplicationProtocol,
+    ListenerHttp3, ListenerTransportKind, ReturnAction, Route, RouteAccessControl, RouteAction,
+    RouteMatcher, RuntimeSettings, Server, VirtualHost, match_server_name,
 };
 
 #[test]
@@ -89,6 +89,7 @@ fn config_snapshot_counts_routes_across_all_vhosts() {
             server,
             tls_termination_enabled: false,
             proxy_protocol_enabled: false,
+            http3: None,
         }],
         default_vhost: VirtualHost {
             id: "server".to_string(),
@@ -115,6 +116,51 @@ fn config_snapshot_counts_routes_across_all_vhosts() {
 
     assert_eq!(snapshot.total_vhost_count(), 3);
     assert_eq!(snapshot.total_route_count(), 4);
+    assert_eq!(snapshot.total_listener_binding_count(), 1);
+    assert!(!snapshot.http3_enabled());
+}
+
+#[test]
+fn listener_transport_bindings_include_udp_http3_binding_when_configured() {
+    let listener = Listener {
+        id: "default".to_string(),
+        name: "default".to_string(),
+        server: Server {
+            listen_addr: "127.0.0.1:443".parse().unwrap(),
+            default_certificate: None,
+            trusted_proxies: Vec::new(),
+            keep_alive: true,
+            max_headers: None,
+            max_request_body_bytes: None,
+            max_connections: None,
+            header_read_timeout: None,
+            request_body_read_timeout: None,
+            response_write_timeout: None,
+            access_log_format: None,
+            tls: None,
+        },
+        tls_termination_enabled: true,
+        proxy_protocol_enabled: false,
+        http3: Some(ListenerHttp3 {
+            listen_addr: "127.0.0.1:443".parse().unwrap(),
+            advertise_alt_svc: true,
+            alt_svc_max_age: Duration::from_secs(3600),
+        }),
+    };
+
+    let bindings = listener.transport_bindings();
+    assert_eq!(listener.binding_count(), 2);
+    assert!(listener.http3_enabled());
+    assert_eq!(bindings.len(), 2);
+    assert_eq!(bindings[0].kind, ListenerTransportKind::Tcp);
+    assert_eq!(
+        bindings[0].protocols,
+        vec![ListenerApplicationProtocol::Http1, ListenerApplicationProtocol::Http2]
+    );
+    assert_eq!(bindings[1].kind, ListenerTransportKind::Udp);
+    assert_eq!(bindings[1].protocols, vec![ListenerApplicationProtocol::Http3]);
+    assert!(bindings[1].advertise_alt_svc);
+    assert_eq!(bindings[1].alt_svc_max_age.map(|value| value.as_secs()), Some(3600));
 }
 
 #[test]

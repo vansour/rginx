@@ -4,15 +4,17 @@ use std::time::Duration;
 
 use ipnet::IpNet;
 use rginx_core::{
-    AccessLogFormat, Error, Listener, OcspConfig, OcspNonceMode, OcspResponderPolicy, Result,
-    Server, ServerCertificateBundle, ServerClientAuthMode, ServerClientAuthPolicy, ServerTls,
-    TlsCipherSuite, TlsKeyExchangeGroup, TlsVersion, VirtualHostTls,
+    AccessLogFormat, Error, Listener, ListenerHttp3, OcspConfig, OcspNonceMode,
+    OcspResponderPolicy, Result, Server, ServerCertificateBundle, ServerClientAuthMode,
+    ServerClientAuthPolicy, ServerTls, TlsCipherSuite, TlsKeyExchangeGroup, TlsVersion,
+    VirtualHostTls,
 };
 
 use crate::model::{
-    ListenerConfig, OcspConfig as RawOcspConfig, OcspNonceModeConfig, OcspResponderPolicyConfig,
-    ServerCertificateBundleConfig, ServerClientAuthModeConfig, ServerConfig, ServerTlsConfig,
-    TlsCipherSuiteConfig, TlsKeyExchangeGroupConfig, TlsVersionConfig, VirtualHostTlsConfig,
+    Http3Config, ListenerConfig, OcspConfig as RawOcspConfig, OcspNonceModeConfig,
+    OcspResponderPolicyConfig, ServerCertificateBundleConfig, ServerClientAuthModeConfig,
+    ServerConfig, ServerTlsConfig, TlsCipherSuiteConfig, TlsKeyExchangeGroupConfig,
+    TlsVersionConfig, VirtualHostTlsConfig,
 };
 
 pub(super) struct CompiledServer {
@@ -40,6 +42,7 @@ pub(super) fn compile_legacy_server(
         response_write_timeout_secs,
         access_log_format,
         tls,
+        http3,
     } = server;
 
     let listen = listen.expect("legacy server listen should be validated before compile");
@@ -60,6 +63,11 @@ pub(super) fn compile_legacy_server(
         },
         base_dir,
     )?;
+    let http3 = compile_http3(
+        http3,
+        compiled.server.listen_addr,
+        compiled.server_tls.is_some() || any_vhost_tls,
+    )?;
 
     Ok(CompiledServer {
         listener: Listener {
@@ -68,6 +76,7 @@ pub(super) fn compile_legacy_server(
             server: compiled.server,
             tls_termination_enabled: compiled.server_tls.is_some() || any_vhost_tls,
             proxy_protocol_enabled: proxy_protocol.unwrap_or(false),
+            http3,
         },
         server_names,
     })
@@ -95,6 +104,7 @@ pub(super) fn compile_listeners(
                 response_write_timeout_secs,
                 access_log_format,
                 tls,
+                http3,
             } = listener;
 
             let compiled = compile_server_fields(
@@ -114,6 +124,8 @@ pub(super) fn compile_listeners(
                 },
                 base_dir,
             )?;
+            let http3 =
+                compile_http3(http3, compiled.server.listen_addr, compiled.server_tls.is_some())?;
 
             Ok(Listener {
                 id: explicit_listener_id(&name),
@@ -121,6 +133,7 @@ pub(super) fn compile_listeners(
                 server: compiled.server,
                 tls_termination_enabled: compiled.server_tls.is_some(),
                 proxy_protocol_enabled: proxy_protocol.unwrap_or(false),
+                http3,
             })
         })
         .collect()
@@ -350,6 +363,33 @@ fn compile_max_connections(max_connections: Option<u64>) -> Result<Option<usize>
 
 fn compile_access_log_format(access_log_format: Option<String>) -> Result<Option<AccessLogFormat>> {
     access_log_format.map(AccessLogFormat::parse).transpose()
+}
+
+fn compile_http3(
+    http3: Option<Http3Config>,
+    tcp_listen_addr: std::net::SocketAddr,
+    tls_enabled: bool,
+) -> Result<Option<ListenerHttp3>> {
+    let Some(http3) = http3 else {
+        return Ok(None);
+    };
+
+    if !tls_enabled {
+        return Err(Error::Config(
+            "http3 requires tls to be configured on the same listener".to_string(),
+        ));
+    }
+
+    let listen_addr = match http3.listen {
+        Some(listen) => listen.parse()?,
+        None => tcp_listen_addr,
+    };
+
+    Ok(Some(ListenerHttp3 {
+        listen_addr,
+        advertise_alt_svc: http3.advertise_alt_svc.unwrap_or(true),
+        alt_svc_max_age: Duration::from_secs(http3.alt_svc_max_age_secs.unwrap_or(86_400)),
+    }))
 }
 
 fn compile_tls_versions(versions: Option<Vec<TlsVersionConfig>>) -> Option<Vec<TlsVersion>> {

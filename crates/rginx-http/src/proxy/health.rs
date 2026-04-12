@@ -65,7 +65,9 @@ pub async fn probe_upstream_peer(
         }
     };
 
-    match tokio::time::timeout(check.timeout, client.request(request)).await {
+    match tokio::time::timeout(check.timeout, client.request(upstream.as_ref(), &peer, request))
+        .await
+    {
         Ok(Ok(response)) if check.grpc_service.is_some() => {
             match tokio::time::timeout(check.timeout, evaluate_grpc_health_probe_response(response))
                 .await

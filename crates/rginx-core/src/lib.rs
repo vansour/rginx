@@ -6,7 +6,8 @@ pub mod types;
 
 pub use config::{
     AccessLogFormat, AccessLogValues, ActiveHealthCheck, ClientIdentity, ConfigSnapshot,
-    GrpcRouteMatch, Listener, OcspConfig, OcspNonceMode, OcspResponderPolicy, ProxyTarget,
+    GrpcRouteMatch, Listener, ListenerApplicationProtocol, ListenerHttp3, ListenerTransportBinding,
+    ListenerTransportKind, OcspConfig, OcspNonceMode, OcspResponderPolicy, ProxyTarget,
     ReturnAction, Route, RouteAccessControl, RouteAction, RouteMatcher, RouteRateLimit,
     RuntimeSettings, Server, ServerCertificateBundle, ServerClientAuthMode, ServerClientAuthPolicy,
     ServerNameMatch, ServerTls, TlsCipherSuite, TlsKeyExchangeGroup, TlsVersion, Upstream,

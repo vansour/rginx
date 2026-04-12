@@ -102,7 +102,7 @@ impl hyper::body::Body for ReplayableRequestBody {
 
 impl PreparedProxyRequest {
     pub(super) async fn from_request(
-        request: Request<Incoming>,
+        request: Request<HttpBody>,
         upstream_name: &str,
         request_body_read_timeout: Option<Duration>,
         write_timeout: Duration,
@@ -184,7 +184,7 @@ async fn prepare_request_body(
     upstream_name: &str,
     method: &Method,
     headers: &HeaderMap,
-    body: Incoming,
+    body: HttpBody,
     body_timeout: Duration,
     max_replayable_request_body_bytes: usize,
     max_request_body_bytes: Option<usize>,
@@ -291,7 +291,7 @@ where
 }
 
 fn downstream_request_body(
-    body: Incoming,
+    body: HttpBody,
     body_timeout: Duration,
     label: String,
     grpc_web_mode: Option<&GrpcWebMode>,

@@ -12,4 +12,34 @@ log() {
 cd "${ROOT_DIR}"
 
 log "running slow integration tests"
-cargo test -p rginx --tests --locked --quiet -- --test-threads=1
+
+required_http3_targets=(
+    "http3"
+    "upstream_http3"
+    "grpc_http3"
+    "reload"
+    "admin"
+    "check"
+)
+
+for test_name in "${required_http3_targets[@]}"; do
+    if [[ ! -f "${ROOT_DIR}/crates/rginx-app/tests/${test_name}.rs" ]]; then
+        printf '[test-slow] missing required HTTP/3 gate target: %s\n' "${test_name}" >&2
+        exit 1
+    fi
+done
+
+mapfile -t tests < <(
+    find "${ROOT_DIR}/crates/rginx-app/tests" -maxdepth 1 -type f -name '*.rs' |
+        while IFS= read -r path; do
+            file_name="${path##*/}"
+            printf '%s\n' "${file_name%.rs}"
+        done |
+        sed 's/\.rs$//' |
+        sort
+)
+
+for test_name in "${tests[@]}"; do
+    log "running ${test_name}"
+    cargo test -p rginx --test "${test_name}" --locked --quiet -- --test-threads=1
+done

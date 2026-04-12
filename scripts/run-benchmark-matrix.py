@@ -77,12 +77,14 @@ def benchmark(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Run the benchmark matrix for HTTP, TLS, HTTP/2, gRPC, and grpc-web."
+        description="Run the benchmark matrix for HTTP, TLS, HTTP/2, HTTP/3, gRPC, and grpc-web."
     )
     parser.add_argument("--http1-url")
     parser.add_argument("--https-url")
     parser.add_argument("--http2-url")
+    parser.add_argument("--http3-url")
     parser.add_argument("--grpc-url")
+    parser.add_argument("--grpc-http3-url")
     parser.add_argument("--grpc-web-url")
     parser.add_argument("--grpc-web-text-url")
     parser.add_argument(
@@ -114,12 +116,26 @@ def main() -> int:
         scenarios.append(
             Scenario("http2_tls", args.http2_url, ["--http2", "--insecure"], [])
         )
+    if args.http3_url:
+        scenarios.append(
+            Scenario("http3_tls", args.http3_url, ["--http3-only", "--insecure"], [])
+        )
     if args.grpc_url:
         scenarios.append(
             Scenario(
                 "grpc_h2",
                 args.grpc_url,
                 ["--http2", "--insecure", "--request", "POST", "--data-binary", "@-"],
+                ["content-type: application/grpc", "te: trailers"],
+                grpc_body,
+            )
+        )
+    if args.grpc_http3_url:
+        scenarios.append(
+            Scenario(
+                "grpc_h3",
+                args.grpc_http3_url,
+                ["--http3-only", "--insecure", "--request", "POST", "--data-binary", "@-"],
                 ["content-type: application/grpc", "te: trailers"],
                 grpc_body,
             )
@@ -148,8 +164,8 @@ def main() -> int:
     if not scenarios:
         parser.error(
             "at least one benchmark URL must be provided; "
-            "supported flags are --http1-url, --https-url, --http2-url, "
-            "--grpc-url, --grpc-web-url, and --grpc-web-text-url"
+            "supported flags are --http1-url, --https-url, --http2-url, --http3-url, "
+            "--grpc-url, --grpc-http3-url, --grpc-web-url, and --grpc-web-text-url"
         )
 
     rows = []

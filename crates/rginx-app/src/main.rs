@@ -54,8 +54,10 @@ fn main() -> anyhow::Result<()> {
                         config.listeners.first().map(|listener| listener.name.as_str()),
                     ),
                     listener_count: config.total_listener_count(),
+                    listener_binding_count: config.total_listener_binding_count(),
                     listeners: check_listener_summaries(&config),
                     tls_enabled: config.tls_enabled(),
+                    http3_enabled: config.http3_enabled(),
                     total_vhost_count: config.total_vhost_count(),
                     total_route_count: config.total_route_count(),
                     upstream_count: config.upstreams.len(),
@@ -79,8 +81,10 @@ fn main() -> anyhow::Result<()> {
                         config.listeners.first().map(|listener| listener.name.as_str()),
                     ),
                     listener_count: config.total_listener_count(),
+                    listener_binding_count: config.total_listener_binding_count(),
                     listeners: check_listener_summaries(&config),
                     tls_enabled: config.tls_enabled(),
+                    http3_enabled: config.http3_enabled(),
                     total_vhost_count: config.total_vhost_count(),
                     total_route_count: config.total_route_count(),
                     upstream_count: config.upstreams.len(),
@@ -129,8 +133,10 @@ fn build_runtime(worker_threads: Option<usize>) -> anyhow::Result<tokio::runtime
 struct CheckSummary {
     listener_model: &'static str,
     listener_count: usize,
+    listener_binding_count: usize,
     listeners: Vec<CheckListenerSummary>,
     tls_enabled: bool,
+    http3_enabled: bool,
     total_vhost_count: usize,
     total_route_count: usize,
     upstream_count: usize,
@@ -143,12 +149,24 @@ struct CheckListenerSummary {
     id: String,
     name: String,
     listen_addr: std::net::SocketAddr,
+    binding_count: usize,
+    http3_enabled: bool,
     tls_enabled: bool,
     proxy_protocol_enabled: bool,
     default_certificate: Option<String>,
     keep_alive: bool,
     max_connections: Option<usize>,
     access_log_format_configured: bool,
+    bindings: Vec<CheckListenerBindingSummary>,
+}
+
+struct CheckListenerBindingSummary {
+    binding_name: String,
+    transport: String,
+    listen_addr: std::net::SocketAddr,
+    protocols: Vec<String>,
+    advertise_alt_svc: Option<bool>,
+    alt_svc_max_age_secs: Option<u64>,
 }
 
 struct TlsCheckDetails {
@@ -160,6 +178,7 @@ struct TlsCheckDetails {
     expiring_certificates: Vec<String>,
     reloadable_fields: Vec<String>,
     restart_required_fields: Vec<String>,
+    listeners: Vec<rginx_http::TlsListenerStatusSnapshot>,
     certificates: Vec<rginx_http::TlsCertificateStatusSnapshot>,
     ocsp: Vec<rginx_http::TlsOcspStatusSnapshot>,
     vhost_bindings: Vec<rginx_http::TlsVhostBindingSnapshot>,
@@ -194,13 +213,31 @@ fn print_check_success(config_path: &Path, summary: CheckSummary) {
             .collect::<Vec<_>>()
             .join(",")
     };
+    let bind_addrs = if summary.listeners.is_empty() {
+        "-".to_string()
+    } else {
+        summary
+            .listeners
+            .iter()
+            .flat_map(|listener| {
+                listener
+                    .bindings
+                    .iter()
+                    .map(|binding| format!("{}://{}", binding.transport, binding.listen_addr))
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    };
     println!(
-        "configuration is valid: config={} listener_model={} listeners={} listen_addrs={} tls={} vhosts={} routes={} upstreams={} worker_threads={} accept_workers={}",
+        "configuration is valid: config={} listener_model={} listeners={} listener_bindings={} listen_addrs={} bind_addrs={} tls={} http3={} vhosts={} routes={} upstreams={} worker_threads={} accept_workers={}",
         config_path.display(),
         summary.listener_model,
         summary.listener_count,
+        summary.listener_binding_count,
         listen_addrs,
+        bind_addrs,
         if summary.tls_enabled { "enabled" } else { "disabled" },
+        if summary.http3_enabled { "enabled" } else { "disabled" },
         summary.total_vhost_count,
         summary.total_route_count,
         summary.upstream_count,
@@ -212,11 +249,13 @@ fn print_check_success(config_path: &Path, summary: CheckSummary) {
     );
     for listener in &summary.listeners {
         println!(
-            "check_listener id={} name={} listen={} tls={} proxy_protocol={} default_certificate={} keep_alive={} max_connections={} access_log_format_configured={}",
+            "check_listener id={} name={} listen={} transport_bindings={} tls={} http3={} proxy_protocol={} default_certificate={} keep_alive={} max_connections={} access_log_format_configured={}",
             listener.id,
             listener.name,
             listener.listen_addr,
+            listener.binding_count,
             if listener.tls_enabled { "enabled" } else { "disabled" },
+            if listener.http3_enabled { "enabled" } else { "disabled" },
             listener.proxy_protocol_enabled,
             listener.default_certificate.as_deref().unwrap_or("-"),
             listener.keep_alive,
@@ -226,6 +265,28 @@ fn print_check_success(config_path: &Path, summary: CheckSummary) {
                 .unwrap_or_else(|| "-".to_string()),
             listener.access_log_format_configured,
         );
+        for binding in &listener.bindings {
+            println!(
+                "check_listener_binding listener={} binding={} transport={} listen={} protocols={} advertise_alt_svc={} alt_svc_max_age_secs={}",
+                listener.id,
+                binding.binding_name,
+                binding.transport,
+                binding.listen_addr,
+                if binding.protocols.is_empty() {
+                    "-".to_string()
+                } else {
+                    binding.protocols.join(",")
+                },
+                binding
+                    .advertise_alt_svc
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+                binding
+                    .alt_svc_max_age_secs
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+            );
+        }
     }
     println!("reload_requires_restart_for={}", summary.tls.restart_required_fields.join(","));
     println!(
@@ -245,6 +306,47 @@ fn print_check_success(config_path: &Path, summary: CheckSummary) {
         println!("tls_expiring_certificates={}", summary.tls.expiring_certificates.join(","));
     }
     println!("tls_restart_required_fields={}", summary.tls.restart_required_fields.join(","));
+    for listener in &summary.tls.listeners {
+        println!(
+            "tls_listener listener={} listener_id={} listen={} tls={} default_certificate={} tcp_versions={} tcp_alpn_protocols={} http3_enabled={} http3_listen={} http3_versions={} http3_alpn_protocols={} sni_names={}",
+            listener.listener_name,
+            listener.listener_id,
+            listener.listen_addr,
+            listener.tls_enabled,
+            listener.default_certificate.as_deref().unwrap_or("-"),
+            listener
+                .versions
+                .as_ref()
+                .filter(|versions| !versions.is_empty())
+                .map(|versions| versions.join(","))
+                .unwrap_or_else(|| "-".to_string()),
+            if listener.alpn_protocols.is_empty() {
+                "-".to_string()
+            } else {
+                listener.alpn_protocols.join(",")
+            },
+            listener.http3_enabled,
+            listener
+                .http3_listen_addr
+                .map(|listen_addr| listen_addr.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            if listener.http3_versions.is_empty() {
+                "-".to_string()
+            } else {
+                listener.http3_versions.join(",")
+            },
+            if listener.http3_alpn_protocols.is_empty() {
+                "-".to_string()
+            } else {
+                listener.http3_alpn_protocols.join(",")
+            },
+            if listener.sni_names.is_empty() {
+                "-".to_string()
+            } else {
+                listener.sni_names.join(",")
+            },
+        );
+    }
     for certificate in &summary.tls.certificates {
         println!(
             "tls_certificate scope={} sha256={} subject={:?} issuer={:?} serial={:?} chain_length={} diagnostics={} cert_path={}",
@@ -379,16 +481,38 @@ fn check_listener_summaries(config: &rginx_config::ConfigSnapshot) -> Vec<CheckL
     config
         .listeners
         .iter()
-        .map(|listener| CheckListenerSummary {
-            id: listener.id.clone(),
-            name: listener.name.clone(),
-            listen_addr: listener.server.listen_addr,
-            tls_enabled: listener.tls_enabled(),
-            proxy_protocol_enabled: listener.proxy_protocol_enabled,
-            default_certificate: listener.server.default_certificate.clone(),
-            keep_alive: listener.server.keep_alive,
-            max_connections: listener.server.max_connections,
-            access_log_format_configured: listener.server.access_log_format.is_some(),
+        .map(|listener| {
+            let bindings = listener
+                .transport_bindings()
+                .into_iter()
+                .map(|binding| CheckListenerBindingSummary {
+                    binding_name: binding.name.to_string(),
+                    transport: binding.kind.as_str().to_string(),
+                    listen_addr: binding.listen_addr,
+                    protocols: binding
+                        .protocols
+                        .into_iter()
+                        .map(|protocol| protocol.as_str().to_string())
+                        .collect(),
+                    advertise_alt_svc: binding.alt_svc_max_age.map(|_| binding.advertise_alt_svc),
+                    alt_svc_max_age_secs: binding.alt_svc_max_age.map(|max_age| max_age.as_secs()),
+                })
+                .collect::<Vec<_>>();
+
+            CheckListenerSummary {
+                id: listener.id.clone(),
+                name: listener.name.clone(),
+                listen_addr: listener.server.listen_addr,
+                binding_count: listener.binding_count(),
+                http3_enabled: listener.http3_enabled(),
+                tls_enabled: listener.tls_enabled(),
+                proxy_protocol_enabled: listener.proxy_protocol_enabled,
+                default_certificate: listener.server.default_certificate.clone(),
+                keep_alive: listener.server.keep_alive,
+                max_connections: listener.server.max_connections,
+                access_log_format_configured: listener.server.access_log_format.is_some(),
+                bindings,
+            }
         })
         .collect()
 }
@@ -485,6 +609,7 @@ fn tls_check_details(config: &rginx_config::ConfigSnapshot) -> TlsCheckDetails {
         expiring_certificates,
         reloadable_fields: tls.reload_boundary.reloadable_fields,
         restart_required_fields: tls.reload_boundary.restart_required_fields,
+        listeners: tls.listeners,
         vhost_bindings: tls.vhost_bindings,
         ocsp: tls.ocsp,
         certificates: tls.certificates,

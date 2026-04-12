@@ -87,7 +87,7 @@ def rginx_proxy_config(port: int, upstream_port: int) -> str:
     )
 
 
-def rginx_tls_return_config(port: int, cert_path: pathlib.Path, key_path: pathlib.Path) -> str:
+def _rginx_return_config_with_server_extra(port: int, server_extra: str) -> str:
     return textwrap.dedent(
         f"""\
         Config(
@@ -99,10 +99,7 @@ def rginx_tls_return_config(port: int, cert_path: pathlib.Path, key_path: pathli
             server: ServerConfig(
                 listen: "127.0.0.1:{port}",
                 keep_alive: Some(true),
-                tls: Some(ServerTlsConfig(
-                    cert_path: "{cert_path}",
-                    key_path: "{key_path}",
-                )),
+{server_extra}
             ),
             upstreams: [],
             locations: [
@@ -128,6 +125,40 @@ def rginx_tls_return_config(port: int, cert_path: pathlib.Path, key_path: pathli
         """
     )
 
+
+def rginx_tls_return_config(port: int, cert_path: pathlib.Path, key_path: pathlib.Path) -> str:
+    server_extra = textwrap.indent(
+        textwrap.dedent(
+            f"""\
+            tls: Some(ServerTlsConfig(
+                cert_path: "{cert_path}",
+                key_path: "{key_path}",
+            )),
+            """
+        ).rstrip(),
+        " " * 16,
+    )
+    return _rginx_return_config_with_server_extra(port, server_extra)
+
+
+def rginx_http3_return_config(port: int, cert_path: pathlib.Path, key_path: pathlib.Path) -> str:
+    server_extra = textwrap.indent(
+        textwrap.dedent(
+            f"""\
+            server_names: ["localhost"],
+            tls: Some(ServerTlsConfig(
+                cert_path: "{cert_path}",
+                key_path: "{key_path}",
+            )),
+            http3: Some(Http3Config(
+                advertise_alt_svc: Some(true),
+                alt_svc_max_age_secs: Some(7200),
+            )),
+            """
+        ).rstrip(),
+        " " * 16,
+    )
+    return _rginx_return_config_with_server_extra(port, server_extra)
 
 def rginx_grpc_proxy_config(
     port: int,

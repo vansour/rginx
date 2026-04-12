@@ -1,1 +1,4 @@
+# Keep the repo-wide Clippy baseline explicit so local runs and CI use the same
+# policy surface.
+msrv = "1.85.0"
 too-many-arguments-threshold = 8

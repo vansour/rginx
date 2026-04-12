@@ -9,11 +9,14 @@ pub(super) fn tls_listener_status_snapshots(
         .map(|listener| {
             let sni_names = tls_listener_sni_names(config, listener.tls_enabled());
             let tls = listener.server.tls.as_ref();
+            let http3 = listener.http3.as_ref();
             TlsListenerStatusSnapshot {
                 listener_id: listener.id.clone(),
                 listener_name: listener.name.clone(),
                 listen_addr: listener.server.listen_addr,
                 tls_enabled: listener.tls_enabled(),
+                http3_enabled: http3.is_some(),
+                http3_listen_addr: http3.map(|http3| http3.listen_addr),
                 default_certificate: listener.server.default_certificate.clone(),
                 versions: tls.and_then(|tls| {
                     tls.versions.as_ref().map(|versions| {
@@ -26,6 +29,10 @@ pub(super) fn tls_listener_status_snapshots(
                 alpn_protocols: tls
                     .and_then(|tls| tls.alpn_protocols.clone())
                     .unwrap_or_else(|| vec!["h2".to_string(), "http/1.1".to_string()]),
+                http3_versions: http3
+                    .map(|_| vec![tls_version_label(rginx_core::TlsVersion::Tls13).to_string()])
+                    .unwrap_or_default(),
+                http3_alpn_protocols: http3.map(|_| vec!["h3".to_string()]).unwrap_or_default(),
                 session_resumption_enabled: tls.map(|tls| tls.session_resumption != Some(false)),
                 session_tickets_enabled: tls.map(|tls| {
                     tls.session_resumption != Some(false) && tls.session_tickets != Some(false)

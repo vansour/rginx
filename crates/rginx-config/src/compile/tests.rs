@@ -2,10 +2,10 @@ use std::fs;
 use std::time::Duration;
 
 use crate::model::{
-    Config, HandlerConfig, ListenerConfig, LocationConfig, MatcherConfig, RuntimeConfig,
-    ServerConfig, ServerTlsConfig, TlsCipherSuiteConfig, TlsKeyExchangeGroupConfig, UpstreamConfig,
-    UpstreamLoadBalanceConfig, UpstreamPeerConfig, UpstreamProtocolConfig, UpstreamTlsConfig,
-    VirtualHostConfig,
+    Config, HandlerConfig, Http3Config, ListenerConfig, LocationConfig, MatcherConfig,
+    RuntimeConfig, ServerConfig, ServerTlsConfig, TlsCipherSuiteConfig, TlsKeyExchangeGroupConfig,
+    UpstreamConfig, UpstreamLoadBalanceConfig, UpstreamPeerConfig, UpstreamProtocolConfig,
+    UpstreamTlsConfig, VirtualHostConfig,
 };
 use tempfile::TempDir;
 
@@ -53,6 +53,7 @@ fn compile_accepts_https_upstreams() {
             response_write_timeout_secs: None,
             access_log_format: None,
             tls: None,
+            http3: None,
         },
         upstreams: vec![UpstreamConfig {
             name: "secure-backend".to_string(),
@@ -168,6 +169,7 @@ fn compile_defaults_grpc_health_check_path_when_service_is_set() {
             response_write_timeout_secs: None,
             access_log_format: None,
             tls: None,
+            http3: None,
         },
         upstreams: vec![UpstreamConfig {
             name: "grpc-backend".to_string(),
@@ -261,6 +263,7 @@ fn compile_applies_granular_upstream_transport_settings() {
             response_write_timeout_secs: None,
             access_log_format: None,
             tls: None,
+            http3: None,
         },
         upstreams: vec![UpstreamConfig {
             name: "backend".to_string(),
@@ -359,6 +362,7 @@ fn compile_accepts_least_conn_load_balance() {
             response_write_timeout_secs: None,
             access_log_format: None,
             tls: None,
+            http3: None,
         },
         upstreams: vec![UpstreamConfig {
             name: "backend".to_string(),
@@ -453,6 +457,7 @@ fn compile_applies_peer_weights() {
             response_write_timeout_secs: None,
             access_log_format: None,
             tls: None,
+            http3: None,
         },
         upstreams: vec![UpstreamConfig {
             name: "backend".to_string(),
@@ -562,6 +567,7 @@ fn compile_accepts_backup_peers() {
             response_write_timeout_secs: None,
             access_log_format: None,
             tls: None,
+            http3: None,
         },
         upstreams: vec![UpstreamConfig {
             name: "backend".to_string(),
@@ -671,6 +677,7 @@ fn compile_uses_legacy_request_timeout_fallbacks_and_disables_pool_idle_timeout(
             response_write_timeout_secs: None,
             access_log_format: None,
             tls: None,
+            http3: None,
         },
         upstreams: vec![UpstreamConfig {
             name: "backend".to_string(),
@@ -767,6 +774,7 @@ fn compile_uses_default_pool_idle_timeout() {
             response_write_timeout_secs: None,
             access_log_format: None,
             tls: None,
+            http3: None,
         },
         upstreams: vec![UpstreamConfig {
             name: "backend".to_string(),
@@ -861,6 +869,7 @@ fn compile_resolves_custom_ca_relative_to_config_base() {
             response_write_timeout_secs: None,
             access_log_format: None,
             tls: None,
+            http3: None,
         },
         upstreams: vec![UpstreamConfig {
             name: "dev-backend".to_string(),
@@ -954,6 +963,92 @@ fn compile_resolves_custom_ca_relative_to_config_base() {
 }
 
 #[test]
+fn compile_accepts_https_http3_upstreams() {
+    let config = Config {
+        runtime: RuntimeConfig {
+            shutdown_timeout_secs: 10,
+            worker_threads: None,
+            accept_workers: None,
+        },
+        listeners: Vec::new(),
+        server: ServerConfig {
+            listen: Some("127.0.0.1:8080".to_string()),
+            proxy_protocol: None,
+            default_certificate: None,
+            server_names: Vec::new(),
+            trusted_proxies: Vec::new(),
+            keep_alive: None,
+            max_headers: None,
+            max_request_body_bytes: None,
+            max_connections: None,
+            header_read_timeout_secs: None,
+            request_body_read_timeout_secs: None,
+            response_write_timeout_secs: None,
+            access_log_format: None,
+            tls: None,
+            http3: None,
+        },
+        upstreams: vec![UpstreamConfig {
+            name: "h3-backend".to_string(),
+            peers: vec![UpstreamPeerConfig {
+                url: "https://example.com:443".to_string(),
+                weight: 1,
+                backup: false,
+            }],
+            tls: None,
+            protocol: UpstreamProtocolConfig::Http3,
+            load_balance: UpstreamLoadBalanceConfig::RoundRobin,
+            server_name: None,
+            server_name_override: Some("example.com".to_string()),
+            request_timeout_secs: None,
+            connect_timeout_secs: None,
+            read_timeout_secs: None,
+            write_timeout_secs: None,
+            idle_timeout_secs: None,
+            pool_idle_timeout_secs: None,
+            pool_max_idle_per_host: None,
+            tcp_keepalive_secs: None,
+            tcp_nodelay: None,
+            http2_keep_alive_interval_secs: None,
+            http2_keep_alive_timeout_secs: None,
+            http2_keep_alive_while_idle: None,
+            max_replayable_request_body_bytes: None,
+            unhealthy_after_failures: None,
+            unhealthy_cooldown_secs: None,
+            health_check_path: None,
+            health_check_grpc_service: None,
+            health_check_interval_secs: None,
+            health_check_timeout_secs: None,
+            healthy_successes_required: None,
+        }],
+        locations: vec![LocationConfig {
+            matcher: MatcherConfig::Prefix("/".to_string()),
+            handler: HandlerConfig::Proxy {
+                upstream: "h3-backend".to_string(),
+                preserve_host: None,
+                strip_prefix: None,
+                proxy_set_headers: std::collections::HashMap::new(),
+            },
+            grpc_service: None,
+            grpc_method: None,
+            allow_cidrs: Vec::new(),
+            deny_cidrs: Vec::new(),
+            requests_per_sec: None,
+            burst: None,
+        }],
+        servers: Vec::new(),
+    };
+
+    let snapshot = compile(config).expect("http3 upstream should compile");
+    let proxy = match &snapshot.default_vhost.routes[0].action {
+        rginx_core::RouteAction::Proxy(proxy) => proxy,
+        _ => panic!("expected proxy route"),
+    };
+    assert_eq!(proxy.upstream.protocol, rginx_core::UpstreamProtocol::Http3);
+    assert_eq!(proxy.upstream.server_name_override.as_deref(), Some("example.com"));
+}
+
+#[test]
 fn compile_resolves_upstream_mtls_identity_and_tls_versions_relative_to_config_base() {
     let base_dir = temp_base_dir("rginx-upstream-mtls-config-test-");
     let ca_path = base_dir.path().join("upstream-ca.pem");
@@ -985,6 +1080,7 @@ fn compile_resolves_upstream_mtls_identity_and_tls_versions_relative_to_config_b
             response_write_timeout_secs: None,
             access_log_format: None,
             tls: None,
+            http3: None,
         },
         upstreams: vec![UpstreamConfig {
             name: "mtls-backend".to_string(),
@@ -1091,6 +1187,7 @@ fn compile_normalizes_server_name_override() {
             response_write_timeout_secs: None,
             access_log_format: None,
             tls: None,
+            http3: None,
         },
         upstreams: vec![UpstreamConfig {
             name: "secure-backend".to_string(),
@@ -1178,6 +1275,7 @@ fn compile_preserves_upstream_server_name_toggle() {
             response_write_timeout_secs: None,
             access_log_format: None,
             tls: None,
+            http3: None,
         },
         upstreams: vec![UpstreamConfig {
             name: "secure-backend".to_string(),
@@ -1271,6 +1369,7 @@ fn compile_rejects_invalid_server_name_override() {
             response_write_timeout_secs: None,
             access_log_format: None,
             tls: None,
+            http3: None,
         },
         upstreams: vec![UpstreamConfig {
             name: "secure-backend".to_string(),
@@ -1353,6 +1452,7 @@ fn compile_attaches_route_access_control() {
             response_write_timeout_secs: None,
             access_log_format: None,
             tls: None,
+            http3: None,
         },
         upstreams: Vec::new(),
         locations: vec![LocationConfig {
@@ -1403,6 +1503,7 @@ fn compile_attaches_route_rate_limit() {
             response_write_timeout_secs: None,
             access_log_format: None,
             tls: None,
+            http3: None,
         },
         upstreams: Vec::new(),
         locations: vec![LocationConfig {
@@ -1455,6 +1556,7 @@ fn compile_generates_distinct_route_and_vhost_ids() {
             response_write_timeout_secs: None,
             access_log_format: None,
             tls: None,
+            http3: None,
         },
         upstreams: Vec::new(),
         locations: vec![LocationConfig {
@@ -1550,6 +1652,7 @@ fn compile_resolves_server_tls_paths_relative_to_config_base() {
                 session_ticket_count: None,
                 client_auth: None,
             }),
+            http3: None,
         },
         upstreams: Vec::new(),
         locations: vec![LocationConfig {
@@ -1623,6 +1726,7 @@ fn compile_preserves_server_tls_policy_fields() {
                 session_ticket_count: None,
                 client_auth: None,
             }),
+            http3: None,
         },
         upstreams: Vec::new(),
         locations: vec![LocationConfig {
@@ -1705,6 +1809,7 @@ fn compile_preserves_server_tls_ocsp_policy_fields() {
                 session_ticket_count: None,
                 client_auth: None,
             }),
+            http3: None,
         },
         upstreams: Vec::new(),
         locations: vec![LocationConfig {
@@ -1755,6 +1860,7 @@ fn compile_normalizes_trusted_proxy_ips_and_cidrs() {
             response_write_timeout_secs: None,
             access_log_format: None,
             tls: None,
+            http3: None,
         },
         upstreams: Vec::new(),
         locations: vec![LocationConfig {
@@ -1806,6 +1912,7 @@ fn compile_attaches_server_hardening_settings() {
             response_write_timeout_secs: Some(5),
             access_log_format: Some("$request_id $status $request".to_string()),
             tls: None,
+            http3: None,
         },
         upstreams: Vec::new(),
         locations: vec![LocationConfig {
@@ -1877,6 +1984,7 @@ fn compile_prioritizes_grpc_constrained_routes_with_same_path_matcher() {
             response_write_timeout_secs: None,
             access_log_format: None,
             tls: None,
+            http3: None,
         },
         upstreams: Vec::new(),
         locations: vec![
@@ -1951,6 +2059,7 @@ fn compile_rejects_invalid_server_access_log_format() {
             response_write_timeout_secs: None,
             access_log_format: Some("$trace_id $status".to_string()),
             tls: None,
+            http3: None,
         },
         upstreams: Vec::new(),
         locations: vec![LocationConfig {
@@ -2000,6 +2109,7 @@ fn compile_supports_explicit_multi_listener_configs() {
                 response_write_timeout_secs: None,
                 access_log_format: None,
                 tls: None,
+                http3: None,
             },
             ListenerConfig {
                 name: "https".to_string(),
@@ -2016,6 +2126,7 @@ fn compile_supports_explicit_multi_listener_configs() {
                 response_write_timeout_secs: None,
                 access_log_format: None,
                 tls: None,
+                http3: None,
             },
         ],
         server: ServerConfig {
@@ -2033,6 +2144,7 @@ fn compile_supports_explicit_multi_listener_configs() {
             response_write_timeout_secs: None,
             access_log_format: None,
             tls: None,
+            http3: None,
         },
         upstreams: Vec::new(),
         locations: vec![LocationConfig {
@@ -2059,4 +2171,81 @@ fn compile_supports_explicit_multi_listener_configs() {
     assert_eq!(snapshot.listeners[0].name, "http");
     assert_eq!(snapshot.listeners[1].name, "https");
     assert_eq!(snapshot.listeners[1].server.max_connections, Some(20));
+}
+
+#[test]
+fn compile_http3_listener_defaults_to_tcp_listen_addr_and_default_alt_svc_policy() {
+    let base_dir = temp_base_dir("rginx-http3-compile-test");
+    let cert_path = base_dir.path().join("server.crt");
+    let key_path = base_dir.path().join("server.key");
+    fs::write(&cert_path, "placeholder cert").expect("cert file should be written");
+    fs::write(&key_path, "placeholder key").expect("key file should be written");
+
+    let config = Config {
+        runtime: RuntimeConfig {
+            shutdown_timeout_secs: 10,
+            worker_threads: None,
+            accept_workers: None,
+        },
+        listeners: Vec::new(),
+        server: ServerConfig {
+            listen: Some("127.0.0.1:8443".to_string()),
+            proxy_protocol: None,
+            default_certificate: None,
+            server_names: vec!["localhost".to_string()],
+            trusted_proxies: Vec::new(),
+            keep_alive: None,
+            max_headers: None,
+            max_request_body_bytes: None,
+            max_connections: None,
+            header_read_timeout_secs: None,
+            request_body_read_timeout_secs: None,
+            response_write_timeout_secs: None,
+            access_log_format: None,
+            tls: Some(ServerTlsConfig {
+                cert_path: cert_path.display().to_string(),
+                key_path: key_path.display().to_string(),
+                additional_certificates: None,
+                versions: None,
+                cipher_suites: None,
+                key_exchange_groups: None,
+                alpn_protocols: None,
+                ocsp_staple_path: None,
+                ocsp: None,
+                session_resumption: None,
+                session_tickets: None,
+                session_cache_size: None,
+                session_ticket_count: None,
+                client_auth: None,
+            }),
+            http3: Some(Http3Config {
+                listen: None,
+                advertise_alt_svc: None,
+                alt_svc_max_age_secs: None,
+            }),
+        },
+        upstreams: Vec::new(),
+        locations: vec![LocationConfig {
+            matcher: MatcherConfig::Exact("/".to_string()),
+            handler: HandlerConfig::Return {
+                status: 200,
+                location: String::new(),
+                body: Some("ok\n".to_string()),
+            },
+            grpc_service: None,
+            grpc_method: None,
+            allow_cidrs: Vec::new(),
+            deny_cidrs: Vec::new(),
+            requests_per_sec: None,
+            burst: None,
+        }],
+        servers: Vec::new(),
+    };
+
+    let snapshot = compile_with_base(config, base_dir.path()).expect("http3 config should compile");
+    let listener = snapshot.listeners.first().expect("snapshot should have one listener");
+    let http3 = listener.http3.as_ref().expect("listener should compile http3 metadata");
+    assert_eq!(http3.listen_addr, "127.0.0.1:8443".parse().unwrap());
+    assert!(http3.advertise_alt_svc);
+    assert_eq!(http3.alt_svc_max_age.as_secs(), 86_400);
 }

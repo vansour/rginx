@@ -38,10 +38,10 @@ fn check_succeeds_without_binding_listener() {
     assert!(stdout.contains("worker_threads=auto"));
     assert!(stdout.contains("accept_workers=1"));
     assert!(stdout.contains(
-        "reload_requires_restart_for=listen,listeners[].listen,runtime.worker_threads,runtime.accept_workers"
+        "reload_requires_restart_for=listen,server.http3.listen,listeners[].listen,listeners[].http3.listen,runtime.worker_threads,runtime.accept_workers"
     ));
     assert!(stdout.contains(
-        "reload_tls_updates=server.tls,listeners[].tls,servers[].tls,upstreams[].tls,upstreams[].server_name,upstreams[].server_name_override"
+        "reload_tls_updates=server.tls,server.http3.advertise_alt_svc,server.http3.alt_svc_max_age_secs,listeners[].tls,listeners[].http3.advertise_alt_svc,listeners[].http3.alt_svc_max_age_secs,servers[].tls,upstreams[].tls,upstreams[].server_name,upstreams[].server_name_override"
     ));
     assert!(stdout.contains("tls_expiring_certificates=-"));
 
@@ -207,11 +207,57 @@ fn check_reports_explicit_listener_summary_and_reload_boundary() {
     assert!(stdout.contains("worker_threads=3"));
     assert!(stdout.contains("accept_workers=2"));
     assert!(stdout.contains(
-        "reload_requires_restart_for=listen,listeners[].listen,runtime.worker_threads,runtime.accept_workers"
+        "reload_requires_restart_for=listen,server.http3.listen,listeners[].listen,listeners[].http3.listen,runtime.worker_threads,runtime.accept_workers"
     ));
     assert!(stdout.contains(
-        "tls_restart_required_fields=listen,listeners[].listen,runtime.worker_threads,runtime.accept_workers"
+        "tls_restart_required_fields=listen,server.http3.listen,listeners[].listen,listeners[].http3.listen,runtime.worker_threads,runtime.accept_workers"
     ));
+
+    let _ = fs::remove_dir_all(temp_dir);
+}
+
+#[test]
+fn check_reports_http3_listener_bindings() {
+    let temp_dir = temp_dir("rginx-check-http3-listener");
+    fs::create_dir_all(&temp_dir).expect("temp test dir should be created");
+    let config_path = temp_dir.join("http3-listener.ron");
+    let listen_addr: SocketAddr = "127.0.0.1:18443".parse().unwrap();
+
+    let cert = generate_cert("localhost");
+    let cert_path = temp_dir.join("server.crt");
+    let key_path = temp_dir.join("server.key");
+    fs::write(&cert_path, cert.cert.pem()).expect("server cert should be written");
+    fs::write(&key_path, cert.signing_key.serialize_pem()).expect("server key should be written");
+
+    fs::write(
+        &config_path,
+        format!(
+            "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n        server_names: [\"localhost\"],\n        tls: Some(ServerTlsConfig(\n            cert_path: {:?},\n            key_path: {:?},\n        )),\n        http3: Some(Http3Config(\n            advertise_alt_svc: Some(true),\n            alt_svc_max_age_secs: Some(7200),\n        )),\n    ),\n    upstreams: [],\n    locations: [\n        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Return(\n                status: 200,\n                location: \"\",\n                body: Some(\"checked\\n\"),\n            ),\n        ),\n    ],\n)\n",
+            listen_addr.to_string(),
+            cert_path.display().to_string(),
+            key_path.display().to_string(),
+        ),
+    )
+    .expect("http3 listener config should be written");
+
+    let output = run_rginx(["check", "--config", config_path.to_str().unwrap()]);
+
+    assert!(output.status.success(), "check should succeed: {}", render_output(&output));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("listener_bindings=2"));
+    assert!(stdout.contains("bind_addrs=tcp://127.0.0.1:18443,udp://127.0.0.1:18443"));
+    assert!(stdout.contains("http3=enabled"));
+    assert!(stdout.contains("transport_bindings=2"));
+    assert!(stdout.contains("check_listener_binding listener=default binding=tcp transport=tcp"));
+    assert!(stdout.contains("check_listener_binding listener=default binding=udp transport=udp"));
+    assert!(stdout.contains("protocols=http3"));
+    assert!(stdout.contains("advertise_alt_svc=true"));
+    assert!(stdout.contains("alt_svc_max_age_secs=7200"));
+    assert!(stdout.contains("tls_listener listener=default"));
+    assert!(stdout.contains("http3_enabled=true"));
+    assert!(stdout.contains(&format!("http3_listen={listen_addr}")));
+    assert!(stdout.contains("http3_versions=TLS1.3"));
+    assert!(stdout.contains("http3_alpn_protocols=h3"));
 
     let _ = fs::remove_dir_all(temp_dir);
 }
@@ -257,7 +303,7 @@ fn check_reports_tls_diagnostics_for_listener_and_vhost_certificates() {
         "tls_details=listener_profiles=1 vhost_overrides=1 sni_names=2 certificate_bundles=2"
     ));
     assert!(stdout.contains(
-        "reload_tls_updates=server.tls,listeners[].tls,servers[].tls,upstreams[].tls,upstreams[].server_name,upstreams[].server_name_override"
+        "reload_tls_updates=server.tls,server.http3.advertise_alt_svc,server.http3.alt_svc_max_age_secs,listeners[].tls,listeners[].http3.advertise_alt_svc,listeners[].http3.alt_svc_max_age_secs,servers[].tls,upstreams[].tls,upstreams[].server_name,upstreams[].server_name_override"
     ));
     assert!(stdout.contains("tls_default_certificates=default=api.example.com"));
     assert!(stdout.contains("tls_expiring_certificates=-"));
@@ -397,9 +443,9 @@ fn check_succeeds_for_repository_default_config() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("listen=0.0.0.0:80"));
-    assert!(stdout.contains("routes=5"));
+    assert!(stdout.contains("routes=4"));
     assert!(stdout.contains("vhosts=2"));
-    assert!(stdout.contains("upstreams=1"));
+    assert!(stdout.contains("upstreams=0"));
 }
 
 fn run_rginx(args: impl IntoIterator<Item = impl AsRef<str>>) -> Output {

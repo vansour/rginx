@@ -57,9 +57,13 @@ pub struct TlsListenerStatusSnapshot {
     pub listener_name: String,
     pub listen_addr: std::net::SocketAddr,
     pub tls_enabled: bool,
+    pub http3_enabled: bool,
+    pub http3_listen_addr: Option<std::net::SocketAddr>,
     pub default_certificate: Option<String>,
     pub versions: Option<Vec<String>>,
     pub alpn_protocols: Vec<String>,
+    pub http3_versions: Vec<String>,
+    pub http3_alpn_protocols: Vec<String>,
     pub session_resumption_enabled: Option<bool>,
     pub session_tickets_enabled: Option<bool>,
     pub session_cache_size: Option<usize>,
@@ -288,12 +292,27 @@ pub struct RuntimeListenerSnapshot {
     pub listener_id: String,
     pub listener_name: String,
     pub listen_addr: std::net::SocketAddr,
+    pub binding_count: usize,
+    pub http3_enabled: bool,
     pub tls_enabled: bool,
     pub proxy_protocol_enabled: bool,
     pub default_certificate: Option<String>,
     pub keep_alive: bool,
     pub max_connections: Option<usize>,
     pub access_log_format_configured: bool,
+    pub bindings: Vec<RuntimeListenerBindingSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeListenerBindingSnapshot {
+    pub binding_name: String,
+    pub transport: String,
+    pub listen_addr: std::net::SocketAddr,
+    pub protocols: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub advertise_alt_svc: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alt_svc_max_age_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

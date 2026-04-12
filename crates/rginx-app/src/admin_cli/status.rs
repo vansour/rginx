@@ -18,6 +18,18 @@ pub(super) fn print_admin_status(config_path: &Path) -> anyhow::Result<()> {
                     .collect::<Vec<_>>()
                     .join(",")
             };
+            let bind_addrs = {
+                let bind_addrs = status
+                    .listeners
+                    .iter()
+                    .flat_map(|listener| {
+                        listener.bindings.iter().map(|binding| {
+                            format!("{}://{}", binding.transport, binding.listen_addr)
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                if bind_addrs.is_empty() { "-".to_string() } else { bind_addrs.join(",") }
+            };
             print_record(
                 "status",
                 [
@@ -32,7 +44,17 @@ pub(super) fn print_admin_status(config_path: &Path) -> anyhow::Result<()> {
                             .unwrap_or_else(|| "-".to_string()),
                     ),
                     ("listeners", status.listeners.len().to_string()),
+                    (
+                        "listener_bindings",
+                        status
+                            .listeners
+                            .iter()
+                            .map(|listener| listener.binding_count)
+                            .sum::<usize>()
+                            .to_string(),
+                    ),
                     ("listen_addrs", listen_addrs),
+                    ("bind_addrs", bind_addrs),
                     (
                         "worker_threads",
                         status
@@ -45,6 +67,15 @@ pub(super) fn print_admin_status(config_path: &Path) -> anyhow::Result<()> {
                     ("routes", status.total_routes.to_string()),
                     ("upstreams", status.total_upstreams.to_string()),
                     ("tls", if status.tls_enabled { "enabled" } else { "disabled" }.to_string()),
+                    (
+                        "http3",
+                        if status.listeners.iter().any(|listener| listener.http3_enabled) {
+                            "enabled"
+                        } else {
+                            "disabled"
+                        }
+                        .to_string(),
+                    ),
                     ("tls_listeners", status.tls.listeners.len().to_string()),
                     ("tls_certificates", status.tls.certificates.len().to_string()),
                     ("tls_ocsp_entries", status.tls.ocsp.len().to_string()),
@@ -107,9 +138,14 @@ pub(super) fn print_admin_status(config_path: &Path) -> anyhow::Result<()> {
                         ("listener", listener.listener_name.clone()),
                         ("listener_id", listener.listener_id.clone()),
                         ("listen", listener.listen_addr.to_string()),
+                        ("transport_bindings", listener.binding_count.to_string()),
                         (
                             "tls",
                             if listener.tls_enabled { "enabled" } else { "disabled" }.to_string(),
+                        ),
+                        (
+                            "http3",
+                            if listener.http3_enabled { "enabled" } else { "disabled" }.to_string(),
                         ),
                         ("proxy_protocol", listener.proxy_protocol_enabled.to_string()),
                         (
@@ -127,6 +163,98 @@ pub(super) fn print_admin_status(config_path: &Path) -> anyhow::Result<()> {
                         (
                             "access_log_format_configured",
                             listener.access_log_format_configured.to_string(),
+                        ),
+                    ],
+                );
+                for binding in &listener.bindings {
+                    print_record(
+                        "status_listener_binding",
+                        [
+                            ("listener", listener.listener_id.clone()),
+                            ("binding", binding.binding_name.clone()),
+                            ("transport", binding.transport.clone()),
+                            ("listen", binding.listen_addr.to_string()),
+                            (
+                                "protocols",
+                                if binding.protocols.is_empty() {
+                                    "-".to_string()
+                                } else {
+                                    binding.protocols.join(",")
+                                },
+                            ),
+                            (
+                                "advertise_alt_svc",
+                                binding
+                                    .advertise_alt_svc
+                                    .map(|value| value.to_string())
+                                    .unwrap_or_else(|| "-".to_string()),
+                            ),
+                            (
+                                "alt_svc_max_age_secs",
+                                binding
+                                    .alt_svc_max_age_secs
+                                    .map(|value| value.to_string())
+                                    .unwrap_or_else(|| "-".to_string()),
+                            ),
+                        ],
+                    );
+                }
+            }
+            for listener in &status.tls.listeners {
+                print_record(
+                    "status_tls_listener",
+                    [
+                        ("listener", listener.listener_name.clone()),
+                        ("listener_id", listener.listener_id.clone()),
+                        ("listen", listener.listen_addr.to_string()),
+                        ("tls", listener.tls_enabled.to_string()),
+                        ("http3_enabled", listener.http3_enabled.to_string()),
+                        (
+                            "http3_listen",
+                            listener
+                                .http3_listen_addr
+                                .map(|listen_addr| listen_addr.to_string())
+                                .unwrap_or_else(|| "-".to_string()),
+                        ),
+                        (
+                            "default_certificate",
+                            listener.default_certificate.clone().unwrap_or_else(|| "-".to_string()),
+                        ),
+                        (
+                            "tcp_versions",
+                            listener
+                                .versions
+                                .as_ref()
+                                .map(|versions| render_optional_string_list(Some(versions)))
+                                .unwrap_or_else(|| "-".to_string()),
+                        ),
+                        (
+                            "tcp_alpn_protocols",
+                            render_optional_string_list(Some(&listener.alpn_protocols)),
+                        ),
+                        (
+                            "http3_versions",
+                            render_optional_string_list(Some(&listener.http3_versions)),
+                        ),
+                        (
+                            "http3_alpn_protocols",
+                            render_optional_string_list(Some(&listener.http3_alpn_protocols)),
+                        ),
+                        ("sni_names", render_optional_string_list(Some(&listener.sni_names))),
+                        (
+                            "client_auth_mode",
+                            listener.client_auth_mode.clone().unwrap_or_else(|| "-".to_string()),
+                        ),
+                        (
+                            "client_auth_verify_depth",
+                            listener
+                                .client_auth_verify_depth
+                                .map(|value| value.to_string())
+                                .unwrap_or_else(|| "-".to_string()),
+                        ),
+                        (
+                            "client_auth_crl_configured",
+                            listener.client_auth_crl_configured.to_string(),
                         ),
                     ],
                 );

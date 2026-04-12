@@ -1,11 +1,9 @@
 #[allow(unused_imports)]
 use std::convert::Infallible;
 #[allow(unused_imports)]
-use std::fs::{self, File};
+use std::fs;
 #[allow(unused_imports)]
 use std::future::Future;
-#[allow(unused_imports)]
-use std::io::BufReader;
 #[allow(unused_imports)]
 use std::net::SocketAddr;
 #[allow(unused_imports)]
@@ -49,6 +47,8 @@ use hyper_util::client::legacy::Client;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 #[allow(unused_imports)]
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+#[allow(unused_imports)]
+use rustls::pki_types::pem::PemObject;
 #[allow(unused_imports)]
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 #[allow(unused_imports)]
@@ -905,19 +905,14 @@ fn plain_grpc_service_method_routing_config(
 }
 
 fn load_certs(path: &Path) -> Vec<CertificateDer<'static>> {
-    let file = File::open(path).expect("certificate file should open");
-    let mut reader = BufReader::new(file);
-    rustls_pemfile::certs(&mut reader)
+    CertificateDer::pem_file_iter(path)
+        .expect("certificate file should open")
         .collect::<Result<Vec<_>, _>>()
         .expect("certificate PEM should parse")
 }
 
 fn load_private_key(path: &Path) -> PrivateKeyDer<'static> {
-    let file = File::open(path).expect("private key file should open");
-    let mut reader = BufReader::new(file);
-    rustls_pemfile::private_key(&mut reader)
-        .expect("private key PEM should parse")
-        .expect("private key PEM should include at least one key")
+    PrivateKeyDer::from_pem_file(path).expect("private key PEM should parse")
 }
 
 fn temp_dir(prefix: &str) -> PathBuf {

@@ -1,8 +1,7 @@
 use std::convert::Infallible;
 use std::env;
 use std::fmt;
-use std::fs::{self, File};
-use std::io::BufReader;
+use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,6 +16,7 @@ use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use rustls::crypto::aws_lc_rs;
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
@@ -169,19 +169,14 @@ fn load_certified_key(cert_path: &Path, key_path: &Path) -> CertifiedKey {
 }
 
 fn load_certs(path: &Path) -> Vec<CertificateDer<'static>> {
-    let file = File::open(path).expect("certificate file should open");
-    let mut reader = BufReader::new(file);
-    rustls_pemfile::certs(&mut reader)
+    CertificateDer::pem_file_iter(path)
+        .expect("certificate file should open")
         .collect::<Result<Vec<_>, _>>()
         .expect("certificate PEM should parse")
 }
 
 fn load_private_key(path: &Path) -> PrivateKeyDer<'static> {
-    let file = File::open(path).expect("private key file should open");
-    let mut reader = BufReader::new(file);
-    rustls_pemfile::private_key(&mut reader)
-        .expect("private key PEM should parse")
-        .expect("private key PEM should include at least one key")
+    PrivateKeyDer::from_pem_file(path).expect("private key PEM should parse")
 }
 
 fn temp_dir(prefix: &str) -> PathBuf {
