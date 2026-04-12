@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use bytes::{Buf, Bytes};
 use h3::quic::{RecvStream, SendStream};
@@ -308,6 +309,9 @@ async fn serve_http3_connection(
                     log_request_task_result(result);
                 }
                 if draining && request_tasks.is_empty() {
+                    // Give Quinn a brief window to flush the final response frames before
+                    // dropping the drained connection.
+                    tokio::time::sleep(Duration::from_millis(50)).await;
                     break;
                 }
             }
