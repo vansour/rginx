@@ -29,6 +29,20 @@ fn temp_base_dir(prefix: &str) -> TempDir {
     tempfile::Builder::new().prefix(prefix).tempdir().expect("temp base dir should be created")
 }
 
+fn test_location(matcher: MatcherConfig, handler: HandlerConfig) -> LocationConfig {
+    LocationConfig {
+        matcher,
+        handler,
+        grpc_service: None,
+        grpc_method: None,
+        allow_cidrs: Vec::new(),
+        deny_cidrs: Vec::new(),
+        requests_per_sec: None,
+        burst: None,
+        allow_early_data: None,
+    }
+}
+
 #[test]
 fn compile_accepts_https_upstreams() {
     let config = Config {
@@ -88,24 +102,15 @@ fn compile_accepts_https_upstreams() {
             health_check_timeout_secs: None,
             healthy_successes_required: None,
         }],
-        locations: vec![LocationConfig {
-            matcher: MatcherConfig::Prefix("/api".to_string()),
-            handler: HandlerConfig::Proxy {
+        locations: vec![test_location(
+            MatcherConfig::Prefix("/api".to_string()),
+            HandlerConfig::Proxy {
                 upstream: "secure-backend".to_string(),
                 preserve_host: None,
                 strip_prefix: None,
                 proxy_set_headers: std::collections::HashMap::new(),
             },
-            grpc_service: None,
-
-            grpc_method: None,
-
-            allow_cidrs: Vec::new(),
-            deny_cidrs: Vec::new(),
-            requests_per_sec: None,
-            burst: None,
-            allow_early_data: None,
-        }],
+        )],
         servers: Vec::new(),
     };
 
@@ -205,24 +210,15 @@ fn compile_defaults_grpc_health_check_path_when_service_is_set() {
             health_check_timeout_secs: None,
             healthy_successes_required: None,
         }],
-        locations: vec![LocationConfig {
-            matcher: MatcherConfig::Prefix("/".to_string()),
-            handler: HandlerConfig::Proxy {
+        locations: vec![test_location(
+            MatcherConfig::Prefix("/".to_string()),
+            HandlerConfig::Proxy {
                 upstream: "grpc-backend".to_string(),
                 preserve_host: None,
                 strip_prefix: None,
                 proxy_set_headers: std::collections::HashMap::new(),
             },
-            grpc_service: None,
-
-            grpc_method: None,
-
-            allow_cidrs: Vec::new(),
-            deny_cidrs: Vec::new(),
-            requests_per_sec: None,
-            burst: None,
-            allow_early_data: None,
-        }],
+        )],
         servers: Vec::new(),
     };
 
@@ -1575,42 +1571,24 @@ fn compile_generates_distinct_route_and_vhost_ids() {
             http3: None,
         },
         upstreams: Vec::new(),
-        locations: vec![LocationConfig {
-            matcher: MatcherConfig::Exact("/".to_string()),
-            handler: HandlerConfig::Return {
+        locations: vec![test_location(
+            MatcherConfig::Exact("/".to_string()),
+            HandlerConfig::Return {
                 status: 200,
                 location: String::new(),
                 body: Some("default site\n".to_string()),
             },
-            grpc_service: None,
-
-            grpc_method: None,
-
-            allow_cidrs: Vec::new(),
-            deny_cidrs: Vec::new(),
-            requests_per_sec: None,
-            burst: None,
-            allow_early_data: None,
-        }],
+        )],
         servers: vec![VirtualHostConfig {
             server_names: vec!["api.example.com".to_string()],
-            locations: vec![LocationConfig {
-                matcher: MatcherConfig::Exact("/".to_string()),
-                handler: HandlerConfig::Return {
+            locations: vec![test_location(
+                MatcherConfig::Exact("/".to_string()),
+                HandlerConfig::Return {
                     status: 200,
                     location: String::new(),
                     body: Some("api site\n".to_string()),
                 },
-                grpc_service: None,
-
-                grpc_method: None,
-
-                allow_cidrs: Vec::new(),
-                deny_cidrs: Vec::new(),
-                requests_per_sec: None,
-                burst: None,
-                allow_early_data: None,
-            }],
+            )],
             tls: None,
         }],
     };
@@ -2011,35 +1989,25 @@ fn compile_prioritizes_grpc_constrained_routes_with_same_path_matcher() {
         },
         upstreams: Vec::new(),
         locations: vec![
-            LocationConfig {
-                matcher: MatcherConfig::Prefix("/".to_string()),
-                handler: HandlerConfig::Return {
+            test_location(
+                MatcherConfig::Prefix("/".to_string()),
+                HandlerConfig::Return {
                     status: 200,
                     location: String::new(),
                     body: Some("fallback\n".to_string()),
                 },
-                grpc_service: None,
-                grpc_method: None,
-                allow_cidrs: Vec::new(),
-                deny_cidrs: Vec::new(),
-                requests_per_sec: None,
-                burst: None,
-                allow_early_data: None,
-            },
+            ),
             LocationConfig {
-                matcher: MatcherConfig::Prefix("/".to_string()),
-                handler: HandlerConfig::Return {
-                    status: 200,
-                    location: String::new(),
-                    body: Some("grpc\n".to_string()),
-                },
                 grpc_service: Some("grpc.health.v1.Health".to_string()),
                 grpc_method: Some("Check".to_string()),
-                allow_cidrs: Vec::new(),
-                deny_cidrs: Vec::new(),
-                requests_per_sec: None,
-                burst: None,
-                allow_early_data: None,
+                ..test_location(
+                    MatcherConfig::Prefix("/".to_string()),
+                    HandlerConfig::Return {
+                        status: 200,
+                        location: String::new(),
+                        body: Some("grpc\n".to_string()),
+                    },
+                )
             },
         ],
         servers: Vec::new(),
