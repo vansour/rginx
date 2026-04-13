@@ -127,7 +127,9 @@ orig_mtu=""
 
 clear_faults() {
     if [[ "${need_privileged}" -eq 1 ]]; then
-        tc qdisc del dev "${NETEM_DEV}" root >/dev/null 2>&1 || true
+        if [[ "${NETEM_PROFILE}" != "none" ]]; then
+            tc qdisc del dev "${NETEM_DEV}" root >/dev/null 2>&1 || true
+        fi
         if [[ -n "${orig_mtu}" ]]; then
             ip link set dev "${NETEM_DEV}" mtu "${orig_mtu}" >/dev/null 2>&1 || true
         fi
