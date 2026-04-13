@@ -83,25 +83,12 @@ pub(super) async fn build_initial_listener_groups(
         let desired_udp_socket_count = config.runtime.accept_workers.max(1);
         let std_udp_sockets = match &listener.http3 {
             Some(http3) => match inherited.udp.remove(&http3.listen_addr) {
-                Some(sockets) => {
-                    let mut sockets = sockets.into_iter().map(Arc::new).collect::<Vec<_>>();
-                    if sockets.len() == 1 && desired_udp_socket_count > 1 {
-                        return Err(Error::Server(format!(
-                            "listener `{}` cannot increase HTTP/3 accept_workers from 1 to {} during restart; perform a cold restart or keep the previous worker count",
-                            listener.name, desired_udp_socket_count,
-                        )));
-                    }
-                    if sockets.len() > desired_udp_socket_count {
-                        sockets.truncate(desired_udp_socket_count);
-                    } else if sockets.len() < desired_udp_socket_count {
-                        sockets.extend(bind_std_udp_sockets_with_reuse_port(
-                            http3.listen_addr,
-                            desired_udp_socket_count - sockets.len(),
-                            desired_udp_socket_count > 1,
-                        )?);
-                    }
-                    sockets
-                }
+                Some(sockets) => normalize_inherited_udp_sockets(
+                    &listener.name,
+                    http3.listen_addr,
+                    sockets,
+                    desired_udp_socket_count,
+                )?,
                 None => bind_std_udp_sockets(http3.listen_addr, config.runtime.accept_workers)?,
             },
             None => Vec::new(),
@@ -455,6 +442,32 @@ fn bind_std_udp_sockets(
     bind_std_udp_sockets_with_reuse_port(listen_addr, count, count > 1)
 }
 
+fn normalize_inherited_udp_sockets(
+    listener_name: &str,
+    listen_addr: std::net::SocketAddr,
+    sockets: Vec<StdUdpSocket>,
+    desired_socket_count: usize,
+) -> Result<Vec<Arc<StdUdpSocket>>> {
+    let desired_socket_count = desired_socket_count.max(1);
+    let mut sockets = sockets.into_iter().map(Arc::new).collect::<Vec<_>>();
+    if sockets.len() == 1 && desired_socket_count > 1 {
+        return Err(Error::Server(format!(
+            "listener `{listener_name}` cannot increase HTTP/3 accept_workers from 1 to {} during restart; perform a cold restart or keep the previous worker count",
+            desired_socket_count,
+        )));
+    }
+    if sockets.len() > desired_socket_count {
+        sockets.truncate(desired_socket_count);
+    } else if sockets.len() < desired_socket_count {
+        sockets.extend(bind_std_udp_sockets_with_reuse_port(
+            listen_addr,
+            desired_socket_count - sockets.len(),
+            desired_socket_count > 1,
+        )?);
+    }
+    Ok(sockets)
+}
+
 fn bind_std_udp_sockets_with_reuse_port(
     listen_addr: std::net::SocketAddr,
     count: usize,
@@ -625,5 +638,62 @@ mod tests {
         for socket in sockets {
             assert_eq!(socket.local_addr().expect("udp socket addr should exist"), listen_addr);
         }
+    }
+
+    #[test]
+    fn normalize_inherited_udp_sockets_truncates_to_worker_count() {
+        let seed =
+            bind_std_udp_socket("127.0.0.1:0".parse().expect("socket addr should parse"), false)
+                .expect("seed udp socket should bind");
+        let listen_addr = seed.local_addr().expect("seed udp addr should exist");
+        drop(seed);
+
+        let inherited = (0..3)
+            .map(|_| {
+                bind_std_udp_socket(listen_addr, true).expect("inherited udp socket should bind")
+            })
+            .collect::<Vec<_>>();
+
+        let sockets = normalize_inherited_udp_sockets("default", listen_addr, inherited, 2)
+            .expect("normalizing inherited sockets should succeed");
+        assert_eq!(sockets.len(), 2);
+        for socket in sockets {
+            assert_eq!(socket.local_addr().expect("udp socket addr should exist"), listen_addr);
+        }
+    }
+
+    #[test]
+    fn normalize_inherited_udp_sockets_fills_missing_workers() {
+        let seed =
+            bind_std_udp_socket("127.0.0.1:0".parse().expect("socket addr should parse"), false)
+                .expect("seed udp socket should bind");
+        let listen_addr = seed.local_addr().expect("seed udp addr should exist");
+        drop(seed);
+
+        let inherited = (0..2)
+            .map(|_| {
+                bind_std_udp_socket(listen_addr, true).expect("inherited udp socket should bind")
+            })
+            .collect::<Vec<_>>();
+
+        let sockets = normalize_inherited_udp_sockets("default", listen_addr, inherited, 3)
+            .expect("normalizing inherited sockets should succeed");
+        assert_eq!(sockets.len(), 3);
+        for socket in sockets {
+            assert_eq!(socket.local_addr().expect("udp socket addr should exist"), listen_addr);
+        }
+    }
+
+    #[test]
+    fn normalize_inherited_udp_sockets_rejects_one_to_many_restart() {
+        let inherited = vec![
+            bind_std_udp_socket("127.0.0.1:0".parse().expect("socket addr should parse"), false)
+                .expect("inherited udp socket should bind"),
+        ];
+        let listen_addr = inherited[0].local_addr().expect("udp socket addr should exist");
+
+        let error = normalize_inherited_udp_sockets("default", listen_addr, inherited, 3)
+            .expect_err("one-to-many restart should fail");
+        assert!(error.to_string().contains("cannot increase HTTP/3 accept_workers from 1 to 3"));
     }
 }
