@@ -90,7 +90,7 @@ while [[ $# -gt 0 ]]; do
             NETEM_PROFILE="$2"
             case "${NETEM_PROFILE}" in
                 none|loss|reorder|jitter) ;;
-                *) die "--netem-profile must be one of: none, loss, reorder, jitter (got `${NETEM_PROFILE}`)" ;;
+                *) die "--netem-profile must be one of: none, loss, reorder, jitter (got '${NETEM_PROFILE}')" ;;
             esac
             shift 2
             ;;

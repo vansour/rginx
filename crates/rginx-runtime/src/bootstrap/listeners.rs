@@ -85,6 +85,12 @@ pub(super) async fn build_initial_listener_groups(
             Some(http3) => match inherited.udp.remove(&http3.listen_addr) {
                 Some(sockets) => {
                     let mut sockets = sockets.into_iter().map(Arc::new).collect::<Vec<_>>();
+                    if sockets.len() == 1 && desired_udp_socket_count > 1 {
+                        return Err(Error::Server(format!(
+                            "listener `{}` cannot increase HTTP/3 accept_workers from 1 to {} during restart; perform a cold restart or keep the previous worker count",
+                            listener.name, desired_udp_socket_count,
+                        )));
+                    }
                     if sockets.len() > desired_udp_socket_count {
                         sockets.truncate(desired_udp_socket_count);
                     } else if sockets.len() < desired_udp_socket_count {

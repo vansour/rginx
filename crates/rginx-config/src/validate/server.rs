@@ -438,6 +438,15 @@ fn validate_http3(
         }
     }
 
+    const HTTP3_ACTIVE_CONNECTION_ID_LIMIT_MIGRATION: u32 = 5;
+    if matches!(http3.active_connection_id_limit, Some(HTTP3_ACTIVE_CONNECTION_ID_LIMIT_MIGRATION))
+        && http3.host_key_path.is_none()
+    {
+        return Err(Error::Config(format!(
+            "{owner_label} http3 active_connection_id_limit=5 requires host_key_path to be configured"
+        )));
+    }
+
     Ok(())
 }
 

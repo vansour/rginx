@@ -2347,7 +2347,7 @@ fn compile_http3_applies_transport_settings_and_resolves_host_key_path() {
                 retry: Some(true),
                 host_key_path: Some("quic/host.key".to_string()),
                 gso: Some(true),
-                early_data: None,
+                early_data: Some(true),
             }),
         },
         upstreams: Vec::new(),
@@ -2381,4 +2381,5 @@ fn compile_http3_applies_transport_settings_and_resolves_host_key_path() {
     assert!(http3.retry);
     assert_eq!(http3.host_key_path, Some(base_dir.path().join("quic/host.key")));
     assert!(http3.gso);
+    assert!(http3.early_data_enabled);
 }
