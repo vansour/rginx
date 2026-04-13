@@ -11,7 +11,7 @@ pub struct ActiveConnectionGuard {
 }
 
 pub(crate) struct ActiveHttp3ConnectionGuard {
-    pub(super) counters: Option<Arc<ListenerTrafficCounters>>,
+    pub(super) counters: Arc<ListenerTrafficCounters>,
     pub(super) listener_id: String,
     pub(super) snapshot_version: Arc<AtomicU64>,
     pub(super) snapshot_notify: Arc<Notify>,
@@ -20,7 +20,7 @@ pub(crate) struct ActiveHttp3ConnectionGuard {
 }
 
 pub(crate) struct ActiveHttp3RequestStreamGuard {
-    pub(super) counters: Option<Arc<ListenerTrafficCounters>>,
+    pub(super) counters: Arc<ListenerTrafficCounters>,
     pub(super) listener_id: String,
     pub(super) snapshot_version: Arc<AtomicU64>,
     pub(super) snapshot_notify: Arc<Notify>,
@@ -46,35 +46,31 @@ impl Drop for ActiveConnectionGuard {
 
 impl Drop for ActiveHttp3ConnectionGuard {
     fn drop(&mut self) {
-        if let Some(counters) = &self.counters {
-            counters.active_http3_connections.fetch_sub(1, Ordering::AcqRel);
-            let version = self.snapshot_version.fetch_add(1, Ordering::Relaxed) + 1;
-            self.snapshot_components.status.store(version, Ordering::Relaxed);
-            self.snapshot_components.traffic.store(version, Ordering::Relaxed);
-            self.traffic_component_versions
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .listeners
-                .insert(self.listener_id.clone(), version);
-            self.snapshot_notify.notify_waiters();
-        }
+        self.counters.active_http3_connections.fetch_sub(1, Ordering::AcqRel);
+        let version = self.snapshot_version.fetch_add(1, Ordering::Relaxed) + 1;
+        self.snapshot_components.status.store(version, Ordering::Relaxed);
+        self.snapshot_components.traffic.store(version, Ordering::Relaxed);
+        self.traffic_component_versions
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .listeners
+            .insert(self.listener_id.clone(), version);
+        self.snapshot_notify.notify_waiters();
     }
 }
 
 impl Drop for ActiveHttp3RequestStreamGuard {
     fn drop(&mut self) {
-        if let Some(counters) = &self.counters {
-            counters.active_http3_request_streams.fetch_sub(1, Ordering::AcqRel);
-            let version = self.snapshot_version.fetch_add(1, Ordering::Relaxed) + 1;
-            self.snapshot_components.status.store(version, Ordering::Relaxed);
-            self.snapshot_components.traffic.store(version, Ordering::Relaxed);
-            self.traffic_component_versions
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .listeners
-                .insert(self.listener_id.clone(), version);
-            self.snapshot_notify.notify_waiters();
-        }
+        self.counters.active_http3_request_streams.fetch_sub(1, Ordering::AcqRel);
+        let version = self.snapshot_version.fetch_add(1, Ordering::Relaxed) + 1;
+        self.snapshot_components.status.store(version, Ordering::Relaxed);
+        self.snapshot_components.traffic.store(version, Ordering::Relaxed);
+        self.traffic_component_versions
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .listeners
+            .insert(self.listener_id.clone(), version);
+        self.snapshot_notify.notify_waiters();
     }
 }
 
@@ -142,43 +138,50 @@ impl SharedState {
         }
     }
 
-    pub(crate) fn retain_http3_connection(&self, listener_id: &str) -> ActiveHttp3ConnectionGuard {
-        let counters = self.listener_traffic_counters(listener_id);
-        if let Some(counters) = &counters {
-            counters.active_http3_connections.fetch_add(1, Ordering::AcqRel);
-            let version = self.mark_snapshot_changed_components(true, false, true, false, false);
-            self.mark_traffic_targets_changed(version, Some(listener_id), None, None);
-            self.notify_snapshot_waiters();
-        }
-        ActiveHttp3ConnectionGuard {
+    pub(crate) fn retain_http3_connection(
+        &self,
+        listener_id: &str,
+    ) -> Result<ActiveHttp3ConnectionGuard> {
+        let counters = self.listener_traffic_counters(listener_id).ok_or_else(|| {
+            rginx_core::Error::Server(format!(
+                "listener `{listener_id}` is missing traffic counters for http3 connections"
+            ))
+        })?;
+        counters.active_http3_connections.fetch_add(1, Ordering::AcqRel);
+        let version = self.mark_snapshot_changed_components(true, false, true, false, false);
+        self.mark_traffic_targets_changed(version, Some(listener_id), None, None);
+        self.notify_snapshot_waiters();
+        Ok(ActiveHttp3ConnectionGuard {
             counters,
             listener_id: listener_id.to_string(),
             snapshot_version: self.snapshot_version.clone(),
             snapshot_notify: self.snapshot_notify.clone(),
             snapshot_components: self.snapshot_components.clone(),
             traffic_component_versions: self.traffic_component_versions.clone(),
-        }
+        })
     }
 
     pub(crate) fn retain_http3_request_stream(
         &self,
         listener_id: &str,
-    ) -> ActiveHttp3RequestStreamGuard {
-        let counters = self.listener_traffic_counters(listener_id);
-        if let Some(counters) = &counters {
-            counters.active_http3_request_streams.fetch_add(1, Ordering::AcqRel);
-            let version = self.mark_snapshot_changed_components(true, false, true, false, false);
-            self.mark_traffic_targets_changed(version, Some(listener_id), None, None);
-            self.notify_snapshot_waiters();
-        }
-        ActiveHttp3RequestStreamGuard {
+    ) -> Result<ActiveHttp3RequestStreamGuard> {
+        let counters = self.listener_traffic_counters(listener_id).ok_or_else(|| {
+            rginx_core::Error::Server(format!(
+                "listener `{listener_id}` is missing traffic counters for http3 request streams"
+            ))
+        })?;
+        counters.active_http3_request_streams.fetch_add(1, Ordering::AcqRel);
+        let version = self.mark_snapshot_changed_components(true, false, true, false, false);
+        self.mark_traffic_targets_changed(version, Some(listener_id), None, None);
+        self.notify_snapshot_waiters();
+        Ok(ActiveHttp3RequestStreamGuard {
             counters,
             listener_id: listener_id.to_string(),
             snapshot_version: self.snapshot_version.clone(),
             snapshot_notify: self.snapshot_notify.clone(),
             snapshot_components: self.snapshot_components.clone(),
             traffic_component_versions: self.traffic_component_versions.clone(),
-        }
+        })
     }
 
     pub(crate) fn record_connection_accepted(&self, listener_id: &str) {

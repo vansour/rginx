@@ -1,5 +1,5 @@
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
@@ -282,6 +282,7 @@ pub fn bind_http3_endpoint_with_socket(
         listener.tls_enabled(),
         default_vhost,
         vhosts,
+        listener.server.max_request_body_bytes,
         listener.http3.as_ref().is_some_and(|http3| http3.early_data_enabled),
     )?
     .ok_or_else(|| {
@@ -455,25 +456,26 @@ fn create_host_key_material(path: &Path) -> Result<Vec<u8>> {
         .fill(&mut bytes)
         .map_err(|_| Error::Server("failed to generate http3 host key material".to_string()))?;
 
-    let temp_path = temp_host_key_path(path);
-    std::fs::write(&temp_path, &bytes)?;
+    use std::io::Write as _;
+
+    let mut file = match std::fs::OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return validate_host_key_material(path, std::fs::read(path).map_err(Error::Io)?);
+        }
+        Err(error) => return Err(Error::Io(error)),
+    };
+    file.write_all(&bytes)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
 
-        std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
-    std::fs::rename(&temp_path, path)?;
+    file.flush().map_err(Error::Io)?;
+    file.sync_all().map_err(Error::Io)?;
 
     Ok(bytes)
-}
-
-fn temp_host_key_path(path: &Path) -> PathBuf {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    path.with_extension(format!("http3-host-key-{unique}.tmp"))
 }
 
 fn derive_labeled_key_material(host_key_material: &[u8], label: &[u8]) -> [u8; 32] {
@@ -500,7 +502,7 @@ async fn serve_http3_connection(
         .current_listener(&listener_id)
         .await
         .expect("listener id should remain available while http3 connection is running");
-    let _http3_connection_guard = state.retain_http3_connection(&listener_id);
+    let _http3_connection_guard = state.retain_http3_connection(&listener_id)?;
     let mtls_configured =
         current_listener.server.tls.as_ref().and_then(|tls| tls.client_auth.as_ref()).is_some();
     let early_data_enabled =
@@ -619,7 +621,8 @@ async fn serve_http3_connection(
                         let connection_addrs = connection_addrs.clone();
                         let handshake_complete = handshake_complete.clone();
                         request_tasks.spawn(async move {
-                            let _request_stream_guard = state.retain_http3_request_stream(&listener_id);
+                            let _request_stream_guard =
+                                state.retain_http3_request_stream(&listener_id)?;
                             let mut connection_addrs = connection_addrs.as_ref().clone();
                             connection_addrs.early_data = !handshake_complete.load(Ordering::Acquire);
                             serve_http3_request(
