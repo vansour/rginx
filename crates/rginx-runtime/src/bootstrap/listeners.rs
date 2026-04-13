@@ -67,6 +67,7 @@ impl ListenerWorkerGroup {
     }
 }
 
+/// Builds the initial active listener groups from config and inherited sockets.
 pub(super) async fn build_initial_listener_groups(
     config: &ConfigSnapshot,
     mut inherited: InheritedListeners,
@@ -112,6 +113,7 @@ pub(super) async fn build_initial_listener_groups(
     Ok(groups)
 }
 
+/// Prepares listener bindings that are new in the next config generation.
 pub(super) fn prepare_added_listener_bindings(
     next_config: &ConfigSnapshot,
     next_listeners: &[Listener],
@@ -185,6 +187,7 @@ pub(super) fn prepare_added_listener_bindings(
     Ok(prepared)
 }
 
+/// Reconciles the active listener worker groups against the next config generation.
 pub(super) async fn reconcile_listener_worker_groups(
     http_state: &rginx_http::SharedState,
     next_config: &ConfigSnapshot,
@@ -238,6 +241,7 @@ pub(super) async fn reconcile_listener_worker_groups(
     prune_draining_listener_groups(http_state, draining_listener_groups).await;
 }
 
+/// Removes drained listener groups once all their worker tasks have completed.
 pub(super) async fn prune_draining_listener_groups(
     http_state: &rginx_http::SharedState,
     draining_listener_groups: &mut Vec<ListenerWorkerGroup>,
@@ -278,6 +282,7 @@ pub(super) async fn join_listener_worker_groups(
     Ok(())
 }
 
+/// Broadcasts shutdown to every listener group in the iterator.
 pub(super) fn initiate_shutdown_for_groups<'a>(
     groups: impl IntoIterator<Item = &'a ListenerWorkerGroup>,
 ) {
@@ -286,6 +291,7 @@ pub(super) fn initiate_shutdown_for_groups<'a>(
     }
 }
 
+/// Aborts every listener worker task in the iterator.
 pub(super) fn abort_listener_worker_groups<'a>(
     groups: impl IntoIterator<Item = &'a ListenerWorkerGroup>,
 ) {
@@ -312,6 +318,7 @@ pub(super) async fn join_aborted_listener_worker_groups(
     draining_listener_groups.clear();
 }
 
+/// Prepares sockets, Tokio listeners, and HTTP/3 endpoints for one listener.
 fn prepare_listener_worker_group(
     listener: Listener,
     std_listener: Arc<StdTcpListener>,
@@ -343,6 +350,7 @@ fn prepare_listener_worker_group(
     })
 }
 
+/// Activates a prepared listener group by spawning its worker tasks.
 fn activate_prepared_listener_worker_group(
     prepared: PreparedListenerWorkerGroup,
     http_state: rginx_http::SharedState,
@@ -404,6 +412,7 @@ fn activate_prepared_listener_worker_group(
     }
 }
 
+/// Waits for all worker tasks in a listener group to finish.
 async fn join_listener_worker_group(group: &mut ListenerWorkerGroup) -> Result<()> {
     for (worker_index, task) in group.tasks.iter_mut().enumerate() {
         task.await.map_err(|error| {
@@ -417,6 +426,7 @@ async fn join_listener_worker_group(group: &mut ListenerWorkerGroup) -> Result<(
     Ok(())
 }
 
+/// Waits for all worker tasks in an already-aborted listener group to settle.
 async fn join_aborted_listener_worker_group(group: &mut ListenerWorkerGroup) {
     for task in group.tasks.iter_mut() {
         if let Err(error) = task.await
@@ -428,12 +438,14 @@ async fn join_aborted_listener_worker_group(group: &mut ListenerWorkerGroup) {
     group.tasks.clear();
 }
 
+/// Binds a nonblocking TCP listener for the given socket address.
 fn bind_std_listener(listen_addr: std::net::SocketAddr) -> Result<StdTcpListener> {
     let socket = StdTcpListener::bind(listen_addr)?;
     socket.set_nonblocking(true)?;
     Ok(socket)
 }
 
+/// Binds one UDP socket per accept worker for an HTTP/3 listener.
 fn bind_std_udp_sockets(
     listen_addr: std::net::SocketAddr,
     count: usize,
@@ -442,6 +454,7 @@ fn bind_std_udp_sockets(
     bind_std_udp_sockets_with_reuse_port(listen_addr, count, count > 1)
 }
 
+/// Normalizes inherited UDP sockets to match the current accept worker count.
 fn normalize_inherited_udp_sockets(
     listener_name: &str,
     listen_addr: std::net::SocketAddr,
@@ -468,6 +481,7 @@ fn normalize_inherited_udp_sockets(
     Ok(sockets)
 }
 
+/// Binds a batch of UDP sockets with a fixed `SO_REUSEPORT` policy.
 fn bind_std_udp_sockets_with_reuse_port(
     listen_addr: std::net::SocketAddr,
     count: usize,
@@ -477,6 +491,7 @@ fn bind_std_udp_sockets_with_reuse_port(
     (0..count).map(|_| bind_std_udp_socket(listen_addr, reuse_port).map(Arc::new)).collect()
 }
 
+/// Binds a single nonblocking UDP socket, optionally enabling `SO_REUSEPORT`.
 fn bind_std_udp_socket(
     listen_addr: std::net::SocketAddr,
     reuse_port: bool,
