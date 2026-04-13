@@ -333,8 +333,11 @@ async fn http3_runtime_telemetry_tracks_status_and_traffic_snapshots() {
     let shared = SharedState::from_config(config).expect("shared state should build");
 
     {
-        let _connection = shared.retain_http3_connection("default");
-        let _stream = shared.retain_http3_request_stream("default");
+        let _connection =
+            shared.retain_http3_connection("default").expect("http3 connection guard should exist");
+        let _stream = shared
+            .retain_http3_request_stream("default")
+            .expect("http3 request stream guard should exist");
         shared.record_http3_retry_issued("default");
         shared.record_http3_retry_failed("default");
         shared.record_http3_request_accept_error("default");

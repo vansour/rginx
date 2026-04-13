@@ -17,17 +17,18 @@ use crate::model::{
     TlsVersionConfig, VirtualHostTlsConfig,
 };
 
-const DEFAULT_HTTP3_MAX_CONCURRENT_STREAMS: usize = 128;
-const DEFAULT_HTTP3_STREAM_BUFFER_SIZE_BYTES: usize = 64 * 1024;
-const DEFAULT_HTTP3_ACTIVE_CONNECTION_ID_LIMIT: u32 = 2;
-const DEFAULT_HTTP3_RETRY: bool = false;
-const DEFAULT_HTTP3_GSO: bool = false;
+pub(super) const DEFAULT_HTTP3_MAX_CONCURRENT_STREAMS: usize = 128;
+pub(super) const DEFAULT_HTTP3_STREAM_BUFFER_SIZE_BYTES: usize = 64 * 1024;
+pub(super) const DEFAULT_HTTP3_ACTIVE_CONNECTION_ID_LIMIT: u32 = 2;
+pub(super) const DEFAULT_HTTP3_RETRY: bool = false;
+pub(super) const DEFAULT_HTTP3_GSO: bool = false;
 
 pub(super) struct CompiledServer {
     pub listener: Listener,
     pub server_names: Vec<String>,
 }
 
+/// Compiles the legacy top-level `server` block into the default listener model.
 pub(super) fn compile_legacy_server(
     server: ServerConfig,
     base_dir: &Path,
@@ -89,6 +90,7 @@ pub(super) fn compile_legacy_server(
     })
 }
 
+/// Compiles explicit listener blocks into runtime listener definitions.
 pub(super) fn compile_listeners(
     listeners: Vec<ListenerConfig>,
     base_dir: &Path,
@@ -150,10 +152,12 @@ pub(super) fn compile_listeners(
         .collect()
 }
 
+/// Builds a stable runtime listener id from a user-facing listener name.
 fn explicit_listener_id(name: &str) -> String {
     format!("listener:{}", name.trim().to_ascii_lowercase())
 }
 
+/// Compiles downstream TLS configuration into the runtime TLS policy structure.
 pub(super) fn compile_server_tls(
     tls: Option<ServerTlsConfig>,
     base_dir: &Path,
@@ -243,6 +247,7 @@ pub(super) fn compile_server_tls(
     }))
 }
 
+/// Compiles per-vhost TLS overrides into the runtime vhost TLS structure.
 pub(super) fn compile_virtual_host_tls(
     tls: Option<VirtualHostTlsConfig>,
     base_dir: &Path,
@@ -297,6 +302,7 @@ struct ServerFieldConfig {
     tls: Option<ServerTlsConfig>,
 }
 
+/// Compiles the shared server fields used by both legacy and explicit listeners.
 fn compile_server_fields(
     config: ServerFieldConfig,
     base_dir: &Path,
@@ -336,10 +342,12 @@ fn compile_server_fields(
     })
 }
 
+/// Normalizes the optional default certificate server name.
 fn compile_default_certificate(default_certificate: Option<String>) -> Option<String> {
     default_certificate.map(|name| name.trim().to_lowercase())
 }
 
+/// Converts the configured maximum header count into a platform-sized value.
 fn compile_max_headers(max_headers: Option<u64>) -> Result<Option<usize>> {
     max_headers
         .map(|limit| {
@@ -350,6 +358,7 @@ fn compile_max_headers(max_headers: Option<u64>) -> Result<Option<usize>> {
         .transpose()
 }
 
+/// Converts the configured request body limit into a platform-sized value.
 fn compile_max_request_body_bytes(max_request_body_bytes: Option<u64>) -> Result<Option<usize>> {
     max_request_body_bytes
         .map(|limit| {
@@ -362,6 +371,7 @@ fn compile_max_request_body_bytes(max_request_body_bytes: Option<u64>) -> Result
         .transpose()
 }
 
+/// Converts the configured maximum connection count into a platform-sized value.
 fn compile_max_connections(max_connections: Option<u64>) -> Result<Option<usize>> {
     max_connections
         .map(|limit| {
@@ -372,10 +382,12 @@ fn compile_max_connections(max_connections: Option<u64>) -> Result<Option<usize>
         .transpose()
 }
 
+/// Parses the optional access log format string into the runtime log template.
 fn compile_access_log_format(access_log_format: Option<String>) -> Result<Option<AccessLogFormat>> {
     access_log_format.map(AccessLogFormat::parse).transpose()
 }
 
+/// Compiles HTTP/3 listener settings and fills in runtime defaults.
 fn compile_http3(
     http3: Option<Http3Config>,
     tcp_listen_addr: std::net::SocketAddr,
@@ -423,11 +435,13 @@ fn compile_http3(
     }))
 }
 
+/// Converts an HTTP/3 numeric field into `usize`, preserving overflow errors.
 fn compile_http3_usize(raw: u64, field: &str) -> Result<usize> {
     usize::try_from(raw)
         .map_err(|_| Error::Config(format!("server http3 {field} `{raw}` exceeds platform limits")))
 }
 
+/// Maps configured TLS versions into runtime TLS version enums.
 fn compile_tls_versions(versions: Option<Vec<TlsVersionConfig>>) -> Option<Vec<TlsVersion>> {
     versions.map(|versions| {
         versions
@@ -440,6 +454,7 @@ fn compile_tls_versions(versions: Option<Vec<TlsVersionConfig>>) -> Option<Vec<T
     })
 }
 
+/// Maps configured TLS cipher suites into runtime cipher suite enums.
 fn compile_tls_cipher_suites(
     cipher_suites: Option<Vec<TlsCipherSuiteConfig>>,
 ) -> Option<Vec<TlsCipherSuite>> {
@@ -475,6 +490,7 @@ fn compile_tls_cipher_suites(
     })
 }
 
+/// Maps configured key exchange groups into runtime key exchange enums.
 fn compile_tls_key_exchange_groups(
     groups: Option<Vec<TlsKeyExchangeGroupConfig>>,
 ) -> Option<Vec<TlsKeyExchangeGroup>> {
@@ -496,12 +512,14 @@ fn compile_tls_key_exchange_groups(
     })
 }
 
+/// Drops empty ALPN entries and preserves the configured ordering.
 fn compile_alpn_protocols(alpn_protocols: Option<Vec<String>>) -> Option<Vec<String>> {
     alpn_protocols.map(|protocols| {
         protocols.into_iter().map(|protocol| protocol.trim().to_string()).collect()
     })
 }
 
+/// Converts the TLS session cache size into a platform-sized value.
 fn compile_session_cache_size(session_cache_size: Option<u64>) -> Result<Option<usize>> {
     session_cache_size
         .map(|size| {
@@ -514,6 +532,7 @@ fn compile_session_cache_size(session_cache_size: Option<u64>) -> Result<Option<
         .transpose()
 }
 
+/// Converts the TLS session ticket count into a platform-sized value.
 fn compile_session_ticket_count(session_ticket_count: Option<u64>) -> Result<Option<usize>> {
     session_ticket_count
         .map(|count| {
@@ -534,6 +553,7 @@ struct CompiledCertificateMaterial {
     ocsp: OcspConfig,
 }
 
+/// Resolves, validates, and compiles certificate material for a TLS identity.
 fn compile_certificate_material(
     base_dir: &Path,
     cert_path: String,
@@ -578,6 +598,7 @@ fn compile_certificate_material(
     })
 }
 
+/// Resolves and validates an additional TLS certificate bundle.
 fn compile_certificate_bundle(
     base_dir: &Path,
     bundle: ServerCertificateBundleConfig,
@@ -605,6 +626,7 @@ fn compile_certificate_bundle(
     Ok(ServerCertificateBundle { cert_path, key_path, ocsp_staple_path, ocsp })
 }
 
+/// Resolves the optional OCSP staple cache path relative to the config base dir.
 fn compile_ocsp_staple_path(
     base_dir: &Path,
     path: Option<String>,
@@ -625,6 +647,7 @@ fn compile_ocsp_staple_path(
     }
 }
 
+/// Converts raw OCSP settings into the runtime OCSP policy structure.
 fn compile_ocsp_config(ocsp: Option<RawOcspConfig>) -> OcspConfig {
     let Some(ocsp) = ocsp else {
         return OcspConfig::default();
@@ -651,6 +674,7 @@ fn compile_ocsp_config(ocsp: Option<RawOcspConfig>) -> OcspConfig {
     }
 }
 
+/// Parses and normalizes the trusted proxy CIDR list.
 fn compile_trusted_proxies(values: Vec<String>) -> Result<Vec<IpNet>> {
     values
         .into_iter()
@@ -668,6 +692,7 @@ fn compile_trusted_proxies(values: Vec<String>) -> Result<Vec<IpNet>> {
         .collect()
 }
 
+/// Normalizes a trusted proxy entry into canonical CIDR form.
 fn normalize_trusted_proxy(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {

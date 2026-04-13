@@ -18,6 +18,7 @@ anyhow.workspace = true
 clap.workspace = true
 libc = "0.2"
 rginx-config = { path = "../rginx-config" }
+rginx-core = { path = "../rginx-core" }
 rginx-http = { path = "../rginx-http" }
 rginx-observability = { path = "../rginx-observability" }
 rginx-runtime = { path = "../rginx-runtime" }

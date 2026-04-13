@@ -88,6 +88,10 @@ while [[ $# -gt 0 ]]; do
         --netem-profile)
             [[ $# -ge 2 ]] || die "--netem-profile requires a value"
             NETEM_PROFILE="$2"
+            case "${NETEM_PROFILE}" in
+                none|loss|reorder|jitter) ;;
+                *) die "--netem-profile must be one of: none, loss, reorder, jitter (got '${NETEM_PROFILE}')" ;;
+            esac
             shift 2
             ;;
         --netem-dev)

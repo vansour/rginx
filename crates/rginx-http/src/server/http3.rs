@@ -1,5 +1,5 @@
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
@@ -256,6 +256,7 @@ pub async fn serve_http3(
     Ok(())
 }
 
+/// Binds a Quinn HTTP/3 endpoint for a listener using a freshly created UDP socket.
 pub fn bind_http3_endpoint(
     listener: &rginx_core::Listener,
     default_vhost: &rginx_core::VirtualHost,
@@ -270,6 +271,7 @@ pub fn bind_http3_endpoint(
     bind_http3_endpoint_with_socket(listener, default_vhost, vhosts, socket).map(Some)
 }
 
+/// Binds a Quinn HTTP/3 endpoint for a listener using a supplied UDP socket.
 pub fn bind_http3_endpoint_with_socket(
     listener: &rginx_core::Listener,
     default_vhost: &rginx_core::VirtualHost,
@@ -310,6 +312,7 @@ pub fn bind_http3_endpoint_with_socket(
     quinn::Endpoint::new(endpoint_config, Some(quic_config), socket, runtime).map_err(Error::Io)
 }
 
+/// Applies HTTP/3 transport tuning to the Quinn server config.
 fn apply_http3_server_runtime(
     http3: Option<&rginx_core::ListenerHttp3>,
     host_key_material: Option<&[u8]>,
@@ -372,6 +375,7 @@ fn apply_http3_server_runtime(
     Ok(())
 }
 
+/// Builds the Quinn endpoint config for an HTTP/3 listener.
 fn build_http3_endpoint_config(
     http3: Option<&rginx_core::ListenerHttp3>,
     host_key_material: Option<&[u8]>,
@@ -394,12 +398,16 @@ fn build_http3_endpoint_config(
                 .cid_generator(|| Box::new(quinn_proto::RandomConnectionIdGenerator::new(0)));
         }
         HTTP3_ACTIVE_CONNECTION_ID_LIMIT_MIGRATION => {
-            if let Some(host_key_material) = host_key_material {
-                let key = derive_hashed_connection_id_key(host_key_material);
-                endpoint_config.cid_generator(move || {
-                    Box::new(quinn_proto::HashedConnectionIdGenerator::from_key(key))
-                });
-            }
+            let host_key_material = host_key_material.ok_or_else(|| {
+                Error::Config(
+                    "http3 active_connection_id_limit `5` requires host_key_path to be configured"
+                        .to_string(),
+                )
+            })?;
+            let key = derive_hashed_connection_id_key(host_key_material);
+            endpoint_config.cid_generator(move || {
+                Box::new(quinn_proto::HashedConnectionIdGenerator::from_key(key))
+            });
         }
         unsupported => {
             return Err(Error::Config(format!(
@@ -411,6 +419,7 @@ fn build_http3_endpoint_config(
     Ok(endpoint_config)
 }
 
+/// Loads or creates the optional HTTP/3 host key material for a listener.
 fn load_or_create_http3_host_key(
     http3: Option<&rginx_core::ListenerHttp3>,
 ) -> Result<Option<Vec<u8>>> {
@@ -421,6 +430,7 @@ fn load_or_create_http3_host_key(
     Ok(Some(load_or_create_host_key_material(path)?))
 }
 
+/// Loads persisted host key material or creates it on first use.
 fn load_or_create_host_key_material(path: &Path) -> Result<Vec<u8>> {
     match std::fs::read(path) {
         Ok(bytes) => validate_host_key_material(path, bytes),
@@ -431,6 +441,7 @@ fn load_or_create_host_key_material(path: &Path) -> Result<Vec<u8>> {
     }
 }
 
+/// Validates the size of persisted HTTP/3 host key material.
 fn validate_host_key_material(path: &Path, bytes: Vec<u8>) -> Result<Vec<u8>> {
     if bytes.len() != HTTP3_HOST_KEY_BYTES {
         return Err(Error::Config(format!(
@@ -443,6 +454,7 @@ fn validate_host_key_material(path: &Path, bytes: Vec<u8>) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Atomically creates and persists new HTTP/3 host key material.
 fn create_host_key_material(path: &Path) -> Result<Vec<u8>> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
@@ -455,27 +467,29 @@ fn create_host_key_material(path: &Path) -> Result<Vec<u8>> {
         .fill(&mut bytes)
         .map_err(|_| Error::Server("failed to generate http3 host key material".to_string()))?;
 
-    let temp_path = temp_host_key_path(path);
-    std::fs::write(&temp_path, &bytes)?;
+    use std::io::Write as _;
+
+    let mut file = match std::fs::OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return validate_host_key_material(path, std::fs::read(path).map_err(Error::Io)?);
+        }
+        Err(error) => return Err(Error::Io(error)),
+    };
+    file.write_all(&bytes)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
 
-        std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
-    std::fs::rename(&temp_path, path)?;
+    file.flush().map_err(Error::Io)?;
+    file.sync_all().map_err(Error::Io)?;
 
     Ok(bytes)
 }
 
-fn temp_host_key_path(path: &Path) -> PathBuf {
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    path.with_extension(format!("http3-host-key-{unique}.tmp"))
-}
-
+/// Derives labeled key material from the persisted HTTP/3 host key secret.
 fn derive_labeled_key_material(host_key_material: &[u8], label: &[u8]) -> [u8; 32] {
     let mut digest = Sha256::new();
     digest.update(label);
@@ -483,11 +497,13 @@ fn derive_labeled_key_material(host_key_material: &[u8], label: &[u8]) -> [u8; 3
     digest.finalize().into()
 }
 
+/// Derives the stable hashed-connection-id seed used for migration mode.
 fn derive_hashed_connection_id_key(host_key_material: &[u8]) -> u64 {
     let digest = derive_labeled_key_material(host_key_material, b"rginx-http3-cid-key");
     u64::from_be_bytes(digest[..8].try_into().expect("sha256 digest should contain 8 bytes"))
 }
 
+/// Serves one accepted HTTP/3 connection until it drains or closes.
 async fn serve_http3_connection(
     incoming: Incoming,
     listener_id: String,
@@ -500,7 +516,7 @@ async fn serve_http3_connection(
         .current_listener(&listener_id)
         .await
         .expect("listener id should remain available while http3 connection is running");
-    let _http3_connection_guard = state.retain_http3_connection(&listener_id);
+    let _http3_connection_guard = state.retain_http3_connection(&listener_id)?;
     let mtls_configured =
         current_listener.server.tls.as_ref().and_then(|tls| tls.client_auth.as_ref()).is_some();
     let early_data_enabled =
@@ -619,7 +635,8 @@ async fn serve_http3_connection(
                         let connection_addrs = connection_addrs.clone();
                         let handshake_complete = handshake_complete.clone();
                         request_tasks.spawn(async move {
-                            let _request_stream_guard = state.retain_http3_request_stream(&listener_id);
+                            let _request_stream_guard =
+                                state.retain_http3_request_stream(&listener_id)?;
                             let mut connection_addrs = connection_addrs.as_ref().clone();
                             connection_addrs.early_data = !handshake_complete.load(Ordering::Acquire);
                             serve_http3_request(
@@ -667,6 +684,7 @@ async fn serve_http3_connection(
     Ok(())
 }
 
+/// Extracts client certificate identity details from a Quinn HTTP/3 connection.
 fn extract_http3_tls_client_identity(connection: &quinn::Connection) -> Option<TlsClientIdentity> {
     let certificates = connection
         .peer_identity()?
@@ -677,6 +695,7 @@ fn extract_http3_tls_client_identity(connection: &quinn::Connection) -> Option<T
     ))
 }
 
+/// Extracts the negotiated ALPN protocol from a Quinn HTTP/3 connection.
 fn http3_tls_alpn_protocol(connection: &quinn::Connection) -> Option<String> {
     connection
         .handshake_data()?
@@ -686,6 +705,7 @@ fn http3_tls_alpn_protocol(connection: &quinn::Connection) -> Option<String> {
         .map(|protocol| String::from_utf8_lossy(&protocol).into_owned())
 }
 
+/// Resolves, dispatches, and responds to a single HTTP/3 request stream.
 async fn serve_http3_request(
     resolver: RequestResolver<h3_quinn::Connection, Bytes>,
     listener_id: String,
@@ -714,6 +734,7 @@ async fn serve_http3_request(
     send_http3_response(send_stream, response, &state, &listener_id).await
 }
 
+/// Writes a finalized downstream response onto an HTTP/3 response stream.
 async fn send_http3_response<S>(
     mut stream: RequestStream<S, Bytes>,
     response: HttpResponse,
@@ -768,6 +789,7 @@ where
     })
 }
 
+/// Logs the completion result of a spawned HTTP/3 connection task.
 fn log_connection_task_result(result: std::result::Result<Result<()>, JoinError>) {
     match result {
         Ok(Ok(())) => {}
@@ -784,6 +806,7 @@ fn log_connection_task_result(result: std::result::Result<Result<()>, JoinError>
     }
 }
 
+/// Logs the completion result of a spawned HTTP/3 request task.
 fn log_request_task_result(result: std::result::Result<Result<()>, JoinError>) {
     match result {
         Ok(Ok(())) => {}
@@ -800,6 +823,7 @@ fn log_request_task_result(result: std::result::Result<Result<()>, JoinError>) {
     }
 }
 
+/// Wraps a stream error into the boxed error type expected by Hyper bodies.
 fn stream_error(error: impl std::fmt::Display) -> BoxError {
     std::io::Error::other(format!("{error}")).into()
 }

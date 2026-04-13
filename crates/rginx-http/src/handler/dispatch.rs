@@ -58,7 +58,8 @@ pub async fn handle(
         HeaderValue::from_str(&request_id).expect("generated request ids should be valid headers");
     request.headers_mut().insert("x-request-id", request_id_header.clone());
     let tls_client_identity = request.extensions().get::<TlsClientIdentity>().cloned();
-    let early_data = request.extensions().get::<bool>().copied().unwrap_or(false);
+    let early_data =
+        request.extensions().get::<EarlyDataFlag>().map(|flag| flag.0).unwrap_or(false);
     let path = request
         .uri()
         .path_and_query()

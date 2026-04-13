@@ -10,6 +10,7 @@ use crate::model::{
     TlsVersionConfig, VirtualHostConfig,
 };
 
+/// Validates the legacy top-level `server` block.
 pub(super) fn validate_server(server: &ServerConfig) -> Result<()> {
     validate_listener_like(ListenerLikeRef {
         owner_label: "server",
@@ -32,6 +33,7 @@ pub(super) fn validate_server(server: &ServerConfig) -> Result<()> {
     Ok(())
 }
 
+/// Validates the explicit listener list and its interaction with the legacy server block.
 pub(super) fn validate_listeners(
     listeners: &[ListenerConfig],
     server: &ServerConfig,
@@ -124,6 +126,7 @@ pub(super) fn validate_listeners(
     Ok(())
 }
 
+/// Validates server-name ownership rules across the default server and vhosts.
 pub(super) fn validate_server_names(
     owner_label: &str,
     server_names: &[String],
@@ -179,6 +182,7 @@ struct ListenerLikeRef<'a> {
     require_listen: bool,
 }
 
+/// Validates the shared listener-like fields used by both legacy and explicit listeners.
 fn validate_listener_like(config: ListenerLikeRef<'_>) -> Result<()> {
     if config.require_listen {
         let listen = config.listen.unwrap_or_default().trim();
@@ -351,6 +355,7 @@ fn validate_listener_like(config: ListenerLikeRef<'_>) -> Result<()> {
     Ok(())
 }
 
+/// Validates HTTP/3-specific configuration and TLS compatibility requirements.
 fn validate_http3(
     owner_label: &str,
     http3: &Http3Config,
@@ -438,9 +443,19 @@ fn validate_http3(
         }
     }
 
+    const HTTP3_ACTIVE_CONNECTION_ID_LIMIT_MIGRATION: u32 = 5;
+    if matches!(http3.active_connection_id_limit, Some(HTTP3_ACTIVE_CONNECTION_ID_LIMIT_MIGRATION))
+        && http3.host_key_path.is_none()
+    {
+        return Err(Error::Config(format!(
+            "{owner_label} http3 active_connection_id_limit=5 requires host_key_path to be configured"
+        )));
+    }
+
     Ok(())
 }
 
+/// Validates TLS identity file paths and related certificate bundle fields.
 pub(super) fn validate_tls_identity_fields(
     owner_label: &str,
     cert_path: &str,
@@ -475,6 +490,7 @@ pub(super) fn validate_tls_identity_fields(
     Ok(())
 }
 
+/// Validates a configured additional TLS certificate bundle.
 fn validate_certificate_bundle(
     owner_label: &str,
     bundle: &ServerCertificateBundleConfig,
@@ -500,6 +516,7 @@ fn validate_certificate_bundle(
     Ok(())
 }
 
+/// Validates the configured TLS version list.
 fn validate_tls_versions(owner_label: &str, versions: Option<&[TlsVersionConfig]>) -> Result<()> {
     let Some(versions) = versions else {
         return Ok(());
@@ -521,6 +538,7 @@ fn validate_tls_versions(owner_label: &str, versions: Option<&[TlsVersionConfig]
     Ok(())
 }
 
+/// Validates configured TLS cipher suites against the allowed TLS versions.
 fn validate_tls_cipher_suites(
     owner_label: &str,
     cipher_suites: Option<&[TlsCipherSuiteConfig]>,
@@ -556,6 +574,7 @@ fn validate_tls_cipher_suites(
     Ok(())
 }
 
+/// Validates the configured TLS key exchange groups.
 fn validate_tls_key_exchange_groups(
     owner_label: &str,
     key_exchange_groups: Option<&[TlsKeyExchangeGroupConfig]>,
@@ -582,6 +601,7 @@ fn validate_tls_key_exchange_groups(
     Ok(())
 }
 
+/// Returns whether a configured cipher suite is valid for a TLS version.
 fn cipher_suite_supports_version(suite: TlsCipherSuiteConfig, version: TlsVersionConfig) -> bool {
     match suite {
         TlsCipherSuiteConfig::Tls13Aes256GcmSha384
@@ -598,6 +618,7 @@ fn cipher_suite_supports_version(suite: TlsCipherSuiteConfig, version: TlsVersio
     }
 }
 
+/// Validates the configured ALPN protocol list.
 fn validate_alpn_protocols(owner_label: &str, alpn_protocols: Option<&[String]>) -> Result<()> {
     let Some(alpn_protocols) = alpn_protocols else {
         return Ok(());
@@ -628,6 +649,7 @@ fn validate_alpn_protocols(owner_label: &str, alpn_protocols: Option<&[String]>)
     Ok(())
 }
 
+/// Detects whether the legacy listener fields are present on the top-level server block.
 fn legacy_server_listener_fields(server: &ServerConfig) -> Option<()> {
     (server.listen.is_some()
         || !server.trusted_proxies.is_empty()
@@ -645,6 +667,7 @@ fn legacy_server_listener_fields(server: &ServerConfig) -> Option<()> {
     .then_some(())
 }
 
+/// Validates a trusted proxy entry and annotates any error with its owner path.
 fn validate_trusted_proxy_with_owner(owner_label: &str, value: &str) -> Result<()> {
     let normalized = normalize_trusted_proxy(value).ok_or_else(|| {
         Error::Config(format!(
@@ -659,6 +682,7 @@ fn validate_trusted_proxy_with_owner(owner_label: &str, value: &str) -> Result<(
     Ok(())
 }
 
+/// Normalizes a trusted proxy entry into canonical IP or CIDR form.
 fn normalize_trusted_proxy(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {

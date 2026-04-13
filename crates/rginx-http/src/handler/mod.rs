@@ -24,6 +24,9 @@ pub(crate) type BoxError = Box<dyn StdError + Send + Sync>;
 pub(crate) type HttpBody = UnsyncBoxBody<Bytes, BoxError>;
 pub(crate) type HttpResponse = Response<HttpBody>;
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct EarlyDataFlag(pub bool);
+
 mod access_log;
 mod dispatch;
 mod grpc;
@@ -45,7 +48,7 @@ pub(crate) fn attach_connection_metadata<B>(
     request: &mut Request<B>,
     connection: &ConnectionPeerAddrs,
 ) {
-    request.extensions_mut().insert(connection.early_data);
+    request.extensions_mut().insert(EarlyDataFlag(connection.early_data));
     if let Some(identity) = connection.tls_client_identity.clone() {
         request.extensions_mut().insert(identity);
     }

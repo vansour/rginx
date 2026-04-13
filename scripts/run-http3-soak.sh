@@ -96,8 +96,12 @@ if [[ "${NETEM_PROFILE}" != "none" || -n "${MTU}" ]]; then
     need_privileged=1
 fi
 if [[ "${need_privileged}" -eq 1 ]]; then
-    have tc || die "tc is required when --netem-profile is used"
-    have ip || die "ip is required when --mtu is used"
+    if [[ "${NETEM_PROFILE}" != "none" ]]; then
+        have tc || die "tc is required when --netem-profile is used"
+    fi
+    if [[ -n "${MTU}" ]]; then
+        have ip || die "ip is required when --mtu is used"
+    fi
     [[ "${EUID}" -eq 0 ]] || die "root privileges are required for netem/mtu operations"
 fi
 
@@ -123,7 +127,9 @@ orig_mtu=""
 
 clear_faults() {
     if [[ "${need_privileged}" -eq 1 ]]; then
-        tc qdisc del dev "${NETEM_DEV}" root >/dev/null 2>&1 || true
+        if [[ "${NETEM_PROFILE}" != "none" ]]; then
+            tc qdisc del dev "${NETEM_DEV}" root >/dev/null 2>&1 || true
+        fi
         if [[ -n "${orig_mtu}" ]]; then
             ip link set dev "${NETEM_DEV}" mtu "${orig_mtu}" >/dev/null 2>&1 || true
         fi
@@ -134,7 +140,7 @@ trap clear_faults EXIT
 
 apply_faults() {
     clear_faults
-    if [[ -z "${orig_mtu}" && "${need_privileged}" -eq 1 ]]; then
+    if [[ -n "${MTU}" && -z "${orig_mtu}" && "${need_privileged}" -eq 1 ]]; then
         orig_mtu="$(ip -o link show dev "${NETEM_DEV}" | awk '{for (i = 1; i <= NF; i++) if ($i == "mtu") { print $(i + 1); exit }}')"
     fi
     case "${NETEM_PROFILE}" in

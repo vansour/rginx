@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, Notify, mpsc};
 use tokio::task::JoinHandle;
 
 use crate::handler::{BoxError, HttpBody, boxed_body};
@@ -21,7 +21,7 @@ pub(crate) struct Http3Client {
     client_config: quinn::ClientConfig,
     connect_timeout: Duration,
     endpoints: Arc<Http3ClientEndpoints>,
-    sessions: Arc<Mutex<HashMap<Http3SessionKey, Arc<Http3Session>>>>,
+    sessions: Arc<Mutex<HashMap<Http3SessionKey, Http3SessionEntry>>>,
 }
 
 #[derive(Default)]
@@ -40,6 +40,12 @@ struct Http3Session {
     sender: Mutex<H3SendRequest>,
     closed: Arc<AtomicBool>,
     driver_task: Mutex<Option<JoinHandle<()>>>,
+}
+
+#[derive(Clone)]
+enum Http3SessionEntry {
+    Ready(Arc<Http3Session>),
+    Pending(Arc<Notify>),
 }
 
 impl Http3Session {
@@ -173,14 +179,7 @@ impl Http3Client {
 
         let (parts, _) = response.into_parts();
         let size_hint = response_size_hint(&parts.headers);
-        let expect_trailers = response_expects_trailers(&parts.headers);
-        let body = streaming_response_body(
-            request_stream,
-            session,
-            peer.url.clone(),
-            size_hint,
-            expect_trailers,
-        );
+        let body = streaming_response_body(request_stream, session, peer.url.clone(), size_hint);
         let mut response_builder = Response::builder().status(parts.status);
         for (name, value) in &parts.headers {
             response_builder = response_builder.header(name, value);
@@ -195,19 +194,43 @@ impl Http3Client {
         key: Http3SessionKey,
         peer_url: &str,
     ) -> Result<Arc<Http3Session>, Error> {
-        if let Some(existing) = self.sessions.lock().await.get(&key).cloned()
-            && !existing.is_closed()
-        {
-            return Ok(existing);
-        }
+        loop {
+            enum SessionAction {
+                Wait(Arc<Notify>),
+                Connect(Arc<Notify>),
+            }
 
-        let created = Arc::new(self.connect_session(&key, peer_url).await?);
-        let mut sessions = self.sessions.lock().await;
-        match sessions.get(&key) {
-            Some(existing) if !existing.is_closed() => Ok(existing.clone()),
-            _ => {
-                sessions.insert(key, created.clone());
-                Ok(created)
+            let action = {
+                let mut sessions = self.sessions.lock().await;
+                match sessions.get(&key).cloned() {
+                    Some(Http3SessionEntry::Ready(existing)) if !existing.is_closed() => {
+                        return Ok(existing);
+                    }
+                    Some(Http3SessionEntry::Pending(notify)) => SessionAction::Wait(notify),
+                    Some(Http3SessionEntry::Ready(_)) | None => {
+                        let notify = Arc::new(Notify::new());
+                        sessions.insert(key.clone(), Http3SessionEntry::Pending(notify.clone()));
+                        SessionAction::Connect(notify)
+                    }
+                }
+            };
+
+            match action {
+                SessionAction::Wait(notify) => notify.notified().await,
+                SessionAction::Connect(notify) => {
+                    let result = self.connect_session(&key, peer_url).await.map(Arc::new);
+                    let mut sessions = self.sessions.lock().await;
+                    match &result {
+                        Ok(session) => {
+                            sessions.insert(key.clone(), Http3SessionEntry::Ready(session.clone()));
+                        }
+                        Err(_) => {
+                            sessions.remove(&key);
+                        }
+                    }
+                    notify.notify_waiters();
+                    return result;
+                }
             }
         }
     }
@@ -296,18 +319,39 @@ impl Http3Client {
 
     #[cfg(test)]
     async fn cached_session_count(&self) -> usize {
-        self.sessions.lock().await.len()
+        self.sessions
+            .lock()
+            .await
+            .values()
+            .filter(|entry| matches!(entry, Http3SessionEntry::Ready(_)))
+            .count()
     }
 }
 
 struct StreamingResponseBody {
     rx: mpsc::Receiver<Result<Frame<Bytes>, BoxError>>,
     size_hint: SizeHint,
+    done: bool,
+    join_handle: Option<JoinHandle<()>>,
 }
 
 impl StreamingResponseBody {
-    fn new(rx: mpsc::Receiver<Result<Frame<Bytes>, BoxError>>, size_hint: SizeHint) -> Self {
-        Self { rx, size_hint }
+    fn new(
+        rx: mpsc::Receiver<Result<Frame<Bytes>, BoxError>>,
+        size_hint: SizeHint,
+        join_handle: JoinHandle<()>,
+    ) -> Self {
+        Self { rx, size_hint, done: false, join_handle: Some(join_handle) }
+    }
+}
+
+impl Drop for StreamingResponseBody {
+    fn drop(&mut self) {
+        if let Some(join_handle) = self.join_handle.take()
+            && !join_handle.is_finished()
+        {
+            join_handle.abort();
+        }
     }
 }
 
@@ -319,11 +363,18 @@ impl hyper::body::Body for StreamingResponseBody {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        self.rx.poll_recv(cx)
+        let this = self.as_mut().get_mut();
+        match this.rx.poll_recv(cx) {
+            std::task::Poll::Ready(None) => {
+                this.done = true;
+                std::task::Poll::Ready(None)
+            }
+            other => other,
+        }
     }
 
     fn is_end_stream(&self) -> bool {
-        self.rx.is_closed()
+        self.done
     }
 
     fn size_hint(&self) -> SizeHint {
@@ -331,15 +382,15 @@ impl hyper::body::Body for StreamingResponseBody {
     }
 }
 
+/// Streams an upstream HTTP/3 response body into a Hyper body adapter.
 fn streaming_response_body(
     mut request_stream: H3RequestStream,
     session: Arc<Http3Session>,
     peer_url: String,
     size_hint: SizeHint,
-    expect_trailers: bool,
 ) -> HttpBody {
     let (tx, rx) = mpsc::channel(1);
-    tokio::spawn(async move {
+    let join_handle = tokio::spawn(async move {
         loop {
             let next = match request_stream.recv_data().await {
                 Ok(chunk) => chunk,
@@ -366,31 +417,30 @@ fn streaming_response_body(
             }
         }
 
-        if expect_trailers {
-            match request_stream.recv_trailers().await {
-                Ok(Some(trailers)) => {
-                    let _ = tx.send(Ok(Frame::trailers(trailers))).await;
-                }
-                Ok(None) => {}
-                Err(error) if is_clean_http3_response_shutdown(&error) => {}
-                Err(error) => {
-                    session.mark_closed();
-                    let _ = tx
-                        .send(Err::<Frame<Bytes>, BoxError>(
-                            std::io::Error::other(format!(
-                                "failed to receive upstream http3 response trailers from `{peer_url}`: {error}"
-                            ))
-                            .into(),
+        match request_stream.recv_trailers().await {
+            Ok(Some(trailers)) => {
+                let _ = tx.send(Ok(Frame::trailers(trailers))).await;
+            }
+            Ok(None) => {}
+            Err(error) if is_clean_http3_response_shutdown(&error) => {}
+            Err(error) => {
+                session.mark_closed();
+                let _ = tx
+                    .send(Err::<Frame<Bytes>, BoxError>(
+                        std::io::Error::other(format!(
+                            "failed to receive upstream http3 response trailers from `{peer_url}`: {error}"
                         ))
-                        .await;
-                }
+                        .into(),
+                    ))
+                    .await;
             }
         }
     });
 
-    boxed_body(StreamingResponseBody::new(rx, size_hint))
+    boxed_body(StreamingResponseBody::new(rx, size_hint, join_handle))
 }
 
+/// Derives a Hyper body size hint from upstream response headers.
 fn response_size_hint(headers: &HeaderMap) -> SizeHint {
     let mut hint = SizeHint::default();
     if let Some(content_length) = headers
@@ -403,20 +453,14 @@ fn response_size_hint(headers: &HeaderMap) -> SizeHint {
     hint
 }
 
-fn response_expects_trailers(headers: &HeaderMap) -> bool {
-    headers
-        .get(http::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.to_ascii_lowercase())
-        .is_some_and(|value| value.starts_with("application/grpc"))
-}
-
+/// Detects peer shutdown errors that should be treated as a clean HTTP/3 EOF.
 fn is_clean_http3_response_shutdown(error: &impl std::fmt::Display) -> bool {
     let error = error.to_string();
     error.contains("ApplicationClose: H3_NO_ERROR")
         || error.contains("Application { code: H3_NO_ERROR")
 }
 
+/// Resolves the selected upstream peer authority into a socket address.
 fn resolve_peer_socket_addr(peer: &UpstreamPeer) -> Result<SocketAddr, Error> {
     peer.authority
         .to_socket_addrs()
@@ -435,6 +479,7 @@ fn resolve_peer_socket_addr(peer: &UpstreamPeer) -> Result<SocketAddr, Error> {
         })
 }
 
+/// Determines the TLS server name to use for an upstream HTTP/3 connection.
 fn server_name_for_peer(upstream: &Upstream, peer: &UpstreamPeer) -> Result<String, Error> {
     if let Some(server_name_override) = upstream.server_name_override.as_ref() {
         return Ok(server_name_override.clone());

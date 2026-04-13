@@ -67,6 +67,7 @@ impl ListenerWorkerGroup {
     }
 }
 
+/// Builds the initial active listener groups from config and inherited sockets.
 pub(super) async fn build_initial_listener_groups(
     config: &ConfigSnapshot,
     mut inherited: InheritedListeners,
@@ -80,9 +81,15 @@ pub(super) async fn build_initial_listener_groups(
             Some(listener_socket) => listener_socket,
             None => bind_std_listener(listener.server.listen_addr)?,
         };
+        let desired_udp_socket_count = config.runtime.accept_workers.max(1);
         let std_udp_sockets = match &listener.http3 {
             Some(http3) => match inherited.udp.remove(&http3.listen_addr) {
-                Some(sockets) => sockets.into_iter().map(Arc::new).collect(),
+                Some(sockets) => normalize_inherited_udp_sockets(
+                    &listener.name,
+                    http3.listen_addr,
+                    sockets,
+                    desired_udp_socket_count,
+                )?,
                 None => bind_std_udp_sockets(http3.listen_addr, config.runtime.accept_workers)?,
             },
             None => Vec::new(),
@@ -106,6 +113,7 @@ pub(super) async fn build_initial_listener_groups(
     Ok(groups)
 }
 
+/// Prepares listener bindings that are new in the next config generation.
 pub(super) fn prepare_added_listener_bindings(
     next_config: &ConfigSnapshot,
     next_listeners: &[Listener],
@@ -179,6 +187,7 @@ pub(super) fn prepare_added_listener_bindings(
     Ok(prepared)
 }
 
+/// Reconciles the active listener worker groups against the next config generation.
 pub(super) async fn reconcile_listener_worker_groups(
     http_state: &rginx_http::SharedState,
     next_config: &ConfigSnapshot,
@@ -232,6 +241,7 @@ pub(super) async fn reconcile_listener_worker_groups(
     prune_draining_listener_groups(http_state, draining_listener_groups).await;
 }
 
+/// Removes drained listener groups once all their worker tasks have completed.
 pub(super) async fn prune_draining_listener_groups(
     http_state: &rginx_http::SharedState,
     draining_listener_groups: &mut Vec<ListenerWorkerGroup>,
@@ -272,6 +282,7 @@ pub(super) async fn join_listener_worker_groups(
     Ok(())
 }
 
+/// Broadcasts shutdown to every listener group in the iterator.
 pub(super) fn initiate_shutdown_for_groups<'a>(
     groups: impl IntoIterator<Item = &'a ListenerWorkerGroup>,
 ) {
@@ -280,6 +291,7 @@ pub(super) fn initiate_shutdown_for_groups<'a>(
     }
 }
 
+/// Aborts every listener worker task in the iterator.
 pub(super) fn abort_listener_worker_groups<'a>(
     groups: impl IntoIterator<Item = &'a ListenerWorkerGroup>,
 ) {
@@ -306,6 +318,7 @@ pub(super) async fn join_aborted_listener_worker_groups(
     draining_listener_groups.clear();
 }
 
+/// Prepares sockets, Tokio listeners, and HTTP/3 endpoints for one listener.
 fn prepare_listener_worker_group(
     listener: Listener,
     std_listener: Arc<StdTcpListener>,
@@ -337,6 +350,7 @@ fn prepare_listener_worker_group(
     })
 }
 
+/// Activates a prepared listener group by spawning its worker tasks.
 fn activate_prepared_listener_worker_group(
     prepared: PreparedListenerWorkerGroup,
     http_state: rginx_http::SharedState,
@@ -398,6 +412,7 @@ fn activate_prepared_listener_worker_group(
     }
 }
 
+/// Waits for all worker tasks in a listener group to finish.
 async fn join_listener_worker_group(group: &mut ListenerWorkerGroup) -> Result<()> {
     for (worker_index, task) in group.tasks.iter_mut().enumerate() {
         task.await.map_err(|error| {
@@ -411,6 +426,7 @@ async fn join_listener_worker_group(group: &mut ListenerWorkerGroup) -> Result<(
     Ok(())
 }
 
+/// Waits for all worker tasks in an already-aborted listener group to settle.
 async fn join_aborted_listener_worker_group(group: &mut ListenerWorkerGroup) {
     for task in group.tasks.iter_mut() {
         if let Err(error) = task.await
@@ -422,20 +438,60 @@ async fn join_aborted_listener_worker_group(group: &mut ListenerWorkerGroup) {
     group.tasks.clear();
 }
 
+/// Binds a nonblocking TCP listener for the given socket address.
 fn bind_std_listener(listen_addr: std::net::SocketAddr) -> Result<StdTcpListener> {
     let socket = StdTcpListener::bind(listen_addr)?;
     socket.set_nonblocking(true)?;
     Ok(socket)
 }
 
+/// Binds one UDP socket per accept worker for an HTTP/3 listener.
 fn bind_std_udp_sockets(
     listen_addr: std::net::SocketAddr,
     count: usize,
 ) -> Result<Vec<Arc<StdUdpSocket>>> {
     let count = count.max(1);
-    (0..count).map(|_| bind_std_udp_socket(listen_addr, count > 1).map(Arc::new)).collect()
+    bind_std_udp_sockets_with_reuse_port(listen_addr, count, count > 1)
 }
 
+/// Normalizes inherited UDP sockets to match the current accept worker count.
+fn normalize_inherited_udp_sockets(
+    listener_name: &str,
+    listen_addr: std::net::SocketAddr,
+    sockets: Vec<StdUdpSocket>,
+    desired_socket_count: usize,
+) -> Result<Vec<Arc<StdUdpSocket>>> {
+    let desired_socket_count = desired_socket_count.max(1);
+    let mut sockets = sockets.into_iter().map(Arc::new).collect::<Vec<_>>();
+    if sockets.len() == 1 && desired_socket_count > 1 {
+        return Err(Error::Server(format!(
+            "listener `{listener_name}` cannot increase HTTP/3 accept_workers from 1 to {} during restart; perform a cold restart or keep the previous worker count",
+            desired_socket_count,
+        )));
+    }
+    if sockets.len() > desired_socket_count {
+        sockets.truncate(desired_socket_count);
+    } else if sockets.len() < desired_socket_count {
+        sockets.extend(bind_std_udp_sockets_with_reuse_port(
+            listen_addr,
+            desired_socket_count - sockets.len(),
+            desired_socket_count > 1,
+        )?);
+    }
+    Ok(sockets)
+}
+
+/// Binds a batch of UDP sockets with a fixed `SO_REUSEPORT` policy.
+fn bind_std_udp_sockets_with_reuse_port(
+    listen_addr: std::net::SocketAddr,
+    count: usize,
+    reuse_port: bool,
+) -> Result<Vec<Arc<StdUdpSocket>>> {
+    let count = count.max(1);
+    (0..count).map(|_| bind_std_udp_socket(listen_addr, reuse_port).map(Arc::new)).collect()
+}
+
+/// Binds a single nonblocking UDP socket, optionally enabling `SO_REUSEPORT`.
 fn bind_std_udp_socket(
     listen_addr: std::net::SocketAddr,
     reuse_port: bool,
@@ -597,5 +653,62 @@ mod tests {
         for socket in sockets {
             assert_eq!(socket.local_addr().expect("udp socket addr should exist"), listen_addr);
         }
+    }
+
+    #[test]
+    fn normalize_inherited_udp_sockets_truncates_to_worker_count() {
+        let seed =
+            bind_std_udp_socket("127.0.0.1:0".parse().expect("socket addr should parse"), false)
+                .expect("seed udp socket should bind");
+        let listen_addr = seed.local_addr().expect("seed udp addr should exist");
+        drop(seed);
+
+        let inherited = (0..3)
+            .map(|_| {
+                bind_std_udp_socket(listen_addr, true).expect("inherited udp socket should bind")
+            })
+            .collect::<Vec<_>>();
+
+        let sockets = normalize_inherited_udp_sockets("default", listen_addr, inherited, 2)
+            .expect("normalizing inherited sockets should succeed");
+        assert_eq!(sockets.len(), 2);
+        for socket in sockets {
+            assert_eq!(socket.local_addr().expect("udp socket addr should exist"), listen_addr);
+        }
+    }
+
+    #[test]
+    fn normalize_inherited_udp_sockets_fills_missing_workers() {
+        let seed =
+            bind_std_udp_socket("127.0.0.1:0".parse().expect("socket addr should parse"), false)
+                .expect("seed udp socket should bind");
+        let listen_addr = seed.local_addr().expect("seed udp addr should exist");
+        drop(seed);
+
+        let inherited = (0..2)
+            .map(|_| {
+                bind_std_udp_socket(listen_addr, true).expect("inherited udp socket should bind")
+            })
+            .collect::<Vec<_>>();
+
+        let sockets = normalize_inherited_udp_sockets("default", listen_addr, inherited, 3)
+            .expect("normalizing inherited sockets should succeed");
+        assert_eq!(sockets.len(), 3);
+        for socket in sockets {
+            assert_eq!(socket.local_addr().expect("udp socket addr should exist"), listen_addr);
+        }
+    }
+
+    #[test]
+    fn normalize_inherited_udp_sockets_rejects_one_to_many_restart() {
+        let inherited = vec![
+            bind_std_udp_socket("127.0.0.1:0".parse().expect("socket addr should parse"), false)
+                .expect("inherited udp socket should bind"),
+        ];
+        let listen_addr = inherited[0].local_addr().expect("udp socket addr should exist");
+
+        let error = normalize_inherited_udp_sockets("default", listen_addr, inherited, 3)
+            .expect_err("one-to-many restart should fail");
+        assert!(error.to_string().contains("cannot increase HTTP/3 accept_workers from 1 to 3"));
     }
 }
