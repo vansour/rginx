@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, Notify, mpsc};
 use tokio::task::JoinHandle;
 
 use crate::handler::{BoxError, HttpBody, boxed_body};
@@ -21,7 +21,7 @@ pub(crate) struct Http3Client {
     client_config: quinn::ClientConfig,
     connect_timeout: Duration,
     endpoints: Arc<Http3ClientEndpoints>,
-    sessions: Arc<Mutex<HashMap<Http3SessionKey, Arc<Http3Session>>>>,
+    sessions: Arc<Mutex<HashMap<Http3SessionKey, Http3SessionEntry>>>,
 }
 
 #[derive(Default)]
@@ -40,6 +40,12 @@ struct Http3Session {
     sender: Mutex<H3SendRequest>,
     closed: Arc<AtomicBool>,
     driver_task: Mutex<Option<JoinHandle<()>>>,
+}
+
+#[derive(Clone)]
+enum Http3SessionEntry {
+    Ready(Arc<Http3Session>),
+    Pending(Arc<Notify>),
 }
 
 impl Http3Session {
@@ -188,19 +194,43 @@ impl Http3Client {
         key: Http3SessionKey,
         peer_url: &str,
     ) -> Result<Arc<Http3Session>, Error> {
-        if let Some(existing) = self.sessions.lock().await.get(&key).cloned()
-            && !existing.is_closed()
-        {
-            return Ok(existing);
-        }
+        loop {
+            enum SessionAction {
+                Wait(Arc<Notify>),
+                Connect(Arc<Notify>),
+            }
 
-        let created = Arc::new(self.connect_session(&key, peer_url).await?);
-        let mut sessions = self.sessions.lock().await;
-        match sessions.get(&key) {
-            Some(existing) if !existing.is_closed() => Ok(existing.clone()),
-            _ => {
-                sessions.insert(key, created.clone());
-                Ok(created)
+            let action = {
+                let mut sessions = self.sessions.lock().await;
+                match sessions.get(&key).cloned() {
+                    Some(Http3SessionEntry::Ready(existing)) if !existing.is_closed() => {
+                        return Ok(existing);
+                    }
+                    Some(Http3SessionEntry::Pending(notify)) => SessionAction::Wait(notify),
+                    Some(Http3SessionEntry::Ready(_)) | None => {
+                        let notify = Arc::new(Notify::new());
+                        sessions.insert(key.clone(), Http3SessionEntry::Pending(notify.clone()));
+                        SessionAction::Connect(notify)
+                    }
+                }
+            };
+
+            match action {
+                SessionAction::Wait(notify) => notify.notified().await,
+                SessionAction::Connect(notify) => {
+                    let result = self.connect_session(&key, peer_url).await.map(Arc::new);
+                    let mut sessions = self.sessions.lock().await;
+                    match &result {
+                        Ok(session) => {
+                            sessions.insert(key.clone(), Http3SessionEntry::Ready(session.clone()));
+                        }
+                        Err(_) => {
+                            sessions.remove(&key);
+                        }
+                    }
+                    notify.notify_waiters();
+                    return result;
+                }
             }
         }
     }
@@ -289,7 +319,12 @@ impl Http3Client {
 
     #[cfg(test)]
     async fn cached_session_count(&self) -> usize {
-        self.sessions.lock().await.len()
+        self.sessions
+            .lock()
+            .await
+            .values()
+            .filter(|entry| matches!(entry, Http3SessionEntry::Ready(_)))
+            .count()
     }
 }
 
@@ -297,11 +332,26 @@ struct StreamingResponseBody {
     rx: mpsc::Receiver<Result<Frame<Bytes>, BoxError>>,
     size_hint: SizeHint,
     done: bool,
+    join_handle: Option<JoinHandle<()>>,
 }
 
 impl StreamingResponseBody {
-    fn new(rx: mpsc::Receiver<Result<Frame<Bytes>, BoxError>>, size_hint: SizeHint) -> Self {
-        Self { rx, size_hint, done: false }
+    fn new(
+        rx: mpsc::Receiver<Result<Frame<Bytes>, BoxError>>,
+        size_hint: SizeHint,
+        join_handle: JoinHandle<()>,
+    ) -> Self {
+        Self { rx, size_hint, done: false, join_handle: Some(join_handle) }
+    }
+}
+
+impl Drop for StreamingResponseBody {
+    fn drop(&mut self) {
+        if let Some(join_handle) = self.join_handle.take()
+            && !join_handle.is_finished()
+        {
+            join_handle.abort();
+        }
     }
 }
 
@@ -339,7 +389,7 @@ fn streaming_response_body(
     size_hint: SizeHint,
 ) -> HttpBody {
     let (tx, rx) = mpsc::channel(1);
-    tokio::spawn(async move {
+    let join_handle = tokio::spawn(async move {
         loop {
             let next = match request_stream.recv_data().await {
                 Ok(chunk) => chunk,
@@ -386,7 +436,7 @@ fn streaming_response_body(
         }
     });
 
-    boxed_body(StreamingResponseBody::new(rx, size_hint))
+    boxed_body(StreamingResponseBody::new(rx, size_hint, join_handle))
 }
 
 fn response_size_hint(headers: &HeaderMap) -> SizeHint {

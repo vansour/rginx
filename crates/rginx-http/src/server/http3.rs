@@ -282,7 +282,6 @@ pub fn bind_http3_endpoint_with_socket(
         listener.tls_enabled(),
         default_vhost,
         vhosts,
-        listener.server.max_request_body_bytes,
         listener.http3.as_ref().is_some_and(|http3| http3.early_data_enabled),
     )?
     .ok_or_else(|| {
@@ -395,12 +394,16 @@ fn build_http3_endpoint_config(
                 .cid_generator(|| Box::new(quinn_proto::RandomConnectionIdGenerator::new(0)));
         }
         HTTP3_ACTIVE_CONNECTION_ID_LIMIT_MIGRATION => {
-            if let Some(host_key_material) = host_key_material {
-                let key = derive_hashed_connection_id_key(host_key_material);
-                endpoint_config.cid_generator(move || {
-                    Box::new(quinn_proto::HashedConnectionIdGenerator::from_key(key))
-                });
-            }
+            let host_key_material = host_key_material.ok_or_else(|| {
+                Error::Config(
+                    "http3 active_connection_id_limit `5` requires host_key_path to be configured"
+                        .to_string(),
+                )
+            })?;
+            let key = derive_hashed_connection_id_key(host_key_material);
+            endpoint_config.cid_generator(move || {
+                Box::new(quinn_proto::HashedConnectionIdGenerator::from_key(key))
+            });
         }
         unsupported => {
             return Err(Error::Config(format!(

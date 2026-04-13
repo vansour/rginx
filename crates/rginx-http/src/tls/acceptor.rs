@@ -18,7 +18,6 @@ use super::sni::{SniCertificateResolver, register_server_name_certificates};
 struct TlsServerConfigOptions {
     alpn_protocols: Vec<String>,
     http3_only: bool,
-    max_request_body_bytes: Option<usize>,
     http3_early_data_enabled: bool,
 }
 
@@ -41,7 +40,6 @@ pub fn build_tls_acceptor(
                 .and_then(|tls| tls.alpn_protocols.clone())
                 .unwrap_or_else(|| vec!["h2".to_string(), "http/1.1".to_string()]),
             http3_only: false,
-            max_request_body_bytes: None,
             http3_early_data_enabled: false,
         },
     )
@@ -54,7 +52,6 @@ pub fn build_http3_server_config(
     tls_termination_enabled: bool,
     default_vhost: &VirtualHost,
     vhosts: &[VirtualHost],
-    max_request_body_bytes: Option<usize>,
     http3_early_data_enabled: bool,
 ) -> Result<Option<Arc<ServerConfig>>> {
     build_tls_server_config(
@@ -66,7 +63,6 @@ pub fn build_http3_server_config(
         TlsServerConfigOptions {
             alpn_protocols: vec!["h3".to_string()],
             http3_only: true,
-            max_request_body_bytes,
             http3_early_data_enabled,
         },
     )
@@ -166,12 +162,8 @@ fn build_tls_server_config(
     config.alpn_protocols = options.alpn_protocols.into_iter().map(String::into_bytes).collect();
     apply_session_policy(&mut config, default_tls)?;
     if options.http3_only && options.http3_early_data_enabled {
-        const DEFAULT_HTTP3_MAX_EARLY_DATA_SIZE: u32 = 64 * 1024;
-
-        config.max_early_data_size = options
-            .max_request_body_bytes
-            .map(|limit| limit.min(u32::MAX as usize) as u32)
-            .unwrap_or(DEFAULT_HTTP3_MAX_EARLY_DATA_SIZE);
+        // Quinn only supports disabling early data entirely or allowing the TLS maximum.
+        config.max_early_data_size = u32::MAX;
     }
 
     Ok(Some(Arc::new(config)))

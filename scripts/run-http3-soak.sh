@@ -138,7 +138,7 @@ trap clear_faults EXIT
 
 apply_faults() {
     clear_faults
-    if [[ -z "${orig_mtu}" && "${need_privileged}" -eq 1 ]]; then
+    if [[ -n "${MTU}" && -z "${orig_mtu}" && "${need_privileged}" -eq 1 ]]; then
         orig_mtu="$(ip -o link show dev "${NETEM_DEV}" | awk '{for (i = 1; i <= NF; i++) if ($i == "mtu") { print $(i + 1); exit }}')"
     fi
     case "${NETEM_PROFILE}" in
