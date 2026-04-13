@@ -27,56 +27,33 @@ impl SharedState {
         );
         let listener_traffic =
             self.traffic_stats.read().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let http3_active_connections = config
-            .listeners
-            .iter()
-            .filter_map(|listener| listener_traffic.listeners.get(&listener.id))
-            .map(|entry| entry.counters.active_http3_connections.load(Ordering::Acquire))
-            .sum();
-        let http3_active_request_streams = config
-            .listeners
-            .iter()
-            .filter_map(|listener| listener_traffic.listeners.get(&listener.id))
-            .map(|entry| entry.counters.active_http3_request_streams.load(Ordering::Acquire))
-            .sum();
-        let http3_retry_issued_total = config
-            .listeners
-            .iter()
-            .filter_map(|listener| listener_traffic.listeners.get(&listener.id))
-            .map(|entry| entry.counters.http3_retry_issued_total.load(Ordering::Relaxed))
-            .sum();
-        let http3_retry_failed_total = config
-            .listeners
-            .iter()
-            .filter_map(|listener| listener_traffic.listeners.get(&listener.id))
-            .map(|entry| entry.counters.http3_retry_failed_total.load(Ordering::Relaxed))
-            .sum();
-        let http3_request_accept_errors_total = config
-            .listeners
-            .iter()
-            .filter_map(|listener| listener_traffic.listeners.get(&listener.id))
-            .map(|entry| entry.counters.http3_request_accept_errors_total.load(Ordering::Relaxed))
-            .sum();
-        let http3_request_resolve_errors_total = config
-            .listeners
-            .iter()
-            .filter_map(|listener| listener_traffic.listeners.get(&listener.id))
-            .map(|entry| entry.counters.http3_request_resolve_errors_total.load(Ordering::Relaxed))
-            .sum();
-        let http3_request_body_stream_errors_total = config
-            .listeners
-            .iter()
-            .filter_map(|listener| listener_traffic.listeners.get(&listener.id))
-            .map(|entry| {
-                entry.counters.http3_request_body_stream_errors_total.load(Ordering::Relaxed)
-            })
-            .sum();
-        let http3_response_stream_errors_total = config
-            .listeners
-            .iter()
-            .filter_map(|listener| listener_traffic.listeners.get(&listener.id))
-            .map(|entry| entry.counters.http3_response_stream_errors_total.load(Ordering::Relaxed))
-            .sum();
+        let mut http3_active_connections = 0;
+        let mut http3_active_request_streams = 0;
+        let mut http3_retry_issued_total = 0;
+        let mut http3_retry_failed_total = 0;
+        let mut http3_request_accept_errors_total = 0;
+        let mut http3_request_resolve_errors_total = 0;
+        let mut http3_request_body_stream_errors_total = 0;
+        let mut http3_response_stream_errors_total = 0;
+        for listener in &config.listeners {
+            let Some(entry) = listener_traffic.listeners.get(&listener.id) else {
+                continue;
+            };
+            let counters = &entry.counters;
+            http3_active_connections += counters.active_http3_connections.load(Ordering::Acquire);
+            http3_active_request_streams +=
+                counters.active_http3_request_streams.load(Ordering::Acquire);
+            http3_retry_issued_total += counters.http3_retry_issued_total.load(Ordering::Relaxed);
+            http3_retry_failed_total += counters.http3_retry_failed_total.load(Ordering::Relaxed);
+            http3_request_accept_errors_total +=
+                counters.http3_request_accept_errors_total.load(Ordering::Relaxed);
+            http3_request_resolve_errors_total +=
+                counters.http3_request_resolve_errors_total.load(Ordering::Relaxed);
+            http3_request_body_stream_errors_total +=
+                counters.http3_request_body_stream_errors_total.load(Ordering::Relaxed);
+            http3_response_stream_errors_total +=
+                counters.http3_response_stream_errors_total.load(Ordering::Relaxed);
+        }
         RuntimeStatusSnapshot {
             revision,
             config_path: self.config_path.as_deref().cloned(),

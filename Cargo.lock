@@ -1357,6 +1357,7 @@ dependencies = [
  "rasn-pkix",
  "rcgen",
  "rginx-config",
+ "rginx-core",
  "rginx-http",
  "rginx-observability",
  "rginx-runtime",

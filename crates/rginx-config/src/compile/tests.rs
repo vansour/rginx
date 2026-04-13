@@ -2289,6 +2289,7 @@ fn compile_http3_listener_defaults_to_tcp_listen_addr_and_default_alt_svc_policy
     assert!(!http3.retry);
     assert_eq!(http3.host_key_path, None);
     assert!(!http3.gso);
+    assert!(!http3.early_data_enabled);
 }
 
 #[test]

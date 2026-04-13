@@ -45,68 +45,14 @@ fn main() -> anyhow::Result<()> {
             rginx_http::SharedState::from_config(config.clone())
                 .context("failed to initialize runtime dependencies")?;
 
-            print_check_success(
-                &cli.config,
-                CheckSummary {
-                    listener_model: listener_model(
-                        config.total_listener_count(),
-                        config.listeners.first().map(|listener| listener.id.as_str()),
-                        config.listeners.first().map(|listener| listener.name.as_str()),
-                    ),
-                    listener_count: config.total_listener_count(),
-                    listener_binding_count: config.total_listener_binding_count(),
-                    listeners: check_listener_summaries(&config),
-                    tls_enabled: config.tls_enabled(),
-                    http3_enabled: config.http3_enabled(),
-                    http3_early_data_enabled_listeners: config
-                        .listeners
-                        .iter()
-                        .filter(|listener| {
-                            listener.http3.as_ref().is_some_and(|http3| http3.early_data_enabled)
-                        })
-                        .count(),
-                    total_vhost_count: config.total_vhost_count(),
-                    total_route_count: config.total_route_count(),
-                    upstream_count: config.upstreams.len(),
-                    worker_threads: config.runtime.worker_threads,
-                    accept_workers: config.runtime.accept_workers,
-                    tls: tls_check_details(&config),
-                },
-            );
+            print_check_success(&cli.config, build_check_summary(&config));
             Ok(())
         }
         _ if cli.test_config => {
             rginx_http::SharedState::from_config(config.clone())
                 .context("failed to initialize runtime dependencies")?;
 
-            print_check_success(
-                &cli.config,
-                CheckSummary {
-                    listener_model: listener_model(
-                        config.total_listener_count(),
-                        config.listeners.first().map(|listener| listener.id.as_str()),
-                        config.listeners.first().map(|listener| listener.name.as_str()),
-                    ),
-                    listener_count: config.total_listener_count(),
-                    listener_binding_count: config.total_listener_binding_count(),
-                    listeners: check_listener_summaries(&config),
-                    tls_enabled: config.tls_enabled(),
-                    http3_enabled: config.http3_enabled(),
-                    http3_early_data_enabled_listeners: config
-                        .listeners
-                        .iter()
-                        .filter(|listener| {
-                            listener.http3.as_ref().is_some_and(|http3| http3.early_data_enabled)
-                        })
-                        .count(),
-                    total_vhost_count: config.total_vhost_count(),
-                    total_route_count: config.total_route_count(),
-                    upstream_count: config.upstreams.len(),
-                    worker_threads: config.runtime.worker_threads,
-                    accept_workers: config.runtime.accept_workers,
-                    tls: tls_check_details(&config),
-                },
-            );
+            print_check_success(&cli.config, build_check_summary(&config));
             Ok(())
         }
         None => {
@@ -556,6 +502,34 @@ fn listener_model(
     }
 }
 
+fn build_check_summary(config: &rginx_config::ConfigSnapshot) -> CheckSummary {
+    CheckSummary {
+        listener_model: listener_model(
+            config.total_listener_count(),
+            config.listeners.first().map(|listener| listener.id.as_str()),
+            config.listeners.first().map(|listener| listener.name.as_str()),
+        ),
+        listener_count: config.total_listener_count(),
+        listener_binding_count: config.total_listener_binding_count(),
+        listeners: check_listener_summaries(config),
+        tls_enabled: config.tls_enabled(),
+        http3_enabled: config.http3_enabled(),
+        http3_early_data_enabled_listeners: config
+            .listeners
+            .iter()
+            .filter(|listener| {
+                listener.http3.as_ref().is_some_and(|http3| http3.early_data_enabled)
+            })
+            .count(),
+        total_vhost_count: config.total_vhost_count(),
+        total_route_count: config.total_route_count(),
+        upstream_count: config.upstreams.len(),
+        worker_threads: config.runtime.worker_threads,
+        accept_workers: config.runtime.accept_workers,
+        tls: tls_check_details(config),
+    }
+}
+
 fn check_listener_summaries(config: &rginx_config::ConfigSnapshot) -> Vec<CheckListenerSummary> {
     config
         .listeners
@@ -574,7 +548,7 @@ fn check_listener_summaries(config: &rginx_config::ConfigSnapshot) -> Vec<CheckL
                         .map(|protocol| protocol.as_str().to_string())
                         .collect(),
                     worker_count: config.runtime.accept_workers,
-                    reuse_port_enabled: (binding.kind.as_str() == "udp")
+                    reuse_port_enabled: (binding.kind == rginx_core::ListenerTransportKind::Udp)
                         .then_some(config.runtime.accept_workers > 1),
                     advertise_alt_svc: binding.alt_svc_max_age.map(|_| binding.advertise_alt_svc),
                     alt_svc_max_age_secs: binding.alt_svc_max_age.map(|max_age| max_age.as_secs()),

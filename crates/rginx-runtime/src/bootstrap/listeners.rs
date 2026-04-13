@@ -80,9 +80,22 @@ pub(super) async fn build_initial_listener_groups(
             Some(listener_socket) => listener_socket,
             None => bind_std_listener(listener.server.listen_addr)?,
         };
+        let desired_udp_socket_count = config.runtime.accept_workers.max(1);
         let std_udp_sockets = match &listener.http3 {
             Some(http3) => match inherited.udp.remove(&http3.listen_addr) {
-                Some(sockets) => sockets.into_iter().map(Arc::new).collect(),
+                Some(sockets) => {
+                    let mut sockets = sockets.into_iter().map(Arc::new).collect::<Vec<_>>();
+                    if sockets.len() > desired_udp_socket_count {
+                        sockets.truncate(desired_udp_socket_count);
+                    } else if sockets.len() < desired_udp_socket_count {
+                        sockets.extend(bind_std_udp_sockets_with_reuse_port(
+                            http3.listen_addr,
+                            desired_udp_socket_count - sockets.len(),
+                            desired_udp_socket_count > 1,
+                        )?);
+                    }
+                    sockets
+                }
                 None => bind_std_udp_sockets(http3.listen_addr, config.runtime.accept_workers)?,
             },
             None => Vec::new(),
@@ -433,7 +446,16 @@ fn bind_std_udp_sockets(
     count: usize,
 ) -> Result<Vec<Arc<StdUdpSocket>>> {
     let count = count.max(1);
-    (0..count).map(|_| bind_std_udp_socket(listen_addr, count > 1).map(Arc::new)).collect()
+    bind_std_udp_sockets_with_reuse_port(listen_addr, count, count > 1)
+}
+
+fn bind_std_udp_sockets_with_reuse_port(
+    listen_addr: std::net::SocketAddr,
+    count: usize,
+    reuse_port: bool,
+) -> Result<Vec<Arc<StdUdpSocket>>> {
+    let count = count.max(1);
+    (0..count).map(|_| bind_std_udp_socket(listen_addr, reuse_port).map(Arc::new)).collect()
 }
 
 fn bind_std_udp_socket(

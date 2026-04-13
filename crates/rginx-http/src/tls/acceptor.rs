@@ -33,6 +33,7 @@ pub fn build_tls_acceptor(
             .and_then(|tls| tls.alpn_protocols.clone())
             .unwrap_or_else(|| vec!["h2".to_string(), "http/1.1".to_string()]),
         false,
+        None,
         false,
     )
     .map(|config| config.map(TlsAcceptor::from))
@@ -44,6 +45,7 @@ pub fn build_http3_server_config(
     tls_termination_enabled: bool,
     default_vhost: &VirtualHost,
     vhosts: &[VirtualHost],
+    max_request_body_bytes: Option<usize>,
     http3_early_data_enabled: bool,
 ) -> Result<Option<Arc<ServerConfig>>> {
     build_tls_server_config(
@@ -54,6 +56,7 @@ pub fn build_http3_server_config(
         vhosts,
         vec!["h3".to_string()],
         true,
+        max_request_body_bytes,
         http3_early_data_enabled,
     )
 }
@@ -66,6 +69,7 @@ fn build_tls_server_config(
     vhosts: &[VirtualHost],
     alpn_protocols: Vec<String>,
     http3_only: bool,
+    max_request_body_bytes: Option<usize>,
     http3_early_data_enabled: bool,
 ) -> Result<Option<Arc<ServerConfig>>> {
     if !tls_termination_enabled {
@@ -154,7 +158,11 @@ fn build_tls_server_config(
     config.alpn_protocols = alpn_protocols.into_iter().map(String::into_bytes).collect();
     apply_session_policy(&mut config, default_tls)?;
     if http3_only && http3_early_data_enabled {
-        config.max_early_data_size = u32::MAX;
+        const DEFAULT_HTTP3_MAX_EARLY_DATA_SIZE: u32 = 64 * 1024;
+
+        config.max_early_data_size = max_request_body_bytes
+            .map(|limit| limit.min(u32::MAX as usize) as u32)
+            .unwrap_or(DEFAULT_HTTP3_MAX_EARLY_DATA_SIZE);
     }
 
     Ok(Some(Arc::new(config)))

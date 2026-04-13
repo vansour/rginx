@@ -173,14 +173,7 @@ impl Http3Client {
 
         let (parts, _) = response.into_parts();
         let size_hint = response_size_hint(&parts.headers);
-        let expect_trailers = response_expects_trailers(&parts.headers);
-        let body = streaming_response_body(
-            request_stream,
-            session,
-            peer.url.clone(),
-            size_hint,
-            expect_trailers,
-        );
+        let body = streaming_response_body(request_stream, session, peer.url.clone(), size_hint);
         let mut response_builder = Response::builder().status(parts.status);
         for (name, value) in &parts.headers {
             response_builder = response_builder.header(name, value);
@@ -303,11 +296,12 @@ impl Http3Client {
 struct StreamingResponseBody {
     rx: mpsc::Receiver<Result<Frame<Bytes>, BoxError>>,
     size_hint: SizeHint,
+    done: bool,
 }
 
 impl StreamingResponseBody {
     fn new(rx: mpsc::Receiver<Result<Frame<Bytes>, BoxError>>, size_hint: SizeHint) -> Self {
-        Self { rx, size_hint }
+        Self { rx, size_hint, done: false }
     }
 }
 
@@ -319,11 +313,18 @@ impl hyper::body::Body for StreamingResponseBody {
         mut self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        self.rx.poll_recv(cx)
+        let this = self.as_mut().get_mut();
+        match this.rx.poll_recv(cx) {
+            std::task::Poll::Ready(None) => {
+                this.done = true;
+                std::task::Poll::Ready(None)
+            }
+            other => other,
+        }
     }
 
     fn is_end_stream(&self) -> bool {
-        self.rx.is_closed()
+        self.done
     }
 
     fn size_hint(&self) -> SizeHint {
@@ -336,7 +337,6 @@ fn streaming_response_body(
     session: Arc<Http3Session>,
     peer_url: String,
     size_hint: SizeHint,
-    expect_trailers: bool,
 ) -> HttpBody {
     let (tx, rx) = mpsc::channel(1);
     tokio::spawn(async move {
@@ -366,24 +366,22 @@ fn streaming_response_body(
             }
         }
 
-        if expect_trailers {
-            match request_stream.recv_trailers().await {
-                Ok(Some(trailers)) => {
-                    let _ = tx.send(Ok(Frame::trailers(trailers))).await;
-                }
-                Ok(None) => {}
-                Err(error) if is_clean_http3_response_shutdown(&error) => {}
-                Err(error) => {
-                    session.mark_closed();
-                    let _ = tx
-                        .send(Err::<Frame<Bytes>, BoxError>(
-                            std::io::Error::other(format!(
-                                "failed to receive upstream http3 response trailers from `{peer_url}`: {error}"
-                            ))
-                            .into(),
+        match request_stream.recv_trailers().await {
+            Ok(Some(trailers)) => {
+                let _ = tx.send(Ok(Frame::trailers(trailers))).await;
+            }
+            Ok(None) => {}
+            Err(error) if is_clean_http3_response_shutdown(&error) => {}
+            Err(error) => {
+                session.mark_closed();
+                let _ = tx
+                    .send(Err::<Frame<Bytes>, BoxError>(
+                        std::io::Error::other(format!(
+                            "failed to receive upstream http3 response trailers from `{peer_url}`: {error}"
                         ))
-                        .await;
-                }
+                        .into(),
+                    ))
+                    .await;
             }
         }
     });
@@ -401,14 +399,6 @@ fn response_size_hint(headers: &HeaderMap) -> SizeHint {
         hint.set_exact(content_length);
     }
     hint
-}
-
-fn response_expects_trailers(headers: &HeaderMap) -> bool {
-    headers
-        .get(http::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.to_ascii_lowercase())
-        .is_some_and(|value| value.starts_with("application/grpc"))
 }
 
 fn is_clean_http3_response_shutdown(error: &impl std::fmt::Display) -> bool {

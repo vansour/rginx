@@ -174,6 +174,7 @@ fn listener_transport_bindings_include_udp_http3_binding_when_configured() {
     assert_eq!(bindings[1].http3_retry, Some(false));
     assert_eq!(bindings[1].http3_host_key_path, None);
     assert_eq!(bindings[1].http3_gso, Some(false));
+    assert_eq!(bindings[1].http3_early_data_enabled, Some(false));
 }
 
 #[test]

@@ -96,8 +96,12 @@ if [[ "${NETEM_PROFILE}" != "none" || -n "${MTU}" ]]; then
     need_privileged=1
 fi
 if [[ "${need_privileged}" -eq 1 ]]; then
-    have tc || die "tc is required when --netem-profile is used"
-    have ip || die "ip is required when --mtu is used"
+    if [[ "${NETEM_PROFILE}" != "none" ]]; then
+        have tc || die "tc is required when --netem-profile is used"
+    fi
+    if [[ -n "${MTU}" ]]; then
+        have ip || die "ip is required when --mtu is used"
+    fi
     [[ "${EUID}" -eq 0 ]] || die "root privileges are required for netem/mtu operations"
 fi
 
