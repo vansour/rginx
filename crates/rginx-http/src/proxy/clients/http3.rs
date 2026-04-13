@@ -382,6 +382,7 @@ impl hyper::body::Body for StreamingResponseBody {
     }
 }
 
+/// Streams an upstream HTTP/3 response body into a Hyper body adapter.
 fn streaming_response_body(
     mut request_stream: H3RequestStream,
     session: Arc<Http3Session>,
@@ -439,6 +440,7 @@ fn streaming_response_body(
     boxed_body(StreamingResponseBody::new(rx, size_hint, join_handle))
 }
 
+/// Derives a Hyper body size hint from upstream response headers.
 fn response_size_hint(headers: &HeaderMap) -> SizeHint {
     let mut hint = SizeHint::default();
     if let Some(content_length) = headers
@@ -451,12 +453,14 @@ fn response_size_hint(headers: &HeaderMap) -> SizeHint {
     hint
 }
 
+/// Detects peer shutdown errors that should be treated as a clean HTTP/3 EOF.
 fn is_clean_http3_response_shutdown(error: &impl std::fmt::Display) -> bool {
     let error = error.to_string();
     error.contains("ApplicationClose: H3_NO_ERROR")
         || error.contains("Application { code: H3_NO_ERROR")
 }
 
+/// Resolves the selected upstream peer authority into a socket address.
 fn resolve_peer_socket_addr(peer: &UpstreamPeer) -> Result<SocketAddr, Error> {
     peer.authority
         .to_socket_addrs()
@@ -475,6 +479,7 @@ fn resolve_peer_socket_addr(peer: &UpstreamPeer) -> Result<SocketAddr, Error> {
         })
 }
 
+/// Determines the TLS server name to use for an upstream HTTP/3 connection.
 fn server_name_for_peer(upstream: &Upstream, peer: &UpstreamPeer) -> Result<String, Error> {
     if let Some(server_name_override) = upstream.server_name_override.as_ref() {
         return Ok(server_name_override.clone());
