@@ -64,6 +64,7 @@ pub(super) async fn serve_connection(
         tls_client_identity: None,
         tls_version: None,
         tls_alpn: None,
+        early_data: false,
     };
 
     if let Some(tls_acceptor) = tls_acceptor {
@@ -187,7 +188,9 @@ fn tls_alpn_protocol(
         .map(|protocol| String::from_utf8_lossy(protocol).into_owned())
 }
 
-fn classify_tls_handshake_failure(error: &impl std::fmt::Display) -> TlsHandshakeFailureReason {
+pub(super) fn classify_tls_handshake_failure(
+    error: &impl std::fmt::Display,
+) -> TlsHandshakeFailureReason {
     let error = error.to_string().to_ascii_lowercase();
     if error.contains("certificate required")
         || error.contains("peer sent no certificates")

@@ -32,6 +32,20 @@ pub struct Http3Config {
     pub advertise_alt_svc: Option<bool>,
     #[serde(default)]
     pub alt_svc_max_age_secs: Option<u64>,
+    #[serde(default)]
+    pub max_concurrent_streams: Option<u64>,
+    #[serde(default)]
+    pub stream_buffer_size_bytes: Option<u64>,
+    #[serde(default)]
+    pub active_connection_id_limit: Option<u32>,
+    #[serde(default)]
+    pub retry: Option<bool>,
+    #[serde(default)]
+    pub host_key_path: Option<String>,
+    #[serde(default)]
+    pub gso: Option<bool>,
+    #[serde(default)]
+    pub early_data: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -322,6 +336,8 @@ pub struct LocationConfig {
     pub requests_per_sec: Option<u32>,
     #[serde(default)]
     pub burst: Option<u32>,
+    #[serde(default)]
+    pub allow_early_data: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -45,6 +45,10 @@ impl SharedState {
                         .get(listener_id)
                         .map(|connections| connections.load(Ordering::Acquire))
                         .unwrap_or(0),
+                    http3_runtime: http3_runtime_snapshot(
+                        entry.http3_enabled,
+                        Some(entry.counters.as_ref()),
+                    ),
                     downstream_connections_accepted: entry
                         .counters
                         .downstream_connections_accepted

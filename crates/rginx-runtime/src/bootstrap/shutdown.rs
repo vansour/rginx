@@ -144,6 +144,7 @@ mod tests {
                     }),
                     access_control: RouteAccessControl::default(),
                     rate_limit: None,
+                    allow_early_data: false,
                 }],
                 tls: None,
             },

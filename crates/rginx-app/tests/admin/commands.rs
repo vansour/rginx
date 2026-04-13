@@ -21,6 +21,10 @@ fn status_command_reads_local_admin_socket() {
     assert!(stdout.contains("tls_listeners=1"));
     assert!(stdout.contains("tls_certificates=0"));
     assert!(stdout.contains("tls_expiring_certificates=0"));
+    assert!(stdout.contains("http3_active_connections=0"));
+    assert!(stdout.contains("http3_active_request_streams=0"));
+    assert!(stdout.contains("http3_retry_issued_total=0"));
+    assert!(stdout.contains("http3_request_body_stream_errors_total=0"));
     assert!(stdout.contains("active_connections=0"));
     assert!(stdout.contains("mtls_listeners=0"));
     assert!(stdout.contains("reload_attempts=0"));
@@ -82,7 +86,7 @@ fn status_command_reports_http3_listener_bindings() {
         &cert.signing_key.serialize_pem(),
         |_, cert_path, key_path| {
             format!(
-                "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n        server_names: [\"localhost\"],\n        tls: Some(ServerTlsConfig(\n            cert_path: {:?},\n            key_path: {:?},\n        )),\n        http3: Some(Http3Config(\n            advertise_alt_svc: Some(true),\n            alt_svc_max_age_secs: Some(7200),\n        )),\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Return(\n                status: 200,\n                location: \"\",\n                body: Some(\"ok\\n\"),\n            ),\n        ),\n    ],\n)\n",
+                "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n        accept_workers: Some(2),\n    ),\n    server: ServerConfig(\n        listen: {:?},\n        server_names: [\"localhost\"],\n        tls: Some(ServerTlsConfig(\n            cert_path: {:?},\n            key_path: {:?},\n        )),\n        http3: Some(Http3Config(\n            advertise_alt_svc: Some(true),\n            alt_svc_max_age_secs: Some(7200),\n            early_data: Some(true),\n        )),\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Return(\n                status: 200,\n                location: \"\",\n                body: Some(\"ok\\n\"),\n            ),\n            allow_early_data: Some(true),\n        ),\n    ],\n)\n",
                 listen_addr.to_string(),
                 cert_path.display().to_string(),
                 key_path.display().to_string(),
@@ -101,6 +105,15 @@ fn status_command_reports_http3_listener_bindings() {
     assert!(stdout.contains("bind_addrs=tcp://"));
     assert!(stdout.contains("udp://"));
     assert!(stdout.contains("http3=enabled"));
+    assert!(stdout.contains("http3_early_data_enabled_listeners=1"));
+    assert!(stdout.contains("http3_active_connections=0"));
+    assert!(stdout.contains("http3_active_request_streams=0"));
+    assert!(stdout.contains("http3_retry_issued_total=0"));
+    assert!(stdout.contains("http3_request_accept_errors_total=0"));
+    assert!(stdout.contains("http3_request_body_stream_errors_total=0"));
+    assert!(stdout.contains("http3_response_stream_errors_total=0"));
+    assert!(stdout.contains("http3_early_data_accepted_requests=0"));
+    assert!(stdout.contains("http3_early_data_rejected_requests=0"));
     assert!(stdout.contains("kind=status_listener"));
     assert!(stdout.contains("transport_bindings=2"));
     assert!(stdout.contains("kind=status_listener_binding"));
@@ -108,12 +121,32 @@ fn status_command_reports_http3_listener_bindings() {
     assert!(stdout.contains("binding=udp"));
     assert!(stdout.contains("transport=udp"));
     assert!(stdout.contains("protocols=http3"));
+    assert!(stdout.contains("worker_count=2"));
+    assert!(stdout.contains("reuse_port_enabled=true"));
     assert!(stdout.contains("advertise_alt_svc=true"));
     assert!(stdout.contains("alt_svc_max_age_secs=7200"));
+    assert!(stdout.contains("http3_max_concurrent_streams=128"));
+    assert!(stdout.contains("http3_stream_buffer_size=65536"));
+    assert!(stdout.contains("http3_active_connection_id_limit=2"));
+    assert!(stdout.contains("http3_retry=false"));
+    assert!(stdout.contains("http3_host_key_path=-"));
+    assert!(stdout.contains("http3_gso=false"));
+    assert!(stdout.contains("http3_early_data_enabled=true"));
+    assert!(stdout.contains("kind=status_listener_http3"));
+    assert!(stdout.contains("retry_issued_total=0"));
+    assert!(stdout.contains("request_accept_errors_total=0"));
+    assert!(stdout.contains("request_body_stream_errors_total=0"));
     assert!(stdout.contains("kind=status_tls_listener"));
     assert!(stdout.contains("http3_enabled=true"));
     assert!(stdout.contains("http3_versions=TLS1.3"));
     assert!(stdout.contains("http3_alpn_protocols=h3"));
+    assert!(stdout.contains("http3_max_concurrent_streams=128"));
+    assert!(stdout.contains("http3_stream_buffer_size=65536"));
+    assert!(stdout.contains("http3_active_connection_id_limit=2"));
+    assert!(stdout.contains("http3_retry=false"));
+    assert!(stdout.contains("http3_host_key_path=-"));
+    assert!(stdout.contains("http3_gso=false"));
+    assert!(stdout.contains("http3_early_data_enabled=true"));
 
     server.shutdown_and_wait(Duration::from_secs(5));
 }
@@ -134,6 +167,8 @@ fn counters_command_reports_local_connection_and_response_counters() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("kind=counters"));
     assert!(stdout.contains("downstream_mtls_authenticated_requests_total=0"));
+    assert!(stdout.contains("downstream_http3_early_data_accepted_requests_total=0"));
+    assert!(stdout.contains("downstream_http3_early_data_rejected_requests_total=0"));
     let requests = parse_counter(&stdout, "downstream_requests_total");
     let responses_2xx = parse_counter(&stdout, "downstream_responses_2xx_total");
     let responses_4xx = parse_counter(&stdout, "downstream_responses_4xx_total");

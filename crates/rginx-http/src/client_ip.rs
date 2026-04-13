@@ -43,6 +43,7 @@ pub struct ConnectionPeerAddrs {
     pub tls_client_identity: Option<TlsClientIdentity>,
     pub tls_version: Option<String>,
     pub tls_alpn: Option<String>,
+    pub early_data: bool,
 }
 
 pub fn resolve_client_address(
@@ -167,6 +168,7 @@ mod tests {
                 tls_client_identity: None,
                 tls_version: None,
                 tls_alpn: None,
+                early_data: false,
             },
         );
 
@@ -203,6 +205,7 @@ mod tests {
                 tls_client_identity: None,
                 tls_version: None,
                 tls_alpn: None,
+                early_data: false,
             },
         );
 
@@ -239,6 +242,7 @@ mod tests {
                 tls_client_identity: None,
                 tls_version: None,
                 tls_alpn: None,
+                early_data: false,
             },
         );
 
@@ -274,6 +278,7 @@ mod tests {
                 tls_client_identity: None,
                 tls_version: None,
                 tls_alpn: None,
+                early_data: false,
             },
         );
 
@@ -309,6 +314,7 @@ mod tests {
                 tls_client_identity: None,
                 tls_version: None,
                 tls_alpn: None,
+                early_data: false,
             },
         );
 
@@ -342,6 +348,7 @@ mod tests {
                 tls_client_identity: None,
                 tls_version: None,
                 tls_alpn: None,
+                early_data: false,
             },
         );
 
