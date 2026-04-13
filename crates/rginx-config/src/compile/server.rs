@@ -17,11 +17,11 @@ use crate::model::{
     TlsVersionConfig, VirtualHostTlsConfig,
 };
 
-const DEFAULT_HTTP3_MAX_CONCURRENT_STREAMS: usize = 128;
-const DEFAULT_HTTP3_STREAM_BUFFER_SIZE_BYTES: usize = 64 * 1024;
-const DEFAULT_HTTP3_ACTIVE_CONNECTION_ID_LIMIT: u32 = 2;
-const DEFAULT_HTTP3_RETRY: bool = false;
-const DEFAULT_HTTP3_GSO: bool = false;
+pub(super) const DEFAULT_HTTP3_MAX_CONCURRENT_STREAMS: usize = 128;
+pub(super) const DEFAULT_HTTP3_STREAM_BUFFER_SIZE_BYTES: usize = 64 * 1024;
+pub(super) const DEFAULT_HTTP3_ACTIVE_CONNECTION_ID_LIMIT: u32 = 2;
+pub(super) const DEFAULT_HTTP3_RETRY: bool = false;
+pub(super) const DEFAULT_HTTP3_GSO: bool = false;
 
 pub(super) struct CompiledServer {
     pub listener: Listener,
