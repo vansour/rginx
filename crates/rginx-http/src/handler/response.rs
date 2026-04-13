@@ -23,10 +23,6 @@ pub(super) fn too_many_requests_response() -> HttpResponse {
     )
 }
 
-pub(super) fn too_early_response() -> HttpResponse {
-    text_response(StatusCode::TOO_EARLY, "text/plain; charset=utf-8", "too early\n")
-}
-
 pub(crate) fn text_response(
     status: StatusCode,
     content_type: &str,

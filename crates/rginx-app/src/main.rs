@@ -58,13 +58,6 @@ fn main() -> anyhow::Result<()> {
                     listeners: check_listener_summaries(&config),
                     tls_enabled: config.tls_enabled(),
                     http3_enabled: config.http3_enabled(),
-                    http3_early_data_enabled_listeners: config
-                        .listeners
-                        .iter()
-                        .filter(|listener| {
-                            listener.http3.as_ref().is_some_and(|http3| http3.early_data_enabled)
-                        })
-                        .count(),
                     total_vhost_count: config.total_vhost_count(),
                     total_route_count: config.total_route_count(),
                     upstream_count: config.upstreams.len(),
@@ -92,13 +85,6 @@ fn main() -> anyhow::Result<()> {
                     listeners: check_listener_summaries(&config),
                     tls_enabled: config.tls_enabled(),
                     http3_enabled: config.http3_enabled(),
-                    http3_early_data_enabled_listeners: config
-                        .listeners
-                        .iter()
-                        .filter(|listener| {
-                            listener.http3.as_ref().is_some_and(|http3| http3.early_data_enabled)
-                        })
-                        .count(),
                     total_vhost_count: config.total_vhost_count(),
                     total_route_count: config.total_route_count(),
                     upstream_count: config.upstreams.len(),
@@ -151,7 +137,6 @@ struct CheckSummary {
     listeners: Vec<CheckListenerSummary>,
     tls_enabled: bool,
     http3_enabled: bool,
-    http3_early_data_enabled_listeners: usize,
     total_vhost_count: usize,
     total_route_count: usize,
     upstream_count: usize,
@@ -180,17 +165,8 @@ struct CheckListenerBindingSummary {
     transport: String,
     listen_addr: std::net::SocketAddr,
     protocols: Vec<String>,
-    worker_count: usize,
-    reuse_port_enabled: Option<bool>,
     advertise_alt_svc: Option<bool>,
     alt_svc_max_age_secs: Option<u64>,
-    http3_max_concurrent_streams: Option<usize>,
-    http3_stream_buffer_size: Option<usize>,
-    http3_active_connection_id_limit: Option<u32>,
-    http3_retry: Option<bool>,
-    http3_host_key_path: Option<PathBuf>,
-    http3_gso: Option<bool>,
-    http3_early_data_enabled: Option<bool>,
 }
 
 struct TlsCheckDetails {
@@ -253,7 +229,7 @@ fn print_check_success(config_path: &Path, summary: CheckSummary) {
             .join(",")
     };
     println!(
-        "configuration is valid: config={} listener_model={} listeners={} listener_bindings={} listen_addrs={} bind_addrs={} tls={} http3={} http3_early_data_enabled_listeners={} vhosts={} routes={} upstreams={} worker_threads={} accept_workers={}",
+        "configuration is valid: config={} listener_model={} listeners={} listener_bindings={} listen_addrs={} bind_addrs={} tls={} http3={} vhosts={} routes={} upstreams={} worker_threads={} accept_workers={}",
         config_path.display(),
         summary.listener_model,
         summary.listener_count,
@@ -262,7 +238,6 @@ fn print_check_success(config_path: &Path, summary: CheckSummary) {
         bind_addrs,
         if summary.tls_enabled { "enabled" } else { "disabled" },
         if summary.http3_enabled { "enabled" } else { "disabled" },
-        summary.http3_early_data_enabled_listeners,
         summary.total_vhost_count,
         summary.total_route_count,
         summary.upstream_count,
@@ -292,7 +267,7 @@ fn print_check_success(config_path: &Path, summary: CheckSummary) {
         );
         for binding in &listener.bindings {
             println!(
-                "check_listener_binding listener={} binding={} transport={} listen={} protocols={} worker_count={} reuse_port_enabled={} advertise_alt_svc={} alt_svc_max_age_secs={} http3_max_concurrent_streams={} http3_stream_buffer_size={} http3_active_connection_id_limit={} http3_retry={} http3_host_key_path={} http3_gso={} http3_early_data_enabled={}",
+                "check_listener_binding listener={} binding={} transport={} listen={} protocols={} advertise_alt_svc={} alt_svc_max_age_secs={}",
                 listener.id,
                 binding.binding_name,
                 binding.transport,
@@ -302,43 +277,12 @@ fn print_check_success(config_path: &Path, summary: CheckSummary) {
                 } else {
                     binding.protocols.join(",")
                 },
-                binding.worker_count,
-                binding
-                    .reuse_port_enabled
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "-".to_string()),
                 binding
                     .advertise_alt_svc
                     .map(|value| value.to_string())
                     .unwrap_or_else(|| "-".to_string()),
                 binding
                     .alt_svc_max_age_secs
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "-".to_string()),
-                binding
-                    .http3_max_concurrent_streams
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "-".to_string()),
-                binding
-                    .http3_stream_buffer_size
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "-".to_string()),
-                binding
-                    .http3_active_connection_id_limit
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "-".to_string()),
-                binding
-                    .http3_retry
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "-".to_string()),
-                binding
-                    .http3_host_key_path
-                    .as_ref()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_else(|| "-".to_string()),
-                binding.http3_gso.map(|value| value.to_string()).unwrap_or_else(|| "-".to_string()),
-                binding
-                    .http3_early_data_enabled
                     .map(|value| value.to_string())
                     .unwrap_or_else(|| "-".to_string()),
             );
@@ -364,7 +308,7 @@ fn print_check_success(config_path: &Path, summary: CheckSummary) {
     println!("tls_restart_required_fields={}", summary.tls.restart_required_fields.join(","));
     for listener in &summary.tls.listeners {
         println!(
-            "tls_listener listener={} listener_id={} listen={} tls={} default_certificate={} tcp_versions={} tcp_alpn_protocols={} http3_enabled={} http3_listen={} http3_versions={} http3_alpn_protocols={} http3_max_concurrent_streams={} http3_stream_buffer_size={} http3_active_connection_id_limit={} http3_retry={} http3_host_key_path={} http3_gso={} http3_early_data_enabled={} sni_names={}",
+            "tls_listener listener={} listener_id={} listen={} tls={} default_certificate={} tcp_versions={} tcp_alpn_protocols={} http3_enabled={} http3_listen={} http3_versions={} http3_alpn_protocols={} sni_names={}",
             listener.listener_name,
             listener.listener_id,
             listener.listen_addr,
@@ -396,29 +340,6 @@ fn print_check_success(config_path: &Path, summary: CheckSummary) {
             } else {
                 listener.http3_alpn_protocols.join(",")
             },
-            listener
-                .http3_max_concurrent_streams
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "-".to_string()),
-            listener
-                .http3_stream_buffer_size
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "-".to_string()),
-            listener
-                .http3_active_connection_id_limit
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "-".to_string()),
-            listener.http3_retry.map(|value| value.to_string()).unwrap_or_else(|| "-".to_string()),
-            listener
-                .http3_host_key_path
-                .as_ref()
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|| "-".to_string()),
-            listener.http3_gso.map(|value| value.to_string()).unwrap_or_else(|| "-".to_string()),
-            listener
-                .http3_early_data_enabled
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "-".to_string()),
             if listener.sni_names.is_empty() {
                 "-".to_string()
             } else {
@@ -573,18 +494,8 @@ fn check_listener_summaries(config: &rginx_config::ConfigSnapshot) -> Vec<CheckL
                         .into_iter()
                         .map(|protocol| protocol.as_str().to_string())
                         .collect(),
-                    worker_count: config.runtime.accept_workers,
-                    reuse_port_enabled: (binding.kind.as_str() == "udp")
-                        .then_some(config.runtime.accept_workers > 1),
                     advertise_alt_svc: binding.alt_svc_max_age.map(|_| binding.advertise_alt_svc),
                     alt_svc_max_age_secs: binding.alt_svc_max_age.map(|max_age| max_age.as_secs()),
-                    http3_max_concurrent_streams: binding.http3_max_concurrent_streams,
-                    http3_stream_buffer_size: binding.http3_stream_buffer_size,
-                    http3_active_connection_id_limit: binding.http3_active_connection_id_limit,
-                    http3_retry: binding.http3_retry,
-                    http3_host_key_path: binding.http3_host_key_path.clone(),
-                    http3_gso: binding.http3_gso,
-                    http3_early_data_enabled: binding.http3_early_data_enabled,
                 })
                 .collect::<Vec<_>>();
 

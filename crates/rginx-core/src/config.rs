@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -118,13 +117,6 @@ pub struct ListenerHttp3 {
     pub listen_addr: SocketAddr,
     pub advertise_alt_svc: bool,
     pub alt_svc_max_age: Duration,
-    pub max_concurrent_streams: usize,
-    pub stream_buffer_size: usize,
-    pub active_connection_id_limit: u32,
-    pub retry: bool,
-    pub host_key_path: Option<PathBuf>,
-    pub gso: bool,
-    pub early_data_enabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -135,13 +127,6 @@ pub struct ListenerTransportBinding {
     pub protocols: Vec<ListenerApplicationProtocol>,
     pub advertise_alt_svc: bool,
     pub alt_svc_max_age: Option<Duration>,
-    pub http3_max_concurrent_streams: Option<usize>,
-    pub http3_stream_buffer_size: Option<usize>,
-    pub http3_active_connection_id_limit: Option<u32>,
-    pub http3_retry: Option<bool>,
-    pub http3_host_key_path: Option<PathBuf>,
-    pub http3_gso: Option<bool>,
-    pub http3_early_data_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -179,13 +164,6 @@ impl Listener {
             },
             advertise_alt_svc: false,
             alt_svc_max_age: None,
-            http3_max_concurrent_streams: None,
-            http3_stream_buffer_size: None,
-            http3_active_connection_id_limit: None,
-            http3_retry: None,
-            http3_host_key_path: None,
-            http3_gso: None,
-            http3_early_data_enabled: None,
         }];
 
         if let Some(http3) = &self.http3 {
@@ -196,13 +174,6 @@ impl Listener {
                 protocols: vec![ListenerApplicationProtocol::Http3],
                 advertise_alt_svc: http3.advertise_alt_svc,
                 alt_svc_max_age: Some(http3.alt_svc_max_age),
-                http3_max_concurrent_streams: Some(http3.max_concurrent_streams),
-                http3_stream_buffer_size: Some(http3.stream_buffer_size),
-                http3_active_connection_id_limit: Some(http3.active_connection_id_limit),
-                http3_retry: Some(http3.retry),
-                http3_host_key_path: http3.host_key_path.clone(),
-                http3_gso: Some(http3.gso),
-                http3_early_data_enabled: Some(http3.early_data_enabled),
             });
         }
 

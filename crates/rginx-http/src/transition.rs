@@ -307,13 +307,6 @@ mod tests {
             listen_addr: "127.0.0.1:8443".parse().unwrap(),
             advertise_alt_svc: true,
             alt_svc_max_age: Duration::from_secs(3600),
-            max_concurrent_streams: 128,
-            stream_buffer_size: 64 * 1024,
-            active_connection_id_limit: 2,
-            retry: false,
-            host_key_path: None,
-            gso: false,
-            early_data_enabled: false,
         });
 
         let mut next = snapshot("127.0.0.1:8443");
@@ -322,13 +315,6 @@ mod tests {
             listen_addr: "127.0.0.1:9443".parse().unwrap(),
             advertise_alt_svc: true,
             alt_svc_max_age: Duration::from_secs(3600),
-            max_concurrent_streams: 128,
-            stream_buffer_size: 64 * 1024,
-            active_connection_id_limit: 2,
-            retry: false,
-            host_key_path: None,
-            gso: false,
-            early_data_enabled: false,
         });
 
         let plan = plan_config_transition(&current, &next);

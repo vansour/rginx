@@ -123,9 +123,6 @@ jobs:
       - name: Run TLS Release Gate
         run: ./scripts/run-tls-gate.sh
 
-      - name: Run HTTP/3 Release Gate
-        run: ./scripts/run-http3-release-gate.sh --soak-iterations 1
-
   build:
     name: Build ${{ matrix.asset_name }} Assets
     needs: verify

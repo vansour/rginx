@@ -2,7 +2,7 @@
 
 `rginx` 是一个面向中小规模部署的 Rust 入口反向代理。
 
-当前版本：`v0.1.3-rc.11`
+当前版本：`v0.1.3-rc.10`
 
 它的目标很收口：
 
@@ -81,7 +81,7 @@
 
 ## HTTP/3 规划
 
-当前仓库已经完成 HTTP/3 NGINX 对齐计划的全部阶段：
+当前仓库已经完成 HTTP/3 的全部八个阶段：
 
 - 下游 HTTP/3 ingress
 - `Return` / 基础 `Proxy`
@@ -95,16 +95,11 @@
 - 面向 HTTP/3 upstream 的主动 gRPC health check
 - HTTP/3 listener 的 TLS / SNI / OCSP 诊断
 - HTTP/3 listener 的 reload / restart / drain 语义
-- HTTP/3 listener 的 0-RTT / replay-safe route 策略
-- HTTP/3 listener 的 QUIC runtime telemetry / dedicated release gate / focused soak
 - HTTP/3 已纳入默认 fast/slow test gate、TLS gate、soak 和 benchmark 入口
 
-- 分阶段实施计划见 `ARCHITECTURE_HTTP3_NGINX_ALIGNMENT_PLAN.md`
-- 阶段 0 基线见 `HTTP3_PHASE0_BASELINE.md`
-- 阶段 7 release gate 说明见 `HTTP3_PHASE7_RELEASE.md`
-- 上游 HTTP/3 生产级传输专项计划见 `ARCHITECTURE_UPSTREAM_HTTP3_PRODUCTION_PLAN.md`
-- 上游 HTTP/3 生产级传输阶段 0 基线见 `ARCHITECTURE_UPSTREAM_HTTP3_PHASE0_BASELINE.md`
-- 当前已完成阶段：Phase 0、Phase 1、Phase 2、Phase 3、Phase 4、Phase 5、Phase 6、Phase 7
+- 分阶段实施计划见 `ARCHITECTURE_HTTP3_PLAN.md`
+- 阶段 0 语义冻结见 `ARCHITECTURE_HTTP3_PHASE0_FREEZE.md`
+- 当前已完成阶段：Phase 0、Phase 1、Phase 2、Phase 3、Phase 4、Phase 5、Phase 6、Phase 7、Phase 8
 
 ## 仓库结构
 
@@ -348,7 +343,7 @@ sudo apt install rginx
 
 当前约定：
 
-- 预发布 tag，例如 `v0.1.3-rc.11`：发布 GitHub Release 资产，但不更新 APT 仓库
+- 预发布 tag，例如 `v0.1.3-rc.10`：发布 GitHub Release 资产，但不更新 APT 仓库
 - 稳定 tag，例如 `v0.1.3`：同时发布 GitHub Release 和 GitHub Pages APT 仓库
 
 要让稳定版自动发布 APT 仓库，还需要一次性配置：
@@ -626,26 +621,13 @@ python3 scripts/run-benchmark-matrix.py \
 ./scripts/run-soak.sh --iterations 1
 ```
 
-HTTP/3 专项 soak：
-
-```bash
-./scripts/run-http3-soak.sh --iterations 3
-```
-
-HTTP/3 release gate：
-
-```bash
-./scripts/run-http3-release-gate.sh --soak-iterations 3
-```
-
-当前建议至少用下面这些命令把工作区收口成可继续迭代的稳定基线：
+当前建议至少用下面三条命令把工作区收口成可继续迭代的稳定基线：
 
 ```bash
 ./scripts/test-fast.sh
 ./scripts/run-clippy-gate.sh
 ./scripts/test-slow.sh
 ./scripts/run-soak.sh --iterations 1
-./scripts/run-http3-gate.sh
 ```
 
 如果你需要本地对比 `rginx` 和 `nginx` 的基准结果，可以继续用：

@@ -38,7 +38,6 @@ fn authorize_route_rejects_disallowed_remote_addr() {
             Vec::new(),
         ),
         rate_limit: None,
-        allow_early_data: false,
     };
 
     let client_address = ClientAddress {
@@ -208,7 +207,6 @@ fn select_route_for_request_prefers_grpc_specific_route() {
                     }),
                     access_control: RouteAccessControl::default(),
                     rate_limit: None,
-                    allow_early_data: false,
                 },
             ],
         ),
@@ -246,7 +244,6 @@ fn select_route_for_request_does_not_match_grpc_specific_route_for_plain_http_re
                 }),
                 access_control: RouteAccessControl::default(),
                 rate_limit: None,
-                allow_early_data: false,
             }],
         ),
         Vec::new(),
@@ -375,7 +372,6 @@ fn attach_connection_metadata_inserts_tls_client_identity_extension() {
         }),
         tls_version: Some("TLS1.3".to_string()),
         tls_alpn: Some("h2".to_string()),
-        early_data: false,
     };
 
     attach_connection_metadata(&mut request, &connection);
@@ -554,7 +550,6 @@ fn authorize_route_returns_grpc_permission_denied_for_grpc_requests() {
             Vec::new(),
         ),
         rate_limit: None,
-        allow_early_data: false,
     };
     let client_address = ClientAddress {
         peer_addr: "192.0.2.10:4567".parse().unwrap(),
@@ -773,7 +768,6 @@ fn test_route(id: &str, matcher: RouteMatcher) -> Route {
         }),
         access_control: RouteAccessControl::default(),
         rate_limit: None,
-        allow_early_data: false,
     }
 }
 

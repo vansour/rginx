@@ -1,11 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::net::{TcpListener as StdTcpListener, UdpSocket as StdUdpSocket};
-use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rginx_core::{ConfigSnapshot, Error, Listener, Result, VirtualHost};
-use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::TcpListener;
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
@@ -17,9 +15,9 @@ pub(super) type ListenerGroupMap = HashMap<String, ListenerWorkerGroup>;
 pub(super) struct PreparedListenerWorkerGroup {
     listener: Listener,
     std_listener: Arc<StdTcpListener>,
-    std_udp_sockets: Vec<Arc<StdUdpSocket>>,
+    std_udp_socket: Option<Arc<StdUdpSocket>>,
     worker_listeners: Vec<TcpListener>,
-    http3_endpoints: Vec<quinn::Endpoint>,
+    http3_endpoint: Option<quinn::Endpoint>,
 }
 
 pub(super) struct WorkerDrainGuard {
@@ -38,7 +36,7 @@ impl Drop for WorkerDrainGuard {
 pub(super) struct ListenerWorkerGroup {
     pub(super) listener: Listener,
     std_listener: Arc<StdTcpListener>,
-    std_udp_sockets: Vec<Arc<StdUdpSocket>>,
+    std_udp_socket: Option<Arc<StdUdpSocket>>,
     shutdown_tx: watch::Sender<bool>,
     tasks: Vec<JoinHandle<Result<()>>>,
 }
@@ -48,7 +46,7 @@ impl ListenerWorkerGroup {
         ListenerHandle {
             listener: self.listener.clone(),
             std_listener: self.std_listener.clone(),
-            std_udp_sockets: self.std_udp_sockets.clone(),
+            std_udp_socket: self.std_udp_socket.clone(),
         }
     }
 
@@ -80,17 +78,17 @@ pub(super) async fn build_initial_listener_groups(
             Some(listener_socket) => listener_socket,
             None => bind_std_listener(listener.server.listen_addr)?,
         };
-        let std_udp_sockets = match &listener.http3 {
+        let std_udp_socket = match &listener.http3 {
             Some(http3) => match inherited.udp.remove(&http3.listen_addr) {
-                Some(sockets) => sockets.into_iter().map(Arc::new).collect(),
-                None => bind_std_udp_sockets(http3.listen_addr, config.runtime.accept_workers)?,
+                Some(socket) => Some(Arc::new(socket)),
+                None => Some(Arc::new(bind_std_udp_socket(http3.listen_addr)?)),
             },
-            None => Vec::new(),
+            None => None,
         };
         let prepared = prepare_listener_worker_group(
             listener.clone(),
             Arc::new(std_listener),
-            std_udp_sockets,
+            std_udp_socket,
             config.runtime.accept_workers,
             &config.default_vhost,
             &config.vhosts,
@@ -167,9 +165,9 @@ pub(super) fn prepare_added_listener_bindings(
             listener
                 .http3
                 .as_ref()
-                .map(|http3| bind_std_udp_sockets(http3.listen_addr, accept_workers))
+                .map(|http3| bind_std_udp_socket(http3.listen_addr))
                 .transpose()?
-                .unwrap_or_default(),
+                .map(Arc::new),
             accept_workers,
             &next_config.default_vhost,
             &next_config.vhosts,
@@ -309,7 +307,7 @@ pub(super) async fn join_aborted_listener_worker_groups(
 fn prepare_listener_worker_group(
     listener: Listener,
     std_listener: Arc<StdTcpListener>,
-    std_udp_sockets: Vec<Arc<StdUdpSocket>>,
+    std_udp_socket: Option<Arc<StdUdpSocket>>,
     accept_workers: usize,
     default_vhost: &VirtualHost,
     vhosts: &[VirtualHost],
@@ -318,22 +316,22 @@ fn prepare_listener_worker_group(
     for _worker_index in 0..accept_workers {
         worker_listeners.push(TcpListener::from_std(std_listener.try_clone()?)?);
     }
-    let mut http3_endpoints = Vec::new();
-    for socket in &std_udp_sockets {
-        http3_endpoints.push(rginx_http::server::bind_http3_endpoint_with_socket(
+    let http3_endpoint = match &std_udp_socket {
+        Some(socket) => Some(rginx_http::server::bind_http3_endpoint_with_socket(
             &listener,
             default_vhost,
             vhosts,
             socket.try_clone()?,
-        )?);
-    }
+        )?),
+        None => rginx_http::server::bind_http3_endpoint(&listener, default_vhost, vhosts)?,
+    };
 
     Ok(PreparedListenerWorkerGroup {
         listener,
         std_listener,
-        std_udp_sockets,
+        std_udp_socket,
         worker_listeners,
-        http3_endpoints,
+        http3_endpoint,
     })
 }
 
@@ -345,7 +343,7 @@ fn activate_prepared_listener_worker_group(
     let (shutdown_tx, _shutdown_rx) = watch::channel(false);
     let mut tasks = Vec::new();
     let remaining_workers = Arc::new(AtomicUsize::new(
-        prepared.worker_listeners.len() + prepared.http3_endpoints.len(),
+        prepared.worker_listeners.len() + usize::from(prepared.http3_endpoint.is_some()),
     ));
 
     for (worker_index, listener_socket) in prepared.worker_listeners.into_iter().enumerate() {
@@ -366,7 +364,7 @@ fn activate_prepared_listener_worker_group(
         }));
     }
 
-    for (worker_index, endpoint) in prepared.http3_endpoints.into_iter().enumerate() {
+    if let Some(endpoint) = prepared.http3_endpoint {
         tracing::info!(
             listener = %prepared.listener.name,
             listen = %prepared
@@ -375,7 +373,6 @@ fn activate_prepared_listener_worker_group(
                 .as_ref()
                 .map(|http3| http3.listen_addr)
                 .unwrap_or(prepared.listener.server.listen_addr),
-            worker = worker_index,
             "starting http3 accept worker"
         );
         let listener_id = prepared.listener.id.clone();
@@ -392,7 +389,7 @@ fn activate_prepared_listener_worker_group(
     ListenerWorkerGroup {
         listener: prepared.listener,
         std_listener: prepared.std_listener,
-        std_udp_sockets: prepared.std_udp_sockets,
+        std_udp_socket: prepared.std_udp_socket,
         shutdown_tx,
         tasks,
     }
@@ -428,39 +425,8 @@ fn bind_std_listener(listen_addr: std::net::SocketAddr) -> Result<StdTcpListener
     Ok(socket)
 }
 
-fn bind_std_udp_sockets(
-    listen_addr: std::net::SocketAddr,
-    count: usize,
-) -> Result<Vec<Arc<StdUdpSocket>>> {
-    let count = count.max(1);
-    (0..count).map(|_| bind_std_udp_socket(listen_addr, count > 1).map(Arc::new)).collect()
-}
-
-fn bind_std_udp_socket(
-    listen_addr: std::net::SocketAddr,
-    reuse_port: bool,
-) -> Result<StdUdpSocket> {
-    let socket = Socket::new(Domain::for_address(listen_addr), Type::DGRAM, Some(Protocol::UDP))
-        .map_err(Error::Io)?;
-    socket.set_reuse_address(true).map_err(Error::Io)?;
-    #[cfg(target_os = "linux")]
-    if reuse_port {
-        let enabled: libc::c_int = 1;
-        let result = unsafe {
-            libc::setsockopt(
-                socket.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_REUSEPORT,
-                (&enabled as *const libc::c_int).cast(),
-                std::mem::size_of_val(&enabled) as libc::socklen_t,
-            )
-        };
-        if result != 0 {
-            return Err(Error::Io(std::io::Error::last_os_error()));
-        }
-    }
-    socket.bind(&listen_addr.into()).map_err(Error::Io)?;
-    let socket: StdUdpSocket = socket.into();
+fn bind_std_udp_socket(listen_addr: std::net::SocketAddr) -> Result<StdUdpSocket> {
+    let socket = StdUdpSocket::bind(listen_addr)?;
     socket.set_nonblocking(true)?;
     Ok(socket)
 }
@@ -525,7 +491,7 @@ mod tests {
         ListenerWorkerGroup {
             listener,
             std_listener: Arc::new(std_listener),
-            std_udp_sockets: Vec::new(),
+            std_udp_socket: None,
             shutdown_tx,
             tasks: Vec::new(),
         }
@@ -582,20 +548,5 @@ mod tests {
         };
 
         assert!(error.to_string().contains("reuses tcp listen address"));
-    }
-
-    #[test]
-    fn bind_std_udp_sockets_creates_one_socket_per_worker() {
-        let seed =
-            bind_std_udp_socket("127.0.0.1:0".parse().expect("socket addr should parse"), false)
-                .expect("seed udp socket should bind");
-        let listen_addr = seed.local_addr().expect("seed udp addr should exist");
-        drop(seed);
-
-        let sockets = bind_std_udp_sockets(listen_addr, 3).expect("udp sockets should bind");
-        assert_eq!(sockets.len(), 3);
-        for socket in sockets {
-            assert_eq!(socket.local_addr().expect("udp socket addr should exist"), listen_addr);
-        }
     }
 }

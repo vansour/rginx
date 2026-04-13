@@ -23,7 +23,7 @@ const CHILD_READY_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct ListenerHandle {
     pub listener: Listener,
     pub std_listener: Arc<StdTcpListener>,
-    pub std_udp_sockets: Vec<Arc<StdUdpSocket>>,
+    pub std_udp_socket: Option<Arc<StdUdpSocket>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,7 +42,7 @@ struct InheritedListenerFd {
 
 pub struct InheritedListeners {
     pub tcp: HashMap<SocketAddr, StdTcpListener>,
-    pub udp: HashMap<SocketAddr, Vec<StdUdpSocket>>,
+    pub udp: HashMap<SocketAddr, StdUdpSocket>,
 }
 
 pub async fn restart(config_path: &Path, listener_handles: &[ListenerHandle]) -> Result<()> {
@@ -56,15 +56,15 @@ pub async fn restart(config_path: &Path, listener_handles: &[ListenerHandle]) ->
             fd: handle.std_listener.as_raw_fd(),
         });
 
-        if let Some(http3) = &handle.listener.http3 {
-            for std_udp_socket in &handle.std_udp_sockets {
-                set_fd_inheritable(std_udp_socket.as_raw_fd())?;
-                inherited.push(InheritedListenerFd {
-                    kind: InheritedSocketKind::Udp,
-                    listen_addr: http3.listen_addr,
-                    fd: std_udp_socket.as_raw_fd(),
-                });
-            }
+        if let Some(http3) = &handle.listener.http3
+            && let Some(std_udp_socket) = &handle.std_udp_socket
+        {
+            set_fd_inheritable(std_udp_socket.as_raw_fd())?;
+            inherited.push(InheritedListenerFd {
+                kind: InheritedSocketKind::Udp,
+                listen_addr: http3.listen_addr,
+                fd: std_udp_socket.as_raw_fd(),
+            });
         }
     }
 
@@ -138,7 +138,7 @@ pub fn take_inherited_listeners_from_env() -> Result<InheritedListeners> {
             InheritedSocketKind::Udp => {
                 let socket = unsafe { StdUdpSocket::from_raw_fd(entry.fd) };
                 socket.set_nonblocking(true)?;
-                udp.entry(entry.listen_addr).or_insert_with(Vec::new).push(socket);
+                udp.insert(entry.listen_addr, socket);
             }
         }
     }
@@ -243,6 +243,5 @@ mod tests {
         assert_eq!(inherited.udp.len(), 1);
         assert!(inherited.tcp.contains_key(&listen_addr));
         assert!(inherited.udp.contains_key(&udp_listen_addr));
-        assert_eq!(inherited.udp[&udp_listen_addr].len(), 1);
     }
 }

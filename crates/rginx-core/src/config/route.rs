@@ -14,7 +14,6 @@ pub struct Route {
     pub action: RouteAction,
     pub access_control: RouteAccessControl,
     pub rate_limit: Option<RouteRateLimit>,
-    pub allow_early_data: bool,
 }
 
 impl Route {

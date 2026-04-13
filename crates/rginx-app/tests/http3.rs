@@ -1,13 +1,10 @@
-use std::fs;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::{Buf, Bytes, BytesMut};
 use flate2::read::GzDecoder;
@@ -18,9 +15,6 @@ use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use quinn::crypto::rustls::QuicClientConfig;
-use rcgen::{
-    BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
-};
 use rustls::pki_types::{CertificateDer, pem::PemObject};
 use rustls::{ClientConfig, RootCertStore};
 
@@ -39,10 +33,6 @@ async fn serves_return_handler_over_http3() {
         |_, cert_path, key_path| http3_return_config(listen_addr, cert_path, key_path),
     );
     server.wait_for_https_ready(listen_addr, Duration::from_secs(5));
-    wait_for_admin_socket(
-        &rginx_runtime::admin::admin_socket_path_for_config(server.config_path()),
-        Duration::from_secs(5),
-    );
 
     let response = http3_get(listen_addr, "localhost", "/v3", &cert.cert.pem())
         .await
@@ -204,12 +194,9 @@ async fn traffic_command_counts_http3_requests() {
     assert!(output.status.success(), "traffic command should succeed: {}", render_output(&output));
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("kind=traffic_listener"));
-    assert!(stdout.contains("kind=traffic_listener_http3"));
     assert!(stdout.contains("listener=default"));
     assert!(stdout.contains("downstream_requests_total=1"));
     assert!(stdout.contains("downstream_responses_total=1"));
-    assert!(stdout.contains("retry_issued_total=0"));
-    assert!(stdout.contains("request_body_stream_errors_total=0"));
 
     server.shutdown_and_wait(Duration::from_secs(5));
 }
@@ -244,313 +231,6 @@ async fn tls_responses_advertise_alt_svc_when_http3_is_enabled() {
     server.shutdown_and_wait(Duration::from_secs(5));
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn required_client_auth_over_http3_accepts_authenticated_clients_and_rejects_anonymous_clients()
- {
-    let fixture = Http3MtlsFixture::new("rginx-http3-required-mtls");
-    let listen_addr = reserve_loopback_addr();
-    let mut server = ServerHarness::spawn_with_tls(
-        "rginx-http3-required-mtls",
-        &fixture.server_cert_pem,
-        &fixture.server_key_pem,
-        |temp_dir, cert_path, key_path| {
-            let ca_path = temp_dir.join("client-ca.pem");
-            fs::write(&ca_path, &fixture.ca_cert_pem).expect("CA cert should be written");
-            http3_client_auth_config(listen_addr, cert_path, key_path, &ca_path, "Required")
-        },
-    );
-    wait_for_admin_socket(
-        &rginx_runtime::admin::admin_socket_path_for_config(server.config_path()),
-        Duration::from_secs(5),
-    );
-
-    wait_for_http3_text_response(
-        listen_addr,
-        "localhost",
-        "/v3",
-        Some((&fixture.client_cert_path, &fixture.client_key_path)),
-        200,
-        "http3 mtls required\n",
-        &fixture.ca_cert_pem,
-        Duration::from_secs(5),
-    )
-    .await;
-
-    let anonymous =
-        http3_get_with_client_identity(listen_addr, "localhost", "/v3", None, &fixture.ca_cert_pem)
-            .await;
-    assert!(anonymous.is_err(), "anonymous HTTP/3 client should be rejected");
-
-    let authenticated = http3_get_with_client_identity(
-        listen_addr,
-        "localhost",
-        "/v3",
-        Some((&fixture.client_cert_path, &fixture.client_key_path)),
-        &fixture.ca_cert_pem,
-    )
-    .await
-    .expect("authenticated HTTP/3 client should succeed");
-    assert_eq!(authenticated.status, StatusCode::OK);
-    assert_eq!(body_text(&authenticated), "http3 mtls required\n");
-
-    let status_output = run_rginx(["--config", server.config_path().to_str().unwrap(), "status"]);
-    assert!(
-        status_output.status.success(),
-        "status command should succeed: {}",
-        render_output(&status_output)
-    );
-    let status_stdout = String::from_utf8_lossy(&status_output.stdout);
-    assert!(status_stdout.contains("mtls_listeners=1"));
-    assert!(status_stdout.contains("mtls_required_listeners=1"));
-    assert!(parse_flat_u64(&status_stdout, "mtls_authenticated_connections") >= 1);
-    assert!(parse_flat_u64(&status_stdout, "mtls_authenticated_requests") >= 1);
-    assert!(parse_flat_u64(&status_stdout, "mtls_handshake_failures_missing_client_cert") >= 1);
-
-    let counters_output =
-        run_rginx(["--config", server.config_path().to_str().unwrap(), "counters"]);
-    assert!(
-        counters_output.status.success(),
-        "counters command should succeed: {}",
-        render_output(&counters_output)
-    );
-    let counters_stdout = String::from_utf8_lossy(&counters_output.stdout);
-    assert!(
-        parse_flat_u64(&counters_stdout, "downstream_mtls_authenticated_connections_total") >= 1
-    );
-    assert!(parse_flat_u64(&counters_stdout, "downstream_mtls_authenticated_requests_total") >= 1);
-    assert!(
-        parse_flat_u64(
-            &counters_stdout,
-            "downstream_tls_handshake_failures_missing_client_cert_total"
-        ) >= 1
-    );
-
-    server.shutdown_and_wait(Duration::from_secs(5));
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn optional_client_auth_over_http3_allows_both_anonymous_and_authenticated_clients() {
-    let fixture = Http3MtlsFixture::new("rginx-http3-optional-mtls");
-    let listen_addr = reserve_loopback_addr();
-    let mut server = ServerHarness::spawn_with_tls(
-        "rginx-http3-optional-mtls",
-        &fixture.server_cert_pem,
-        &fixture.server_key_pem,
-        |temp_dir, cert_path, key_path| {
-            let ca_path = temp_dir.join("client-ca.pem");
-            fs::write(&ca_path, &fixture.ca_cert_pem).expect("CA cert should be written");
-            http3_client_auth_config(listen_addr, cert_path, key_path, &ca_path, "Optional")
-        },
-    );
-
-    wait_for_http3_text_response(
-        listen_addr,
-        "localhost",
-        "/v3",
-        None,
-        200,
-        "http3 mtls optional\n",
-        &fixture.ca_cert_pem,
-        Duration::from_secs(5),
-    )
-    .await;
-
-    let anonymous =
-        http3_get_with_client_identity(listen_addr, "localhost", "/v3", None, &fixture.ca_cert_pem)
-            .await
-            .expect("anonymous HTTP/3 client should succeed");
-    assert_eq!(anonymous.status, StatusCode::OK);
-    assert_eq!(body_text(&anonymous), "http3 mtls optional\n");
-
-    let authenticated = http3_get_with_client_identity(
-        listen_addr,
-        "localhost",
-        "/v3",
-        Some((&fixture.client_cert_path, &fixture.client_key_path)),
-        &fixture.ca_cert_pem,
-    )
-    .await
-    .expect("authenticated HTTP/3 client should succeed");
-    assert_eq!(authenticated.status, StatusCode::OK);
-    assert_eq!(body_text(&authenticated), "http3 mtls optional\n");
-
-    server.shutdown_and_wait(Duration::from_secs(5));
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn validates_client_address_with_http3_retry_and_creates_host_key() {
-    let cert = generate_cert("localhost");
-    let listen_addr = reserve_loopback_addr();
-    let mut server = ServerHarness::spawn_with_tls(
-        "rginx-http3-retry",
-        &cert.cert.pem(),
-        &cert.signing_key.serialize_pem(),
-        |temp_dir, cert_path, key_path| {
-            http3_retry_config(listen_addr, cert_path, key_path, &temp_dir.join("quic/host.key"))
-        },
-    );
-    server.wait_for_https_ready(listen_addr, Duration::from_secs(5));
-
-    let response = http3_get(listen_addr, "localhost", "/v3", &cert.cert.pem())
-        .await
-        .expect("http3 request with retry should succeed");
-    assert_eq!(response.status, StatusCode::OK);
-    assert_eq!(body_text(&response), "http3 return\n");
-
-    let status_output = run_rginx(["--config", server.config_path().to_str().unwrap(), "status"]);
-    assert!(
-        status_output.status.success(),
-        "status command should succeed: {}",
-        render_output(&status_output)
-    );
-    let status_stdout = String::from_utf8_lossy(&status_output.stdout);
-    assert!(parse_flat_u64(&status_stdout, "http3_retry_issued_total") >= 1);
-    assert!(status_stdout.contains("kind=status_listener_http3"));
-
-    server.shutdown_and_wait(Duration::from_secs(5));
-
-    let host_key_path = server.temp_dir().join("quic/host.key");
-    let host_key = fs::read(&host_key_path).expect("http3 host key should be created");
-    assert_eq!(host_key.len(), 64);
-
-    let logs = server.combined_output();
-    assert!(
-        logs.contains("http3 issuing retry to validate client address"),
-        "expected retry log entry, got {logs:?}"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn preserves_http3_host_key_across_reload() {
-    let cert = generate_cert("localhost");
-    let listen_addr = reserve_loopback_addr();
-    let mut server = ServerHarness::spawn_with_tls(
-        "rginx-http3-retry-reload",
-        &cert.cert.pem(),
-        &cert.signing_key.serialize_pem(),
-        |temp_dir, cert_path, key_path| {
-            http3_retry_config(listen_addr, cert_path, key_path, &temp_dir.join("quic/host.key"))
-        },
-    );
-    server.wait_for_https_ready(listen_addr, Duration::from_secs(5));
-
-    let first = http3_get(listen_addr, "localhost", "/v3", &cert.cert.pem())
-        .await
-        .expect("initial http3 request should succeed");
-    assert_eq!(first.status, StatusCode::OK);
-
-    let host_key_path = server.temp_dir().join("quic/host.key");
-    let before = fs::read(&host_key_path).expect("host key should exist before reload");
-    assert_eq!(before.len(), 64);
-
-    server.send_signal(libc::SIGHUP);
-    server.wait_for_https_ready(listen_addr, Duration::from_secs(5));
-
-    let second = http3_get(listen_addr, "localhost", "/v3", &cert.cert.pem())
-        .await
-        .expect("http3 request after reload should succeed");
-    assert_eq!(second.status, StatusCode::OK);
-
-    let after = fs::read(&host_key_path).expect("host key should exist after reload");
-    assert_eq!(before, after);
-
-    server.shutdown_and_wait(Duration::from_secs(5));
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn routes_http3_early_data_by_replay_safety() {
-    let cert = generate_cert("localhost");
-    let listen_addr = reserve_loopback_addr();
-    let mut server = ServerHarness::spawn_with_tls(
-        "rginx-http3-early-data",
-        &cert.cert.pem(),
-        &cert.signing_key.serialize_pem(),
-        |_, cert_path, key_path| http3_early_data_config(listen_addr, cert_path, key_path),
-    );
-    server.wait_for_https_ready(listen_addr, Duration::from_secs(5));
-    wait_for_admin_socket(
-        &rginx_runtime::admin::admin_socket_path_for_config(server.config_path()),
-        Duration::from_secs(5),
-    );
-
-    let endpoint = http3_client_endpoint(None, &cert.cert.pem(), true)
-        .expect("http3 early-data client should build");
-
-    let (warmup, _) = http3_request_with_endpoint(
-        &endpoint,
-        listen_addr,
-        "localhost",
-        "GET",
-        "/safe",
-        &[],
-        None,
-        false,
-        Duration::from_millis(150),
-    )
-    .await
-    .expect("warmup request should succeed");
-    assert_eq!(warmup.status, StatusCode::OK);
-    assert_eq!(body_text(&warmup), "early data safe\n");
-
-    let (safe, safe_accepted) = wait_for_http3_0rtt_request(
-        &endpoint,
-        listen_addr,
-        "localhost",
-        "/safe",
-        Duration::from_secs(2),
-    )
-    .await
-    .expect("0-RTT request to replay-safe route should succeed");
-    assert!(safe_accepted, "server should accept 0-RTT data");
-    assert_eq!(safe.status, StatusCode::OK);
-    assert_eq!(body_text(&safe), "early data safe\n");
-
-    let (unsafe_route, unsafe_accepted) = wait_for_http3_0rtt_request(
-        &endpoint,
-        listen_addr,
-        "localhost",
-        "/unsafe",
-        Duration::from_secs(2),
-    )
-    .await
-    .expect("0-RTT request to non-replay-safe route should respond");
-    assert!(unsafe_accepted, "server should keep 0-RTT enabled for the listener");
-    assert_eq!(unsafe_route.status, StatusCode::TOO_EARLY);
-    assert_eq!(body_text(&unsafe_route), "too early\n");
-
-    endpoint.close(quinn::VarInt::from_u32(0), b"done");
-
-    let status_output = run_rginx(["--config", server.config_path().to_str().unwrap(), "status"]);
-    assert!(
-        status_output.status.success(),
-        "status command should succeed: {}",
-        render_output(&status_output)
-    );
-    let status_stdout = String::from_utf8_lossy(&status_output.stdout);
-    assert_eq!(parse_flat_u64(&status_stdout, "http3_early_data_enabled_listeners"), 1);
-    assert!(parse_flat_u64(&status_stdout, "http3_early_data_accepted_requests") >= 1);
-    assert!(parse_flat_u64(&status_stdout, "http3_early_data_rejected_requests") >= 1);
-
-    let counters_output =
-        run_rginx(["--config", server.config_path().to_str().unwrap(), "counters"]);
-    assert!(
-        counters_output.status.success(),
-        "counters command should succeed: {}",
-        render_output(&counters_output)
-    );
-    let counters_stdout = String::from_utf8_lossy(&counters_output.stdout);
-    assert!(
-        parse_flat_u64(&counters_stdout, "downstream_http3_early_data_accepted_requests_total")
-            >= 1
-    );
-    assert!(
-        parse_flat_u64(&counters_stdout, "downstream_http3_early_data_rejected_requests_total")
-            >= 1
-    );
-
-    server.shutdown_and_wait(Duration::from_secs(5));
-}
-
 struct Http3Response {
     status: StatusCode,
     headers: std::collections::HashMap<String, String>,
@@ -563,18 +243,7 @@ async fn http3_get(
     path: &str,
     cert_pem: &str,
 ) -> Result<Http3Response, String> {
-    http3_request_inner(listen_addr, server_name, "GET", path, &[], None, None, cert_pem).await
-}
-
-async fn http3_get_with_client_identity(
-    listen_addr: SocketAddr,
-    server_name: &str,
-    path: &str,
-    client_identity: Option<(&Path, &Path)>,
-    cert_pem: &str,
-) -> Result<Http3Response, String> {
-    http3_request_inner(listen_addr, server_name, "GET", path, &[], None, client_identity, cert_pem)
-        .await
+    http3_request(listen_addr, server_name, "GET", path, &[], None, cert_pem).await
 }
 
 async fn http3_request(
@@ -586,61 +255,15 @@ async fn http3_request(
     body: Option<Bytes>,
     cert_pem: &str,
 ) -> Result<Http3Response, String> {
-    http3_request_inner(listen_addr, server_name, method, path, headers, body, None, cert_pem).await
-}
-
-async fn http3_request_inner(
-    listen_addr: SocketAddr,
-    server_name: &str,
-    method: &str,
-    path: &str,
-    headers: &[(&str, &str)],
-    body: Option<Bytes>,
-    client_identity: Option<(&Path, &Path)>,
-    cert_pem: &str,
-) -> Result<Http3Response, String> {
-    let endpoint = http3_client_endpoint(client_identity, cert_pem, false)?;
-    let (response, _) = http3_request_with_endpoint(
-        &endpoint,
-        listen_addr,
-        server_name,
-        method,
-        path,
-        headers,
-        body,
-        false,
-        Duration::ZERO,
-    )
-    .await?;
-    endpoint.close(quinn::VarInt::from_u32(0), b"done");
-
-    Ok(response)
-}
-
-fn http3_client_endpoint(
-    client_identity: Option<(&Path, &Path)>,
-    cert_pem: &str,
-    enable_early_data: bool,
-) -> Result<quinn::Endpoint, String> {
     let roots = root_store_from_pem(cert_pem)?;
-    let client_crypto = ClientConfig::builder_with_provider(Arc::new(
+    let mut client_crypto = ClientConfig::builder_with_provider(Arc::new(
         rustls::crypto::aws_lc_rs::default_provider(),
     ))
     .with_protocol_versions(&[&rustls::version::TLS13])
     .map_err(|error| format!("failed to constrain TLS versions for http3 client: {error}"))?
-    .with_root_certificates(roots);
-    let mut client_crypto = match client_identity {
-        Some((cert_path, key_path)) => {
-            let certs = load_certs_from_path(cert_path)?;
-            let key = load_private_key_from_path(key_path)?;
-            client_crypto
-                .with_client_auth_cert(certs, key)
-                .map_err(|error| format!("failed to configure HTTP/3 client cert: {error}"))?
-        }
-        None => client_crypto.with_no_client_auth(),
-    };
+    .with_root_certificates(roots)
+    .with_no_client_auth();
     client_crypto.alpn_protocols = vec![b"h3".to_vec()];
-    client_crypto.enable_early_data = enable_early_data;
 
     let client_config = quinn::ClientConfig::new(Arc::new(
         QuicClientConfig::try_from(client_crypto)
@@ -650,35 +273,11 @@ fn http3_client_endpoint(
         .map_err(|error| error.to_string())?;
     endpoint.set_default_client_config(client_config);
 
-    Ok(endpoint)
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn http3_request_with_endpoint(
-    endpoint: &quinn::Endpoint,
-    listen_addr: SocketAddr,
-    server_name: &str,
-    method: &str,
-    path: &str,
-    headers: &[(&str, &str)],
-    body: Option<Bytes>,
-    use_0rtt: bool,
-    linger_after_response: Duration,
-) -> Result<(Http3Response, Option<bool>), String> {
-    let connecting = endpoint
+    let connection = endpoint
         .connect(listen_addr, server_name)
-        .map_err(|error| format!("failed to start quic connect: {error}"))?;
-    let (connection, zero_rtt_accepted) = if use_0rtt {
-        match connecting.into_0rtt() {
-            Ok((connection, accepted)) => (connection, Some(accepted)),
-            Err(_) => return Err("0-RTT resumption was not available".to_string()),
-        }
-    } else {
-        let connection =
-            connecting.await.map_err(|error| format!("quic connect failed: {error}"))?;
-        (connection, None)
-    };
-    let connection_handle = connection.clone();
+        .map_err(|error| format!("failed to start quic connect: {error}"))?
+        .await
+        .map_err(|error| format!("quic connect failed: {error}"))?;
 
     let (mut driver, mut send_request) =
         client::new(h3_quinn::Connection::new(connection))
@@ -734,66 +333,13 @@ async fn http3_request_with_endpoint(
         .await
         .map_err(|error| format!("failed to receive http3 response trailers: {error}"))?;
 
-    let early_data_accepted = match zero_rtt_accepted {
-        Some(accepted) => Some(accepted.await),
-        None => None,
-    };
-
-    if linger_after_response > Duration::ZERO {
-        tokio::time::sleep(linger_after_response).await;
-    }
-
-    connection_handle.close(quinn::VarInt::from_u32(0), b"done");
-
     if tokio::time::timeout(Duration::from_millis(50), &mut driver_task).await.is_err() {
         driver_task.abort();
         let _ = driver_task.await;
     }
+    endpoint.close(quinn::VarInt::from_u32(0), b"done");
 
-    Ok((Http3Response { status, headers, body: body.to_vec() }, early_data_accepted))
-}
-
-async fn wait_for_http3_0rtt_request(
-    endpoint: &quinn::Endpoint,
-    listen_addr: SocketAddr,
-    server_name: &str,
-    path: &str,
-    timeout: Duration,
-) -> Result<(Http3Response, bool), String> {
-    let deadline = std::time::Instant::now() + timeout;
-    let mut last_error = String::new();
-
-    while std::time::Instant::now() < deadline {
-        match http3_request_with_endpoint(
-            endpoint,
-            listen_addr,
-            server_name,
-            "GET",
-            path,
-            &[],
-            None,
-            true,
-            Duration::ZERO,
-        )
-        .await
-        {
-            Ok((response, Some(accepted))) => return Ok((response, accepted)),
-            Ok((_response, None)) => {
-                last_error =
-                    "0-RTT request unexpectedly completed without an acceptance signal".to_string();
-            }
-            Err(error) if error.contains("0-RTT resumption was not available") => {
-                last_error = error;
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            Err(error) => return Err(error),
-        }
-    }
-
-    Err(format!(
-        "timed out waiting for reusable 0-RTT state for https://{server_name}:{}{path}; last error: {last_error}",
-        listen_addr.port()
-    ))
+    Ok(Http3Response { status, headers, body: body.to_vec() })
 }
 
 fn https_client(
@@ -828,20 +374,6 @@ fn root_store_from_pem(cert_pem: &str) -> Result<RootCertStore, String> {
     let mut roots = RootCertStore::empty();
     roots.add(cert).map_err(|error| format!("failed to add root certificate: {error}"))?;
     Ok(roots)
-}
-
-fn load_certs_from_path(path: &Path) -> Result<Vec<CertificateDer<'static>>, String> {
-    CertificateDer::pem_file_iter(path)
-        .map_err(|error| format!("failed to open cert `{}`: {error}", path.display()))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("failed to parse cert `{}`: {error}", path.display()))
-}
-
-fn load_private_key_from_path(
-    path: &Path,
-) -> Result<rustls::pki_types::PrivateKeyDer<'static>, String> {
-    rustls::pki_types::PrivateKeyDer::from_pem_file(path)
-        .map_err(|error| format!("failed to parse key `{}`: {error}", path.display()))
 }
 
 fn http3_return_config(
@@ -903,145 +435,9 @@ fn http3_proxy_config(
     )
 }
 
-fn http3_retry_config(
-    listen_addr: SocketAddr,
-    cert_path: &std::path::Path,
-    key_path: &std::path::Path,
-    host_key_path: &std::path::Path,
-) -> String {
-    format!(
-        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n        server_names: [],\n        tls: Some(ServerTlsConfig(\n            cert_path: {:?},\n            key_path: {:?},\n        )),\n        http3: Some(Http3Config(\n            advertise_alt_svc: Some(true),\n            alt_svc_max_age_secs: Some(7200),\n            active_connection_id_limit: Some(5),\n            retry: Some(true),\n            host_key_path: Some({:?}),\n        )),\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Return(\n                status: 200,\n                location: \"\",\n                body: Some(\"fallback\\n\"),\n            ),\n        ),\n    ],\n    servers: [\n        VirtualHostConfig(\n            server_names: [\"localhost\"],\n            locations: [\n                LocationConfig(\n                    matcher: Exact(\"/v3\"),\n                    handler: Return(\n                        status: 200,\n                        location: \"\",\n                        body: Some(\"http3 return\\n\"),\n                    ),\n                ),\n            ],\n        ),\n    ],\n)\n",
-        listen_addr.to_string(),
-        cert_path.display().to_string(),
-        key_path.display().to_string(),
-        host_key_path.display().to_string(),
-        ready_route = READY_ROUTE_CONFIG,
-    )
-}
-
-fn http3_early_data_config(
-    listen_addr: SocketAddr,
-    cert_path: &std::path::Path,
-    key_path: &std::path::Path,
-) -> String {
-    format!(
-        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n        server_names: [\"localhost\"],\n        tls: Some(ServerTlsConfig(\n            cert_path: {:?},\n            key_path: {:?},\n        )),\n        http3: Some(Http3Config(\n            advertise_alt_svc: Some(true),\n            alt_svc_max_age_secs: Some(7200),\n            early_data: Some(true),\n        )),\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/safe\"),\n            handler: Return(\n                status: 200,\n                location: \"\",\n                body: Some(\"early data safe\\n\"),\n            ),\n            allow_early_data: Some(true),\n        ),\n        LocationConfig(\n            matcher: Exact(\"/unsafe\"),\n            handler: Return(\n                status: 200,\n                location: \"\",\n                body: Some(\"early data unsafe\\n\"),\n            ),\n        ),\n    ],\n)\n",
-        listen_addr.to_string(),
-        cert_path.display().to_string(),
-        key_path.display().to_string(),
-        ready_route = READY_ROUTE_CONFIG,
-    )
-}
-
-fn http3_client_auth_config(
-    listen_addr: SocketAddr,
-    cert_path: &std::path::Path,
-    key_path: &std::path::Path,
-    ca_path: &std::path::Path,
-    mode: &str,
-) -> String {
-    let body = if mode == "Required" { "http3 mtls required\n" } else { "http3 mtls optional\n" };
-    format!(
-        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n        server_names: [\"localhost\"],\n        tls: Some(ServerTlsConfig(\n            cert_path: {:?},\n            key_path: {:?},\n            client_auth: Some(ServerClientAuthConfig(\n                mode: {},\n                ca_cert_path: {:?},\n            )),\n        )),\n        http3: Some(Http3Config(\n            advertise_alt_svc: Some(true),\n            alt_svc_max_age_secs: Some(7200),\n        )),\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/v3\"),\n            handler: Return(\n                status: 200,\n                location: \"\",\n                body: Some({:?}),\n            ),\n        ),\n    ],\n)\n",
-        listen_addr.to_string(),
-        cert_path.display().to_string(),
-        key_path.display().to_string(),
-        mode,
-        ca_path.display().to_string(),
-        body,
-        ready_route = READY_ROUTE_CONFIG,
-    )
-}
-
 fn generate_cert(hostname: &str) -> rcgen::CertifiedKey<rcgen::KeyPair> {
     rcgen::generate_simple_self_signed(vec![hostname.to_string()])
         .expect("self-signed certificate should generate")
-}
-
-struct Http3MtlsFixture {
-    _dir: PathBuf,
-    ca_cert_pem: String,
-    server_cert_pem: String,
-    server_key_pem: String,
-    client_cert_path: PathBuf,
-    client_key_path: PathBuf,
-}
-
-impl Http3MtlsFixture {
-    fn new(prefix: &str) -> Self {
-        let dir = temp_dir(prefix);
-        fs::create_dir_all(&dir).expect("fixture temp dir should be created");
-
-        let ca = generate_ca_cert("rginx h3 mtls ca");
-        let server =
-            generate_cert_signed_by_ca("localhost", &ca, ExtendedKeyUsagePurpose::ServerAuth);
-        let client = generate_cert_signed_by_ca(
-            "client.example.com",
-            &ca,
-            ExtendedKeyUsagePurpose::ClientAuth,
-        );
-
-        let client_cert_path = dir.join("client.crt");
-        let client_key_path = dir.join("client.key");
-        fs::write(&client_cert_path, client.cert.pem()).expect("client cert should be written");
-        fs::write(&client_key_path, client.signing_key.serialize_pem())
-            .expect("client key should be written");
-
-        Self {
-            _dir: dir,
-            ca_cert_pem: ca.cert.pem(),
-            server_cert_pem: server.cert.pem(),
-            server_key_pem: server.signing_key.serialize_pem(),
-            client_cert_path,
-            client_key_path,
-        }
-    }
-}
-
-fn temp_dir(prefix: &str) -> PathBuf {
-    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system time should be after unix epoch")
-        .as_nanos();
-    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    PathBuf::from(format!("{}/{}-{}-{}", std::env::temp_dir().display(), prefix, unique, id))
-}
-
-struct TestCertifiedKey {
-    cert: rcgen::Certificate,
-    signing_key: KeyPair,
-    params: CertificateParams,
-}
-
-impl TestCertifiedKey {
-    fn issuer(&self) -> Issuer<'_, &KeyPair> {
-        Issuer::from_params(&self.params, &self.signing_key)
-    }
-}
-
-fn generate_ca_cert(common_name: &str) -> TestCertifiedKey {
-    let mut params = CertificateParams::default();
-    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    params.distinguished_name.push(DnType::CommonName, common_name);
-    let signing_key = KeyPair::generate().expect("CA keypair should generate");
-    let cert = params.self_signed(&signing_key).expect("CA cert should generate");
-    TestCertifiedKey { cert, signing_key, params }
-}
-
-fn generate_cert_signed_by_ca(
-    dns_name: &str,
-    issuer: &TestCertifiedKey,
-    usage: ExtendedKeyUsagePurpose,
-) -> TestCertifiedKey {
-    let mut params =
-        CertificateParams::new(vec![dns_name.to_string()]).expect("leaf params should build");
-    params.distinguished_name.push(DnType::CommonName, dns_name);
-    params.extended_key_usages = vec![usage];
-    let signing_key = KeyPair::generate().expect("leaf keypair should generate");
-    let cert =
-        params.signed_by(&signing_key, &issuer.issuer()).expect("leaf cert should be signed");
-    TestCertifiedKey { cert, signing_key, params }
 }
 
 fn decode_gzip(bytes: &[u8]) -> Vec<u8> {
@@ -1071,60 +467,6 @@ fn wait_for_admin_socket(path: &Path, timeout: Duration) {
     }
 
     panic!("timed out waiting for admin socket {}", path.display());
-}
-
-async fn wait_for_http3_text_response(
-    listen_addr: SocketAddr,
-    server_name: &str,
-    path: &str,
-    client_identity: Option<(&Path, &Path)>,
-    expected_status: u16,
-    expected_body: &str,
-    cert_pem: &str,
-    timeout: Duration,
-) {
-    let deadline = std::time::Instant::now() + timeout;
-    let mut last_error = String::new();
-
-    while std::time::Instant::now() < deadline {
-        match http3_get_with_client_identity(
-            listen_addr,
-            server_name,
-            path,
-            client_identity,
-            cert_pem,
-        )
-        .await
-        {
-            Ok(response)
-                if response.status.as_u16() == expected_status
-                    && body_text(&response) == expected_body =>
-            {
-                return;
-            }
-            Ok(response) => {
-                last_error = format!(
-                    "unexpected response: status={} body={:?}",
-                    response.status.as_u16(),
-                    body_text(&response)
-                );
-            }
-            Err(error) => last_error = error,
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-
-    panic!(
-        "timed out waiting for expected HTTP/3 response on {listen_addr}{path}; last error: {last_error}"
-    );
-}
-
-fn parse_flat_u64(output: &str, key: &str) -> u64 {
-    output
-        .split_whitespace()
-        .find_map(|field| field.strip_prefix(&format!("{key}=")))
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(0)
 }
 
 fn run_rginx(args: impl IntoIterator<Item = impl AsRef<str>>) -> std::process::Output {

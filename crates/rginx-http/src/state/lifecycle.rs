@@ -25,116 +25,44 @@ impl SharedState {
             config.as_ref(),
             Some(&ocsp_statuses),
         );
-        let listener_traffic =
-            self.traffic_stats.read().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let http3_active_connections = config
-            .listeners
-            .iter()
-            .filter_map(|listener| listener_traffic.listeners.get(&listener.id))
-            .map(|entry| entry.counters.active_http3_connections.load(Ordering::Acquire))
-            .sum();
-        let http3_active_request_streams = config
-            .listeners
-            .iter()
-            .filter_map(|listener| listener_traffic.listeners.get(&listener.id))
-            .map(|entry| entry.counters.active_http3_request_streams.load(Ordering::Acquire))
-            .sum();
-        let http3_retry_issued_total = config
-            .listeners
-            .iter()
-            .filter_map(|listener| listener_traffic.listeners.get(&listener.id))
-            .map(|entry| entry.counters.http3_retry_issued_total.load(Ordering::Relaxed))
-            .sum();
-        let http3_retry_failed_total = config
-            .listeners
-            .iter()
-            .filter_map(|listener| listener_traffic.listeners.get(&listener.id))
-            .map(|entry| entry.counters.http3_retry_failed_total.load(Ordering::Relaxed))
-            .sum();
-        let http3_request_accept_errors_total = config
-            .listeners
-            .iter()
-            .filter_map(|listener| listener_traffic.listeners.get(&listener.id))
-            .map(|entry| entry.counters.http3_request_accept_errors_total.load(Ordering::Relaxed))
-            .sum();
-        let http3_request_resolve_errors_total = config
-            .listeners
-            .iter()
-            .filter_map(|listener| listener_traffic.listeners.get(&listener.id))
-            .map(|entry| entry.counters.http3_request_resolve_errors_total.load(Ordering::Relaxed))
-            .sum();
-        let http3_request_body_stream_errors_total = config
-            .listeners
-            .iter()
-            .filter_map(|listener| listener_traffic.listeners.get(&listener.id))
-            .map(|entry| {
-                entry.counters.http3_request_body_stream_errors_total.load(Ordering::Relaxed)
-            })
-            .sum();
-        let http3_response_stream_errors_total = config
-            .listeners
-            .iter()
-            .filter_map(|listener| listener_traffic.listeners.get(&listener.id))
-            .map(|entry| entry.counters.http3_response_stream_errors_total.load(Ordering::Relaxed))
-            .sum();
         RuntimeStatusSnapshot {
             revision,
             config_path: self.config_path.as_deref().cloned(),
             listeners: config
                 .listeners
                 .iter()
-                .map(|listener| {
-                    let listener_entry = listener_traffic.listeners.get(&listener.id);
-                    let listener_counters = listener_entry.map(|entry| entry.counters.as_ref());
-                    RuntimeListenerSnapshot {
-                        listener_id: listener.id.clone(),
-                        listener_name: listener.name.clone(),
-                        listen_addr: listener.server.listen_addr,
-                        binding_count: listener.binding_count(),
-                        http3_enabled: listener.http3_enabled(),
-                        tls_enabled: listener.tls_enabled(),
-                        proxy_protocol_enabled: listener.proxy_protocol_enabled,
-                        default_certificate: listener.server.default_certificate.clone(),
-                        keep_alive: listener.server.keep_alive,
-                        max_connections: listener.server.max_connections,
-                        access_log_format_configured: listener.server.access_log_format.is_some(),
-                        http3_runtime: http3_runtime_snapshot(
-                            listener.http3.is_some(),
-                            listener_counters,
-                        ),
-                        bindings: listener
-                            .transport_bindings()
-                            .into_iter()
-                            .map(|binding| crate::state::RuntimeListenerBindingSnapshot {
-                                binding_name: binding.name.to_string(),
-                                transport: binding.kind.as_str().to_string(),
-                                listen_addr: binding.listen_addr,
-                                protocols: binding
-                                    .protocols
-                                    .into_iter()
-                                    .map(|protocol| protocol.as_str().to_string())
-                                    .collect(),
-                                worker_count: config.runtime.accept_workers,
-                                reuse_port_enabled: (binding.kind
-                                    == rginx_core::ListenerTransportKind::Udp)
-                                    .then_some(config.runtime.accept_workers > 1),
-                                advertise_alt_svc: binding
-                                    .alt_svc_max_age
-                                    .map(|_| binding.advertise_alt_svc),
-                                alt_svc_max_age_secs: binding
-                                    .alt_svc_max_age
-                                    .map(|max_age| max_age.as_secs()),
-                                http3_max_concurrent_streams: binding.http3_max_concurrent_streams,
-                                http3_stream_buffer_size: binding.http3_stream_buffer_size,
-                                http3_active_connection_id_limit: binding
-                                    .http3_active_connection_id_limit,
-                                http3_retry: binding.http3_retry,
-                                http3_host_key_path: binding.http3_host_key_path.clone(),
-                                http3_gso: binding.http3_gso,
-                                http3_early_data_enabled: binding.http3_early_data_enabled,
-                            })
-                            .collect(),
-                    }
+                .map(|listener| RuntimeListenerSnapshot {
+                    listener_id: listener.id.clone(),
+                    listener_name: listener.name.clone(),
+                    listen_addr: listener.server.listen_addr,
+                    binding_count: listener.binding_count(),
+                    http3_enabled: listener.http3_enabled(),
+                    tls_enabled: listener.tls_enabled(),
+                    proxy_protocol_enabled: listener.proxy_protocol_enabled,
+                    default_certificate: listener.server.default_certificate.clone(),
+                    keep_alive: listener.server.keep_alive,
+                    max_connections: listener.server.max_connections,
+                    access_log_format_configured: listener.server.access_log_format.is_some(),
+                    bindings: listener
+                        .transport_bindings()
+                        .into_iter()
+                        .map(|binding| crate::state::RuntimeListenerBindingSnapshot {
+                            binding_name: binding.name.to_string(),
+                            transport: binding.kind.as_str().to_string(),
+                            listen_addr: binding.listen_addr,
+                            protocols: binding
+                                .protocols
+                                .into_iter()
+                                .map(|protocol| protocol.as_str().to_string())
+                                .collect(),
+                            advertise_alt_svc: binding
+                                .alt_svc_max_age
+                                .map(|_| binding.advertise_alt_svc),
+                            alt_svc_max_age_secs: binding
+                                .alt_svc_max_age
+                                .map(|max_age| max_age.as_secs()),
+                        })
+                        .collect(),
                 })
                 .collect(),
             worker_threads: config.runtime.worker_threads,
@@ -143,29 +71,6 @@ impl SharedState {
             total_routes: config.total_route_count(),
             total_upstreams: config.upstreams.len(),
             tls_enabled: config.tls_enabled(),
-            http3_active_connections,
-            http3_active_request_streams,
-            http3_retry_issued_total,
-            http3_retry_failed_total,
-            http3_request_accept_errors_total,
-            http3_request_resolve_errors_total,
-            http3_request_body_stream_errors_total,
-            http3_response_stream_errors_total,
-            http3_early_data_enabled_listeners: config
-                .listeners
-                .iter()
-                .filter(|listener| {
-                    listener.http3.as_ref().is_some_and(|http3| http3.early_data_enabled)
-                })
-                .count(),
-            http3_early_data_accepted_requests: self
-                .counters
-                .downstream_http3_early_data_accepted_requests
-                .load(Ordering::Relaxed),
-            http3_early_data_rejected_requests: self
-                .counters
-                .downstream_http3_early_data_rejected_requests
-                .load(Ordering::Relaxed),
             tls,
             mtls,
             upstream_tls: upstream_tls_status_snapshots(config.as_ref()),

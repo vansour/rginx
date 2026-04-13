@@ -153,7 +153,6 @@ run_step ./scripts/test-fast.sh
 run_step ./scripts/run-clippy-gate.sh
 run_step ./scripts/test-slow.sh
 run_step ./scripts/run-tls-gate.sh
-run_step ./scripts/run-http3-release-gate.sh --soak-iterations 1
 
 log "running: cargo run -p rginx -- --version"
 VERSION_OUTPUT="$(cargo run -p rginx -- --version | tail -n 1)"

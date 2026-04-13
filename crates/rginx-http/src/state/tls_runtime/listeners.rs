@@ -33,14 +33,6 @@ pub(super) fn tls_listener_status_snapshots(
                     .map(|_| vec![tls_version_label(rginx_core::TlsVersion::Tls13).to_string()])
                     .unwrap_or_default(),
                 http3_alpn_protocols: http3.map(|_| vec!["h3".to_string()]).unwrap_or_default(),
-                http3_max_concurrent_streams: http3.map(|http3| http3.max_concurrent_streams),
-                http3_stream_buffer_size: http3.map(|http3| http3.stream_buffer_size),
-                http3_active_connection_id_limit: http3
-                    .map(|http3| http3.active_connection_id_limit),
-                http3_retry: http3.map(|http3| http3.retry),
-                http3_host_key_path: http3.and_then(|http3| http3.host_key_path.clone()),
-                http3_gso: http3.map(|http3| http3.gso),
-                http3_early_data_enabled: http3.map(|http3| http3.early_data_enabled),
                 session_resumption_enabled: tls.map(|tls| tls.session_resumption != Some(false)),
                 session_tickets_enabled: tls.map(|tls| {
                     tls.session_resumption != Some(false) && tls.session_tickets != Some(false)

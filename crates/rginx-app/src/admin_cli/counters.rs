@@ -80,14 +80,6 @@ pub(super) fn print_admin_counters(config_path: &Path) -> anyhow::Result<()> {
                         "downstream_tls_handshake_failures_other_total",
                         counters.downstream_tls_handshake_failures_other.to_string(),
                     ),
-                    (
-                        "downstream_http3_early_data_accepted_requests_total",
-                        counters.downstream_http3_early_data_accepted_requests.to_string(),
-                    ),
-                    (
-                        "downstream_http3_early_data_rejected_requests_total",
-                        counters.downstream_http3_early_data_rejected_requests.to_string(),
-                    ),
                 ],
             );
             Ok(())

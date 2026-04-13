@@ -132,7 +132,6 @@ mod tests {
             }),
             access_control: RouteAccessControl::default(),
             rate_limit: None,
-            allow_early_data: false,
         }
     }
 
@@ -163,7 +162,6 @@ mod tests {
                 }),
                 access_control: RouteAccessControl::default(),
                 rate_limit: None,
-                allow_early_data: false,
             },
             Route {
                 id: "test|prefix:/".to_string(),
@@ -176,7 +174,6 @@ mod tests {
                 }),
                 access_control: RouteAccessControl::default(),
                 rate_limit: None,
-                allow_early_data: false,
             },
         ];
 
@@ -197,7 +194,6 @@ mod tests {
             }),
             access_control: RouteAccessControl::default(),
             rate_limit: None,
-            allow_early_data: false,
         }];
 
         assert!(select_route(&routes, "/api/demo").is_some());
@@ -277,7 +273,6 @@ mod tests {
                 }),
                 access_control: RouteAccessControl::default(),
                 rate_limit: None,
-                allow_early_data: false,
             },
             Route {
                 id: "test|prefix:/".to_string(),
@@ -290,7 +285,6 @@ mod tests {
                 }),
                 access_control: RouteAccessControl::default(),
                 rate_limit: None,
-                allow_early_data: false,
             },
         ];
 
@@ -318,7 +312,6 @@ mod tests {
             }),
             access_control: RouteAccessControl::default(),
             rate_limit: None,
-            allow_early_data: false,
         }];
 
         assert!(select_route(&routes, "/").is_none());
@@ -351,7 +344,6 @@ mod tests {
                     }),
                     access_control: RouteAccessControl::default(),
                     rate_limit: None,
-                    allow_early_data: false,
                 },
                 make_route("/", "fallback"),
             ],

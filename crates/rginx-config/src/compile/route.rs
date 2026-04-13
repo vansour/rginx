@@ -41,7 +41,6 @@ fn compile_route(
         deny_cidrs,
         requests_per_sec,
         burst,
-        allow_early_data,
     } = location;
 
     let matcher = match matcher {
@@ -66,15 +65,7 @@ fn compile_route(
     let rate_limit = compile_route_rate_limit(&matcher, requests_per_sec, burst)?;
     let action = compile_route_action(handler, upstreams)?;
 
-    Ok(Route {
-        id: route_id,
-        matcher,
-        grpc_match,
-        action,
-        access_control,
-        rate_limit,
-        allow_early_data: allow_early_data.unwrap_or(false),
-    })
+    Ok(Route { id: route_id, matcher, grpc_match, action, access_control, rate_limit })
 }
 
 fn compile_route_action(

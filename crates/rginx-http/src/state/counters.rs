@@ -19,8 +19,6 @@ pub(super) struct HttpCounters {
     downstream_tls_handshake_failures_certificate_revoked: AtomicU64,
     downstream_tls_handshake_failures_verify_depth_exceeded: AtomicU64,
     downstream_tls_handshake_failures_other: AtomicU64,
-    downstream_http3_early_data_accepted_requests: AtomicU64,
-    downstream_http3_early_data_rejected_requests: AtomicU64,
 }
 
 #[derive(Debug, Default)]
@@ -134,22 +132,6 @@ pub(super) struct RequestTrafficCounters {
 pub(super) struct ListenerTrafficCounters {
     downstream_connections_accepted: AtomicU64,
     downstream_connections_rejected: AtomicU64,
-    active_http3_connections: AtomicUsize,
-    active_http3_request_streams: AtomicUsize,
-    http3_retry_issued_total: AtomicU64,
-    http3_retry_failed_total: AtomicU64,
-    http3_request_accept_errors_total: AtomicU64,
-    http3_request_resolve_errors_total: AtomicU64,
-    http3_request_body_stream_errors_total: AtomicU64,
-    http3_response_stream_errors_total: AtomicU64,
-    http3_connection_close_version_mismatch_total: AtomicU64,
-    http3_connection_close_transport_error_total: AtomicU64,
-    http3_connection_close_connection_closed_total: AtomicU64,
-    http3_connection_close_application_closed_total: AtomicU64,
-    http3_connection_close_reset_total: AtomicU64,
-    http3_connection_close_timed_out_total: AtomicU64,
-    http3_connection_close_locally_closed_total: AtomicU64,
-    http3_connection_close_cids_exhausted_total: AtomicU64,
     downstream_mtls_authenticated_connections: AtomicU64,
     downstream_tls_handshake_failures: AtomicU64,
     downstream_tls_handshake_failures_missing_client_cert: AtomicU64,
@@ -158,8 +140,6 @@ pub(super) struct ListenerTrafficCounters {
     downstream_tls_handshake_failures_certificate_revoked: AtomicU64,
     downstream_tls_handshake_failures_verify_depth_exceeded: AtomicU64,
     downstream_tls_handshake_failures_other: AtomicU64,
-    downstream_http3_early_data_accepted_requests: AtomicU64,
-    downstream_http3_early_data_rejected_requests: AtomicU64,
     downstream_requests: AtomicU64,
     downstream_mtls_authenticated_requests: AtomicU64,
     downstream_mtls_anonymous_requests: AtomicU64,
@@ -206,7 +186,6 @@ pub(super) struct RouteTrafficCounters {
 pub(super) struct ListenerTrafficEntry {
     listener_name: String,
     listen_addr: std::net::SocketAddr,
-    http3_enabled: bool,
     counters: Arc<ListenerTrafficCounters>,
 }
 
@@ -293,12 +272,6 @@ impl HttpCounters {
                 .load(Ordering::Relaxed),
             downstream_tls_handshake_failures_other: self
                 .downstream_tls_handshake_failures_other
-                .load(Ordering::Relaxed),
-            downstream_http3_early_data_accepted_requests: self
-                .downstream_http3_early_data_accepted_requests
-                .load(Ordering::Relaxed),
-            downstream_http3_early_data_rejected_requests: self
-                .downstream_http3_early_data_rejected_requests
                 .load(Ordering::Relaxed),
         }
     }
@@ -524,7 +497,6 @@ pub(super) fn build_traffic_stats_index(
             ListenerTrafficEntry {
                 listener_name: listener.name.clone(),
                 listen_addr: listener.server.listen_addr,
-                http3_enabled: listener.http3.is_some(),
                 counters: current
                     .map(|entry| entry.counters.clone())
                     .unwrap_or_else(|| Arc::new(ListenerTrafficCounters::default())),

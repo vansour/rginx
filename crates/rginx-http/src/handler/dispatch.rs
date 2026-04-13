@@ -3,9 +3,7 @@ use super::grpc::{
     GrpcRequestMetadata, GrpcStatsContext, GrpcStatusCode, grpc_error_response, grpc_observability,
     grpc_request_metadata, wrap_grpc_observability_response,
 };
-use super::response::{
-    forbidden_response, full_body, text_response, too_early_response, too_many_requests_response,
-};
+use super::response::{forbidden_response, full_body, text_response, too_many_requests_response};
 use super::*;
 use crate::client_ip::{ConnectionPeerAddrs, TlsClientIdentity};
 use std::sync::Arc;
@@ -58,7 +56,6 @@ pub async fn handle(
         HeaderValue::from_str(&request_id).expect("generated request ids should be valid headers");
     request.headers_mut().insert("x-request-id", request_id_header.clone());
     let tls_client_identity = request.extensions().get::<TlsClientIdentity>().cloned();
-    let early_data = request.extensions().get::<bool>().copied().unwrap_or(false);
     let path = request
         .uri()
         .path_and_query()
@@ -108,12 +105,7 @@ pub async fn handle(
     };
     let response = match selected_route {
         Some(route) => {
-            if early_data && !route.allow_early_data {
-                state.record_http3_early_data_rejected_request(listener_id);
-                early_data_rejection_response(&request_headers)
-            } else if let Some(response) =
-                authorize_route(&request_headers, &route, &client_address)
-            {
+            if let Some(response) = authorize_route(&request_headers, &route, &client_address) {
                 state.record_route_access_denied(&route.id);
                 response
             } else if let Some(response) =
@@ -122,9 +114,6 @@ pub async fn handle(
                 state.record_route_rate_limited(&route.id);
                 response
             } else {
-                if early_data {
-                    state.record_http3_early_data_accepted_request(listener_id);
-                }
                 build_route_response(
                     request,
                     state.clone(),
@@ -227,15 +216,6 @@ pub async fn handle(
     );
 
     response
-}
-
-fn early_data_rejection_response(request_headers: &HeaderMap) -> HttpResponse {
-    grpc_error_response(
-        request_headers,
-        GrpcStatusCode::Unavailable,
-        "early data rejected for non-replay-safe route",
-    )
-    .unwrap_or_else(too_early_response)
 }
 
 pub(super) async fn finalize_downstream_response(
