@@ -15,6 +15,13 @@ use super::provider::{build_crypto_provider, default_crypto_provider, rustls_ver
 use super::session::apply_session_policy;
 use super::sni::{SniCertificateResolver, register_server_name_certificates};
 
+struct TlsServerConfigOptions {
+    alpn_protocols: Vec<String>,
+    http3_only: bool,
+    max_request_body_bytes: Option<usize>,
+    http3_early_data_enabled: bool,
+}
+
 /// 构建支持 SNI 的 TLS acceptor
 pub fn build_tls_acceptor(
     default_tls: Option<&ServerTls>,
@@ -29,12 +36,14 @@ pub fn build_tls_acceptor(
         tls_termination_enabled,
         default_vhost,
         vhosts,
-        default_tls
-            .and_then(|tls| tls.alpn_protocols.clone())
-            .unwrap_or_else(|| vec!["h2".to_string(), "http/1.1".to_string()]),
-        false,
-        None,
-        false,
+        TlsServerConfigOptions {
+            alpn_protocols: default_tls
+                .and_then(|tls| tls.alpn_protocols.clone())
+                .unwrap_or_else(|| vec!["h2".to_string(), "http/1.1".to_string()]),
+            http3_only: false,
+            max_request_body_bytes: None,
+            http3_early_data_enabled: false,
+        },
     )
     .map(|config| config.map(TlsAcceptor::from))
 }
@@ -54,10 +63,12 @@ pub fn build_http3_server_config(
         tls_termination_enabled,
         default_vhost,
         vhosts,
-        vec!["h3".to_string()],
-        true,
-        max_request_body_bytes,
-        http3_early_data_enabled,
+        TlsServerConfigOptions {
+            alpn_protocols: vec!["h3".to_string()],
+            http3_only: true,
+            max_request_body_bytes,
+            http3_early_data_enabled,
+        },
     )
 }
 
@@ -67,10 +78,7 @@ fn build_tls_server_config(
     tls_termination_enabled: bool,
     default_vhost: &VirtualHost,
     vhosts: &[VirtualHost],
-    alpn_protocols: Vec<String>,
-    http3_only: bool,
-    max_request_body_bytes: Option<usize>,
-    http3_early_data_enabled: bool,
+    options: TlsServerConfigOptions,
 ) -> Result<Option<Arc<ServerConfig>>> {
     if !tls_termination_enabled {
         return Ok(None);
@@ -123,7 +131,7 @@ fn build_tls_server_config(
     }
 
     let resolver = Arc::new(SniCertificateResolver::new(default_certs, all_certs));
-    let builder = build_server_config_builder(default_tls, http3_only)?;
+    let builder = build_server_config_builder(default_tls, options.http3_only)?;
     let mut config = if let Some(client_auth) = default_tls.and_then(|tls| tls.client_auth.as_ref())
     {
         let roots = load_ca_cert_store(&client_auth.ca_cert_path)?;
@@ -155,12 +163,13 @@ fn build_tls_server_config(
     } else {
         builder.with_no_client_auth().with_cert_resolver(resolver)
     };
-    config.alpn_protocols = alpn_protocols.into_iter().map(String::into_bytes).collect();
+    config.alpn_protocols = options.alpn_protocols.into_iter().map(String::into_bytes).collect();
     apply_session_policy(&mut config, default_tls)?;
-    if http3_only && http3_early_data_enabled {
+    if options.http3_only && options.http3_early_data_enabled {
         const DEFAULT_HTTP3_MAX_EARLY_DATA_SIZE: u32 = 64 * 1024;
 
-        config.max_early_data_size = max_request_body_bytes
+        config.max_early_data_size = options
+            .max_request_body_bytes
             .map(|limit| limit.min(u32::MAX as usize) as u32)
             .unwrap_or(DEFAULT_HTTP3_MAX_EARLY_DATA_SIZE);
     }
