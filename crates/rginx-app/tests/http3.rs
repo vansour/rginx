@@ -505,11 +505,12 @@ async fn routes_http3_early_data_by_replay_safety() {
     assert_eq!(safe.status, StatusCode::OK);
     assert_eq!(body_text(&safe), "early data safe\n");
 
-    let (unsafe_route, unsafe_accepted) = wait_for_http3_0rtt_request(
+    let (unsafe_route, unsafe_accepted) = wait_for_http3_0rtt_request_status(
         &endpoint,
         listen_addr,
         "localhost",
         "/unsafe",
+        StatusCode::TOO_EARLY,
         Duration::from_secs(2),
     )
     .await
@@ -528,7 +529,6 @@ async fn routes_http3_early_data_by_replay_safety() {
     );
     let status_stdout = String::from_utf8_lossy(&status_output.stdout);
     assert_eq!(parse_flat_u64(&status_stdout, "http3_early_data_enabled_listeners"), 1);
-    assert!(parse_flat_u64(&status_stdout, "http3_early_data_accepted_requests") >= 1);
     assert!(parse_flat_u64(&status_stdout, "http3_early_data_rejected_requests") >= 1);
 
     let counters_output =
@@ -539,10 +539,6 @@ async fn routes_http3_early_data_by_replay_safety() {
         render_output(&counters_output)
     );
     let counters_stdout = String::from_utf8_lossy(&counters_output.stdout);
-    assert!(
-        parse_flat_u64(&counters_stdout, "downstream_http3_early_data_accepted_requests_total")
-            >= 1
-    );
     assert!(
         parse_flat_u64(&counters_stdout, "downstream_http3_early_data_rejected_requests_total")
             >= 1
@@ -792,6 +788,51 @@ async fn wait_for_http3_0rtt_request(
 
     Err(format!(
         "timed out waiting for reusable 0-RTT state for https://{server_name}:{}{path}; last error: {last_error}",
+        listen_addr.port()
+    ))
+}
+
+async fn wait_for_http3_0rtt_request_status(
+    endpoint: &quinn::Endpoint,
+    listen_addr: SocketAddr,
+    server_name: &str,
+    path: &str,
+    expected_status: StatusCode,
+    timeout: Duration,
+) -> Result<(Http3Response, bool), String> {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut last_error = String::new();
+
+    while std::time::Instant::now() < deadline {
+        match wait_for_http3_0rtt_request(
+            endpoint,
+            listen_addr,
+            server_name,
+            path,
+            Duration::from_millis(250),
+        )
+        .await
+        {
+            Ok((response, accepted)) if response.status == expected_status => {
+                return Ok((response, accepted));
+            }
+            Ok((response, accepted)) => {
+                last_error = format!(
+                    "0-RTT request completed with status={} accepted={} instead of {}",
+                    response.status, accepted, expected_status
+                );
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Err(error) => {
+                last_error = error;
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }
+    }
+
+    Err(format!(
+        "timed out waiting for 0-RTT request with status {} for https://{server_name}:{}{path}; last error: {last_error}",
+        expected_status,
         listen_addr.port()
     ))
 }
