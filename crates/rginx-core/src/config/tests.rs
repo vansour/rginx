@@ -145,6 +145,13 @@ fn listener_transport_bindings_include_udp_http3_binding_when_configured() {
             listen_addr: "127.0.0.1:443".parse().unwrap(),
             advertise_alt_svc: true,
             alt_svc_max_age: Duration::from_secs(3600),
+            max_concurrent_streams: 128,
+            stream_buffer_size: 64 * 1024,
+            active_connection_id_limit: 2,
+            retry: false,
+            host_key_path: None,
+            gso: false,
+            early_data_enabled: false,
         }),
     };
 
@@ -161,6 +168,12 @@ fn listener_transport_bindings_include_udp_http3_binding_when_configured() {
     assert_eq!(bindings[1].protocols, vec![ListenerApplicationProtocol::Http3]);
     assert!(bindings[1].advertise_alt_svc);
     assert_eq!(bindings[1].alt_svc_max_age.map(|value| value.as_secs()), Some(3600));
+    assert_eq!(bindings[1].http3_max_concurrent_streams, Some(128));
+    assert_eq!(bindings[1].http3_stream_buffer_size, Some(64 * 1024));
+    assert_eq!(bindings[1].http3_active_connection_id_limit, Some(2));
+    assert_eq!(bindings[1].http3_retry, Some(false));
+    assert_eq!(bindings[1].http3_host_key_path, None);
+    assert_eq!(bindings[1].http3_gso, Some(false));
 }
 
 #[test]
@@ -345,5 +358,6 @@ fn route(path: &str) -> Route {
         }),
         access_control: RouteAccessControl::default(),
         rate_limit: None,
+        allow_early_data: false,
     }
 }

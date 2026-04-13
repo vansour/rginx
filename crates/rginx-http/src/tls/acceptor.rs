@@ -33,6 +33,7 @@ pub fn build_tls_acceptor(
             .and_then(|tls| tls.alpn_protocols.clone())
             .unwrap_or_else(|| vec!["h2".to_string(), "http/1.1".to_string()]),
         false,
+        false,
     )
     .map(|config| config.map(TlsAcceptor::from))
 }
@@ -43,14 +44,8 @@ pub fn build_http3_server_config(
     tls_termination_enabled: bool,
     default_vhost: &VirtualHost,
     vhosts: &[VirtualHost],
+    http3_early_data_enabled: bool,
 ) -> Result<Option<Arc<ServerConfig>>> {
-    if default_tls.and_then(|tls| tls.client_auth.as_ref()).is_some() {
-        return Err(Error::Config(
-            "http3 currently does not support downstream client_auth on the same listener"
-                .to_string(),
-        ));
-    }
-
     build_tls_server_config(
         default_tls,
         default_certificate,
@@ -59,6 +54,7 @@ pub fn build_http3_server_config(
         vhosts,
         vec!["h3".to_string()],
         true,
+        http3_early_data_enabled,
     )
 }
 
@@ -70,6 +66,7 @@ fn build_tls_server_config(
     vhosts: &[VirtualHost],
     alpn_protocols: Vec<String>,
     http3_only: bool,
+    http3_early_data_enabled: bool,
 ) -> Result<Option<Arc<ServerConfig>>> {
     if !tls_termination_enabled {
         return Ok(None);
@@ -156,6 +153,9 @@ fn build_tls_server_config(
     };
     config.alpn_protocols = alpn_protocols.into_iter().map(String::into_bytes).collect();
     apply_session_policy(&mut config, default_tls)?;
+    if http3_only && http3_early_data_enabled {
+        config.max_early_data_size = u32::MAX;
+    }
 
     Ok(Some(Arc::new(config)))
 }

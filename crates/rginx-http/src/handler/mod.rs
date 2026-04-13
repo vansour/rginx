@@ -45,6 +45,7 @@ pub(crate) fn attach_connection_metadata<B>(
     request: &mut Request<B>,
     connection: &ConnectionPeerAddrs,
 ) {
+    request.extensions_mut().insert(connection.early_data);
     if let Some(identity) = connection.tls_client_identity.clone() {
         request.extensions_mut().insert(identity);
     }

@@ -232,7 +232,7 @@ fn check_reports_http3_listener_bindings() {
     fs::write(
         &config_path,
         format!(
-            "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n        server_names: [\"localhost\"],\n        tls: Some(ServerTlsConfig(\n            cert_path: {:?},\n            key_path: {:?},\n        )),\n        http3: Some(Http3Config(\n            advertise_alt_svc: Some(true),\n            alt_svc_max_age_secs: Some(7200),\n        )),\n    ),\n    upstreams: [],\n    locations: [\n        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Return(\n                status: 200,\n                location: \"\",\n                body: Some(\"checked\\n\"),\n            ),\n        ),\n    ],\n)\n",
+            "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n        accept_workers: Some(2),\n    ),\n    server: ServerConfig(\n        listen: {:?},\n        server_names: [\"localhost\"],\n        tls: Some(ServerTlsConfig(\n            cert_path: {:?},\n            key_path: {:?},\n        )),\n        http3: Some(Http3Config(\n            advertise_alt_svc: Some(true),\n            alt_svc_max_age_secs: Some(7200),\n            early_data: Some(true),\n        )),\n    ),\n    upstreams: [],\n    locations: [\n        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Return(\n                status: 200,\n                location: \"\",\n                body: Some(\"checked\\n\"),\n            ),\n            allow_early_data: Some(true),\n        ),\n    ],\n)\n",
             listen_addr.to_string(),
             cert_path.display().to_string(),
             key_path.display().to_string(),
@@ -247,17 +247,34 @@ fn check_reports_http3_listener_bindings() {
     assert!(stdout.contains("listener_bindings=2"));
     assert!(stdout.contains("bind_addrs=tcp://127.0.0.1:18443,udp://127.0.0.1:18443"));
     assert!(stdout.contains("http3=enabled"));
+    assert!(stdout.contains("http3_early_data_enabled_listeners=1"));
     assert!(stdout.contains("transport_bindings=2"));
     assert!(stdout.contains("check_listener_binding listener=default binding=tcp transport=tcp"));
     assert!(stdout.contains("check_listener_binding listener=default binding=udp transport=udp"));
     assert!(stdout.contains("protocols=http3"));
+    assert!(stdout.contains("worker_count=2"));
+    assert!(stdout.contains("reuse_port_enabled=true"));
     assert!(stdout.contains("advertise_alt_svc=true"));
     assert!(stdout.contains("alt_svc_max_age_secs=7200"));
+    assert!(stdout.contains("http3_max_concurrent_streams=128"));
+    assert!(stdout.contains("http3_stream_buffer_size=65536"));
+    assert!(stdout.contains("http3_active_connection_id_limit=2"));
+    assert!(stdout.contains("http3_retry=false"));
+    assert!(stdout.contains("http3_host_key_path=-"));
+    assert!(stdout.contains("http3_gso=false"));
+    assert!(stdout.contains("http3_early_data_enabled=true"));
     assert!(stdout.contains("tls_listener listener=default"));
     assert!(stdout.contains("http3_enabled=true"));
     assert!(stdout.contains(&format!("http3_listen={listen_addr}")));
     assert!(stdout.contains("http3_versions=TLS1.3"));
     assert!(stdout.contains("http3_alpn_protocols=h3"));
+    assert!(stdout.contains("http3_max_concurrent_streams=128"));
+    assert!(stdout.contains("http3_stream_buffer_size=65536"));
+    assert!(stdout.contains("http3_active_connection_id_limit=2"));
+    assert!(stdout.contains("http3_retry=false"));
+    assert!(stdout.contains("http3_host_key_path=-"));
+    assert!(stdout.contains("http3_gso=false"));
+    assert!(stdout.contains("http3_early_data_enabled=true"));
 
     let _ = fs::remove_dir_all(temp_dir);
 }

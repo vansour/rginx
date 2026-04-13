@@ -98,7 +98,7 @@ pub(super) fn print_admin_traffic(config_path: &Path, args: &WindowArgs) -> anyh
                     print_record(
                         "traffic_listener_recent_window",
                         [
-                            ("listener", listener_id),
+                            ("listener", listener_id.clone()),
                             ("recent_window_secs", recent_window.window_secs.to_string()),
                             (
                                 "recent_window_downstream_requests_total",
@@ -123,6 +123,66 @@ pub(super) fn print_admin_traffic(config_path: &Path, args: &WindowArgs) -> anyh
                             (
                                 "recent_window_grpc_requests_total",
                                 recent_window.grpc_requests_total.to_string(),
+                            ),
+                        ],
+                    );
+                }
+                if let Some(http3) = &listener.http3_runtime {
+                    print_record(
+                        "traffic_listener_http3",
+                        [
+                            ("listener", listener_id.clone()),
+                            ("active_connections", http3.active_connections.to_string()),
+                            ("active_request_streams", http3.active_request_streams.to_string()),
+                            ("retry_issued_total", http3.retry_issued_total.to_string()),
+                            ("retry_failed_total", http3.retry_failed_total.to_string()),
+                            (
+                                "request_accept_errors_total",
+                                http3.request_accept_errors_total.to_string(),
+                            ),
+                            (
+                                "request_resolve_errors_total",
+                                http3.request_resolve_errors_total.to_string(),
+                            ),
+                            (
+                                "request_body_stream_errors_total",
+                                http3.request_body_stream_errors_total.to_string(),
+                            ),
+                            (
+                                "response_stream_errors_total",
+                                http3.response_stream_errors_total.to_string(),
+                            ),
+                            (
+                                "connection_close_version_mismatch_total",
+                                http3.connection_close_version_mismatch_total.to_string(),
+                            ),
+                            (
+                                "connection_close_transport_error_total",
+                                http3.connection_close_transport_error_total.to_string(),
+                            ),
+                            (
+                                "connection_close_connection_closed_total",
+                                http3.connection_close_connection_closed_total.to_string(),
+                            ),
+                            (
+                                "connection_close_application_closed_total",
+                                http3.connection_close_application_closed_total.to_string(),
+                            ),
+                            (
+                                "connection_close_reset_total",
+                                http3.connection_close_reset_total.to_string(),
+                            ),
+                            (
+                                "connection_close_timed_out_total",
+                                http3.connection_close_timed_out_total.to_string(),
+                            ),
+                            (
+                                "connection_close_locally_closed_total",
+                                http3.connection_close_locally_closed_total.to_string(),
+                            ),
+                            (
+                                "connection_close_cids_exhausted_total",
+                                http3.connection_close_cids_exhausted_total.to_string(),
                             ),
                         ],
                     );
