@@ -22,7 +22,7 @@ fn idempotent_requests_fail_over_after_upstream_timeout() {
         spawn_response_server_with_hits(Duration::from_millis(0), "fast peer\n", fast_hits.clone());
     let listen_addr = reserve_loopback_addr();
     let mut server = ServerHarness::spawn("rginx-failover-test", |_| {
-        proxy_config(listen_addr, &[slow_peer, fast_peer])
+        proxy_config(listen_addr, &[slow_peer, fast_peer], None)
     });
 
     server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
@@ -48,7 +48,7 @@ fn non_idempotent_requests_do_not_fail_over_after_upstream_timeout() {
         spawn_response_server_with_hits(Duration::from_millis(0), "fast peer\n", fast_hits.clone());
     let listen_addr = reserve_loopback_addr();
     let mut server = ServerHarness::spawn("rginx-failover-non-idempotent-test", |_| {
-        proxy_config(listen_addr, &[slow_peer, fast_peer])
+        proxy_config(listen_addr, &[slow_peer, fast_peer], None)
     });
 
     server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
@@ -67,6 +67,36 @@ fn non_idempotent_requests_do_not_fail_over_after_upstream_timeout() {
     );
     assert!(slow_hits.load(Ordering::SeqCst) > 0, "slow peer should be attempted before timeout");
     assert_eq!(fast_hits.load(Ordering::SeqCst), 0, "POST requests must not fail over");
+
+    server.shutdown_and_wait(Duration::from_secs(5));
+}
+
+#[test]
+fn request_buffering_off_disables_failover_for_idempotent_requests() {
+    let slow_hits = Arc::new(AtomicUsize::new(0));
+    let fast_hits = Arc::new(AtomicUsize::new(0));
+    let slow_peer = spawn_response_server_with_hits(
+        Duration::from_millis(1_500),
+        "slow peer\n",
+        slow_hits.clone(),
+    );
+    let fast_peer =
+        spawn_response_server_with_hits(Duration::from_millis(0), "fast peer\n", fast_hits.clone());
+    let listen_addr = reserve_loopback_addr();
+    let mut server = ServerHarness::spawn("rginx-failover-request-buffering-off", |_| {
+        proxy_config(listen_addr, &[slow_peer, fast_peer], Some("Off"))
+    });
+
+    server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
+    let (status, body) = fetch_text_response(listen_addr, "/api/demo")
+        .expect("request should return a terminal response");
+    assert_eq!(status, 504);
+    assert!(
+        body.contains("timed out after 1000 ms"),
+        "expected upstream timeout body, got {body:?}"
+    );
+    assert!(slow_hits.load(Ordering::SeqCst) > 0, "slow peer should be attempted first");
+    assert_eq!(fast_hits.load(Ordering::SeqCst), 0, "request_buffering=Off must disable failover");
 
     server.shutdown_and_wait(Duration::from_secs(5));
 }
@@ -161,7 +191,11 @@ fn send_text_request(
     Ok((status, body.to_string()))
 }
 
-fn proxy_config(listen_addr: SocketAddr, upstreams: &[SocketAddr]) -> String {
+fn proxy_config(
+    listen_addr: SocketAddr,
+    upstreams: &[SocketAddr],
+    request_buffering: Option<&str>,
+) -> String {
     let peers = upstreams
         .iter()
         .map(|addr| {
@@ -172,11 +206,15 @@ fn proxy_config(listen_addr: SocketAddr, upstreams: &[SocketAddr]) -> String {
         })
         .collect::<Vec<_>>()
         .join(",\n");
+    let request_buffering = request_buffering
+        .map(|value| format!("            request_buffering: Some({value}),\n"))
+        .unwrap_or_default();
 
     format!(
-        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [\n{}\n            ],\n            request_timeout_secs: Some(1),\n            unhealthy_after_failures: Some(2),\n            unhealthy_cooldown_secs: Some(1),\n        ),\n    ],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Prefix(\"/api\"),\n            handler: Proxy(\n                upstream: \"backend\",\n            ),\n        ),\n    ],\n)\n",
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [\n{}\n            ],\n            request_timeout_secs: Some(1),\n            unhealthy_after_failures: Some(2),\n            unhealthy_cooldown_secs: Some(1),\n        ),\n    ],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Prefix(\"/api\"),\n            handler: Proxy(\n                upstream: \"backend\",\n            ),\n{request_buffering}        ),\n    ],\n)\n",
         listen_addr.to_string(),
         peers,
         ready_route = READY_ROUTE_CONFIG,
+        request_buffering = request_buffering,
     )
 }

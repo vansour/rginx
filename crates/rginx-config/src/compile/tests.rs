@@ -3,9 +3,10 @@ use std::time::Duration;
 
 use crate::model::{
     Config, HandlerConfig, Http3Config, ListenerConfig, LocationConfig, MatcherConfig,
-    RuntimeConfig, ServerConfig, ServerTlsConfig, TlsCipherSuiteConfig, TlsKeyExchangeGroupConfig,
-    UpstreamConfig, UpstreamLoadBalanceConfig, UpstreamPeerConfig, UpstreamProtocolConfig,
-    UpstreamTlsConfig, VirtualHostConfig,
+    RouteBufferingPolicyConfig, RouteCompressionPolicyConfig, RuntimeConfig, ServerConfig,
+    ServerTlsConfig, TlsCipherSuiteConfig, TlsKeyExchangeGroupConfig, UpstreamConfig,
+    UpstreamLoadBalanceConfig, UpstreamPeerConfig, UpstreamProtocolConfig, UpstreamTlsConfig,
+    VirtualHostConfig,
 };
 use tempfile::TempDir;
 
@@ -40,6 +41,12 @@ fn test_location(matcher: MatcherConfig, handler: HandlerConfig) -> LocationConf
         requests_per_sec: None,
         burst: None,
         allow_early_data: None,
+        request_buffering: None,
+        response_buffering: None,
+        compression: None,
+        compression_min_bytes: None,
+        compression_content_types: None,
+        streaming_response_idle_timeout_secs: None,
     }
 }
 
@@ -411,6 +418,12 @@ fn compile_accepts_least_conn_load_balance() {
             requests_per_sec: None,
             burst: None,
             allow_early_data: None,
+            request_buffering: None,
+            response_buffering: None,
+            compression: None,
+            compression_min_bytes: None,
+            compression_content_types: None,
+            streaming_response_idle_timeout_secs: None,
         }],
         servers: Vec::new(),
     };
@@ -507,6 +520,12 @@ fn compile_applies_peer_weights() {
             requests_per_sec: None,
             burst: None,
             allow_early_data: None,
+            request_buffering: None,
+            response_buffering: None,
+            compression: None,
+            compression_min_bytes: None,
+            compression_content_types: None,
+            streaming_response_idle_timeout_secs: None,
         }],
         servers: Vec::new(),
     };
@@ -618,6 +637,12 @@ fn compile_accepts_backup_peers() {
             requests_per_sec: None,
             burst: None,
             allow_early_data: None,
+            request_buffering: None,
+            response_buffering: None,
+            compression: None,
+            compression_min_bytes: None,
+            compression_content_types: None,
+            streaming_response_idle_timeout_secs: None,
         }],
         servers: Vec::new(),
     };
@@ -722,6 +747,12 @@ fn compile_uses_legacy_request_timeout_fallbacks_and_disables_pool_idle_timeout(
             requests_per_sec: None,
             burst: None,
             allow_early_data: None,
+            request_buffering: None,
+            response_buffering: None,
+            compression: None,
+            compression_min_bytes: None,
+            compression_content_types: None,
+            streaming_response_idle_timeout_secs: None,
         }],
         servers: Vec::new(),
     };
@@ -820,6 +851,12 @@ fn compile_uses_default_pool_idle_timeout() {
             requests_per_sec: None,
             burst: None,
             allow_early_data: None,
+            request_buffering: None,
+            response_buffering: None,
+            compression: None,
+            compression_min_bytes: None,
+            compression_content_types: None,
+            streaming_response_idle_timeout_secs: None,
         }],
         servers: Vec::new(),
     };
@@ -925,6 +962,12 @@ fn compile_resolves_custom_ca_relative_to_config_base() {
             requests_per_sec: None,
             burst: None,
             allow_early_data: None,
+            request_buffering: None,
+            response_buffering: None,
+            compression: None,
+            compression_min_bytes: None,
+            compression_content_types: None,
+            streaming_response_idle_timeout_secs: None,
         }],
         servers: Vec::new(),
     };
@@ -1032,6 +1075,12 @@ fn compile_accepts_https_http3_upstreams() {
             requests_per_sec: None,
             burst: None,
             allow_early_data: None,
+            request_buffering: None,
+            response_buffering: None,
+            compression: None,
+            compression_min_bytes: None,
+            compression_content_types: None,
+            streaming_response_idle_timeout_secs: None,
         }],
         servers: Vec::new(),
     };
@@ -1136,6 +1185,12 @@ fn compile_resolves_upstream_mtls_identity_and_tls_versions_relative_to_config_b
             requests_per_sec: None,
             burst: None,
             allow_early_data: None,
+            request_buffering: None,
+            response_buffering: None,
+            compression: None,
+            compression_min_bytes: None,
+            compression_content_types: None,
+            streaming_response_idle_timeout_secs: None,
         }],
         servers: Vec::new(),
     };
@@ -1237,6 +1292,12 @@ fn compile_normalizes_server_name_override() {
             requests_per_sec: None,
             burst: None,
             allow_early_data: None,
+            request_buffering: None,
+            response_buffering: None,
+            compression: None,
+            compression_min_bytes: None,
+            compression_content_types: None,
+            streaming_response_idle_timeout_secs: None,
         }],
         servers: Vec::new(),
     };
@@ -1331,6 +1392,12 @@ fn compile_preserves_upstream_server_name_toggle() {
             requests_per_sec: None,
             burst: None,
             allow_early_data: None,
+            request_buffering: None,
+            response_buffering: None,
+            compression: None,
+            compression_min_bytes: None,
+            compression_content_types: None,
+            streaming_response_idle_timeout_secs: None,
         }],
         servers: Vec::new(),
     };
@@ -1421,6 +1488,12 @@ fn compile_rejects_invalid_server_name_override() {
             requests_per_sec: None,
             burst: None,
             allow_early_data: None,
+            request_buffering: None,
+            response_buffering: None,
+            compression: None,
+            compression_min_bytes: None,
+            compression_content_types: None,
+            streaming_response_idle_timeout_secs: None,
         }],
         servers: Vec::new(),
     };
@@ -1472,6 +1545,12 @@ fn compile_attaches_route_access_control() {
             requests_per_sec: None,
             burst: None,
             allow_early_data: None,
+            request_buffering: None,
+            response_buffering: None,
+            compression: None,
+            compression_min_bytes: None,
+            compression_content_types: None,
+            streaming_response_idle_timeout_secs: None,
         }],
         servers: Vec::new(),
     };
@@ -1524,6 +1603,12 @@ fn compile_attaches_route_rate_limit() {
             requests_per_sec: Some(20),
             burst: Some(5),
             allow_early_data: None,
+            request_buffering: None,
+            response_buffering: None,
+            compression: None,
+            compression_min_bytes: None,
+            compression_content_types: None,
+            streaming_response_idle_timeout_secs: None,
         }],
         servers: Vec::new(),
     };
@@ -1533,6 +1618,101 @@ fn compile_attaches_route_rate_limit() {
         snapshot.default_vhost.routes[0].rate_limit.expect("route rate limit should exist");
     assert_eq!(rate_limit.requests_per_sec, 20);
     assert_eq!(rate_limit.burst, 5);
+}
+
+#[test]
+fn compile_applies_route_transport_policy_defaults_and_overrides() {
+    let config = Config {
+        runtime: RuntimeConfig {
+            shutdown_timeout_secs: 10,
+            worker_threads: None,
+            accept_workers: None,
+        },
+        listeners: Vec::new(),
+        server: ServerConfig {
+            listen: Some("127.0.0.1:8080".to_string()),
+            proxy_protocol: None,
+            default_certificate: None,
+            server_names: Vec::new(),
+            trusted_proxies: Vec::new(),
+            keep_alive: None,
+            max_headers: None,
+            max_request_body_bytes: None,
+            max_connections: None,
+            header_read_timeout_secs: None,
+            request_body_read_timeout_secs: None,
+            response_write_timeout_secs: None,
+            access_log_format: None,
+            tls: None,
+            http3: None,
+        },
+        upstreams: Vec::new(),
+        locations: vec![
+            test_location(
+                MatcherConfig::Exact("/default".to_string()),
+                HandlerConfig::Return {
+                    status: 200,
+                    location: String::new(),
+                    body: Some("default\n".to_string()),
+                },
+            ),
+            LocationConfig {
+                matcher: MatcherConfig::Exact("/custom".to_string()),
+                handler: HandlerConfig::Return {
+                    status: 200,
+                    location: String::new(),
+                    body: Some("custom\n".to_string()),
+                },
+                grpc_service: None,
+                grpc_method: None,
+                allow_cidrs: Vec::new(),
+                deny_cidrs: Vec::new(),
+                requests_per_sec: None,
+                burst: None,
+                allow_early_data: None,
+                request_buffering: Some(RouteBufferingPolicyConfig::Off),
+                response_buffering: Some(RouteBufferingPolicyConfig::On),
+                compression: Some(RouteCompressionPolicyConfig::Force),
+                compression_min_bytes: Some(1024),
+                compression_content_types: Some(vec![
+                    " text/plain ".to_string(),
+                    "application/json".to_string(),
+                ]),
+                streaming_response_idle_timeout_secs: Some(15),
+            },
+        ],
+        servers: Vec::new(),
+    };
+
+    let snapshot = compile(config).expect("route transport policies should compile");
+    let default_route = snapshot
+        .default_vhost
+        .routes
+        .iter()
+        .find(|route| matches!(route.matcher, rginx_core::RouteMatcher::Exact(ref path) if path == "/default"))
+        .expect("default route should exist");
+    assert_eq!(default_route.request_buffering, rginx_core::RouteBufferingPolicy::Auto);
+    assert_eq!(default_route.response_buffering, rginx_core::RouteBufferingPolicy::Auto);
+    assert_eq!(default_route.compression, rginx_core::RouteCompressionPolicy::Auto);
+    assert_eq!(default_route.compression_min_bytes, None);
+    assert!(default_route.compression_content_types.is_empty());
+    assert_eq!(default_route.streaming_response_idle_timeout, None);
+
+    let custom_route = snapshot
+        .default_vhost
+        .routes
+        .iter()
+        .find(|route| matches!(route.matcher, rginx_core::RouteMatcher::Exact(ref path) if path == "/custom"))
+        .expect("custom route should exist");
+    assert_eq!(custom_route.request_buffering, rginx_core::RouteBufferingPolicy::Off);
+    assert_eq!(custom_route.response_buffering, rginx_core::RouteBufferingPolicy::On);
+    assert_eq!(custom_route.compression, rginx_core::RouteCompressionPolicy::Force);
+    assert_eq!(custom_route.compression_min_bytes, Some(1024));
+    assert_eq!(
+        custom_route.compression_content_types,
+        vec!["text/plain".to_string(), "application/json".to_string()]
+    );
+    assert_eq!(custom_route.streaming_response_idle_timeout, Some(Duration::from_secs(15)));
 }
 
 #[test]
@@ -1658,6 +1838,12 @@ fn compile_resolves_server_tls_paths_relative_to_config_base() {
             requests_per_sec: None,
             burst: None,
             allow_early_data: None,
+            request_buffering: None,
+            response_buffering: None,
+            compression: None,
+            compression_min_bytes: None,
+            compression_content_types: None,
+            streaming_response_idle_timeout_secs: None,
         }],
         servers: Vec::new(),
     };
@@ -1731,6 +1917,12 @@ fn compile_preserves_server_tls_policy_fields() {
             requests_per_sec: None,
             burst: None,
             allow_early_data: None,
+            request_buffering: None,
+            response_buffering: None,
+            compression: None,
+            compression_min_bytes: None,
+            compression_content_types: None,
+            streaming_response_idle_timeout_secs: None,
         }],
         servers: Vec::new(),
     };
@@ -1815,6 +2007,12 @@ fn compile_preserves_server_tls_ocsp_policy_fields() {
             requests_per_sec: None,
             burst: None,
             allow_early_data: None,
+            request_buffering: None,
+            response_buffering: None,
+            compression: None,
+            compression_min_bytes: None,
+            compression_content_types: None,
+            streaming_response_idle_timeout_secs: None,
         }],
         servers: Vec::new(),
     };
@@ -1869,6 +2067,12 @@ fn compile_normalizes_trusted_proxy_ips_and_cidrs() {
             requests_per_sec: None,
             burst: None,
             allow_early_data: None,
+            request_buffering: None,
+            response_buffering: None,
+            compression: None,
+            compression_min_bytes: None,
+            compression_content_types: None,
+            streaming_response_idle_timeout_secs: None,
         }],
         servers: Vec::new(),
     };
@@ -1922,6 +2126,12 @@ fn compile_attaches_server_hardening_settings() {
             requests_per_sec: None,
             burst: None,
             allow_early_data: None,
+            request_buffering: None,
+            response_buffering: None,
+            compression: None,
+            compression_min_bytes: None,
+            compression_content_types: None,
+            streaming_response_idle_timeout_secs: None,
         }],
         servers: Vec::new(),
     };
@@ -2062,6 +2272,12 @@ fn compile_rejects_invalid_server_access_log_format() {
             requests_per_sec: None,
             burst: None,
             allow_early_data: None,
+            request_buffering: None,
+            response_buffering: None,
+            compression: None,
+            compression_min_bytes: None,
+            compression_content_types: None,
+            streaming_response_idle_timeout_secs: None,
         }],
         servers: Vec::new(),
     };
@@ -2146,6 +2362,12 @@ fn compile_supports_explicit_multi_listener_configs() {
             requests_per_sec: None,
             burst: None,
             allow_early_data: None,
+            request_buffering: None,
+            response_buffering: None,
+            compression: None,
+            compression_min_bytes: None,
+            compression_content_types: None,
+            streaming_response_idle_timeout_secs: None,
         }],
         servers: Vec::new(),
     };
@@ -2232,6 +2454,12 @@ fn compile_http3_listener_defaults_to_tcp_listen_addr_and_default_alt_svc_policy
             requests_per_sec: None,
             burst: None,
             allow_early_data: None,
+            request_buffering: None,
+            response_buffering: None,
+            compression: None,
+            compression_min_bytes: None,
+            compression_content_types: None,
+            streaming_response_idle_timeout_secs: None,
         }],
         servers: Vec::new(),
     };
@@ -2327,6 +2555,12 @@ fn compile_http3_applies_transport_settings_and_resolves_host_key_path() {
             requests_per_sec: None,
             burst: None,
             allow_early_data: None,
+            request_buffering: None,
+            response_buffering: None,
+            compression: None,
+            compression_min_bytes: None,
+            compression_content_types: None,
+            streaming_response_idle_timeout_secs: None,
         }],
         servers: Vec::new(),
     };

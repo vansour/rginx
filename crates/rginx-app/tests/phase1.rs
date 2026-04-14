@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -88,6 +89,90 @@ fn proxy_preserves_request_id_end_to_end() {
     upstream_task.join().expect("upstream thread should complete");
 }
 
+#[test]
+fn proxy_request_buffering_off_streams_chunked_uploads_and_enforces_limits() {
+    let upstream_listener =
+        TcpListener::bind(("127.0.0.1", 0)).expect("test upstream listener should bind");
+    let upstream_addr =
+        upstream_listener.local_addr().expect("upstream listener addr should be available");
+    let observed_request = Arc::new(Mutex::new(None));
+    let observed_request_clone = observed_request.clone();
+    let upstream_task = thread::spawn(move || {
+        let (mut stream, _) = upstream_listener.accept().expect("upstream should accept");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("upstream read timeout should be configurable");
+        stream
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .expect("upstream write timeout should be configurable");
+
+        let (head, mut body) = read_http_head_and_body(&mut stream);
+        let mut chunk = [0u8; 256];
+        loop {
+            match stream.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(read) => body.extend_from_slice(&chunk[..read]),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    break;
+                }
+                Err(error) => panic!("upstream should keep reading proxied body bytes: {error}"),
+            }
+        }
+
+        *observed_request_clone.lock().expect("request observation lock should be available") =
+            Some((head, body));
+    });
+
+    let listen_addr = reserve_loopback_addr();
+    let mut server = ServerHarness::spawn("rginx-phase1-streaming-upload", |_| {
+        proxy_streaming_limit_config(listen_addr, upstream_addr)
+    });
+    server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
+
+    let response = send_http_request(
+        listen_addr,
+        &format!(
+            "POST /api/upload HTTP/1.1\r\nHost: {listen_addr}\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nabcde\r\n5\r\nfghij\r\n0\r\n\r\n"
+        ),
+    )
+    .expect("chunked upload should return a response");
+
+    assert_eq!(response.status, 413);
+    assert!(
+        String::from_utf8_lossy(&response.body).contains("max_request_body_bytes (8 bytes)"),
+        "expected payload-too-large body, got {:?}",
+        response.body
+    );
+
+    server.shutdown_and_wait(Duration::from_secs(5));
+    upstream_task.join().expect("upstream thread should complete");
+
+    let (head, body) = observed_request
+        .lock()
+        .expect("request observation lock should be available")
+        .take()
+        .expect("upstream should observe a streamed request");
+    assert!(
+        head.to_ascii_lowercase().contains("transfer-encoding: chunked\r\n"),
+        "streamed upstream request should remain chunked, got {head:?}"
+    );
+
+    let body_text = String::from_utf8_lossy(&body);
+    assert!(
+        body_text.contains("abcde"),
+        "upstream should receive the first chunk before the limit trips, got {body_text:?}"
+    );
+    assert!(
+        !body_text.contains("fghij"),
+        "upstream should not receive the over-limit chunk, got {body_text:?}"
+    );
+}
+
 #[derive(Debug)]
 struct ParsedResponse {
     status: u16,
@@ -134,6 +219,24 @@ fn send_http_request_with_timeouts(
         .read_to_end(&mut response)
         .map_err(|error| format!("failed to read response: {error}"))?;
     parse_http_response(&response)
+}
+
+fn read_http_head_and_body(stream: &mut TcpStream) -> (String, Vec<u8>) {
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 256];
+
+    loop {
+        let read = stream.read(&mut chunk).expect("HTTP head should be readable");
+        assert!(read > 0, "stream closed before the HTTP head was complete");
+        buffer.extend_from_slice(&chunk[..read]);
+
+        if let Some(head_end) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+            let head = String::from_utf8(buffer[..head_end + 4].to_vec())
+                .expect("HTTP head should be valid UTF-8");
+            let body = buffer[head_end + 4..].to_vec();
+            return (head, body);
+        }
+    }
 }
 
 fn parse_http_response(bytes: &[u8]) -> Result<ParsedResponse, String> {
@@ -184,6 +287,15 @@ fn return_config(listen_addr: SocketAddr, body: &str) -> String {
 fn proxy_config(listen_addr: SocketAddr, upstream_addr: SocketAddr) -> String {
     format!(
         "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [\n                UpstreamPeerConfig(\n                    url: {:?},\n                ),\n            ],\n        ),\n    ],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Prefix(\"/api\"),\n            handler: Proxy(\n                upstream: \"backend\",\n            ),\n        ),\n    ],\n)\n",
+        listen_addr.to_string(),
+        format!("http://{upstream_addr}"),
+        ready_route = READY_ROUTE_CONFIG,
+    )
+}
+
+fn proxy_streaming_limit_config(listen_addr: SocketAddr, upstream_addr: SocketAddr) -> String {
+    format!(
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n        max_request_body_bytes: Some(8),\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [\n                UpstreamPeerConfig(\n                    url: {:?},\n                ),\n            ],\n            request_timeout_secs: Some(1),\n        ),\n    ],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Prefix(\"/api\"),\n            handler: Proxy(\n                upstream: \"backend\",\n            ),\n            request_buffering: Some(Off),\n        ),\n    ],\n)\n",
         listen_addr.to_string(),
         format!("http://{upstream_addr}"),
         ready_route = READY_ROUTE_CONFIG,

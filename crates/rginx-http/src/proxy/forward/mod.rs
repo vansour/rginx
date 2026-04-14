@@ -7,8 +7,9 @@ mod grpc;
 mod response;
 
 use error::{
-    bad_gateway, bad_request, gateway_timeout, grpc_timeout_message,
-    invalid_downstream_request_body_error, payload_too_large, unsupported_media_type,
+    bad_gateway, bad_request, downstream_request_body_too_large_error, gateway_timeout,
+    grpc_timeout_message, invalid_downstream_request_body_error, payload_too_large,
+    unsupported_media_type,
 };
 use grpc::grpc_protocol_request;
 use response::{GrpcResponseDeadline, build_downstream_response};
@@ -22,6 +23,8 @@ pub(super) use grpc::{detect_grpc_web_mode, effective_upstream_request_timeout};
 pub struct DownstreamRequestOptions {
     pub request_body_read_timeout: Option<Duration>,
     pub max_request_body_bytes: Option<usize>,
+    pub request_buffering: RouteBufferingPolicy,
+    pub streaming_response_idle_timeout: Option<Duration>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -42,6 +45,8 @@ pub async fn forward_request(
     downstream: DownstreamRequestContext<'_>,
 ) -> HttpResponse {
     let request_headers = request.headers().clone();
+    let response_idle_timeout =
+        downstream.options.streaming_response_idle_timeout.unwrap_or(target.upstream.idle_timeout);
     state.record_upstream_request(&target.upstream_name);
     let grpc_web_mode = match detect_grpc_web_mode(request.headers()) {
         Ok(mode) => mode,
@@ -100,6 +105,7 @@ pub async fn forward_request(
         target.upstream.write_timeout,
         target.upstream.max_replayable_request_body_bytes,
         downstream.options.max_request_body_bytes,
+        downstream.options.request_buffering,
         grpc_web_mode.as_ref(),
     )
     .await
@@ -255,7 +261,7 @@ pub async fn forward_request(
                         response,
                         &target.upstream_name,
                         &peer.url,
-                        target.upstream.idle_timeout,
+                        response_idle_timeout,
                         grpc_response_deadline.clone(),
                         grpc_web_mode.as_ref(),
                         None,
@@ -266,7 +272,7 @@ pub async fn forward_request(
                     response,
                     &target.upstream_name,
                     &peer.url,
-                    target.upstream.idle_timeout,
+                    response_idle_timeout,
                     grpc_response_deadline,
                     grpc_web_mode.as_ref(),
                     Some(active_peer),
@@ -296,6 +302,25 @@ pub async fn forward_request(
                 );
             }
             Ok(Err(error)) => {
+                if downstream_request_body_too_large_error(&error) {
+                    let max_request_body_bytes =
+                        downstream.options.max_request_body_bytes.unwrap_or_default();
+                    tracing::info!(
+                        request_id = %downstream.request_id,
+                        upstream = %target.upstream_name,
+                        peer = %peer.url,
+                        max_request_body_bytes,
+                        %error,
+                        "rejecting streamed request body that exceeds configured server limit"
+                    );
+                    state.record_upstream_payload_too_large_response(&target.upstream_name);
+                    return payload_too_large(
+                        &request_headers,
+                        format!(
+                            "request body exceeds server.max_request_body_bytes ({max_request_body_bytes} bytes)\n"
+                        ),
+                    );
+                }
                 if invalid_downstream_request_body_error(&error) {
                     tracing::warn!(
                         request_id = %downstream.request_id,

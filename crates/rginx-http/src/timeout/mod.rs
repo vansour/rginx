@@ -6,4 +6,5 @@ mod timers;
 mod tests;
 
 pub(crate) use body::{GrpcDeadlineBody, IdleTimeoutBody};
+pub(crate) use body::{MaxBytesBody, RequestBodyLimitError};
 pub(crate) use io::WriteTimeoutIo;

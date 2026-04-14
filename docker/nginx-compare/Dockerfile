@@ -4,7 +4,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV CARGO_HOME=/usr/local/cargo
 ENV RUSTUP_HOME=/usr/local/rustup
 ENV PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-ARG RUST_TOOLCHAIN=1.85.0
+ARG RUST_TOOLCHAIN=1.94.1
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \

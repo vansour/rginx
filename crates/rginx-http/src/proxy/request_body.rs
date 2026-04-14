@@ -6,6 +6,7 @@ pub(super) struct PreparedProxyRequest {
     pub uri: Uri,
     pub headers: HeaderMap,
     pub body: PreparedRequestBody,
+    pub(super) peer_failover_enabled: bool,
 }
 
 pub(super) enum PreparedRequestBody {
@@ -30,7 +31,11 @@ impl PrepareRequestError {
     }
 
     fn boxed(error: BoxError) -> Self {
-        Self::Other(error)
+        if let Some(max_request_body_bytes) = request_body_limit_error(error.as_ref()) {
+            Self::payload_too_large(max_request_body_bytes)
+        } else {
+            Self::Other(error)
+        }
     }
 }
 
@@ -108,11 +113,12 @@ impl PreparedProxyRequest {
         write_timeout: Duration,
         max_replayable_request_body_bytes: usize,
         max_request_body_bytes: Option<usize>,
+        request_buffering: RouteBufferingPolicy,
         grpc_web_mode: Option<&GrpcWebMode>,
     ) -> Result<Self, PrepareRequestError> {
         let (parts, body) = request.into_parts();
         let body_timeout = request_body_read_timeout.unwrap_or(write_timeout);
-        let replayable = prepare_request_body(
+        let prepared_body = prepare_request_body(
             upstream_name,
             &parts.method,
             &parts.headers,
@@ -120,15 +126,23 @@ impl PreparedProxyRequest {
             body_timeout,
             max_replayable_request_body_bytes,
             max_request_body_bytes,
+            request_buffering,
             grpc_web_mode,
         )
         .await?;
 
-        Ok(Self { method: parts.method, uri: parts.uri, headers: parts.headers, body: replayable })
+        Ok(Self {
+            method: parts.method,
+            uri: parts.uri,
+            headers: parts.headers,
+            body: prepared_body,
+            peer_failover_enabled: request_buffering != RouteBufferingPolicy::Off,
+        })
     }
 
     pub(super) fn can_failover(&self) -> bool {
-        is_idempotent_method(&self.method)
+        self.peer_failover_enabled
+            && is_idempotent_method(&self.method)
             && matches!(self.body, PreparedRequestBody::Replayable { .. })
     }
 
@@ -188,75 +202,60 @@ async fn prepare_request_body(
     body_timeout: Duration,
     max_replayable_request_body_bytes: usize,
     max_request_body_bytes: Option<usize>,
+    request_buffering: RouteBufferingPolicy,
     grpc_web_mode: Option<&GrpcWebMode>,
 ) -> Result<PreparedRequestBody, PrepareRequestError> {
     let body_timeout_label = format!("upstream `{upstream_name}` request body");
+    let preserves_trailers = preserved_te_trailers_value(headers).is_some();
 
     if let Some(max_request_body_bytes) = max_request_body_bytes {
-        if body.is_end_stream() {
-            return Ok(PreparedRequestBody::Replayable { body: Bytes::new(), trailers: None });
-        }
-
         if body.size_hint().lower() > max_request_body_bytes as u64 {
             return Err(PrepareRequestError::payload_too_large(max_request_body_bytes));
         }
-
-        let body = collect_request_body(
-            downstream_request_body(body, body_timeout, body_timeout_label.clone(), grpc_web_mode),
-            Some(max_request_body_bytes),
-        )
-        .await?;
-        return Ok(PreparedRequestBody::Replayable { body: body.body, trailers: body.trailers });
     }
 
-    if preserved_te_trailers_value(headers).is_some() {
-        return Ok(PreparedRequestBody::Streaming(Some(downstream_request_body(
-            body,
-            body_timeout,
-            body_timeout_label,
-            grpc_web_mode,
-        ))));
-    }
-
-    if !is_idempotent_method(method) {
-        return Ok(PreparedRequestBody::Streaming(Some(downstream_request_body(
-            body,
-            body_timeout,
-            body_timeout_label,
-            grpc_web_mode,
-        ))));
-    }
+    let body = downstream_request_body(
+        body,
+        body_timeout,
+        body_timeout_label,
+        grpc_web_mode,
+        max_request_body_bytes,
+    );
 
     if body.is_end_stream() {
-        return Ok(PreparedRequestBody::Replayable { body: Bytes::new(), trailers: None });
+        return Ok(match request_buffering {
+            RouteBufferingPolicy::Off => PreparedRequestBody::Streaming(Some(body)),
+            RouteBufferingPolicy::On | RouteBufferingPolicy::Auto => {
+                PreparedRequestBody::Replayable { body: Bytes::new(), trailers: None }
+            }
+        });
     }
 
-    match body.size_hint().upper() {
-        Some(upper) if upper <= max_replayable_request_body_bytes as u64 => {
-            let body = collect_request_body(
-                downstream_request_body(body, body_timeout, body_timeout_label, grpc_web_mode),
-                None,
-            )
-            .await?;
+    match request_buffering {
+        RouteBufferingPolicy::Off => Ok(PreparedRequestBody::Streaming(Some(body))),
+        RouteBufferingPolicy::On if !preserves_trailers => {
+            let body = collect_request_body(body).await?;
             Ok(PreparedRequestBody::Replayable { body: body.body, trailers: body.trailers })
         }
-        _ => Ok(PreparedRequestBody::Streaming(Some(downstream_request_body(
-            body,
-            body_timeout,
-            body_timeout_label,
-            grpc_web_mode,
-        )))),
+        RouteBufferingPolicy::On => Ok(PreparedRequestBody::Streaming(Some(body))),
+        RouteBufferingPolicy::Auto
+            if !preserves_trailers
+                && is_idempotent_method(method)
+                && matches!(
+                    body.size_hint().upper(),
+                    Some(upper) if upper <= max_replayable_request_body_bytes as u64
+                ) =>
+        {
+            let body = collect_request_body(body).await?;
+            Ok(PreparedRequestBody::Replayable { body: body.body, trailers: body.trailers })
+        }
+        RouteBufferingPolicy::Auto => Ok(PreparedRequestBody::Streaming(Some(body))),
     }
 }
 
-async fn collect_request_body<B>(
-    mut body: B,
-    max_request_body_bytes: Option<usize>,
-) -> Result<CollectedRequestBody, PrepareRequestError>
-where
-    B: hyper::body::Body<Data = Bytes> + Unpin,
-    B::Error: Into<BoxError>,
-{
+async fn collect_request_body(
+    mut body: HttpBody,
+) -> Result<CollectedRequestBody, PrepareRequestError> {
     let mut collected = BytesMut::new();
     let mut trailers = None;
 
@@ -265,11 +264,6 @@ where
             frame.map_err(|error| PrepareRequestError::boxed(Into::<BoxError>::into(error)))?;
         let frame = match frame.into_data() {
             Ok(data) => {
-                if let Some(max_request_body_bytes) = max_request_body_bytes
-                    && data.len() > max_request_body_bytes.saturating_sub(collected.len())
-                {
-                    return Err(PrepareRequestError::payload_too_large(max_request_body_bytes));
-                }
                 collected.extend_from_slice(&data);
                 continue;
             }
@@ -295,15 +289,36 @@ fn downstream_request_body(
     body_timeout: Duration,
     label: String,
     grpc_web_mode: Option<&GrpcWebMode>,
+    max_request_body_bytes: Option<usize>,
 ) -> HttpBody {
     let body = IdleTimeoutBody::new(body, body_timeout, label);
-    match grpc_web_mode {
+    let body = match grpc_web_mode {
         Some(mode) if mode.is_text() => {
             GrpcWebRequestBody::new(GrpcWebTextDecodeBody::new(body)).boxed_unsync()
         }
         Some(_) => GrpcWebRequestBody::new(body).boxed_unsync(),
         None => body.boxed_unsync(),
+    };
+
+    match max_request_body_bytes {
+        Some(max_request_body_bytes) => {
+            MaxBytesBody::new(body, max_request_body_bytes).boxed_unsync()
+        }
+        None => body,
     }
+}
+
+fn request_body_limit_error(error: &(dyn std::error::Error + 'static)) -> Option<usize> {
+    let mut current = Some(error);
+    while let Some(candidate) = current {
+        if let Some(limit_error) = candidate.downcast_ref::<RequestBodyLimitError>() {
+            return Some(limit_error.max_request_body_bytes());
+        }
+
+        current = candidate.source();
+    }
+
+    None
 }
 
 pub(super) fn is_idempotent_method(method: &Method) -> bool {
@@ -319,4 +334,170 @@ pub(super) fn can_retry_peer_request(
     attempt_index: usize,
 ) -> bool {
     prepared_request.can_failover() && attempt_index + 1 < peers.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::convert::Infallible;
+
+    use futures_util::stream;
+    use http::header::TE;
+    use http_body_util::BodyExt;
+    use http_body_util::StreamBody;
+
+    use super::*;
+    use crate::handler::{boxed_body, full_body};
+
+    fn test_request(method: Method, headers: HeaderMap, body: HttpBody) -> Request<HttpBody> {
+        let mut request = Request::builder()
+            .method(method)
+            .uri("http://example.com/upload")
+            .body(body)
+            .expect("request should build");
+        *request.headers_mut() = headers;
+        request
+    }
+
+    fn chunked_body(chunks: Vec<&'static [u8]>) -> HttpBody {
+        boxed_body(StreamBody::new(stream::iter(
+            chunks
+                .into_iter()
+                .map(|chunk| Ok::<_, Infallible>(Frame::data(Bytes::from_static(chunk)))),
+        )))
+    }
+
+    #[tokio::test]
+    async fn request_buffering_off_keeps_small_idempotent_body_streaming() {
+        let prepared = PreparedProxyRequest::from_request(
+            test_request(Method::PUT, HeaderMap::new(), full_body("hello")),
+            "backend",
+            None,
+            Duration::from_secs(1),
+            64 * 1024,
+            Some(1024),
+            RouteBufferingPolicy::Off,
+            None,
+        )
+        .await
+        .expect("request should prepare");
+
+        assert!(!prepared.can_failover());
+        let PreparedRequestBody::Streaming(Some(mut body)) = prepared.body else {
+            panic!("request_buffering=Off should keep request bodies streaming");
+        };
+        let frame =
+            body.frame().await.expect("body should yield a frame").expect("frame should succeed");
+        assert_eq!(
+            frame.into_data().expect("frame should contain data"),
+            Bytes::from_static(b"hello")
+        );
+    }
+
+    #[tokio::test]
+    async fn request_buffering_auto_collects_small_idempotent_body() {
+        let prepared = PreparedProxyRequest::from_request(
+            test_request(Method::PUT, HeaderMap::new(), full_body("hello")),
+            "backend",
+            None,
+            Duration::from_secs(1),
+            64 * 1024,
+            Some(1024),
+            RouteBufferingPolicy::Auto,
+            None,
+        )
+        .await
+        .expect("request should prepare");
+
+        assert!(prepared.can_failover());
+        let PreparedRequestBody::Replayable { body, trailers } = prepared.body else {
+            panic!("small idempotent requests should remain replayable in Auto mode");
+        };
+        assert_eq!(body, Bytes::from_static(b"hello"));
+        assert!(trailers.is_none());
+    }
+
+    #[tokio::test]
+    async fn request_buffering_on_collects_non_idempotent_body() {
+        let prepared = PreparedProxyRequest::from_request(
+            test_request(Method::POST, HeaderMap::new(), chunked_body(vec![b"hello", b" world"])),
+            "backend",
+            None,
+            Duration::from_secs(1),
+            64 * 1024,
+            Some(1024),
+            RouteBufferingPolicy::On,
+            None,
+        )
+        .await
+        .expect("request should prepare");
+
+        assert!(!prepared.can_failover());
+        let PreparedRequestBody::Replayable { body, trailers } = prepared.body else {
+            panic!("request_buffering=On should collect request bodies when allowed");
+        };
+        assert_eq!(body, Bytes::from_static(b"hello world"));
+        assert!(trailers.is_none());
+    }
+
+    #[tokio::test]
+    async fn request_buffering_on_preserves_te_trailers_boundary_as_streaming() {
+        let mut headers = HeaderMap::new();
+        headers.insert(TE, HeaderValue::from_static("trailers"));
+
+        let prepared = PreparedProxyRequest::from_request(
+            test_request(Method::PUT, headers, full_body("hello")),
+            "backend",
+            None,
+            Duration::from_secs(1),
+            64 * 1024,
+            Some(1024),
+            RouteBufferingPolicy::On,
+            None,
+        )
+        .await
+        .expect("request should prepare");
+
+        assert!(!prepared.can_failover());
+        assert!(
+            matches!(prepared.body, PreparedRequestBody::Streaming(Some(_))),
+            "TE: trailers should stay on the streaming path"
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_request_body_limit_errors_midstream() {
+        let prepared = PreparedProxyRequest::from_request(
+            test_request(Method::POST, HeaderMap::new(), chunked_body(vec![b"hello", b"world"])),
+            "backend",
+            None,
+            Duration::from_secs(1),
+            64 * 1024,
+            Some(8),
+            RouteBufferingPolicy::Off,
+            None,
+        )
+        .await
+        .expect("request should prepare");
+
+        let PreparedRequestBody::Streaming(Some(mut body)) = prepared.body else {
+            panic!("request should stay streaming");
+        };
+
+        let first = body
+            .frame()
+            .await
+            .expect("body should yield first frame")
+            .expect("first frame should succeed");
+        assert_eq!(
+            first.into_data().expect("frame should contain data"),
+            Bytes::from_static(b"hello")
+        );
+
+        let error = body
+            .frame()
+            .await
+            .expect("body should yield a terminal error")
+            .expect_err("second frame should exceed the configured limit");
+        assert!(error.to_string().contains("request body exceeded configured limit of 8 bytes"));
+    }
 }

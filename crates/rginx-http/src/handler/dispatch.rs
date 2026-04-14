@@ -8,6 +8,7 @@ use super::response::{
 };
 use super::*;
 use crate::client_ip::{ConnectionPeerAddrs, TlsClientIdentity};
+use crate::compression::ResponseCompressionOptions;
 use std::sync::Arc;
 
 #[derive(Clone, Copy)]
@@ -89,6 +90,8 @@ pub async fn handle(
         .map(|route| route.id.clone())
         .unwrap_or_else(|| "__unmatched__".to_string());
     let selected_route_id = selected_route.as_ref().map(|route| route.id.clone());
+    let response_compression_options =
+        selected_route.as_ref().map(ResponseCompressionOptions::for_route).unwrap_or_default();
     state.record_downstream_request(listener_id, &selected_vhost_id, selected_route_id.as_deref());
     if listener.server.tls.as_ref().and_then(|tls| tls.client_auth.as_ref()).is_some() {
         state.record_mtls_request(listener_id, tls_client_identity.is_some());
@@ -126,10 +129,14 @@ pub async fn handle(
                 if early_data {
                     state.record_http3_early_data_accepted_request(listener_id);
                 }
+                let request_buffering = route.request_buffering;
+                let action = route.action;
                 build_route_response(
                     request,
                     state.clone(),
-                    route.action,
+                    action,
+                    request_buffering,
+                    route.streaming_response_idle_timeout,
                     active,
                     listener_context,
                     client_address.clone(),
@@ -152,6 +159,7 @@ pub async fn handle(
     let finalized = finalize_downstream_response(
         &method,
         &request_headers,
+        &response_compression_options,
         request_id_header,
         response,
         grpc_request,
@@ -242,6 +250,7 @@ fn early_data_rejection_response(request_headers: &HeaderMap) -> HttpResponse {
 pub(super) async fn finalize_downstream_response(
     method: &Method,
     request_headers: &HeaderMap,
+    response_compression_options: &ResponseCompressionOptions,
     request_id_header: HeaderValue,
     mut response: HttpResponse,
     grpc_request: Option<GrpcRequestMetadata<'_>>,
@@ -254,8 +263,13 @@ pub(super) async fn finalize_downstream_response(
     // 4. Add request-id after transforms so every returned response carries it.
     let grpc = grpc_observability(grpc_request, response.headers());
     if grpc.is_none() && *method != Method::HEAD {
-        response =
-            crate::compression::maybe_encode_response(method, request_headers, response).await;
+        response = crate::compression::maybe_encode_response(
+            method,
+            request_headers,
+            response_compression_options,
+            response,
+        )
+        .await;
     }
     if *method == Method::HEAD {
         response = strip_response_body(response);
@@ -393,6 +407,8 @@ async fn build_route_response(
     request: Request<HttpBody>,
     state: SharedState,
     action: RouteAction,
+    request_buffering: rginx_core::RouteBufferingPolicy,
+    streaming_response_idle_timeout: Option<std::time::Duration>,
     active: ActiveState,
     listener: ListenerRequestContext<'_>,
     client_address: ClientAddress,
@@ -415,6 +431,8 @@ async fn build_route_response(
                     options: crate::proxy::DownstreamRequestOptions {
                         request_body_read_timeout: listener.request_body_read_timeout,
                         max_request_body_bytes: listener.max_request_body_bytes,
+                        request_buffering,
+                        streaming_response_idle_timeout,
                     },
                 },
             )

@@ -26,6 +26,19 @@ pub(super) fn invalid_downstream_request_body_error(error: &(dyn StdError + 'sta
     false
 }
 
+pub(super) fn downstream_request_body_too_large_error(error: &(dyn StdError + 'static)) -> bool {
+    let mut current = Some(error);
+    while let Some(candidate) = current {
+        if candidate.to_string().contains("request body exceeded configured limit of") {
+            return true;
+        }
+
+        current = candidate.source();
+    }
+
+    false
+}
+
 pub(crate) async fn wait_for_upstream_stage<T>(
     request_timeout: Duration,
     upstream_name: &str,

@@ -7,12 +7,13 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use http::{HeaderMap, HeaderValue};
+use http_body_util::StreamBody;
 use hyper::body::{Body, Frame, SizeHint};
 use pin_project_lite::pin_project;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::time::{Instant, Sleep};
 
-use super::{GrpcDeadlineBody, IdleTimeoutBody, WriteTimeoutIo};
+use super::{GrpcDeadlineBody, IdleTimeoutBody, MaxBytesBody, WriteTimeoutIo};
 
 pin_project! {
     struct DelayedFrameBody {
@@ -279,6 +280,47 @@ async fn grpc_deadline_body_keeps_absolute_deadline_after_progress() {
         .expect("deadline trailers should be successful");
     let trailers = second.into_trailers().expect("deadline should surface as trailers");
     assert_eq!(trailers.get("grpc-status").and_then(|value| value.to_str().ok()), Some("4"));
+}
+
+#[tokio::test]
+async fn max_bytes_body_allows_frames_within_limit() {
+    let body = StreamBody::new(futures_util::stream::iter(vec![
+        Ok::<_, io::Error>(Frame::data(Bytes::from_static(b"hello"))),
+        Ok(Frame::data(Bytes::from_static(b"!"))),
+    ]));
+    let mut body = Box::pin(MaxBytesBody::new(body, 8));
+
+    let first = poll_fn(|cx| body.as_mut().poll_frame(cx))
+        .await
+        .expect("body should yield first frame")
+        .expect("first frame should succeed");
+    assert_eq!(first.into_data().expect("frame should contain data"), Bytes::from_static(b"hello"));
+
+    let second = poll_fn(|cx| body.as_mut().poll_frame(cx))
+        .await
+        .expect("body should yield second frame")
+        .expect("second frame should succeed");
+    assert_eq!(second.into_data().expect("frame should contain data"), Bytes::from_static(b"!"));
+}
+
+#[tokio::test]
+async fn max_bytes_body_errors_when_limit_is_exceeded() {
+    let body = StreamBody::new(futures_util::stream::iter(vec![
+        Ok::<_, io::Error>(Frame::data(Bytes::from_static(b"hello"))),
+        Ok(Frame::data(Bytes::from_static(b"world"))),
+    ]));
+    let mut body = Box::pin(MaxBytesBody::new(body, 8));
+
+    let _ = poll_fn(|cx| body.as_mut().poll_frame(cx))
+        .await
+        .expect("body should yield first frame")
+        .expect("first frame should succeed");
+
+    let error = poll_fn(|cx| body.as_mut().poll_frame(cx))
+        .await
+        .expect("body should yield a terminal error")
+        .expect_err("second frame should exceed the configured limit");
+    assert!(error.to_string().contains("request body exceeded configured limit of 8 bytes"));
 }
 
 pin_project! {

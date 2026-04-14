@@ -30,6 +30,8 @@ mod reload_boundary;
 mod reload_flow;
 #[path = "reload/restart_flow.rs"]
 mod restart_flow;
+#[path = "reload/streaming_flow.rs"]
+mod streaming_flow;
 
 struct TestServer {
     inner: ServerHarness,
@@ -65,6 +67,10 @@ impl TestServer {
             expected,
             timeout,
         );
+    }
+
+    fn wait_for_http_ready(&mut self, listen_addr: SocketAddr, timeout: Duration) {
+        self.inner.wait_for_http_ready(listen_addr, timeout);
     }
 
     fn send_signal(&self, signal: i32) {

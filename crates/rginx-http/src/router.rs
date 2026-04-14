@@ -133,6 +133,12 @@ mod tests {
             access_control: RouteAccessControl::default(),
             rate_limit: None,
             allow_early_data: false,
+            request_buffering: rginx_core::RouteBufferingPolicy::Auto,
+            response_buffering: rginx_core::RouteBufferingPolicy::Auto,
+            compression: rginx_core::RouteCompressionPolicy::Auto,
+            compression_min_bytes: None,
+            compression_content_types: Vec::new(),
+            streaming_response_idle_timeout: None,
         }
     }
 
@@ -164,6 +170,12 @@ mod tests {
                 access_control: RouteAccessControl::default(),
                 rate_limit: None,
                 allow_early_data: false,
+                request_buffering: rginx_core::RouteBufferingPolicy::Auto,
+                response_buffering: rginx_core::RouteBufferingPolicy::Auto,
+                compression: rginx_core::RouteCompressionPolicy::Auto,
+                compression_min_bytes: None,
+                compression_content_types: Vec::new(),
+                streaming_response_idle_timeout: None,
             },
             Route {
                 id: "test|prefix:/".to_string(),
@@ -177,6 +189,12 @@ mod tests {
                 access_control: RouteAccessControl::default(),
                 rate_limit: None,
                 allow_early_data: false,
+                request_buffering: rginx_core::RouteBufferingPolicy::Auto,
+                response_buffering: rginx_core::RouteBufferingPolicy::Auto,
+                compression: rginx_core::RouteCompressionPolicy::Auto,
+                compression_min_bytes: None,
+                compression_content_types: Vec::new(),
+                streaming_response_idle_timeout: None,
             },
         ];
 
@@ -198,6 +216,12 @@ mod tests {
             access_control: RouteAccessControl::default(),
             rate_limit: None,
             allow_early_data: false,
+            request_buffering: rginx_core::RouteBufferingPolicy::Auto,
+            response_buffering: rginx_core::RouteBufferingPolicy::Auto,
+            compression: rginx_core::RouteCompressionPolicy::Auto,
+            compression_min_bytes: None,
+            compression_content_types: Vec::new(),
+            streaming_response_idle_timeout: None,
         }];
 
         assert!(select_route(&routes, "/api/demo").is_some());
@@ -278,6 +302,12 @@ mod tests {
                 access_control: RouteAccessControl::default(),
                 rate_limit: None,
                 allow_early_data: false,
+                request_buffering: rginx_core::RouteBufferingPolicy::Auto,
+                response_buffering: rginx_core::RouteBufferingPolicy::Auto,
+                compression: rginx_core::RouteCompressionPolicy::Auto,
+                compression_min_bytes: None,
+                compression_content_types: Vec::new(),
+                streaming_response_idle_timeout: None,
             },
             Route {
                 id: "test|prefix:/".to_string(),
@@ -291,6 +321,12 @@ mod tests {
                 access_control: RouteAccessControl::default(),
                 rate_limit: None,
                 allow_early_data: false,
+                request_buffering: rginx_core::RouteBufferingPolicy::Auto,
+                response_buffering: rginx_core::RouteBufferingPolicy::Auto,
+                compression: rginx_core::RouteCompressionPolicy::Auto,
+                compression_min_bytes: None,
+                compression_content_types: Vec::new(),
+                streaming_response_idle_timeout: None,
             },
         ];
 
@@ -319,6 +355,12 @@ mod tests {
             access_control: RouteAccessControl::default(),
             rate_limit: None,
             allow_early_data: false,
+            request_buffering: rginx_core::RouteBufferingPolicy::Auto,
+            response_buffering: rginx_core::RouteBufferingPolicy::Auto,
+            compression: rginx_core::RouteCompressionPolicy::Auto,
+            compression_min_bytes: None,
+            compression_content_types: Vec::new(),
+            streaming_response_idle_timeout: None,
         }];
 
         assert!(select_route(&routes, "/").is_none());
@@ -352,6 +394,12 @@ mod tests {
                     access_control: RouteAccessControl::default(),
                     rate_limit: None,
                     allow_early_data: false,
+                    request_buffering: rginx_core::RouteBufferingPolicy::Auto,
+                    response_buffering: rginx_core::RouteBufferingPolicy::Auto,
+                    compression: rginx_core::RouteCompressionPolicy::Auto,
+                    compression_min_bytes: None,
+                    compression_content_types: Vec::new(),
+                    streaming_response_idle_timeout: None,
                 },
                 make_route("/", "fallback"),
             ],

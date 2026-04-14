@@ -17,9 +17,9 @@ pub(super) async fn graceful_shutdown(
     shutdown_tx: &watch::Sender<bool>,
     active_listener_groups: &mut ListenerGroupMap,
     draining_listener_groups: &mut Vec<ListenerWorkerGroup>,
-    admin_task: &mut JoinHandle<std::io::Result<()>>,
-    health_task: &mut JoinHandle<()>,
-    ocsp_task: &mut JoinHandle<()>,
+    admin_task: &mut Option<JoinHandle<std::io::Result<()>>>,
+    health_task: &mut Option<JoinHandle<()>>,
+    ocsp_task: &mut Option<JoinHandle<()>>,
 ) -> Result<()> {
     let _ = shutdown_tx.send(true);
     initiate_shutdown_for_groups(active_listener_groups.values());
@@ -28,15 +28,9 @@ pub(super) async fn graceful_shutdown(
     match tokio::time::timeout(shutdown_timeout, async {
         join_listener_worker_groups(&state.http, active_listener_groups, draining_listener_groups)
             .await?;
-        (&mut *admin_task).await.map_err(|error| {
-            Error::Server(format!("admin socket task failed to join: {error}"))
-        })??;
-        (&mut *health_task).await.map_err(|error| {
-            Error::Server(format!("active health task failed to join: {error}"))
-        })?;
-        (&mut *ocsp_task)
-            .await
-            .map_err(|error| Error::Server(format!("OCSP refresh task failed to join: {error}")))?;
+        join_admin_task(admin_task).await?;
+        join_unit_task(health_task, "active health").await?;
+        join_unit_task(ocsp_task, "OCSP refresh").await?;
         state.http.drain_background_tasks().await;
         Ok::<(), Error>(())
     })
@@ -49,9 +43,9 @@ pub(super) async fn graceful_shutdown(
             );
             abort_listener_worker_groups(active_listener_groups.values());
             abort_listener_worker_groups(draining_listener_groups.iter());
-            admin_task.abort();
-            health_task.abort();
-            ocsp_task.abort();
+            abort_task(admin_task.as_ref());
+            abort_task(health_task.as_ref());
+            abort_task(ocsp_task.as_ref());
 
             join_aborted_listener_worker_groups(
                 &state.http,
@@ -60,27 +54,54 @@ pub(super) async fn graceful_shutdown(
             )
             .await;
 
-            if let Err(error) = (&mut *admin_task).await
-                && !error.is_cancelled()
-            {
-                tracing::warn!(%error, "admin socket task failed after abort");
-            }
-
-            if let Err(error) = (&mut *health_task).await
-                && !error.is_cancelled()
-            {
-                tracing::warn!(%error, "active health task failed after abort");
-            }
-
-            if let Err(error) = (&mut *ocsp_task).await
-                && !error.is_cancelled()
-            {
-                tracing::warn!(%error, "OCSP refresh task failed after abort");
-            }
+            join_admin_task_after_abort(admin_task).await;
+            join_unit_task_after_abort(health_task, "active health").await;
+            join_unit_task_after_abort(ocsp_task, "OCSP refresh").await;
 
             state.http.abort_background_tasks().await;
             Ok(())
         }
+    }
+}
+
+fn abort_task<T>(task: Option<&JoinHandle<T>>) {
+    if let Some(task) = task {
+        task.abort();
+    }
+}
+
+async fn join_admin_task(task: &mut Option<JoinHandle<std::io::Result<()>>>) -> Result<()> {
+    if let Some(task) = task.take() {
+        task.await.map_err(|error| {
+            Error::Server(format!("admin socket task failed to join: {error}"))
+        })??;
+    }
+    Ok(())
+}
+
+async fn join_unit_task(task: &mut Option<JoinHandle<()>>, name: &str) -> Result<()> {
+    if let Some(task) = task.take() {
+        task.await
+            .map_err(|error| Error::Server(format!("{name} task failed to join: {error}")))?;
+    }
+    Ok(())
+}
+
+async fn join_admin_task_after_abort(task: &mut Option<JoinHandle<std::io::Result<()>>>) {
+    if let Some(task) = task.take()
+        && let Err(error) = task.await
+        && !error.is_cancelled()
+    {
+        tracing::warn!(%error, "admin socket task failed after abort");
+    }
+}
+
+async fn join_unit_task_after_abort(task: &mut Option<JoinHandle<()>>, name: &str) {
+    if let Some(task) = task.take()
+        && let Err(error) = task.await
+        && !error.is_cancelled()
+    {
+        tracing::warn!(%error, "{name} task failed after abort");
     }
 }
 
@@ -145,6 +166,12 @@ mod tests {
                     access_control: RouteAccessControl::default(),
                     rate_limit: None,
                     allow_early_data: false,
+                    request_buffering: rginx_core::RouteBufferingPolicy::Auto,
+                    response_buffering: rginx_core::RouteBufferingPolicy::Auto,
+                    compression: rginx_core::RouteCompressionPolicy::Auto,
+                    compression_min_bytes: None,
+                    compression_content_types: Vec::new(),
+                    streaming_response_idle_timeout: None,
                 }],
                 tls: None,
             },
@@ -167,9 +194,9 @@ mod tests {
 
         let mut active_listener_groups = ListenerGroupMap::new();
         let mut draining_listener_groups = Vec::new();
-        let mut admin_task = tokio::spawn(async { Ok::<(), std::io::Error>(()) });
-        let mut health_task = tokio::spawn(async {});
-        let mut ocsp_task = tokio::spawn(async {});
+        let mut admin_task = Some(tokio::spawn(async { Ok::<(), std::io::Error>(()) }));
+        let mut health_task = Some(tokio::spawn(async {}));
+        let mut ocsp_task = Some(tokio::spawn(async {}));
 
         graceful_shutdown(
             &state,
@@ -186,9 +213,9 @@ mod tests {
 
         assert!(*shutdown_rx.borrow());
         assert!(background_task_drained.load(Ordering::Relaxed));
-        assert!(admin_task.is_finished());
-        assert!(health_task.is_finished());
-        assert!(ocsp_task.is_finished());
+        assert!(admin_task.is_none());
+        assert!(health_task.is_none());
+        assert!(ocsp_task.is_none());
         assert!(active_listener_groups.is_empty());
         assert!(draining_listener_groups.is_empty());
     }
@@ -207,9 +234,9 @@ mod tests {
 
         let mut active_listener_groups = ListenerGroupMap::new();
         let mut draining_listener_groups = Vec::new();
-        let mut admin_task = tokio::spawn(async { pending::<std::io::Result<()>>().await });
-        let mut health_task = tokio::spawn(async { pending::<()>().await });
-        let mut ocsp_task = tokio::spawn(async { pending::<()>().await });
+        let mut admin_task = Some(tokio::spawn(async { pending::<std::io::Result<()>>().await }));
+        let mut health_task = Some(tokio::spawn(async { pending::<()>().await }));
+        let mut ocsp_task = Some(tokio::spawn(async { pending::<()>().await }));
 
         tokio::task::yield_now().await;
         graceful_shutdown(
@@ -227,9 +254,9 @@ mod tests {
 
         assert!(*shutdown_rx.borrow());
         assert!(background_task_started.load(Ordering::Relaxed));
-        assert!(admin_task.is_finished());
-        assert!(health_task.is_finished());
-        assert!(ocsp_task.is_finished());
+        assert!(admin_task.is_none());
+        assert!(health_task.is_none());
+        assert!(ocsp_task.is_none());
         assert!(active_listener_groups.is_empty());
         assert!(draining_listener_groups.is_empty());
     }

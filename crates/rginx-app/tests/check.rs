@@ -178,6 +178,33 @@ fn check_reports_runtime_worker_settings() {
 }
 
 #[test]
+fn check_reports_route_transport_policy_summary() {
+    let temp_dir = temp_dir("rginx-check-route-transport");
+    fs::create_dir_all(&temp_dir).expect("temp test dir should be created");
+    let config_path = temp_dir.join("route-transport.ron");
+    let listen_addr: SocketAddr = "127.0.0.1:18083".parse().unwrap();
+
+    fs::write(
+        &config_path,
+        format!(
+            "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [],\n    locations: [\n        LocationConfig(\n            matcher: Exact(\"/default\"),\n            handler: Return(\n                status: 200,\n                location: \"\",\n                body: Some(\"default\\n\"),\n            ),\n        ),\n        LocationConfig(\n            matcher: Exact(\"/stream\"),\n            handler: Return(\n                status: 200,\n                location: \"\",\n                body: Some(\"stream\\n\"),\n            ),\n            request_buffering: Some(Off),\n            response_buffering: Some(On),\n            compression: Some(Force),\n            compression_min_bytes: Some(1024),\n            compression_content_types: Some([\"text/plain\", \"application/json\"]),\n            streaming_response_idle_timeout_secs: Some(15),\n        ),\n    ],\n)\n",
+            listen_addr.to_string()
+        ),
+    )
+    .expect("route transport config should be written");
+
+    let output = run_rginx(["check", "--config", config_path.to_str().unwrap()]);
+
+    assert!(output.status.success(), "check should succeed: {}", render_output(&output));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains(
+        "route_transport_details=request_buffering_auto=1 request_buffering_on=0 request_buffering_off=1 response_buffering_auto=1 response_buffering_on=1 response_buffering_off=0 compression_auto=1 compression_off=0 compression_force=1 custom_compression_min_bytes_routes=1 custom_compression_content_types_routes=1 streaming_response_idle_timeout_routes=1"
+    ));
+
+    let _ = fs::remove_dir_all(temp_dir);
+}
+
+#[test]
 fn check_reports_explicit_listener_summary_and_reload_boundary() {
     let temp_dir = temp_dir("rginx-check-listeners-test");
     fs::create_dir_all(&temp_dir).expect("temp test dir should be created");

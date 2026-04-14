@@ -117,6 +117,12 @@ fn snapshot_with_routes(listen: &str) -> ConfigSnapshot {
         access_control: RouteAccessControl::default(),
         rate_limit: None,
         allow_early_data: false,
+        request_buffering: rginx_core::RouteBufferingPolicy::Auto,
+        response_buffering: rginx_core::RouteBufferingPolicy::Auto,
+        compression: rginx_core::RouteCompressionPolicy::Auto,
+        compression_min_bytes: None,
+        compression_content_types: Vec::new(),
+        streaming_response_idle_timeout: None,
     }];
     snapshot
 }
@@ -135,6 +141,12 @@ fn snapshot_with_routes_and_upstream(listen: &str) -> ConfigSnapshot {
         access_control: RouteAccessControl::default(),
         rate_limit: None,
         allow_early_data: false,
+        request_buffering: rginx_core::RouteBufferingPolicy::Auto,
+        response_buffering: rginx_core::RouteBufferingPolicy::Auto,
+        compression: rginx_core::RouteCompressionPolicy::Auto,
+        compression_min_bytes: None,
+        compression_content_types: Vec::new(),
+        streaming_response_idle_timeout: None,
     }];
     snapshot
 }

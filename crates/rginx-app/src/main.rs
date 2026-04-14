@@ -103,6 +103,7 @@ struct CheckSummary {
     upstream_count: usize,
     worker_threads: Option<usize>,
     accept_workers: usize,
+    route_transport: RouteTransportCheckDetails,
     tls: TlsCheckDetails,
 }
 
@@ -137,6 +138,21 @@ struct CheckListenerBindingSummary {
     http3_host_key_path: Option<PathBuf>,
     http3_gso: Option<bool>,
     http3_early_data_enabled: Option<bool>,
+}
+
+struct RouteTransportCheckDetails {
+    request_buffering_auto_routes: usize,
+    request_buffering_on_routes: usize,
+    request_buffering_off_routes: usize,
+    response_buffering_auto_routes: usize,
+    response_buffering_on_routes: usize,
+    response_buffering_off_routes: usize,
+    compression_auto_routes: usize,
+    compression_off_routes: usize,
+    compression_force_routes: usize,
+    custom_compression_min_bytes_routes: usize,
+    custom_compression_content_types_routes: usize,
+    streaming_response_idle_timeout_routes: usize,
 }
 
 struct TlsCheckDetails {
@@ -290,6 +306,21 @@ fn print_check_success(config_path: &Path, summary: CheckSummary) {
             );
         }
     }
+    println!(
+        "route_transport_details=request_buffering_auto={} request_buffering_on={} request_buffering_off={} response_buffering_auto={} response_buffering_on={} response_buffering_off={} compression_auto={} compression_off={} compression_force={} custom_compression_min_bytes_routes={} custom_compression_content_types_routes={} streaming_response_idle_timeout_routes={}",
+        summary.route_transport.request_buffering_auto_routes,
+        summary.route_transport.request_buffering_on_routes,
+        summary.route_transport.request_buffering_off_routes,
+        summary.route_transport.response_buffering_auto_routes,
+        summary.route_transport.response_buffering_on_routes,
+        summary.route_transport.response_buffering_off_routes,
+        summary.route_transport.compression_auto_routes,
+        summary.route_transport.compression_off_routes,
+        summary.route_transport.compression_force_routes,
+        summary.route_transport.custom_compression_min_bytes_routes,
+        summary.route_transport.custom_compression_content_types_routes,
+        summary.route_transport.streaming_response_idle_timeout_routes,
+    );
     println!("reload_requires_restart_for={}", summary.tls.restart_required_fields.join(","));
     println!(
         "tls_details=listener_profiles={} vhost_overrides={} sni_names={} certificate_bundles={}",
@@ -526,8 +557,68 @@ fn build_check_summary(config: &rginx_config::ConfigSnapshot) -> CheckSummary {
         upstream_count: config.upstreams.len(),
         worker_threads: config.runtime.worker_threads,
         accept_workers: config.runtime.accept_workers,
+        route_transport: route_transport_check_details(config),
         tls: tls_check_details(config),
     }
+}
+
+fn route_transport_check_details(
+    config: &rginx_config::ConfigSnapshot,
+) -> RouteTransportCheckDetails {
+    let mut details = RouteTransportCheckDetails {
+        request_buffering_auto_routes: 0,
+        request_buffering_on_routes: 0,
+        request_buffering_off_routes: 0,
+        response_buffering_auto_routes: 0,
+        response_buffering_on_routes: 0,
+        response_buffering_off_routes: 0,
+        compression_auto_routes: 0,
+        compression_off_routes: 0,
+        compression_force_routes: 0,
+        custom_compression_min_bytes_routes: 0,
+        custom_compression_content_types_routes: 0,
+        streaming_response_idle_timeout_routes: 0,
+    };
+
+    for route in all_routes(config) {
+        match route.request_buffering {
+            rginx_core::RouteBufferingPolicy::Auto => details.request_buffering_auto_routes += 1,
+            rginx_core::RouteBufferingPolicy::On => details.request_buffering_on_routes += 1,
+            rginx_core::RouteBufferingPolicy::Off => details.request_buffering_off_routes += 1,
+        }
+
+        match route.response_buffering {
+            rginx_core::RouteBufferingPolicy::Auto => details.response_buffering_auto_routes += 1,
+            rginx_core::RouteBufferingPolicy::On => details.response_buffering_on_routes += 1,
+            rginx_core::RouteBufferingPolicy::Off => details.response_buffering_off_routes += 1,
+        }
+
+        match route.compression {
+            rginx_core::RouteCompressionPolicy::Auto => details.compression_auto_routes += 1,
+            rginx_core::RouteCompressionPolicy::Off => details.compression_off_routes += 1,
+            rginx_core::RouteCompressionPolicy::Force => details.compression_force_routes += 1,
+        }
+
+        if route.compression_min_bytes.is_some() {
+            details.custom_compression_min_bytes_routes += 1;
+        }
+        if !route.compression_content_types.is_empty() {
+            details.custom_compression_content_types_routes += 1;
+        }
+        if route.streaming_response_idle_timeout.is_some() {
+            details.streaming_response_idle_timeout_routes += 1;
+        }
+    }
+
+    details
+}
+
+fn all_routes<'a>(
+    config: &'a rginx_config::ConfigSnapshot,
+) -> impl Iterator<Item = &'a rginx_core::Route> {
+    std::iter::once(&config.default_vhost)
+        .chain(config.vhosts.iter())
+        .flat_map(|vhost| vhost.routes.iter())
 }
 
 fn check_listener_summaries(config: &rginx_config::ConfigSnapshot) -> Vec<CheckListenerSummary> {

@@ -320,6 +320,22 @@ pub enum UpstreamLoadBalanceConfig {
     LeastConn,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
+pub enum RouteBufferingPolicyConfig {
+    #[default]
+    Auto,
+    On,
+    Off,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
+pub enum RouteCompressionPolicyConfig {
+    Off,
+    #[default]
+    Auto,
+    Force,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct LocationConfig {
     pub matcher: MatcherConfig,
@@ -338,6 +354,18 @@ pub struct LocationConfig {
     pub burst: Option<u32>,
     #[serde(default)]
     pub allow_early_data: Option<bool>,
+    #[serde(default)]
+    pub request_buffering: Option<RouteBufferingPolicyConfig>,
+    #[serde(default)]
+    pub response_buffering: Option<RouteBufferingPolicyConfig>,
+    #[serde(default)]
+    pub compression: Option<RouteCompressionPolicyConfig>,
+    #[serde(default)]
+    pub compression_min_bytes: Option<u64>,
+    #[serde(default)]
+    pub compression_content_types: Option<Vec<String>>,
+    #[serde(default)]
+    pub streaming_response_idle_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

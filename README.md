@@ -104,6 +104,7 @@
 - 阶段 7 release gate 说明见 `HTTP3_PHASE7_RELEASE.md`
 - 上游 HTTP/3 生产级传输专项计划见 `ARCHITECTURE_UPSTREAM_HTTP3_PRODUCTION_PLAN.md`
 - 上游 HTTP/3 生产级传输阶段 0 基线见 `ARCHITECTURE_UPSTREAM_HTTP3_PHASE0_BASELINE.md`
+- 无缓存边缘传输专项计划见 `ARCHITECTURE_EDGE_TRANSPORT_STREAMING_PLAN.md`
 - 当前已完成阶段：Phase 0、Phase 1、Phase 2、Phase 3、Phase 4、Phase 5、Phase 6、Phase 7
 
 ## 仓库结构
@@ -131,7 +132,7 @@
 ### 环境
 
 - Linux
-- Rust `1.85+`
+- Rust `1.94+`
 
 ### 源码运行
 

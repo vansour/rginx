@@ -1,5 +1,6 @@
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use http::{HeaderName, HeaderValue, StatusCode};
 use ipnet::IpNet;
@@ -15,6 +16,12 @@ pub struct Route {
     pub access_control: RouteAccessControl,
     pub rate_limit: Option<RouteRateLimit>,
     pub allow_early_data: bool,
+    pub request_buffering: RouteBufferingPolicy,
+    pub response_buffering: RouteBufferingPolicy,
+    pub compression: RouteCompressionPolicy,
+    pub compression_min_bytes: Option<usize>,
+    pub compression_content_types: Vec<String>,
+    pub streaming_response_idle_timeout: Option<Duration>,
 }
 
 impl Route {
@@ -54,6 +61,42 @@ pub struct RouteRateLimit {
 impl RouteRateLimit {
     pub fn new(requests_per_sec: u32, burst: u32) -> Self {
         Self { requests_per_sec, burst }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RouteBufferingPolicy {
+    #[default]
+    Auto,
+    On,
+    Off,
+}
+
+impl RouteBufferingPolicy {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RouteCompressionPolicy {
+    Off,
+    #[default]
+    Auto,
+    Force,
+}
+
+impl RouteCompressionPolicy {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Auto => "auto",
+            Self::Force => "force",
+        }
     }
 }
 

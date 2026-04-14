@@ -122,6 +122,121 @@ async fn serves_http2_over_tls_and_proxies_to_http11_upstreams() {
     upstream_task.join().expect("upstream thread should complete");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn streams_http2_responses_without_buffering_entire_upstream_body() {
+    let upstream_listener =
+        TcpListener::bind(("127.0.0.1", 0)).expect("upstream listener should bind");
+    upstream_listener
+        .set_nonblocking(true)
+        .expect("upstream listener should support nonblocking mode");
+    let upstream_addr =
+        upstream_listener.local_addr().expect("upstream listener addr should be available");
+    let upstream_task = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut stream = loop {
+            match upstream_listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error)
+                    if error.kind() == ErrorKind::WouldBlock && Instant::now() < deadline =>
+                {
+                    thread::sleep(Duration::from_millis(25));
+                }
+                Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                    panic!("timed out waiting for upstream connection: {error}");
+                }
+                Err(error) => panic!("failed to accept upstream connection: {error}"),
+            }
+        };
+
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("upstream read timeout should be configurable");
+        stream
+            .set_write_timeout(Some(Duration::from_secs(3)))
+            .expect("upstream write timeout should be configurable");
+
+        let request = read_http_head(&mut stream);
+        assert!(
+            request.starts_with("GET /stream HTTP/1.1\r\n"),
+            "expected proxied HTTP/2 request to preserve the streaming path, got {request:?}"
+        );
+
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+            )
+            .expect("upstream response head should write");
+        write_chunk(&mut stream, b"first\n");
+        thread::sleep(Duration::from_millis(900));
+        write_chunk(&mut stream, b"second\n");
+        stream.write_all(b"0\r\n\r\n").expect("terminal chunk should write");
+        stream.flush().expect("terminal chunk should flush");
+    });
+
+    let listen_addr = reserve_loopback_addr();
+    let mut server = ServerHarness::spawn_with_tls(
+        "rginx-http2-streaming-test",
+        TEST_SERVER_CERT_PEM,
+        TEST_SERVER_KEY_PEM,
+        |_, cert_path, key_path| {
+            apply_tls_placeholders(
+                tls_streaming_proxy_config(listen_addr, upstream_addr),
+                cert_path,
+                key_path,
+            )
+        },
+    );
+    server.wait_for_https_ready(listen_addr, Duration::from_secs(5));
+
+    let connector = HttpsConnectorBuilder::new()
+        .with_tls_config(
+            ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(InsecureServerCertVerifier::new()))
+                .with_no_client_auth(),
+        )
+        .https_only()
+        .enable_http2()
+        .build();
+    let client: Client<_, Empty<Bytes>> = Client::builder(TokioExecutor::new()).build(connector);
+
+    let request = Request::builder()
+        .uri(format!("https://127.0.0.1:{}/api/stream", listen_addr.port()))
+        .version(Version::HTTP_2)
+        .body(Empty::<Bytes>::new())
+        .expect("HTTP/2 request should build");
+    let started = Instant::now();
+    let response = tokio::time::timeout(Duration::from_secs(5), client.request(request))
+        .await
+        .expect("HTTP/2 request should not time out")
+        .expect("HTTP/2 request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.version(), Version::HTTP_2);
+
+    let mut body = response.into_body();
+    let first = tokio::time::timeout(Duration::from_millis(500), next_data_chunk(&mut body))
+        .await
+        .expect("first HTTP/2 chunk should arrive before upstream completes")
+        .expect("first HTTP/2 chunk should exist");
+    assert_eq!(&first[..], b"first\n");
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "first HTTP/2 chunk should arrive early, elapsed={:?}",
+        started.elapsed()
+    );
+
+    let second = tokio::time::timeout(Duration::from_secs(2), next_data_chunk(&mut body))
+        .await
+        .expect("second HTTP/2 chunk should arrive")
+        .expect("second HTTP/2 chunk should exist");
+    assert_eq!(&second[..], b"second\n");
+    assert!(next_data_chunk(&mut body).await.is_none(), "stream should end after two chunks");
+
+    server.shutdown_and_wait(Duration::from_secs(5));
+    upstream_task.join().expect("upstream thread should complete");
+}
+
 fn tls_proxy_config(listen_addr: SocketAddr, upstream_addr: SocketAddr) -> String {
     format!(
         "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n        tls: Some(ServerTlsConfig(\n            cert_path: \"__CERT_PATH__\",\n            key_path: \"__KEY_PATH__\",\n        )),\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [\n                UpstreamPeerConfig(\n                    url: {:?},\n                ),\n            ],\n        ),\n    ],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Proxy(\n                upstream: \"backend\",\n            ),\n        ),\n    ],\n)\n",
@@ -129,6 +244,40 @@ fn tls_proxy_config(listen_addr: SocketAddr, upstream_addr: SocketAddr) -> Strin
         format!("http://{upstream_addr}"),
         ready_route = READY_ROUTE_CONFIG,
     )
+}
+
+fn tls_streaming_proxy_config(listen_addr: SocketAddr, upstream_addr: SocketAddr) -> String {
+    format!(
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n        tls: Some(ServerTlsConfig(\n            cert_path: \"__CERT_PATH__\",\n            key_path: \"__KEY_PATH__\",\n        )),\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [\n                UpstreamPeerConfig(\n                    url: {:?},\n                ),\n            ],\n            request_timeout_secs: Some(5),\n        ),\n    ],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Prefix(\"/api\"),\n            handler: Proxy(\n                upstream: \"backend\",\n                preserve_host: Some(false),\n                strip_prefix: Some(\"/api\"),\n            ),\n            response_buffering: Some(Off),\n            compression: Some(Off),\n        ),\n    ],\n)\n",
+        listen_addr.to_string(),
+        format!("http://{upstream_addr}"),
+        ready_route = READY_ROUTE_CONFIG,
+    )
+}
+
+async fn next_data_chunk<B>(body: &mut B) -> Option<Bytes>
+where
+    B: hyper::body::Body<Data = Bytes> + Unpin,
+    B::Error: std::fmt::Display,
+{
+    while let Some(frame) = body.frame().await {
+        let frame =
+            frame.unwrap_or_else(|error| panic!("streaming body frame should arrive: {error}"));
+        if let Ok(data) = frame.into_data() {
+            if data.is_empty() {
+                continue;
+            }
+            return Some(data);
+        }
+    }
+    None
+}
+
+fn write_chunk(stream: &mut std::net::TcpStream, chunk: &[u8]) {
+    write!(stream, "{:x}\r\n", chunk.len()).expect("chunk header should write");
+    stream.write_all(chunk).expect("chunk payload should write");
+    stream.write_all(b"\r\n").expect("chunk terminator should write");
+    stream.flush().expect("chunk should flush");
 }
 
 #[derive(Debug)]
