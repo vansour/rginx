@@ -781,7 +781,7 @@ fn algorithm_identifier_value_bytes(
 }
 
 fn signature_bytes<'a>(path: &Path, signature: &'a rasn::types::BitString) -> Result<&'a [u8]> {
-    if signature.len() % 8 != 0 {
+    if !signature.len().is_multiple_of(8) {
         return Err(Error::Server(format!(
             "failed to parse OCSP signature value for certificate `{}`: signature BIT STRING contains unused bits",
             path.display()
@@ -811,13 +811,13 @@ fn validate_ocsp_response_time(
         )));
     }
 
-    if let Some(next_update) = &response.next_update {
-        if next_update < &now {
-            return Err(Error::Server(format!(
-                "OCSP response for certificate `{}` is expired (nextUpdate is in the past)",
-                path.display()
-            )));
-        }
+    if let Some(next_update) = &response.next_update
+        && next_update < &now
+    {
+        return Err(Error::Server(format!(
+            "OCSP response for certificate `{}` is expired (nextUpdate is in the past)",
+            path.display()
+        )));
     }
 
     Ok(())

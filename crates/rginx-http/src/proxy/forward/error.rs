@@ -1,6 +1,7 @@
 use std::error::Error as StdError;
 use std::future::Future;
 
+use super::super::request_body::request_body_limit_error;
 use super::*;
 
 pub(super) fn invalid_downstream_request_body_error(error: &(dyn StdError + 'static)) -> bool {
@@ -26,17 +27,28 @@ pub(super) fn invalid_downstream_request_body_error(error: &(dyn StdError + 'sta
     false
 }
 
-pub(super) fn downstream_request_body_too_large_error(error: &(dyn StdError + 'static)) -> bool {
+pub(super) fn downstream_request_body_limit(error: &(dyn StdError + 'static)) -> Option<usize> {
     let mut current = Some(error);
     while let Some(candidate) = current {
-        if candidate.to_string().contains("request body exceeded configured limit of") {
-            return true;
+        if let Some(limit) = request_body_limit_error(candidate) {
+            return Some(limit);
+        }
+
+        if let Some(limit) = parse_request_body_limit_message(&candidate.to_string()) {
+            return Some(limit);
         }
 
         current = candidate.source();
     }
 
-    false
+    None
+}
+
+fn parse_request_body_limit_message(message: &str) -> Option<usize> {
+    let prefix = "request body exceeded configured limit of ";
+    let suffix = " bytes";
+    let value = message.strip_prefix(prefix)?.strip_suffix(suffix)?;
+    value.parse().ok()
 }
 
 pub(crate) async fn wait_for_upstream_stage<T>(

@@ -28,10 +28,10 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    if let Some(command) = cli.command.as_ref() {
-        if admin_cli::run_admin_command(&cli.config, command)? {
-            return Ok(());
-        }
+    if let Some(command) = cli.command.as_ref()
+        && admin_cli::run_admin_command(&cli.config, command)?
+    {
+        return Ok(());
     }
 
     rginx_observability::init_logging()
@@ -613,9 +613,7 @@ fn route_transport_check_details(
     details
 }
 
-fn all_routes<'a>(
-    config: &'a rginx_config::ConfigSnapshot,
-) -> impl Iterator<Item = &'a rginx_core::Route> {
+fn all_routes(config: &rginx_config::ConfigSnapshot) -> impl Iterator<Item = &rginx_core::Route> {
     std::iter::once(&config.default_vhost)
         .chain(config.vhosts.iter())
         .flat_map(|vhost| vhost.routes.iter())

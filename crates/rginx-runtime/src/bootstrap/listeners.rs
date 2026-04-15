@@ -416,18 +416,35 @@ fn activate_prepared_listener_worker_group(
 
 /// Waits for all worker tasks in a listener group to finish.
 async fn join_listener_worker_group(group: &mut ListenerWorkerGroup) -> Result<()> {
+    let mut first_error = None;
+
     while group.joined_tasks < group.tasks.len() {
         let worker_index = group.joined_tasks;
-        (&mut group.tasks[worker_index]).await.map_err(|error| {
-            Error::Server(format!(
-                "listener `{}` worker {worker_index} failed to join: {error}",
-                group.listener.name
-            ))
-        })??;
+        match (&mut group.tasks[worker_index]).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(Error::Server(format!(
+                        "listener `{}` worker {worker_index} failed to join: {error}",
+                        group.listener.name
+                    )));
+                }
+            }
+        }
         group.joined_tasks += 1;
     }
     group.tasks.clear();
     group.joined_tasks = 0;
+
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+
     Ok(())
 }
 

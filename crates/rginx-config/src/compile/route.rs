@@ -77,6 +77,16 @@ fn compile_route(
     let rate_limit = compile_route_rate_limit(&matcher, requests_per_sec, burst)?;
     let action = compile_route_action(handler, upstreams)?;
 
+    let compression_min_bytes = compression_min_bytes
+        .map(|value| {
+            usize::try_from(value).map_err(|_| {
+                Error::Config(format!(
+                    "route `{route_id}` compression_min_bytes `{value}` does not fit into usize"
+                ))
+            })
+        })
+        .transpose()?;
+
     Ok(Route {
         id: route_id,
         matcher,
@@ -88,7 +98,7 @@ fn compile_route(
         request_buffering: compile_buffering_policy(request_buffering),
         response_buffering: compile_buffering_policy(response_buffering),
         compression: compile_compression_policy(compression),
-        compression_min_bytes: compression_min_bytes.map(|value| value as usize),
+        compression_min_bytes,
         compression_content_types: compile_compression_content_types(compression_content_types),
         streaming_response_idle_timeout: streaming_response_idle_timeout_secs
             .map(Duration::from_secs),

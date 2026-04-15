@@ -19,6 +19,17 @@ struct CollectedRequestBody {
     trailers: Option<HeaderMap>,
 }
 
+struct PrepareRequestBodyConfig<'a> {
+    upstream_name: &'a str,
+    method: &'a Method,
+    headers: &'a HeaderMap,
+    body_timeout: Duration,
+    max_replayable_request_body_bytes: usize,
+    max_request_body_bytes: Option<usize>,
+    request_buffering: RouteBufferingPolicy,
+    grpc_web_mode: Option<&'a GrpcWebMode>,
+}
+
 #[derive(Debug)]
 pub(super) enum PrepareRequestError {
     PayloadTooLarge { max_request_body_bytes: usize },
@@ -119,15 +130,17 @@ impl PreparedProxyRequest {
         let (parts, body) = request.into_parts();
         let body_timeout = request_body_read_timeout.unwrap_or(write_timeout);
         let prepared_body = prepare_request_body(
-            upstream_name,
-            &parts.method,
-            &parts.headers,
             body,
-            body_timeout,
-            max_replayable_request_body_bytes,
-            max_request_body_bytes,
-            request_buffering,
-            grpc_web_mode,
+            PrepareRequestBodyConfig {
+                upstream_name,
+                method: &parts.method,
+                headers: &parts.headers,
+                body_timeout,
+                max_replayable_request_body_bytes,
+                max_request_body_bytes,
+                request_buffering,
+                grpc_web_mode,
+            },
         )
         .await?;
 
@@ -195,35 +208,28 @@ impl PreparedProxyRequest {
 }
 
 async fn prepare_request_body(
-    upstream_name: &str,
-    method: &Method,
-    headers: &HeaderMap,
     body: HttpBody,
-    body_timeout: Duration,
-    max_replayable_request_body_bytes: usize,
-    max_request_body_bytes: Option<usize>,
-    request_buffering: RouteBufferingPolicy,
-    grpc_web_mode: Option<&GrpcWebMode>,
+    config: PrepareRequestBodyConfig<'_>,
 ) -> Result<PreparedRequestBody, PrepareRequestError> {
-    let body_timeout_label = format!("upstream `{upstream_name}` request body");
-    let preserves_trailers = preserved_te_trailers_value(headers).is_some();
+    let body_timeout_label = format!("upstream `{}` request body", config.upstream_name);
+    let preserves_trailers = preserved_te_trailers_value(config.headers).is_some();
 
-    if let Some(max_request_body_bytes) = max_request_body_bytes {
-        if body.size_hint().lower() > max_request_body_bytes as u64 {
-            return Err(PrepareRequestError::payload_too_large(max_request_body_bytes));
-        }
+    if let Some(max_request_body_bytes) = config.max_request_body_bytes
+        && body.size_hint().lower() > max_request_body_bytes as u64
+    {
+        return Err(PrepareRequestError::payload_too_large(max_request_body_bytes));
     }
 
     let body = downstream_request_body(
         body,
-        body_timeout,
+        config.body_timeout,
         body_timeout_label,
-        grpc_web_mode,
-        max_request_body_bytes,
+        config.grpc_web_mode,
+        config.max_request_body_bytes,
     );
 
     if body.is_end_stream() {
-        return Ok(match request_buffering {
+        return Ok(match config.request_buffering {
             RouteBufferingPolicy::Off => PreparedRequestBody::Streaming(Some(body)),
             RouteBufferingPolicy::On | RouteBufferingPolicy::Auto => {
                 PreparedRequestBody::Replayable { body: Bytes::new(), trailers: None }
@@ -231,7 +237,7 @@ async fn prepare_request_body(
         });
     }
 
-    match request_buffering {
+    match config.request_buffering {
         RouteBufferingPolicy::Off => Ok(PreparedRequestBody::Streaming(Some(body))),
         RouteBufferingPolicy::On if !preserves_trailers => {
             let body = collect_request_body(body).await?;
@@ -240,10 +246,10 @@ async fn prepare_request_body(
         RouteBufferingPolicy::On => Ok(PreparedRequestBody::Streaming(Some(body))),
         RouteBufferingPolicy::Auto
             if !preserves_trailers
-                && is_idempotent_method(method)
+                && is_idempotent_method(config.method)
                 && matches!(
                     body.size_hint().upper(),
-                    Some(upper) if upper <= max_replayable_request_body_bytes as u64
+                    Some(upper) if upper <= config.max_replayable_request_body_bytes as u64
                 ) =>
         {
             let body = collect_request_body(body).await?;
@@ -308,7 +314,7 @@ fn downstream_request_body(
     }
 }
 
-fn request_body_limit_error(error: &(dyn std::error::Error + 'static)) -> Option<usize> {
+pub(super) fn request_body_limit_error(error: &(dyn std::error::Error + 'static)) -> Option<usize> {
     let mut current = Some(error);
     while let Some(candidate) = current {
         if let Some(limit_error) = candidate.downcast_ref::<RequestBodyLimitError>() {

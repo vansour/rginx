@@ -88,11 +88,16 @@ async fn join_unit_task(task: &mut Option<JoinHandle<()>>, name: &str) -> Result
 }
 
 async fn join_admin_task_after_abort(task: &mut Option<JoinHandle<std::io::Result<()>>>) {
-    if let Some(task) = task.take()
-        && let Err(error) = task.await
-        && !error.is_cancelled()
-    {
-        tracing::warn!(%error, "admin socket task failed after abort");
+    if let Some(task) = task.take() {
+        match task.await {
+            Err(error) if !error.is_cancelled() => {
+                tracing::warn!(%error, "admin socket task failed after abort");
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "admin socket task returned error after abort");
+            }
+            _ => {}
+        }
     }
 }
 

@@ -19,6 +19,13 @@ struct ListenerRequestContext<'a> {
     max_request_body_bytes: Option<usize>,
 }
 
+#[derive(Clone)]
+struct RouteExecutionContext {
+    action: RouteAction,
+    request_buffering: rginx_core::RouteBufferingPolicy,
+    streaming_response_idle_timeout: Option<std::time::Duration>,
+}
+
 pub(super) struct FinalizedDownstreamResponse {
     pub(super) response: HttpResponse,
     pub(super) status: StatusCode,
@@ -110,18 +117,17 @@ pub async fn handle(
         request_body_read_timeout: listener.server.request_body_read_timeout,
         max_request_body_bytes: listener.server.max_request_body_bytes,
     };
-    let response = match selected_route {
+    let response = match selected_route.as_ref() {
         Some(route) => {
             if early_data && !route.allow_early_data {
                 state.record_http3_early_data_rejected_request(listener_id);
                 early_data_rejection_response(&request_headers)
-            } else if let Some(response) =
-                authorize_route(&request_headers, &route, &client_address)
+            } else if let Some(response) = authorize_route(&request_headers, route, &client_address)
             {
                 state.record_route_access_denied(&route.id);
                 response
             } else if let Some(response) =
-                enforce_rate_limit(&request_headers, &state, &route, &route_id, &client_address)
+                enforce_rate_limit(&request_headers, &state, route, &route_id, &client_address)
             {
                 state.record_route_rate_limited(&route.id);
                 response
@@ -129,14 +135,14 @@ pub async fn handle(
                 if early_data {
                     state.record_http3_early_data_accepted_request(listener_id);
                 }
-                let request_buffering = route.request_buffering;
-                let action = route.action;
                 build_route_response(
                     request,
                     state.clone(),
-                    action,
-                    request_buffering,
-                    route.streaming_response_idle_timeout,
+                    RouteExecutionContext {
+                        action: route.action.clone(),
+                        request_buffering: route.request_buffering,
+                        streaming_response_idle_timeout: route.streaming_response_idle_timeout,
+                    },
                     active,
                     listener_context,
                     client_address.clone(),
@@ -250,7 +256,7 @@ fn early_data_rejection_response(request_headers: &HeaderMap) -> HttpResponse {
 pub(super) async fn finalize_downstream_response(
     method: &Method,
     request_headers: &HeaderMap,
-    response_compression_options: &ResponseCompressionOptions,
+    response_compression_options: &ResponseCompressionOptions<'_>,
     request_id_header: HeaderValue,
     mut response: HttpResponse,
     grpc_request: Option<GrpcRequestMetadata<'_>>,
@@ -406,15 +412,13 @@ pub(super) fn enforce_rate_limit(
 async fn build_route_response(
     request: Request<HttpBody>,
     state: SharedState,
-    action: RouteAction,
-    request_buffering: rginx_core::RouteBufferingPolicy,
-    streaming_response_idle_timeout: Option<std::time::Duration>,
+    route: RouteExecutionContext,
     active: ActiveState,
     listener: ListenerRequestContext<'_>,
     client_address: ClientAddress,
     request_id: &str,
 ) -> HttpResponse {
-    match &action {
+    match &route.action {
         RouteAction::Proxy(proxy) => {
             let downstream_proto = if listener.listener_tls_enabled { "https" } else { "http" };
             crate::proxy::forward_request(
@@ -431,8 +435,8 @@ async fn build_route_response(
                     options: crate::proxy::DownstreamRequestOptions {
                         request_body_read_timeout: listener.request_body_read_timeout,
                         max_request_body_bytes: listener.max_request_body_bytes,
-                        request_buffering,
-                        streaming_response_idle_timeout,
+                        request_buffering: route.request_buffering,
+                        streaming_response_idle_timeout: route.streaming_response_idle_timeout,
                     },
                 },
             )

@@ -110,7 +110,7 @@ pub(crate) fn decode_grpc_web_text_final(
         return Ok(None);
     }
 
-    if carryover.len() % 4 != 0 {
+    if !carryover.len().is_multiple_of(4) {
         return Err(invalid_grpc_web_body("incomplete grpc-web-text base64 body"));
     }
 

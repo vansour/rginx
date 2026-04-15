@@ -661,46 +661,60 @@ async fn http3_streaming_get_two_chunks(
         let _ = std::future::poll_fn(|cx| driver.poll_close(cx)).await;
     });
 
-    let request = Request::builder()
-        .method("GET")
-        .uri(format!("https://{server_name}:{}{path}", listen_addr.port()))
-        .body(())
-        .expect("http3 request should build");
-    let mut request_stream = send_request
-        .send_request(request)
-        .await
-        .map_err(|error| format!("failed to send http3 request: {error}"))?;
-    request_stream
-        .finish()
-        .await
-        .map_err(|error| format!("failed to finish http3 request: {error}"))?;
+    let result = async {
+        let request = Request::builder()
+            .method("GET")
+            .uri(format!("https://{server_name}:{}{path}", listen_addr.port()))
+            .body(())
+            .expect("http3 request should build");
+        let mut request_stream = send_request
+            .send_request(request)
+            .await
+            .map_err(|error| format!("failed to send http3 request: {error}"))?;
+        request_stream
+            .finish()
+            .await
+            .map_err(|error| format!("failed to finish http3 request: {error}"))?;
 
-    let response = request_stream
-        .recv_response()
-        .await
-        .map_err(|error| format!("failed to receive http3 response headers: {error}"))?;
-    let status = response.status();
-    let mut first = tokio::time::timeout(Duration::from_millis(500), request_stream.recv_data())
-        .await
-        .map_err(|_| "timed out waiting for first http3 response chunk".to_string())?
-        .map_err(|error| format!("failed to receive first http3 response chunk: {error}"))?
-        .ok_or_else(|| "http3 response body ended before the first chunk arrived".to_string())?;
-    let mut second = tokio::time::timeout(Duration::from_secs(2), request_stream.recv_data())
-        .await
-        .map_err(|_| "timed out waiting for second http3 response chunk".to_string())?
-        .map_err(|error| format!("failed to receive second http3 response chunk: {error}"))?
-        .ok_or_else(|| "http3 response body ended before the second chunk arrived".to_string())?;
+        let response = request_stream
+            .recv_response()
+            .await
+            .map_err(|error| format!("failed to receive http3 response headers: {error}"))?;
+        let status = response.status();
+        let mut first =
+            tokio::time::timeout(Duration::from_millis(500), request_stream.recv_data())
+                .await
+                .map_err(|_| "timed out waiting for first http3 response chunk".to_string())?
+                .map_err(|error| format!("failed to receive first http3 response chunk: {error}"))?
+                .ok_or_else(|| {
+                    "http3 response body ended before the first chunk arrived".to_string()
+                })?;
+        let mut second = tokio::time::timeout(Duration::from_secs(2), request_stream.recv_data())
+            .await
+            .map_err(|_| "timed out waiting for second http3 response chunk".to_string())?
+            .map_err(|error| format!("failed to receive second http3 response chunk: {error}"))?
+            .ok_or_else(|| {
+                "http3 response body ended before the second chunk arrived".to_string()
+            })?;
 
-    while request_stream
-        .recv_data()
-        .await
-        .map_err(|error| format!("failed to drain remaining http3 response body: {error}"))?
-        .is_some()
-    {}
-    let _ = request_stream
-        .recv_trailers()
-        .await
-        .map_err(|error| format!("failed to receive http3 response trailers: {error}"))?;
+        while request_stream
+            .recv_data()
+            .await
+            .map_err(|error| format!("failed to drain remaining http3 response body: {error}"))?
+            .is_some()
+        {}
+        let _ = request_stream
+            .recv_trailers()
+            .await
+            .map_err(|error| format!("failed to receive http3 response trailers: {error}"))?;
+
+        Ok((
+            status,
+            first.copy_to_bytes(first.remaining()),
+            second.copy_to_bytes(second.remaining()),
+        ))
+    }
+    .await;
 
     connection_handle.close(quinn::VarInt::from_u32(0), b"done");
     endpoint.close(quinn::VarInt::from_u32(0), b"done");
@@ -709,7 +723,7 @@ async fn http3_streaming_get_two_chunks(
         let _ = driver_task.await;
     }
 
-    Ok((status, first.copy_to_bytes(first.remaining()), second.copy_to_bytes(second.remaining())))
+    result
 }
 
 async fn http3_request_inner(

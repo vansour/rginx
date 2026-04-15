@@ -279,12 +279,11 @@ where
     }
 
     fn size_hint(&self) -> SizeHint {
-        let mut hint = self.inner.size_hint();
-        if let Some(upper) = hint.upper() {
-            hint.set_upper(
-                upper.min(self.max_request_body_bytes.saturating_sub(self.bytes_read) as u64),
-            );
-        }
+        let remaining = self.max_request_body_bytes.saturating_sub(self.bytes_read) as u64;
+        let inner = self.inner.size_hint();
+        let mut hint = SizeHint::new();
+        hint.set_lower(inner.lower().min(remaining));
+        hint.set_upper(inner.upper().map_or(remaining, |upper| upper.min(remaining)));
         hint
     }
 }

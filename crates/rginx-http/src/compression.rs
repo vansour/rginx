@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::io::Write;
 
 use brotli::CompressorWriter;
@@ -18,21 +19,32 @@ use crate::handler::{HttpResponse, full_body};
 const MIN_COMPRESSIBLE_RESPONSE_BYTES: usize = 256;
 const MAX_COMPRESSIBLE_RESPONSE_BYTES: usize = 1024 * 1024;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct ResponseCompressionOptions {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ResponseCompressionOptions<'a> {
     pub(crate) response_buffering: RouteBufferingPolicy,
     pub(crate) compression: RouteCompressionPolicy,
     pub(crate) compression_min_bytes: Option<usize>,
-    pub(crate) compression_content_types: Vec<String>,
+    pub(crate) compression_content_types: Cow<'a, [String]>,
 }
 
-impl ResponseCompressionOptions {
-    pub(crate) fn for_route(route: &Route) -> Self {
+impl Default for ResponseCompressionOptions<'_> {
+    fn default() -> Self {
+        Self {
+            response_buffering: RouteBufferingPolicy::Auto,
+            compression: RouteCompressionPolicy::Auto,
+            compression_min_bytes: None,
+            compression_content_types: Cow::Borrowed(&[]),
+        }
+    }
+}
+
+impl<'a> ResponseCompressionOptions<'a> {
+    pub(crate) fn for_route(route: &'a Route) -> Self {
         Self {
             response_buffering: route.response_buffering,
             compression: route.compression,
             compression_min_bytes: route.compression_min_bytes,
-            compression_content_types: route.compression_content_types.clone(),
+            compression_content_types: Cow::Borrowed(route.compression_content_types.as_slice()),
         }
     }
 
@@ -68,7 +80,7 @@ impl ContentCoding {
 pub async fn maybe_encode_response(
     method: &Method,
     request_headers: &HeaderMap,
-    options: &ResponseCompressionOptions,
+    options: &ResponseCompressionOptions<'_>,
     response: HttpResponse,
 ) -> HttpResponse {
     if options.compression == RouteCompressionPolicy::Off
@@ -139,7 +151,7 @@ fn parts_without_compression_metadata(mut parts: http::response::Parts) -> http:
 fn response_is_eligible(
     headers: &HeaderMap,
     status: StatusCode,
-    options: &ResponseCompressionOptions,
+    options: &ResponseCompressionOptions<'_>,
 ) -> bool {
     if status.is_informational()
         || status == StatusCode::NO_CONTENT
@@ -165,7 +177,7 @@ fn response_is_eligible(
 fn compression_candidate_length(
     headers: &HeaderMap,
     body: &crate::handler::HttpBody,
-    options: &ResponseCompressionOptions,
+    options: &ResponseCompressionOptions<'_>,
 ) -> Option<usize> {
     parse_content_length(headers).or_else(|| {
         (options.response_buffering == RouteBufferingPolicy::On)
@@ -301,7 +313,7 @@ fn is_compressible_content_type(content_type: &str) -> bool {
         )
 }
 
-fn content_type_is_eligible(content_type: &str, options: &ResponseCompressionOptions) -> bool {
+fn content_type_is_eligible(content_type: &str, options: &ResponseCompressionOptions<'_>) -> bool {
     let mime = content_type.split(';').next().unwrap_or(content_type).trim();
     if options.compression_content_types.is_empty() {
         return is_compressible_content_type(mime);
@@ -338,6 +350,7 @@ fn gzip_bytes(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
     use std::pin::Pin;
     use std::task::{Context, Poll};
 
@@ -619,7 +632,7 @@ mod tests {
         let mut request_headers = HeaderMap::new();
         request_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
         let options = ResponseCompressionOptions {
-            compression_content_types: vec!["application/json".to_string()],
+            compression_content_types: Cow::Owned(vec!["application/json".to_string()]),
             ..ResponseCompressionOptions::default()
         };
 

@@ -7,9 +7,8 @@ mod grpc;
 mod response;
 
 use error::{
-    bad_gateway, bad_request, downstream_request_body_too_large_error, gateway_timeout,
-    grpc_timeout_message, invalid_downstream_request_body_error, payload_too_large,
-    unsupported_media_type,
+    bad_gateway, bad_request, downstream_request_body_limit, gateway_timeout, grpc_timeout_message,
+    invalid_downstream_request_body_error, payload_too_large, unsupported_media_type,
 };
 use grpc::grpc_protocol_request;
 use response::{GrpcResponseDeadline, build_downstream_response};
@@ -302,9 +301,7 @@ pub async fn forward_request(
                 );
             }
             Ok(Err(error)) => {
-                if downstream_request_body_too_large_error(&error) {
-                    let max_request_body_bytes =
-                        downstream.options.max_request_body_bytes.unwrap_or_default();
+                if let Some(max_request_body_bytes) = downstream_request_body_limit(&error) {
                     tracing::info!(
                         request_id = %downstream.request_id,
                         upstream = %target.upstream_name,

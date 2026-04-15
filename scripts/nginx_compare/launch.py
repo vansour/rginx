@@ -304,6 +304,7 @@ def warmup_named_curl(
 ) -> None:
     warmup_concurrency = min(concurrency, requests, 16)
     failed_requests = 0
+    first_error: Exception | None = None
     with concurrent.futures.ThreadPoolExecutor(max_workers=warmup_concurrency) as executor:
         futures = [
             executor.submit(
@@ -320,12 +321,17 @@ def warmup_named_curl(
         for future in concurrent.futures.as_completed(futures):
             try:
                 future.result()
-            except Exception:
+            except Exception as exc:  # noqa: BLE001 - warmup resilience
                 failed_requests += 1
+                if first_error is None:
+                    first_error = exc
 
     if failed_requests:
         print(
-            f"[nginx-compare] warning: warmup failed {failed_requests}/{requests} requests for {url}",
+            (
+                f"[nginx-compare] warning: warmup failed {failed_requests}/{requests} requests "
+                f"for {url}; first error: {first_error!r}"
+            ),
             file=sys.stderr,
         )
 
