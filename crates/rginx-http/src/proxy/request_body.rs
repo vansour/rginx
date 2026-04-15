@@ -237,6 +237,14 @@ async fn prepare_request_body(
         });
     }
 
+    if config.grpc_web_mode.is_some() {
+        // grpc-web translation must validate the full downstream payload before
+        // we open an upstream request, otherwise malformed bodies can be masked
+        // by upstream connection failures.
+        let body = collect_request_body(body).await?;
+        return Ok(PreparedRequestBody::Replayable { body: body.body, trailers: body.trailers });
+    }
+
     match config.request_buffering {
         RouteBufferingPolicy::Off => Ok(PreparedRequestBody::Streaming(Some(body))),
         RouteBufferingPolicy::On if !preserves_trailers => {
@@ -353,6 +361,7 @@ mod tests {
 
     use super::*;
     use crate::handler::{boxed_body, full_body};
+    use crate::proxy::grpc_web::{GrpcWebEncoding, GrpcWebMode};
 
     fn test_request(method: Method, headers: HeaderMap, body: HttpBody) -> Request<HttpBody> {
         let mut request = Request::builder()
@@ -370,6 +379,14 @@ mod tests {
                 .into_iter()
                 .map(|chunk| Ok::<_, Infallible>(Frame::data(Bytes::from_static(chunk)))),
         )))
+    }
+
+    fn grpc_web_text_mode() -> GrpcWebMode {
+        GrpcWebMode {
+            downstream_content_type: HeaderValue::from_static("application/grpc-web-text+proto"),
+            upstream_content_type: HeaderValue::from_static("application/grpc+proto"),
+            encoding: GrpcWebEncoding::Text,
+        }
     }
 
     #[tokio::test]
@@ -505,5 +522,55 @@ mod tests {
             .expect("body should yield a terminal error")
             .expect_err("second frame should exceed the configured limit");
         assert!(error.to_string().contains("request body exceeded configured limit of 8 bytes"));
+    }
+
+    #[tokio::test]
+    async fn grpc_web_text_requests_are_validated_before_upstream_dispatch() {
+        let prepared = PreparedProxyRequest::from_request(
+            test_request(
+                Method::POST,
+                HeaderMap::new(),
+                full_body(Bytes::from_static(b"AAAAAAA=")),
+            ),
+            "backend",
+            None,
+            Duration::from_secs(1),
+            64 * 1024,
+            Some(1024),
+            RouteBufferingPolicy::Off,
+            Some(&grpc_web_text_mode()),
+        )
+        .await
+        .expect("valid grpc-web-text body should prepare");
+
+        let PreparedRequestBody::Replayable { body, trailers } = prepared.body else {
+            panic!("grpc-web-text request bodies should be buffered for early validation");
+        };
+        assert_eq!(body, Bytes::from_static(b"\0\0\0\0\0"));
+        assert!(trailers.is_none());
+    }
+
+    #[tokio::test]
+    async fn invalid_grpc_web_text_request_body_fails_during_preparation() {
+        let error = match PreparedProxyRequest::from_request(
+            test_request(Method::POST, HeaderMap::new(), full_body(Bytes::from_static(b"%%%"))),
+            "backend",
+            None,
+            Duration::from_secs(1),
+            64 * 1024,
+            Some(1024),
+            RouteBufferingPolicy::Off,
+            Some(&grpc_web_text_mode()),
+        )
+        .await
+        {
+            Ok(_) => panic!("invalid grpc-web-text body should fail before upstream dispatch"),
+            Err(error) => error,
+        };
+
+        assert!(
+            error.to_string().contains("incomplete grpc-web-text base64 body"),
+            "unexpected error: {error}"
+        );
     }
 }
