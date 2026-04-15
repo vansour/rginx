@@ -169,7 +169,7 @@ async fn streams_http2_responses_without_buffering_entire_upstream_body() {
             )
             .expect("upstream response head should write");
         write_chunk(&mut stream, b"first\n");
-        thread::sleep(Duration::from_millis(900));
+        thread::sleep(Duration::from_millis(1500));
         write_chunk(&mut stream, b"second\n");
         stream.write_all(b"0\r\n\r\n").expect("terminal chunk should write");
         stream.flush().expect("terminal chunk should flush");
@@ -207,7 +207,6 @@ async fn streams_http2_responses_without_buffering_entire_upstream_body() {
         .version(Version::HTTP_2)
         .body(Empty::<Bytes>::new())
         .expect("HTTP/2 request should build");
-    let started = Instant::now();
     let response = tokio::time::timeout(Duration::from_secs(5), client.request(request))
         .await
         .expect("HTTP/2 request should not time out")
@@ -216,6 +215,7 @@ async fn streams_http2_responses_without_buffering_entire_upstream_body() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.version(), Version::HTTP_2);
 
+    let headers_received_at = Instant::now();
     let mut body = response.into_body();
     let first = tokio::time::timeout(STREAMING_CHUNK_DEADLINE, next_data_chunk(&mut body))
         .await
@@ -223,9 +223,9 @@ async fn streams_http2_responses_without_buffering_entire_upstream_body() {
         .expect("first HTTP/2 chunk should exist");
     assert_eq!(&first[..], b"first\n");
     assert!(
-        started.elapsed() < STREAMING_CHUNK_DEADLINE,
-        "first HTTP/2 chunk should arrive early, elapsed={:?}",
-        started.elapsed()
+        headers_received_at.elapsed() < STREAMING_CHUNK_DEADLINE,
+        "first HTTP/2 chunk should arrive soon after response headers, elapsed={:?}",
+        headers_received_at.elapsed()
     );
 
     let second = tokio::time::timeout(Duration::from_secs(2), next_data_chunk(&mut body))

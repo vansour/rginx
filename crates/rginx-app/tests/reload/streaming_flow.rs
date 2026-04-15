@@ -29,21 +29,20 @@ fn sighup_reload_drains_inflight_streaming_response_before_switching_routes() {
         "streaming reload response should remain chunked: {head:?}"
     );
     assert_eq!(
-        super::support::read_http_chunk(&mut client, &mut pending)
-            .expect("first chunk should arrive before reload"),
-        b"before reload\n"
+        super::support::read_http_chunk(&mut client, &mut pending),
+        super::support::HttpChunkRead::Chunk(b"before reload\n".to_vec())
     );
 
     server.write_return_config(listen_addr, "after reload\n");
     server.send_signal(libc::SIGHUP);
 
     assert_eq!(
-        super::support::read_http_chunk(&mut client, &mut pending)
-            .expect("second chunk should arrive after reload"),
-        b"after chunk\n"
+        super::support::read_http_chunk(&mut client, &mut pending),
+        super::support::HttpChunkRead::Chunk(b"after chunk\n".to_vec())
     );
     assert!(
-        super::support::read_http_chunk(&mut client, &mut pending).is_none(),
+        super::support::read_http_chunk(&mut client, &mut pending)
+            == super::support::HttpChunkRead::End,
         "stream should end cleanly"
     );
 
@@ -78,9 +77,8 @@ fn nginx_style_restart_command_drains_inflight_streaming_response_before_old_pro
     let (head, mut pending) = super::support::read_http_head_and_pending(&mut client);
     assert!(head.starts_with("HTTP/1.1 200"), "unexpected response head: {head:?}");
     assert_eq!(
-        super::support::read_http_chunk(&mut client, &mut pending)
-            .expect("first chunk should arrive before restart"),
-        b"before restart\n"
+        super::support::read_http_chunk(&mut client, &mut pending),
+        super::support::HttpChunkRead::Chunk(b"before restart\n".to_vec())
     );
 
     server.write_return_config(listen_addr, "after restart\n");
@@ -89,12 +87,12 @@ fn nginx_style_restart_command_drains_inflight_streaming_response_before_old_pro
 
     let new_pid = wait_for_pid_change(&server.pid_path(), old_pid, Duration::from_secs(10));
     assert_eq!(
-        super::support::read_http_chunk(&mut client, &mut pending)
-            .expect("second chunk should arrive while old process drains"),
-        b"after chunk\n"
+        super::support::read_http_chunk(&mut client, &mut pending),
+        super::support::HttpChunkRead::Chunk(b"after chunk\n".to_vec())
     );
     assert!(
-        super::support::read_http_chunk(&mut client, &mut pending).is_none(),
+        super::support::read_http_chunk(&mut client, &mut pending)
+            == super::support::HttpChunkRead::End,
         "stream should end cleanly"
     );
 

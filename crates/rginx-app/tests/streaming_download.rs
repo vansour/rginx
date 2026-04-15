@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 mod support;
 
 use support::{
-    READY_ROUTE_CONFIG, ServerHarness, connect_http_client, read_http_chunk,
+    HttpChunkRead, READY_ROUTE_CONFIG, ServerHarness, connect_http_client, read_http_chunk,
     read_http_head_and_pending, reserve_loopback_addr, spawn_scripted_chunked_response_server,
 };
 
@@ -37,21 +37,19 @@ fn proxy_streaming_download_delivers_first_chunk_before_upstream_completes() {
         "streaming response should remain chunked, got {head:?}"
     );
 
-    let first =
-        read_http_chunk(&mut client, &mut pending).expect("first streaming chunk should arrive");
-    assert_eq!(first, b"first\n");
+    let first = read_http_chunk(&mut client, &mut pending);
+    assert_eq!(first, HttpChunkRead::Chunk(b"first\n".to_vec()));
     assert!(
         started.elapsed() < Duration::from_millis(500),
         "first chunk should arrive before the upstream finishes streaming, elapsed={:?}",
         started.elapsed()
     );
 
-    let second =
-        read_http_chunk(&mut client, &mut pending).expect("second streaming chunk should arrive");
-    assert_eq!(second, b"second\n");
+    let second = read_http_chunk(&mut client, &mut pending);
+    assert_eq!(second, HttpChunkRead::Chunk(b"second\n".to_vec()));
     assert_eq!(
         read_http_chunk(&mut client, &mut pending),
-        None,
+        HttpChunkRead::End,
         "stream should end after the scripted chunks"
     );
 
@@ -84,14 +82,13 @@ fn route_streaming_response_idle_timeout_closes_stalled_proxy_downloads() {
 
     let (head, mut pending) = read_http_head_and_pending(&mut client);
     assert!(head.starts_with("HTTP/1.1 200"), "unexpected response head: {head:?}");
-    let first = read_http_chunk(&mut client, &mut pending)
-        .expect("first chunk should arrive before the stall");
-    assert_eq!(first, b"hello\n");
+    let first = read_http_chunk(&mut client, &mut pending);
+    assert_eq!(first, HttpChunkRead::Chunk(b"hello\n".to_vec()));
 
     let stalled_at = Instant::now();
     let follow_up = read_http_chunk(&mut client, &mut pending);
     assert!(
-        follow_up.is_none(),
+        follow_up == HttpChunkRead::End,
         "stalled streaming response should terminate instead of delivering another chunk: {follow_up:?}"
     );
     assert!(

@@ -311,7 +311,14 @@ pub fn read_http_head_and_pending(stream: &mut TcpStream) -> (String, Vec<u8>) {
     }
 }
 
-pub fn read_http_chunk(stream: &mut TcpStream, pending: &mut Vec<u8>) -> Option<Vec<u8>> {
+#[derive(Debug, PartialEq, Eq)]
+pub enum HttpChunkRead {
+    Chunk(Vec<u8>),
+    End,
+    TimedOut,
+}
+
+pub fn read_http_chunk(stream: &mut TcpStream, pending: &mut Vec<u8>) -> HttpChunkRead {
     let mut scratch = [0u8; 256];
 
     let line_end = loop {
@@ -319,7 +326,7 @@ pub fn read_http_chunk(stream: &mut TcpStream, pending: &mut Vec<u8>) -> Option<
             break position;
         }
         match stream.read(&mut scratch) {
-            Ok(0) => return None,
+            Ok(0) => return HttpChunkRead::End,
             Ok(read) => pending.extend_from_slice(&scratch[..read]),
             Err(error)
                 if matches!(
@@ -327,7 +334,7 @@ pub fn read_http_chunk(stream: &mut TcpStream, pending: &mut Vec<u8>) -> Option<
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                 ) =>
             {
-                return None;
+                return HttpChunkRead::TimedOut;
             }
             Err(error) => panic!("failed to read chunk header: {error}"),
         }
@@ -341,7 +348,7 @@ pub fn read_http_chunk(stream: &mut TcpStream, pending: &mut Vec<u8>) -> Option<
 
     while pending.len() < chunk_len + 2 {
         match stream.read(&mut scratch) {
-            Ok(0) => return None,
+            Ok(0) => return HttpChunkRead::End,
             Ok(read) => pending.extend_from_slice(&scratch[..read]),
             Err(error)
                 if matches!(
@@ -349,7 +356,7 @@ pub fn read_http_chunk(stream: &mut TcpStream, pending: &mut Vec<u8>) -> Option<
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                 ) =>
             {
-                return None;
+                return HttpChunkRead::TimedOut;
             }
             Err(error) => panic!("failed to read chunk payload: {error}"),
         }
@@ -357,12 +364,12 @@ pub fn read_http_chunk(stream: &mut TcpStream, pending: &mut Vec<u8>) -> Option<
 
     if chunk_len == 0 {
         pending.drain(..2);
-        return None;
+        return HttpChunkRead::End;
     }
 
     let chunk = pending[..chunk_len].to_vec();
     pending.drain(..chunk_len + 2);
-    Some(chunk)
+    HttpChunkRead::Chunk(chunk)
 }
 
 pub fn spawn_scripted_chunked_response_server(
