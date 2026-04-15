@@ -14,7 +14,7 @@ mod upstream;
 pub use access_log::{AccessLogFormat, AccessLogValues};
 pub use route::{
     GrpcRouteMatch, ProxyTarget, ReturnAction, Route, RouteAccessControl, RouteAction,
-    RouteMatcher, RouteRateLimit,
+    RouteBufferingPolicy, RouteCompressionPolicy, RouteMatcher, RouteRateLimit,
 };
 pub use tls::{
     ClientIdentity, OcspConfig, OcspNonceMode, OcspResponderPolicy, ServerCertificateBundle,

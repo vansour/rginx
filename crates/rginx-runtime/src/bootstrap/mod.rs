@@ -43,13 +43,14 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
         "starting rginx runtime"
     );
 
-    let mut admin_task = tokio::spawn(admin::run(
+    let mut admin_task = Some(tokio::spawn(admin::run(
         state.config_path.clone(),
         state.http.clone(),
         shutdown_tx.subscribe(),
-    ));
-    let mut health_task = tokio::spawn(health::run(state.http.clone(), shutdown_tx.subscribe()));
-    let mut ocsp_task = tokio::spawn(ocsp::run(state.http.clone(), shutdown_tx.subscribe()));
+    )));
+    let mut health_task =
+        Some(tokio::spawn(health::run(state.http.clone(), shutdown_tx.subscribe())));
+    let mut ocsp_task = Some(tokio::spawn(ocsp::run(state.http.clone(), shutdown_tx.subscribe())));
     crate::restart::notify_ready_if_requested()?;
 
     loop {

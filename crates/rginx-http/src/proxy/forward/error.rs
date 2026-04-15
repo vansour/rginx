@@ -1,6 +1,7 @@
 use std::error::Error as StdError;
 use std::future::Future;
 
+use super::super::request_body::request_body_limit_error;
 use super::*;
 
 pub(super) fn invalid_downstream_request_body_error(error: &(dyn StdError + 'static)) -> bool {
@@ -16,7 +17,9 @@ pub(super) fn invalid_downstream_request_body_error(error: &(dyn StdError + 'sta
         }
 
         let message = candidate.to_string();
-        if message.contains("grpc-web") && message.contains("invalid") {
+        if message.contains("grpc-web")
+            && (message.contains("invalid") || message.contains("incomplete"))
+        {
             return true;
         }
 
@@ -24,6 +27,33 @@ pub(super) fn invalid_downstream_request_body_error(error: &(dyn StdError + 'sta
     }
 
     false
+}
+
+pub(super) fn downstream_request_body_limit(error: &(dyn StdError + 'static)) -> Option<usize> {
+    let mut current = Some(error);
+    while let Some(candidate) = current {
+        if let Some(limit) = request_body_limit_error(candidate) {
+            return Some(limit);
+        }
+
+        if let Some(limit) = parse_request_body_limit_message(&candidate.to_string()) {
+            return Some(limit);
+        }
+
+        current = candidate.source();
+    }
+
+    None
+}
+
+fn parse_request_body_limit_message(message: &str) -> Option<usize> {
+    let prefix = "request body exceeded configured limit of ";
+    let suffix = " bytes";
+    let start = message.find(prefix)? + prefix.len();
+    let rest = &message[start..];
+    let end = rest.find(suffix)?;
+    let value = &rest[..end];
+    value.parse().ok()
 }
 
 pub(crate) async fn wait_for_upstream_stage<T>(
@@ -101,4 +131,41 @@ pub(super) fn unsupported_media_type(request_headers: &HeaderMap, message: Strin
             )
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use super::*;
+
+    #[test]
+    fn detects_invalid_io_kinds_in_error_chain() {
+        let error = io::Error::new(io::ErrorKind::InvalidData, "bad request body");
+        assert!(invalid_downstream_request_body_error(&error));
+    }
+
+    #[test]
+    fn detects_stringified_incomplete_grpc_web_errors() {
+        let error = Error::Server(
+            "upstream request failed: client error (SendRequest): error from user's Body stream: incomplete grpc-web-text base64 body"
+                .to_string(),
+        );
+        assert!(invalid_downstream_request_body_error(&error));
+    }
+
+    #[test]
+    fn ignores_unrelated_server_errors() {
+        let error = Error::Server("upstream `backend` is unavailable".to_string());
+        assert!(!invalid_downstream_request_body_error(&error));
+    }
+
+    #[test]
+    fn extracts_request_body_limit_from_stringified_server_errors() {
+        let error = Error::Server(
+            "upstream request failed: client error (SendRequest): error from user's Body stream: request body exceeded configured limit of 8 bytes"
+                .to_string(),
+        );
+        assert_eq!(downstream_request_body_limit(&error), Some(8));
+    }
 }

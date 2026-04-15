@@ -105,6 +105,60 @@ async fn proxies_basic_http_requests_over_http3_to_http11_upstreams() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn streams_http3_responses_without_buffering_entire_upstream_body() {
+    let upstream_listener =
+        TcpListener::bind(("127.0.0.1", 0)).expect("upstream listener should bind");
+    upstream_listener
+        .set_nonblocking(false)
+        .expect("upstream listener should support blocking mode");
+    let upstream_addr = upstream_listener.local_addr().expect("upstream addr should be available");
+    let upstream_task = thread::spawn(move || {
+        let (mut stream, _) =
+            upstream_listener.accept().expect("upstream connection should arrive");
+        let request = read_http_head_from_stream(&mut stream);
+        assert!(
+            request.starts_with("GET /stream HTTP/1.1\r\n"),
+            "unexpected upstream request: {request}"
+        );
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+        )
+        .expect("upstream response head should write");
+        stream.flush().expect("upstream response head should flush");
+        write_chunked_payload(&mut stream, b"first\n");
+        thread::sleep(Duration::from_millis(900));
+        write_chunked_payload(&mut stream, b"second\n");
+        stream.write_all(b"0\r\n\r\n").expect("terminal chunk should write");
+        stream.flush().expect("terminal chunk should flush");
+    });
+
+    let cert = generate_cert("localhost");
+    let listen_addr = reserve_loopback_addr();
+    let mut server = ServerHarness::spawn_with_tls(
+        "rginx-http3-streaming",
+        &cert.cert.pem(),
+        &cert.signing_key.serialize_pem(),
+        |_, cert_path, key_path| {
+            http3_streaming_proxy_config(listen_addr, upstream_addr, cert_path, key_path)
+        },
+    );
+    server.wait_for_https_ready(listen_addr, Duration::from_secs(5));
+
+    let (status, first, second) =
+        http3_streaming_get_two_chunks(listen_addr, "localhost", "/api/stream", &cert.cert.pem())
+            .await
+            .expect("http3 streaming request should succeed");
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(&first[..], b"first\n");
+    assert_eq!(&second[..], b"second\n");
+
+    upstream_task.join().expect("upstream task should complete");
+    server.shutdown_and_wait(Duration::from_secs(5));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn enforces_access_control_and_rate_limits_over_http3() {
     let cert = generate_cert("localhost");
     let listen_addr = reserve_loopback_addr();
@@ -585,6 +639,93 @@ async fn http3_request(
     http3_request_inner(listen_addr, server_name, method, path, headers, body, None, cert_pem).await
 }
 
+async fn http3_streaming_get_two_chunks(
+    listen_addr: SocketAddr,
+    server_name: &str,
+    path: &str,
+    cert_pem: &str,
+) -> Result<(StatusCode, Bytes, Bytes), String> {
+    let endpoint = http3_client_endpoint(None, cert_pem, false)?;
+    let connection = endpoint
+        .connect(listen_addr, server_name)
+        .map_err(|error| format!("failed to start quic connect: {error}"))?
+        .await
+        .map_err(|error| format!("quic connect failed: {error}"))?;
+    let connection_handle = connection.clone();
+
+    let (mut driver, mut send_request) =
+        client::new(h3_quinn::Connection::new(connection))
+            .await
+            .map_err(|error| format!("failed to initialize http3 client: {error}"))?;
+    let mut driver_task = tokio::spawn(async move {
+        let _ = std::future::poll_fn(|cx| driver.poll_close(cx)).await;
+    });
+
+    let result = async {
+        let request = Request::builder()
+            .method("GET")
+            .uri(format!("https://{server_name}:{}{path}", listen_addr.port()))
+            .body(())
+            .expect("http3 request should build");
+        let mut request_stream = send_request
+            .send_request(request)
+            .await
+            .map_err(|error| format!("failed to send http3 request: {error}"))?;
+        request_stream
+            .finish()
+            .await
+            .map_err(|error| format!("failed to finish http3 request: {error}"))?;
+
+        let response = request_stream
+            .recv_response()
+            .await
+            .map_err(|error| format!("failed to receive http3 response headers: {error}"))?;
+        let status = response.status();
+        let mut first =
+            tokio::time::timeout(Duration::from_millis(500), request_stream.recv_data())
+                .await
+                .map_err(|_| "timed out waiting for first http3 response chunk".to_string())?
+                .map_err(|error| format!("failed to receive first http3 response chunk: {error}"))?
+                .ok_or_else(|| {
+                    "http3 response body ended before the first chunk arrived".to_string()
+                })?;
+        let mut second = tokio::time::timeout(Duration::from_secs(2), request_stream.recv_data())
+            .await
+            .map_err(|_| "timed out waiting for second http3 response chunk".to_string())?
+            .map_err(|error| format!("failed to receive second http3 response chunk: {error}"))?
+            .ok_or_else(|| {
+                "http3 response body ended before the second chunk arrived".to_string()
+            })?;
+
+        while request_stream
+            .recv_data()
+            .await
+            .map_err(|error| format!("failed to drain remaining http3 response body: {error}"))?
+            .is_some()
+        {}
+        let _ = request_stream
+            .recv_trailers()
+            .await
+            .map_err(|error| format!("failed to receive http3 response trailers: {error}"))?;
+
+        Ok((
+            status,
+            first.copy_to_bytes(first.remaining()),
+            second.copy_to_bytes(second.remaining()),
+        ))
+    }
+    .await;
+
+    connection_handle.close(quinn::VarInt::from_u32(0), b"done");
+    endpoint.close(quinn::VarInt::from_u32(0), b"done");
+    if tokio::time::timeout(Duration::from_millis(50), &mut driver_task).await.is_err() {
+        driver_task.abort();
+        let _ = driver_task.await;
+    }
+
+    result
+}
+
 async fn http3_request_inner(
     listen_addr: SocketAddr,
     server_name: &str,
@@ -944,6 +1085,22 @@ fn http3_proxy_config(
     )
 }
 
+fn http3_streaming_proxy_config(
+    listen_addr: SocketAddr,
+    upstream_addr: SocketAddr,
+    cert_path: &std::path::Path,
+    key_path: &std::path::Path,
+) -> String {
+    format!(
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n        server_names: [\"localhost\"],\n        tls: Some(ServerTlsConfig(\n            cert_path: {:?},\n            key_path: {:?},\n        )),\n        http3: Some(Http3Config(\n            advertise_alt_svc: Some(true),\n            alt_svc_max_age_secs: Some(7200),\n        )),\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [UpstreamPeerConfig(url: {:?})],\n            request_timeout_secs: Some(5),\n        ),\n    ],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Prefix(\"/api\"),\n            handler: Proxy(\n                upstream: \"backend\",\n                preserve_host: Some(false),\n                strip_prefix: Some(\"/api\"),\n            ),\n            response_buffering: Some(Off),\n            compression: Some(Off),\n        ),\n    ],\n)\n",
+        listen_addr.to_string(),
+        cert_path.display().to_string(),
+        key_path.display().to_string(),
+        format!("http://{upstream_addr}"),
+        ready_route = READY_ROUTE_CONFIG,
+    )
+}
+
 fn http3_retry_config(
     listen_addr: SocketAddr,
     cert_path: &std::path::Path,
@@ -1204,4 +1361,11 @@ fn read_http_head_from_stream(stream: &mut std::net::TcpStream) -> String {
                 .expect("HTTP head should be valid UTF-8");
         }
     }
+}
+
+fn write_chunked_payload(stream: &mut std::net::TcpStream, chunk: &[u8]) {
+    write!(stream, "{:x}\r\n", chunk.len()).expect("chunk header should write");
+    stream.write_all(chunk).expect("chunk payload should write");
+    stream.write_all(b"\r\n").expect("chunk terminator should write");
+    stream.flush().expect("chunk should flush");
 }

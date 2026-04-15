@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::io::Write;
 
 use brotli::CompressorWriter;
@@ -10,11 +11,52 @@ use http::header::{
 };
 use http::{HeaderMap, Method, Response, StatusCode};
 use http_body_util::BodyExt;
+use hyper::body::Body as _;
+use rginx_core::{Route, RouteBufferingPolicy, RouteCompressionPolicy};
 
 use crate::handler::{HttpResponse, full_body};
 
 const MIN_COMPRESSIBLE_RESPONSE_BYTES: usize = 256;
 const MAX_COMPRESSIBLE_RESPONSE_BYTES: usize = 1024 * 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ResponseCompressionOptions<'a> {
+    pub(crate) response_buffering: RouteBufferingPolicy,
+    pub(crate) compression: RouteCompressionPolicy,
+    pub(crate) compression_min_bytes: Option<usize>,
+    pub(crate) compression_content_types: Cow<'a, [String]>,
+}
+
+impl Default for ResponseCompressionOptions<'_> {
+    fn default() -> Self {
+        Self {
+            response_buffering: RouteBufferingPolicy::Auto,
+            compression: RouteCompressionPolicy::Auto,
+            compression_min_bytes: None,
+            compression_content_types: Cow::Borrowed(&[]),
+        }
+    }
+}
+
+impl<'a> ResponseCompressionOptions<'a> {
+    pub(crate) fn for_route(route: &'a Route) -> Self {
+        Self {
+            response_buffering: route.response_buffering,
+            compression: route.compression,
+            compression_min_bytes: route.compression_min_bytes,
+            compression_content_types: Cow::Borrowed(route.compression_content_types.as_slice()),
+        }
+    }
+
+    fn min_bytes(&self) -> usize {
+        match self.compression {
+            RouteCompressionPolicy::Force => self.compression_min_bytes.unwrap_or(1),
+            RouteCompressionPolicy::Auto | RouteCompressionPolicy::Off => {
+                self.compression_min_bytes.unwrap_or(MIN_COMPRESSIBLE_RESPONSE_BYTES)
+            }
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ContentCoding {
@@ -38,8 +80,15 @@ impl ContentCoding {
 pub async fn maybe_encode_response(
     method: &Method,
     request_headers: &HeaderMap,
+    options: &ResponseCompressionOptions<'_>,
     response: HttpResponse,
 ) -> HttpResponse {
+    if options.compression == RouteCompressionPolicy::Off
+        || options.response_buffering == RouteBufferingPolicy::Off
+    {
+        return response;
+    }
+
     let Some(content_coding) = preferred_response_encoding(request_headers) else {
         return response;
     };
@@ -49,17 +98,15 @@ pub async fn maybe_encode_response(
     }
 
     let (mut parts, body) = response.into_parts();
-    if !response_is_eligible(&parts.headers, parts.status) {
+    if !response_is_eligible(&parts.headers, parts.status, options) {
         return Response::from_parts(parts, body);
     }
 
-    let Some(content_length) = parse_content_length(&parts.headers) else {
+    let Some(content_length) = compression_candidate_length(&parts.headers, &body, options) else {
         return Response::from_parts(parts, body);
     };
 
-    if !(MIN_COMPRESSIBLE_RESPONSE_BYTES..=MAX_COMPRESSIBLE_RESPONSE_BYTES)
-        .contains(&content_length)
-    {
+    if content_length > MAX_COMPRESSIBLE_RESPONSE_BYTES || content_length < options.min_bytes() {
         return Response::from_parts(parts, body);
     }
 
@@ -101,7 +148,11 @@ fn parts_without_compression_metadata(mut parts: http::response::Parts) -> http:
     parts
 }
 
-fn response_is_eligible(headers: &HeaderMap, status: StatusCode) -> bool {
+fn response_is_eligible(
+    headers: &HeaderMap,
+    status: StatusCode,
+    options: &ResponseCompressionOptions<'_>,
+) -> bool {
     if status.is_informational()
         || status == StatusCode::NO_CONTENT
         || status == StatusCode::NOT_MODIFIED
@@ -120,7 +171,20 @@ fn response_is_eligible(headers: &HeaderMap, status: StatusCode) -> bool {
         return false;
     };
 
-    is_compressible_content_type(content_type)
+    content_type_is_eligible(content_type, options)
+}
+
+fn compression_candidate_length(
+    headers: &HeaderMap,
+    body: &crate::handler::HttpBody,
+    options: &ResponseCompressionOptions<'_>,
+) -> Option<usize> {
+    parse_content_length(headers).or_else(|| {
+        (options.response_buffering == RouteBufferingPolicy::On)
+            .then(|| body.size_hint().exact())
+            .flatten()
+            .and_then(|value| usize::try_from(value).ok())
+    })
 }
 
 fn parse_content_length(headers: &HeaderMap) -> Option<usize> {
@@ -249,6 +313,18 @@ fn is_compressible_content_type(content_type: &str) -> bool {
         )
 }
 
+fn content_type_is_eligible(content_type: &str, options: &ResponseCompressionOptions<'_>) -> bool {
+    let mime = content_type.split(';').next().unwrap_or(content_type).trim();
+    if options.compression_content_types.is_empty() {
+        return is_compressible_content_type(mime);
+    }
+
+    options
+        .compression_content_types
+        .iter()
+        .any(|candidate| candidate.trim().eq_ignore_ascii_case(mime))
+}
+
 fn compress_bytes(coding: ContentCoding, bytes: &[u8]) -> std::io::Result<Vec<u8>> {
     match coding {
         ContentCoding::Brotli => brotli_bytes(bytes),
@@ -274,6 +350,7 @@ fn gzip_bytes(bytes: &[u8]) -> std::io::Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
     use std::pin::Pin;
     use std::task::{Context, Poll};
 
@@ -286,9 +363,13 @@ mod tests {
     use http::{HeaderMap, HeaderValue, Method, Response, StatusCode};
     use http_body_util::BodyExt;
     use hyper::body::{Frame, SizeHint};
+    use rginx_core::{RouteBufferingPolicy, RouteCompressionPolicy};
     use std::io::Read;
 
-    use super::{ContentCoding, maybe_encode_response, preferred_response_encoding};
+    use super::{
+        ContentCoding, ResponseCompressionOptions, maybe_encode_response,
+        preferred_response_encoding,
+    };
     use crate::handler::{BoxError, text_response};
 
     #[derive(Debug, Default)]
@@ -336,6 +417,7 @@ mod tests {
     async fn maybe_encode_response_brotlis_text_bodies() {
         let mut request_headers = HeaderMap::new();
         request_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("br, gzip;q=0.5"));
+        let options = ResponseCompressionOptions::default();
 
         let response = text_response(
             StatusCode::OK,
@@ -343,7 +425,8 @@ mod tests {
             "hello brotli world\n".repeat(32),
         );
 
-        let response = maybe_encode_response(&Method::GET, &request_headers, response).await;
+        let response =
+            maybe_encode_response(&Method::GET, &request_headers, &options, response).await;
         assert_eq!(response.headers().get(CONTENT_ENCODING).unwrap(), "br");
         assert_eq!(response.headers().get(http::header::VARY).unwrap(), "Accept-Encoding");
 
@@ -364,6 +447,7 @@ mod tests {
     async fn maybe_encode_response_gzips_text_bodies() {
         let mut request_headers = HeaderMap::new();
         request_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip, br;q=0.1"));
+        let options = ResponseCompressionOptions::default();
 
         let response = text_response(
             StatusCode::OK,
@@ -371,7 +455,8 @@ mod tests {
             "hello gzip world\n".repeat(32),
         );
 
-        let response = maybe_encode_response(&Method::GET, &request_headers, response).await;
+        let response =
+            maybe_encode_response(&Method::GET, &request_headers, &options, response).await;
         assert_eq!(response.headers().get(CONTENT_ENCODING).unwrap(), "gzip");
         assert_eq!(response.headers().get(http::header::VARY).unwrap(), "Accept-Encoding");
 
@@ -392,6 +477,7 @@ mod tests {
     async fn maybe_encode_response_skips_partial_content() {
         let mut request_headers = HeaderMap::new();
         request_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+        let options = ResponseCompressionOptions::default();
 
         let response = Response::builder()
             .status(StatusCode::PARTIAL_CONTENT)
@@ -402,7 +488,8 @@ mod tests {
             .body(crate::handler::full_body(Bytes::from(vec![b'a'; 512])))
             .expect("partial content response should build");
 
-        let response = maybe_encode_response(&Method::GET, &request_headers, response).await;
+        let response =
+            maybe_encode_response(&Method::GET, &request_headers, &options, response).await;
         assert!(response.headers().get(CONTENT_ENCODING).is_none());
         assert_eq!(
             response.headers().get(http::header::CONTENT_RANGE).unwrap(),
@@ -414,9 +501,10 @@ mod tests {
     async fn maybe_encode_response_skips_small_or_binary_bodies() {
         let mut request_headers = HeaderMap::new();
         request_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+        let options = ResponseCompressionOptions::default();
 
         let small = text_response(StatusCode::OK, "text/plain; charset=utf-8", "tiny");
-        let small = maybe_encode_response(&Method::GET, &request_headers, small).await;
+        let small = maybe_encode_response(&Method::GET, &request_headers, &options, small).await;
         assert!(small.headers().get(CONTENT_ENCODING).is_none());
 
         let binary = Response::builder()
@@ -425,7 +513,7 @@ mod tests {
             .header(http::header::CONTENT_LENGTH, "512")
             .body(crate::handler::full_body(Bytes::from(vec![0_u8; 512])))
             .expect("binary response should build");
-        let binary = maybe_encode_response(&Method::GET, &request_headers, binary).await;
+        let binary = maybe_encode_response(&Method::GET, &request_headers, &options, binary).await;
         assert!(binary.headers().get(CONTENT_ENCODING).is_none());
     }
 
@@ -433,6 +521,7 @@ mod tests {
     async fn maybe_encode_response_merges_existing_vary_header() {
         let mut request_headers = HeaderMap::new();
         request_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+        let options = ResponseCompressionOptions::default();
 
         let response = Response::builder()
             .status(StatusCode::OK)
@@ -442,7 +531,8 @@ mod tests {
             .body(crate::handler::full_body(Bytes::from(vec![b'a'; 640])))
             .expect("response should build");
 
-        let response = maybe_encode_response(&Method::GET, &request_headers, response).await;
+        let response =
+            maybe_encode_response(&Method::GET, &request_headers, &options, response).await;
         let vary = response
             .headers()
             .get(VARY)
@@ -460,6 +550,7 @@ mod tests {
     async fn maybe_encode_response_preserves_vary_wildcard() {
         let mut request_headers = HeaderMap::new();
         request_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+        let options = ResponseCompressionOptions::default();
 
         let response = Response::builder()
             .status(StatusCode::OK)
@@ -469,7 +560,8 @@ mod tests {
             .body(crate::handler::full_body(Bytes::from(vec![b'a'; 640])))
             .expect("response should build");
 
-        let response = maybe_encode_response(&Method::GET, &request_headers, response).await;
+        let response =
+            maybe_encode_response(&Method::GET, &request_headers, &options, response).await;
         assert_eq!(response.headers().get(VARY).and_then(|value| value.to_str().ok()), Some("*"));
     }
 
@@ -477,6 +569,7 @@ mod tests {
     async fn maybe_encode_response_does_not_leave_stale_content_length_on_collect_failure() {
         let mut request_headers = HeaderMap::new();
         request_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+        let options = ResponseCompressionOptions::default();
 
         let response = Response::builder()
             .status(StatusCode::OK)
@@ -485,7 +578,8 @@ mod tests {
             .body(CollectErrorBody.map_err(|error| -> BoxError { Box::new(error) }).boxed_unsync())
             .expect("response should build");
 
-        let response = maybe_encode_response(&Method::GET, &request_headers, response).await;
+        let response =
+            maybe_encode_response(&Method::GET, &request_headers, &options, response).await;
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let advertised_length = response
             .headers()
@@ -509,5 +603,116 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn maybe_encode_response_skips_when_response_buffering_is_off() {
+        let mut request_headers = HeaderMap::new();
+        request_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+        let options = ResponseCompressionOptions {
+            response_buffering: RouteBufferingPolicy::Off,
+            ..ResponseCompressionOptions::default()
+        };
+
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+            .header(CONTENT_LENGTH, "512")
+            .body(CollectErrorBody.map_err(|error| -> BoxError { Box::new(error) }).boxed_unsync())
+            .expect("response should build");
+
+        let response =
+            maybe_encode_response(&Method::GET, &request_headers, &options, response).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get(CONTENT_ENCODING).is_none());
+    }
+
+    #[tokio::test]
+    async fn maybe_encode_response_respects_custom_content_type_allowlist() {
+        let mut request_headers = HeaderMap::new();
+        request_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+        let options = ResponseCompressionOptions {
+            compression_content_types: Cow::Owned(vec!["application/json".to_string()]),
+            ..ResponseCompressionOptions::default()
+        };
+
+        let response = text_response(
+            StatusCode::OK,
+            "text/plain; charset=utf-8",
+            "hello allowlist\n".repeat(32),
+        );
+
+        let response =
+            maybe_encode_response(&Method::GET, &request_headers, &options, response).await;
+        assert!(response.headers().get(CONTENT_ENCODING).is_none());
+    }
+
+    #[tokio::test]
+    async fn maybe_encode_response_respects_custom_min_bytes() {
+        let mut request_headers = HeaderMap::new();
+        request_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+        let options = ResponseCompressionOptions {
+            compression_min_bytes: Some(1024),
+            ..ResponseCompressionOptions::default()
+        };
+
+        let response = text_response(StatusCode::OK, "text/plain; charset=utf-8", "a".repeat(640));
+
+        let response =
+            maybe_encode_response(&Method::GET, &request_headers, &options, response).await;
+        assert!(response.headers().get(CONTENT_ENCODING).is_none());
+    }
+
+    #[tokio::test]
+    async fn maybe_encode_response_force_allows_small_responses() {
+        let mut request_headers = HeaderMap::new();
+        request_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+        let options = ResponseCompressionOptions {
+            compression: RouteCompressionPolicy::Force,
+            ..ResponseCompressionOptions::default()
+        };
+
+        let response = text_response(StatusCode::OK, "text/plain; charset=utf-8", "a".repeat(128));
+
+        let response =
+            maybe_encode_response(&Method::GET, &request_headers, &options, response).await;
+        assert_eq!(response.headers().get(CONTENT_ENCODING).unwrap(), "gzip");
+    }
+
+    #[tokio::test]
+    async fn maybe_encode_response_response_buffering_on_can_use_exact_size_hint() {
+        let mut request_headers = HeaderMap::new();
+        request_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+        let options = ResponseCompressionOptions {
+            response_buffering: RouteBufferingPolicy::On,
+            ..ResponseCompressionOptions::default()
+        };
+
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+            .body(crate::handler::full_body(Bytes::from(vec![b'a'; 512])))
+            .expect("response should build");
+
+        let response =
+            maybe_encode_response(&Method::GET, &request_headers, &options, response).await;
+        assert_eq!(response.headers().get(CONTENT_ENCODING).unwrap(), "gzip");
+    }
+
+    #[tokio::test]
+    async fn maybe_encode_response_auto_skips_when_content_length_is_unknown() {
+        let mut request_headers = HeaderMap::new();
+        request_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+        let options = ResponseCompressionOptions::default();
+
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+            .body(crate::handler::full_body(Bytes::from(vec![b'a'; 512])))
+            .expect("response should build");
+
+        let response =
+            maybe_encode_response(&Method::GET, &request_headers, &options, response).await;
+        assert!(response.headers().get(CONTENT_ENCODING).is_none());
     }
 }

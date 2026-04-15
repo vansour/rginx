@@ -21,6 +21,7 @@ use super::grpc::{
 };
 use super::{GrpcStatusCode, attach_connection_metadata, grpc_error_response, text_response};
 use crate::client_ip::{ClientAddress, ClientIpSource, ConnectionPeerAddrs, TlsClientIdentity};
+use crate::compression::ResponseCompressionOptions;
 
 #[test]
 fn authorize_route_rejects_disallowed_remote_addr() {
@@ -39,6 +40,12 @@ fn authorize_route_rejects_disallowed_remote_addr() {
         ),
         rate_limit: None,
         allow_early_data: false,
+        request_buffering: rginx_core::RouteBufferingPolicy::Auto,
+        response_buffering: rginx_core::RouteBufferingPolicy::Auto,
+        compression: rginx_core::RouteCompressionPolicy::Auto,
+        compression_min_bytes: None,
+        compression_content_types: Vec::new(),
+        streaming_response_idle_timeout: None,
     };
 
     let client_address = ClientAddress {
@@ -209,6 +216,12 @@ fn select_route_for_request_prefers_grpc_specific_route() {
                     access_control: RouteAccessControl::default(),
                     rate_limit: None,
                     allow_early_data: false,
+                    request_buffering: rginx_core::RouteBufferingPolicy::Auto,
+                    response_buffering: rginx_core::RouteBufferingPolicy::Auto,
+                    compression: rginx_core::RouteCompressionPolicy::Auto,
+                    compression_min_bytes: None,
+                    compression_content_types: Vec::new(),
+                    streaming_response_idle_timeout: None,
                 },
             ],
         ),
@@ -247,6 +260,12 @@ fn select_route_for_request_does_not_match_grpc_specific_route_for_plain_http_re
                 access_control: RouteAccessControl::default(),
                 rate_limit: None,
                 allow_early_data: false,
+                request_buffering: rginx_core::RouteBufferingPolicy::Auto,
+                response_buffering: rginx_core::RouteBufferingPolicy::Auto,
+                compression: rginx_core::RouteCompressionPolicy::Auto,
+                compression_min_bytes: None,
+                compression_content_types: Vec::new(),
+                streaming_response_idle_timeout: None,
             }],
         ),
         Vec::new(),
@@ -555,6 +574,12 @@ fn authorize_route_returns_grpc_permission_denied_for_grpc_requests() {
         ),
         rate_limit: None,
         allow_early_data: false,
+        request_buffering: rginx_core::RouteBufferingPolicy::Auto,
+        response_buffering: rginx_core::RouteBufferingPolicy::Auto,
+        compression: rginx_core::RouteCompressionPolicy::Auto,
+        compression_min_bytes: None,
+        compression_content_types: Vec::new(),
+        streaming_response_idle_timeout: None,
     };
     let client_address = ClientAddress {
         peer_addr: "192.0.2.10:4567".parse().unwrap(),
@@ -585,10 +610,12 @@ fn response_body_bytes_sent_returns_zero_for_head_requests() {
 async fn finalize_downstream_response_compresses_plain_text_responses() {
     let mut request_headers = HeaderMap::new();
     request_headers.insert(http::header::ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+    let compression_options = ResponseCompressionOptions::default();
 
     let finalized = finalize_downstream_response(
         &http::Method::GET,
         &request_headers,
+        &compression_options,
         HeaderValue::from_static("req-plain"),
         text_response(
             StatusCode::OK,
@@ -621,10 +648,12 @@ async fn finalize_downstream_response_skips_compression_for_grpc_responses() {
     request_headers.insert(http::header::ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
     request_headers
         .insert(http::header::CONTENT_TYPE, HeaderValue::from_static("application/grpc"));
+    let compression_options = ResponseCompressionOptions::default();
 
     let finalized = finalize_downstream_response(
         &http::Method::POST,
         &request_headers,
+        &compression_options,
         HeaderValue::from_static("req-grpc"),
         text_response(StatusCode::OK, "application/grpc", "hello grpc pipeline\n".repeat(32)),
         grpc_request_metadata(&request_headers, "/grpc.health.v1.Health/Check"),
@@ -644,10 +673,12 @@ async fn finalize_downstream_response_skips_compression_for_grpc_responses() {
 async fn finalize_downstream_response_strips_head_body_after_final_transforms() {
     let mut request_headers = HeaderMap::new();
     request_headers.insert(http::header::ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+    let compression_options = ResponseCompressionOptions::default();
 
     let finalized = finalize_downstream_response(
         &http::Method::HEAD,
         &request_headers,
+        &compression_options,
         HeaderValue::from_static("req-head"),
         text_response(
             StatusCode::OK,
@@ -684,10 +715,12 @@ async fn finalize_downstream_response_strips_head_body_after_final_transforms() 
 #[tokio::test]
 async fn finalize_downstream_response_injects_alt_svc_when_provided() {
     let request_headers = HeaderMap::new();
+    let compression_options = ResponseCompressionOptions::default();
 
     let finalized = finalize_downstream_response(
         &http::Method::GET,
         &request_headers,
+        &compression_options,
         HeaderValue::from_static("req-alt-svc"),
         text_response(StatusCode::OK, "text/plain; charset=utf-8", "hello"),
         None,
@@ -702,6 +735,63 @@ async fn finalize_downstream_response_injects_alt_svc_when_provided() {
             .get(http::header::ALT_SVC)
             .and_then(|value| value.to_str().ok()),
         Some("h3=\":443\"; ma=7200")
+    );
+}
+
+#[tokio::test]
+async fn finalize_downstream_response_respects_response_buffering_off() {
+    let mut request_headers = HeaderMap::new();
+    request_headers.insert(http::header::ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+    let compression_options = ResponseCompressionOptions {
+        response_buffering: rginx_core::RouteBufferingPolicy::Off,
+        ..ResponseCompressionOptions::default()
+    };
+
+    let finalized = finalize_downstream_response(
+        &http::Method::GET,
+        &request_headers,
+        &compression_options,
+        HeaderValue::from_static("req-stream"),
+        text_response(
+            StatusCode::OK,
+            "text/plain; charset=utf-8",
+            "hello response buffering\n".repeat(32),
+        ),
+        None,
+        None,
+    )
+    .await;
+
+    assert!(finalized.response.headers().get(http::header::CONTENT_ENCODING).is_none());
+}
+
+#[tokio::test]
+async fn finalize_downstream_response_force_compresses_small_responses() {
+    let mut request_headers = HeaderMap::new();
+    request_headers.insert(http::header::ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+    let compression_options = ResponseCompressionOptions {
+        compression: rginx_core::RouteCompressionPolicy::Force,
+        ..ResponseCompressionOptions::default()
+    };
+
+    let finalized = finalize_downstream_response(
+        &http::Method::GET,
+        &request_headers,
+        &compression_options,
+        HeaderValue::from_static("req-force"),
+        text_response(StatusCode::OK, "text/plain; charset=utf-8", "a".repeat(128)),
+        None,
+        None,
+    )
+    .await;
+
+    assert_eq!(
+        finalized
+            .response
+            .headers()
+            .get(http::header::CONTENT_ENCODING)
+            .and_then(|value| value.to_str().ok()),
+        Some("gzip")
     );
 }
 
@@ -774,6 +864,12 @@ fn test_route(id: &str, matcher: RouteMatcher) -> Route {
         access_control: RouteAccessControl::default(),
         rate_limit: None,
         allow_early_data: false,
+        request_buffering: rginx_core::RouteBufferingPolicy::Auto,
+        response_buffering: rginx_core::RouteBufferingPolicy::Auto,
+        compression: rginx_core::RouteCompressionPolicy::Auto,
+        compression_min_bytes: None,
+        compression_content_types: Vec::new(),
+        streaming_response_idle_timeout: None,
     }
 }
 

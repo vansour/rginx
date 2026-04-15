@@ -1,8 +1,9 @@
 use crate::model::{
     Config, HandlerConfig, Http3Config, ListenerConfig, LocationConfig, MatcherConfig,
-    RuntimeConfig, ServerConfig, ServerTlsConfig, TlsCipherSuiteConfig, TlsKeyExchangeGroupConfig,
-    UpstreamConfig, UpstreamLoadBalanceConfig, UpstreamPeerConfig, UpstreamProtocolConfig,
-    VirtualHostConfig, VirtualHostTlsConfig,
+    RouteBufferingPolicyConfig, RouteCompressionPolicyConfig, RuntimeConfig, ServerConfig,
+    ServerTlsConfig, TlsCipherSuiteConfig, TlsKeyExchangeGroupConfig, UpstreamConfig,
+    UpstreamLoadBalanceConfig, UpstreamPeerConfig, UpstreamProtocolConfig, VirtualHostConfig,
+    VirtualHostTlsConfig,
 };
 
 use super::{DEFAULT_GRPC_HEALTH_CHECK_PATH, validate};
@@ -337,6 +338,60 @@ fn validate_rejects_burst_without_rate_limit() {
 
     let error = validate(&config).expect_err("burst without rate limit should be rejected");
     assert!(error.to_string().contains("burst requires requests_per_sec to be set"));
+}
+
+#[test]
+fn validate_rejects_zero_route_compression_min_bytes() {
+    let mut config = base_config();
+    config.locations[0].compression_min_bytes = Some(0);
+
+    let error = validate(&config).expect_err("zero compression_min_bytes should be rejected");
+    assert!(error.to_string().contains("compression_min_bytes must be greater than 0"));
+}
+
+#[test]
+fn validate_rejects_zero_route_streaming_response_idle_timeout() {
+    let mut config = base_config();
+    config.locations[0].streaming_response_idle_timeout_secs = Some(0);
+
+    let error =
+        validate(&config).expect_err("zero streaming response idle timeout should be rejected");
+    assert!(
+        error.to_string().contains("streaming_response_idle_timeout_secs must be greater than 0")
+    );
+}
+
+#[test]
+fn validate_rejects_force_compression_with_response_buffering_off() {
+    let mut config = base_config();
+    config.locations[0].response_buffering = Some(RouteBufferingPolicyConfig::Off);
+    config.locations[0].compression = Some(RouteCompressionPolicyConfig::Force);
+
+    let error = validate(&config).expect_err("force compression should require buffering");
+    assert!(
+        error
+            .to_string()
+            .contains("compression=Force requires response_buffering to remain Auto or On")
+    );
+}
+
+#[test]
+fn validate_rejects_empty_route_compression_content_types() {
+    let mut config = base_config();
+    config.locations[0].compression_content_types = Some(Vec::new());
+
+    let error = validate(&config).expect_err("empty compression_content_types should be rejected");
+    assert!(error.to_string().contains("compression_content_types must not be empty"));
+}
+
+#[test]
+fn validate_rejects_blank_route_compression_content_type_entry() {
+    let mut config = base_config();
+    config.locations[0].compression_content_types = Some(vec!["   ".to_string()]);
+
+    let error =
+        validate(&config).expect_err("blank compression_content_types entry should be rejected");
+    assert!(error.to_string().contains("compression_content_types entries must not be empty"));
 }
 
 #[test]
@@ -832,6 +887,12 @@ fn validate_allows_duplicate_exact_routes_when_grpc_constraints_differ() {
         requests_per_sec: None,
         burst: None,
         allow_early_data: None,
+        request_buffering: None,
+        response_buffering: None,
+        compression: None,
+        compression_min_bytes: None,
+        compression_content_types: None,
+        streaming_response_idle_timeout_secs: None,
     });
 
     validate(&config).expect("different gRPC route constraints should be allowed");
@@ -1117,6 +1178,77 @@ fn validate_accepts_explicit_listeners_when_legacy_listener_fields_are_empty() {
 }
 
 #[test]
+fn validate_accepts_request_buffering_on_with_legacy_body_limit() {
+    let mut config = base_config();
+    config.server.max_request_body_bytes = Some(1024);
+    config.locations[0].request_buffering = Some(RouteBufferingPolicyConfig::On);
+
+    validate(&config).expect("request_buffering=On should validate with a legacy body limit");
+}
+
+#[test]
+fn validate_rejects_request_buffering_on_without_legacy_body_limit() {
+    let mut config = base_config();
+    config.locations[0].request_buffering = Some(RouteBufferingPolicyConfig::On);
+
+    let error =
+        validate(&config).expect_err("request_buffering=On should require a legacy body limit");
+    assert!(
+        error.to_string().contains("request_buffering=On requires server.max_request_body_bytes")
+    );
+}
+
+#[test]
+fn validate_rejects_request_buffering_on_without_explicit_listener_body_limits() {
+    let mut config = base_config();
+    config.server.listen = None;
+    config.locations[0].request_buffering = Some(RouteBufferingPolicyConfig::On);
+    config.listeners = vec![
+        ListenerConfig {
+            name: "http".to_string(),
+            proxy_protocol: None,
+            default_certificate: None,
+            listen: "127.0.0.1:8080".to_string(),
+            trusted_proxies: Vec::new(),
+            keep_alive: Some(true),
+            max_headers: None,
+            max_request_body_bytes: Some(1024),
+            max_connections: None,
+            header_read_timeout_secs: None,
+            request_body_read_timeout_secs: None,
+            response_write_timeout_secs: None,
+            access_log_format: None,
+            tls: None,
+            http3: None,
+        },
+        ListenerConfig {
+            name: "https".to_string(),
+            proxy_protocol: None,
+            default_certificate: None,
+            listen: "127.0.0.1:8443".to_string(),
+            trusted_proxies: Vec::new(),
+            keep_alive: Some(true),
+            max_headers: None,
+            max_request_body_bytes: None,
+            max_connections: None,
+            header_read_timeout_secs: None,
+            request_body_read_timeout_secs: None,
+            response_write_timeout_secs: None,
+            access_log_format: None,
+            tls: Some(valid_server_tls()),
+            http3: None,
+        },
+    ];
+
+    let error = validate(&config)
+        .expect_err("request_buffering=On should require limits on all explicit listeners");
+    assert!(error.to_string().contains(
+        "request_buffering=On requires max_request_body_bytes on every explicit listener"
+    ));
+    assert!(error.to_string().contains("https"));
+}
+
+#[test]
 fn validate_rejects_duplicate_listener_names_after_ascii_normalization() {
     let mut config = base_config();
     config.server.listen = None;
@@ -1223,6 +1355,12 @@ fn validate_rejects_vhost_tls_without_any_tls_listener() {
             requests_per_sec: None,
             burst: None,
             allow_early_data: None,
+            request_buffering: None,
+            response_buffering: None,
+            compression: None,
+            compression_min_bytes: None,
+            compression_content_types: None,
+            streaming_response_idle_timeout_secs: None,
         }],
         tls: Some(VirtualHostTlsConfig {
             cert_path: "server.crt".to_string(),
@@ -1310,6 +1448,12 @@ fn base_config() -> Config {
             requests_per_sec: None,
             burst: None,
             allow_early_data: None,
+            request_buffering: None,
+            response_buffering: None,
+            compression: None,
+            compression_min_bytes: None,
+            compression_content_types: None,
+            streaming_response_idle_timeout_secs: None,
         }],
         servers: Vec::new(),
     }
@@ -1351,6 +1495,12 @@ fn sample_vhost(server_names: Vec<&str>) -> VirtualHostConfig {
             requests_per_sec: None,
             burst: None,
             allow_early_data: None,
+            request_buffering: None,
+            response_buffering: None,
+            compression: None,
+            compression_min_bytes: None,
+            compression_content_types: None,
+            streaming_response_idle_timeout_secs: None,
         }],
         tls: None,
     }

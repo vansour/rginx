@@ -13,6 +13,7 @@ import socket
 import ssl
 import statistics
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -302,6 +303,8 @@ def warmup_named_curl(
     grpc_mode: str | None = None,
 ) -> None:
     warmup_concurrency = min(concurrency, requests, 16)
+    failed_requests = 0
+    first_error: Exception | None = None
     with concurrent.futures.ThreadPoolExecutor(max_workers=warmup_concurrency) as executor:
         futures = [
             executor.submit(
@@ -316,7 +319,21 @@ def warmup_named_curl(
             for _ in range(requests)
         ]
         for future in concurrent.futures.as_completed(futures):
-            future.result()
+            try:
+                future.result()
+            except Exception as exc:  # noqa: BLE001 - warmup resilience
+                failed_requests += 1
+                if first_error is None:
+                    first_error = exc
+
+    if failed_requests:
+        print(
+            (
+                f"[nginx-compare] warning: warmup failed {failed_requests}/{requests} requests "
+                f"for {url}; first error: {first_error!r}"
+            ),
+            file=sys.stderr,
+        )
 
 
 def benchmark_named_curl(
@@ -333,6 +350,8 @@ def benchmark_named_curl(
     grpc_mode: str | None = None,
 ) -> BenchmarkResult:
     durations: list[float] = []
+    failed_requests = 0
+    first_error: Exception | None = None
     started = time.perf_counter()
     with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
         futures = [
@@ -348,17 +367,31 @@ def benchmark_named_curl(
             for _ in range(requests)
         ]
         for future in concurrent.futures.as_completed(futures):
-            durations.append(future.result())
+            try:
+                durations.append(future.result())
+            except Exception as exc:  # noqa: BLE001 - preserve scenario-level aggregation
+                failed_requests += 1
+                if first_error is None:
+                    first_error = exc
 
     wall_elapsed = max(time.perf_counter() - started, 1e-9)
+    complete_requests = requests - failed_requests
+    if failed_requests:
+        print(
+            (
+                f"[nginx-compare] warning: {server}/{scenario} failed {failed_requests}/{requests} "
+                f"requests; first error: {first_error!r}"
+            ),
+            file=sys.stderr,
+        )
     return BenchmarkResult(
         server=server,
         scenario=scenario,
         tool="curl-threadpool",
-        complete_requests=requests,
-        failed_requests=0,
-        requests_per_sec=round(requests / wall_elapsed, 2),
-        time_per_request_ms=round(statistics.mean(durations) * 1000, 3),
+        complete_requests=complete_requests,
+        failed_requests=failed_requests,
+        requests_per_sec=round(complete_requests / wall_elapsed, 2),
+        time_per_request_ms=round(statistics.mean(durations) * 1000, 3) if durations else 0.0,
         transfer_rate_kb_sec=None,
     )
 
@@ -452,9 +485,13 @@ def spawn_process(
 
 
 def stop_process(process: subprocess.Popen[str], *, name: str) -> None:
+    allowed_exit_codes = {0, -15}
     if process.poll() is not None:
-        if process.returncode not in (0, -15):
-            raise RuntimeError(f"{name} exited with unexpected status {process.returncode}")
+        if process.returncode not in allowed_exit_codes:
+            print(
+                f"[nginx-compare] warning: {name} exited with status {process.returncode}",
+                file=sys.stderr,
+            )
         return
     process.terminate()
     try:
@@ -462,8 +499,11 @@ def stop_process(process: subprocess.Popen[str], *, name: str) -> None:
     except subprocess.TimeoutExpired:
         process.kill()
         process.wait(timeout=10)
-    if process.returncode not in (0, -15):
-        raise RuntimeError(f"{name} exited with unexpected status {process.returncode}")
+    if process.returncode not in allowed_exit_codes:
+        print(
+            f"[nginx-compare] warning: {name} exited with status {process.returncode}",
+            file=sys.stderr,
+        )
 
 
 def measure_reload_apply_time(

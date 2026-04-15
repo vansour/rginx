@@ -360,5 +360,11 @@ fn route(path: &str) -> Route {
         access_control: RouteAccessControl::default(),
         rate_limit: None,
         allow_early_data: false,
+        request_buffering: crate::RouteBufferingPolicy::Auto,
+        response_buffering: crate::RouteBufferingPolicy::Auto,
+        compression: crate::RouteCompressionPolicy::Auto,
+        compression_min_bytes: None,
+        compression_content_types: Vec::new(),
+        streaming_response_idle_timeout: None,
     }
 }

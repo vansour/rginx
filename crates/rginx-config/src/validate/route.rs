@@ -3,7 +3,10 @@ use std::collections::HashSet;
 use ipnet::IpNet;
 use rginx_core::{Error, Result};
 
-use crate::model::{HandlerConfig, LocationConfig, MatcherConfig};
+use crate::model::{
+    HandlerConfig, LocationConfig, MatcherConfig, RouteBufferingPolicyConfig,
+    RouteCompressionPolicyConfig,
+};
 
 pub(super) fn validate_locations(
     scope_label: Option<&str>,
@@ -48,6 +51,15 @@ pub(super) fn validate_locations(
         validate_route_cidrs(matcher_label, "allow_cidrs", &location.allow_cidrs)?;
         validate_route_cidrs(matcher_label, "deny_cidrs", &location.deny_cidrs)?;
         validate_route_rate_limit(matcher_label, location.requests_per_sec, location.burst)?;
+        validate_route_transport_policy(
+            matcher_label,
+            location.request_buffering,
+            location.response_buffering,
+            location.compression,
+            location.compression_min_bytes,
+            location.compression_content_types.as_deref(),
+            location.streaming_response_idle_timeout_secs,
+        )?;
 
         let route_scope = route_scope(scope_label, matcher_label);
         validate_grpc_route_match(
@@ -151,6 +163,54 @@ fn validate_route_rate_limit(
         return Err(Error::Config(format!(
             "route matcher `{route_matcher}` burst requires requests_per_sec to be set"
         )));
+    }
+
+    Ok(())
+}
+
+fn validate_route_transport_policy(
+    route_matcher: &str,
+    _request_buffering: Option<RouteBufferingPolicyConfig>,
+    response_buffering: Option<RouteBufferingPolicyConfig>,
+    compression: Option<RouteCompressionPolicyConfig>,
+    compression_min_bytes: Option<u64>,
+    compression_content_types: Option<&[String]>,
+    streaming_response_idle_timeout_secs: Option<u64>,
+) -> Result<()> {
+    if compression_min_bytes.is_some_and(|value| value == 0) {
+        return Err(Error::Config(format!(
+            "route matcher `{route_matcher}` compression_min_bytes must be greater than 0"
+        )));
+    }
+
+    if streaming_response_idle_timeout_secs.is_some_and(|value| value == 0) {
+        return Err(Error::Config(format!(
+            "route matcher `{route_matcher}` streaming_response_idle_timeout_secs must be greater than 0"
+        )));
+    }
+
+    if matches!(compression, Some(RouteCompressionPolicyConfig::Force))
+        && matches!(response_buffering, Some(RouteBufferingPolicyConfig::Off))
+    {
+        return Err(Error::Config(format!(
+            "route matcher `{route_matcher}` compression=Force requires response_buffering to remain Auto or On"
+        )));
+    }
+
+    if let Some(content_types) = compression_content_types {
+        if content_types.is_empty() {
+            return Err(Error::Config(format!(
+                "route matcher `{route_matcher}` compression_content_types must not be empty when provided"
+            )));
+        }
+
+        for content_type in content_types {
+            if content_type.trim().is_empty() {
+                return Err(Error::Config(format!(
+                    "route matcher `{route_matcher}` compression_content_types entries must not be empty"
+                )));
+            }
+        }
     }
 
     Ok(())

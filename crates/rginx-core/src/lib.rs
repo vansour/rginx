@@ -8,10 +8,11 @@ pub use config::{
     AccessLogFormat, AccessLogValues, ActiveHealthCheck, ClientIdentity, ConfigSnapshot,
     GrpcRouteMatch, Listener, ListenerApplicationProtocol, ListenerHttp3, ListenerTransportBinding,
     ListenerTransportKind, OcspConfig, OcspNonceMode, OcspResponderPolicy, ProxyTarget,
-    ReturnAction, Route, RouteAccessControl, RouteAction, RouteMatcher, RouteRateLimit,
-    RuntimeSettings, Server, ServerCertificateBundle, ServerClientAuthMode, ServerClientAuthPolicy,
-    ServerNameMatch, ServerTls, TlsCipherSuite, TlsKeyExchangeGroup, TlsVersion, Upstream,
-    UpstreamLoadBalance, UpstreamPeer, UpstreamProtocol, UpstreamSettings, UpstreamTls,
-    VirtualHost, VirtualHostTls, best_matching_server_name_pattern, match_server_name,
+    ReturnAction, Route, RouteAccessControl, RouteAction, RouteBufferingPolicy,
+    RouteCompressionPolicy, RouteMatcher, RouteRateLimit, RuntimeSettings, Server,
+    ServerCertificateBundle, ServerClientAuthMode, ServerClientAuthPolicy, ServerNameMatch,
+    ServerTls, TlsCipherSuite, TlsKeyExchangeGroup, TlsVersion, Upstream, UpstreamLoadBalance,
+    UpstreamPeer, UpstreamProtocol, UpstreamSettings, UpstreamTls, VirtualHost, VirtualHostTls,
+    best_matching_server_name_pattern, match_server_name,
 };
 pub use error::{Error, Result};

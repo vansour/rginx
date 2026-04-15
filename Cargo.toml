@@ -12,7 +12,7 @@ repository = "https://github.com/vansour/rginx"
 homepage = "https://github.com/vansour/rginx"
 documentation = "https://github.com/vansour/rginx/tree/main/wiki"
 readme = "README.md"
-rust-version = "1.85"
+rust-version = "1.94.1"
 
 [workspace.dependencies]
 anyhow = "1.0"

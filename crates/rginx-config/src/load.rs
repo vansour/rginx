@@ -167,12 +167,11 @@ fn split_lines_preserving_newlines(contents: &str) -> Vec<&str> {
     }
 
     let mut lines = contents.split_inclusive('\n').collect::<Vec<_>>();
-    if !contents.ends_with('\n') {
-        if let Some(last) = contents.rsplit_once('\n').map(|(_, tail)| tail) {
-            if lines.last().copied() != Some(last) {
-                lines.push(last);
-            }
-        }
+    if !contents.ends_with('\n')
+        && let Some(last) = contents.rsplit_once('\n').map(|(_, tail)| tail)
+        && lines.last().copied() != Some(last)
+    {
+        lines.push(last);
     }
     lines
 }

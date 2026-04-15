@@ -41,6 +41,7 @@ pub(super) struct ListenerWorkerGroup {
     std_udp_sockets: Vec<Arc<StdUdpSocket>>,
     shutdown_tx: watch::Sender<bool>,
     tasks: Vec<JoinHandle<Result<()>>>,
+    joined_tasks: usize,
 }
 
 impl ListenerWorkerGroup {
@@ -409,33 +410,56 @@ fn activate_prepared_listener_worker_group(
         std_udp_sockets: prepared.std_udp_sockets,
         shutdown_tx,
         tasks,
+        joined_tasks: 0,
     }
 }
 
 /// Waits for all worker tasks in a listener group to finish.
 async fn join_listener_worker_group(group: &mut ListenerWorkerGroup) -> Result<()> {
-    for (worker_index, task) in group.tasks.iter_mut().enumerate() {
-        task.await.map_err(|error| {
-            Error::Server(format!(
-                "listener `{}` worker {worker_index} failed to join: {error}",
-                group.listener.name
-            ))
-        })??;
+    let mut first_error = None;
+
+    while group.joined_tasks < group.tasks.len() {
+        let worker_index = group.joined_tasks;
+        match (&mut group.tasks[worker_index]).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+            Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(Error::Server(format!(
+                        "listener `{}` worker {worker_index} failed to join: {error}",
+                        group.listener.name
+                    )));
+                }
+            }
+        }
+        group.joined_tasks += 1;
     }
     group.tasks.clear();
+    group.joined_tasks = 0;
+
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+
     Ok(())
 }
 
 /// Waits for all worker tasks in an already-aborted listener group to settle.
 async fn join_aborted_listener_worker_group(group: &mut ListenerWorkerGroup) {
-    for task in group.tasks.iter_mut() {
-        if let Err(error) = task.await
+    while group.joined_tasks < group.tasks.len() {
+        if let Err(error) = (&mut group.tasks[group.joined_tasks]).await
             && !error.is_cancelled()
         {
             tracing::warn!(%error, listener = %group.listener.name, "http worker failed after abort");
         }
+        group.joined_tasks += 1;
     }
     group.tasks.clear();
+    group.joined_tasks = 0;
 }
 
 /// Binds a nonblocking TCP listener for the given socket address.
@@ -584,6 +608,7 @@ mod tests {
             std_udp_sockets: Vec::new(),
             shutdown_tx,
             tasks: Vec::new(),
+            joined_tasks: 0,
         }
     }
 

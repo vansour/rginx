@@ -8,6 +8,7 @@ use super::response::{
 };
 use super::*;
 use crate::client_ip::{ConnectionPeerAddrs, TlsClientIdentity};
+use crate::compression::ResponseCompressionOptions;
 use std::sync::Arc;
 
 #[derive(Clone, Copy)]
@@ -16,6 +17,13 @@ struct ListenerRequestContext<'a> {
     listener_tls_enabled: bool,
     request_body_read_timeout: Option<std::time::Duration>,
     max_request_body_bytes: Option<usize>,
+}
+
+#[derive(Clone)]
+struct RouteExecutionContext {
+    action: RouteAction,
+    request_buffering: rginx_core::RouteBufferingPolicy,
+    streaming_response_idle_timeout: Option<std::time::Duration>,
 }
 
 pub(super) struct FinalizedDownstreamResponse {
@@ -89,6 +97,8 @@ pub async fn handle(
         .map(|route| route.id.clone())
         .unwrap_or_else(|| "__unmatched__".to_string());
     let selected_route_id = selected_route.as_ref().map(|route| route.id.clone());
+    let response_compression_options =
+        selected_route.as_ref().map(ResponseCompressionOptions::for_route).unwrap_or_default();
     state.record_downstream_request(listener_id, &selected_vhost_id, selected_route_id.as_deref());
     if listener.server.tls.as_ref().and_then(|tls| tls.client_auth.as_ref()).is_some() {
         state.record_mtls_request(listener_id, tls_client_identity.is_some());
@@ -107,18 +117,17 @@ pub async fn handle(
         request_body_read_timeout: listener.server.request_body_read_timeout,
         max_request_body_bytes: listener.server.max_request_body_bytes,
     };
-    let response = match selected_route {
+    let response = match selected_route.as_ref() {
         Some(route) => {
             if early_data && !route.allow_early_data {
                 state.record_http3_early_data_rejected_request(listener_id);
                 early_data_rejection_response(&request_headers)
-            } else if let Some(response) =
-                authorize_route(&request_headers, &route, &client_address)
+            } else if let Some(response) = authorize_route(&request_headers, route, &client_address)
             {
                 state.record_route_access_denied(&route.id);
                 response
             } else if let Some(response) =
-                enforce_rate_limit(&request_headers, &state, &route, &route_id, &client_address)
+                enforce_rate_limit(&request_headers, &state, route, &route_id, &client_address)
             {
                 state.record_route_rate_limited(&route.id);
                 response
@@ -129,7 +138,11 @@ pub async fn handle(
                 build_route_response(
                     request,
                     state.clone(),
-                    route.action,
+                    RouteExecutionContext {
+                        action: route.action.clone(),
+                        request_buffering: route.request_buffering,
+                        streaming_response_idle_timeout: route.streaming_response_idle_timeout,
+                    },
                     active,
                     listener_context,
                     client_address.clone(),
@@ -152,6 +165,7 @@ pub async fn handle(
     let finalized = finalize_downstream_response(
         &method,
         &request_headers,
+        &response_compression_options,
         request_id_header,
         response,
         grpc_request,
@@ -242,6 +256,7 @@ fn early_data_rejection_response(request_headers: &HeaderMap) -> HttpResponse {
 pub(super) async fn finalize_downstream_response(
     method: &Method,
     request_headers: &HeaderMap,
+    response_compression_options: &ResponseCompressionOptions<'_>,
     request_id_header: HeaderValue,
     mut response: HttpResponse,
     grpc_request: Option<GrpcRequestMetadata<'_>>,
@@ -254,8 +269,13 @@ pub(super) async fn finalize_downstream_response(
     // 4. Add request-id after transforms so every returned response carries it.
     let grpc = grpc_observability(grpc_request, response.headers());
     if grpc.is_none() && *method != Method::HEAD {
-        response =
-            crate::compression::maybe_encode_response(method, request_headers, response).await;
+        response = crate::compression::maybe_encode_response(
+            method,
+            request_headers,
+            response_compression_options,
+            response,
+        )
+        .await;
     }
     if *method == Method::HEAD {
         response = strip_response_body(response);
@@ -392,13 +412,13 @@ pub(super) fn enforce_rate_limit(
 async fn build_route_response(
     request: Request<HttpBody>,
     state: SharedState,
-    action: RouteAction,
+    route: RouteExecutionContext,
     active: ActiveState,
     listener: ListenerRequestContext<'_>,
     client_address: ClientAddress,
     request_id: &str,
 ) -> HttpResponse {
-    match &action {
+    match &route.action {
         RouteAction::Proxy(proxy) => {
             let downstream_proto = if listener.listener_tls_enabled { "https" } else { "http" };
             crate::proxy::forward_request(
@@ -415,6 +435,8 @@ async fn build_route_response(
                     options: crate::proxy::DownstreamRequestOptions {
                         request_body_read_timeout: listener.request_body_read_timeout,
                         max_request_body_bytes: listener.max_request_body_bytes,
+                        request_buffering: route.request_buffering,
+                        streaming_response_idle_timeout: route.streaming_response_idle_timeout,
                     },
                 },
             )

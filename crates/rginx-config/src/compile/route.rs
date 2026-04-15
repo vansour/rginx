@@ -1,14 +1,19 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use http::StatusCode;
 use ipnet::IpNet;
 use rginx_core::{
     Error, GrpcRouteMatch, ProxyTarget, Result, ReturnAction, Route, RouteAccessControl,
-    RouteAction, RouteMatcher, RouteRateLimit, Upstream,
+    RouteAction, RouteBufferingPolicy, RouteCompressionPolicy, RouteMatcher, RouteRateLimit,
+    Upstream,
 };
 
-use crate::model::{HandlerConfig, LocationConfig, MatcherConfig};
+use crate::model::{
+    HandlerConfig, LocationConfig, MatcherConfig, RouteBufferingPolicyConfig,
+    RouteCompressionPolicyConfig,
+};
 
 pub(super) fn compile_routes(
     locations: Vec<LocationConfig>,
@@ -42,6 +47,12 @@ fn compile_route(
         requests_per_sec,
         burst,
         allow_early_data,
+        request_buffering,
+        response_buffering,
+        compression,
+        compression_min_bytes,
+        compression_content_types,
+        streaming_response_idle_timeout_secs,
     } = location;
 
     let matcher = match matcher {
@@ -66,6 +77,16 @@ fn compile_route(
     let rate_limit = compile_route_rate_limit(&matcher, requests_per_sec, burst)?;
     let action = compile_route_action(handler, upstreams)?;
 
+    let compression_min_bytes = compression_min_bytes
+        .map(|value| {
+            usize::try_from(value).map_err(|_| {
+                Error::Config(format!(
+                    "route `{route_id}` compression_min_bytes `{value}` does not fit into usize"
+                ))
+            })
+        })
+        .transpose()?;
+
     Ok(Route {
         id: route_id,
         matcher,
@@ -74,6 +95,13 @@ fn compile_route(
         access_control,
         rate_limit,
         allow_early_data: allow_early_data.unwrap_or(false),
+        request_buffering: compile_buffering_policy(request_buffering),
+        response_buffering: compile_buffering_policy(response_buffering),
+        compression: compile_compression_policy(compression),
+        compression_min_bytes,
+        compression_content_types: compile_compression_content_types(compression_content_types),
+        streaming_response_idle_timeout: streaming_response_idle_timeout_secs
+            .map(Duration::from_secs),
     })
 }
 
@@ -168,5 +196,31 @@ fn compile_cidrs(route_matcher: &str, field: &str, cidrs: Vec<String>) -> Result
                 ))
             })
         })
+        .collect()
+}
+
+fn compile_buffering_policy(policy: Option<RouteBufferingPolicyConfig>) -> RouteBufferingPolicy {
+    match policy.unwrap_or_default() {
+        RouteBufferingPolicyConfig::Auto => RouteBufferingPolicy::Auto,
+        RouteBufferingPolicyConfig::On => RouteBufferingPolicy::On,
+        RouteBufferingPolicyConfig::Off => RouteBufferingPolicy::Off,
+    }
+}
+
+fn compile_compression_policy(
+    policy: Option<RouteCompressionPolicyConfig>,
+) -> RouteCompressionPolicy {
+    match policy.unwrap_or_default() {
+        RouteCompressionPolicyConfig::Off => RouteCompressionPolicy::Off,
+        RouteCompressionPolicyConfig::Auto => RouteCompressionPolicy::Auto,
+        RouteCompressionPolicyConfig::Force => RouteCompressionPolicy::Force,
+    }
+}
+
+fn compile_compression_content_types(content_types: Option<Vec<String>>) -> Vec<String> {
+    content_types
+        .unwrap_or_default()
+        .into_iter()
+        .map(|content_type| content_type.trim().to_ascii_lowercase())
         .collect()
 }

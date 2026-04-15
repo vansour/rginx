@@ -81,6 +81,87 @@ fn falls_back_to_gzip_when_client_prefers_it_over_brotli() {
     server.shutdown_and_wait(Duration::from_secs(5));
 }
 
+#[test]
+fn skips_compression_when_response_buffering_is_off() {
+    let listen_addr = reserve_loopback_addr();
+    let mut server = ServerHarness::spawn("rginx-compression-buffering-off", |_| {
+        return_config_with_route_options(
+            listen_addr,
+            &"hello passthrough world\n".repeat(32),
+            "            response_buffering: Some(Off),\n",
+        )
+    });
+    server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
+
+    let response = send_http_request(
+        listen_addr,
+        &format!(
+            "GET / HTTP/1.1\r\nHost: {listen_addr}\r\nAccept-Encoding: gzip\r\nConnection: close\r\n\r\n"
+        ),
+    )
+    .expect("request should succeed");
+
+    assert_eq!(response.status, 200);
+    assert_eq!(response.header("content-encoding"), None);
+    assert_eq!(response.body, "hello passthrough world\n".repeat(32).into_bytes());
+
+    server.shutdown_and_wait(Duration::from_secs(5));
+}
+
+#[test]
+fn force_compression_can_encode_small_responses_when_response_buffering_is_on() {
+    let listen_addr = reserve_loopback_addr();
+    let mut server = ServerHarness::spawn("rginx-compression-force-small", |_| {
+        return_config_with_route_options(
+            listen_addr,
+            &"a".repeat(128),
+            "            response_buffering: Some(On),\n            compression: Some(Force),\n",
+        )
+    });
+    server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
+
+    let response = send_http_request(
+        listen_addr,
+        &format!(
+            "GET / HTTP/1.1\r\nHost: {listen_addr}\r\nAccept-Encoding: gzip\r\nConnection: close\r\n\r\n"
+        ),
+    )
+    .expect("force compression request should succeed");
+
+    assert_eq!(response.status, 200);
+    assert_eq!(response.header("content-encoding"), Some("gzip"));
+    assert_eq!(decode_gzip(&response.body), "a".repeat(128).into_bytes());
+
+    server.shutdown_and_wait(Duration::from_secs(5));
+}
+
+#[test]
+fn custom_compression_content_types_can_disable_default_text_compression() {
+    let listen_addr = reserve_loopback_addr();
+    let mut server = ServerHarness::spawn("rginx-compression-content-types", |_| {
+        return_config_with_route_options(
+            listen_addr,
+            &"hello allowlist world\n".repeat(32),
+            "            response_buffering: Some(On),\n            compression_content_types: Some([\"application/json\"]),\n",
+        )
+    });
+    server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
+
+    let response = send_http_request(
+        listen_addr,
+        &format!(
+            "GET / HTTP/1.1\r\nHost: {listen_addr}\r\nAccept-Encoding: gzip\r\nConnection: close\r\n\r\n"
+        ),
+    )
+    .expect("allowlist request should succeed");
+
+    assert_eq!(response.status, 200);
+    assert_eq!(response.header("content-encoding"), None);
+    assert_eq!(response.body, "hello allowlist world\n".repeat(32).into_bytes());
+
+    server.shutdown_and_wait(Duration::from_secs(5));
+}
+
 #[derive(Debug)]
 struct ParsedResponse {
     status: u16,
@@ -156,10 +237,19 @@ fn decode_brotli(bytes: &[u8]) -> Vec<u8> {
 }
 
 fn return_config(listen_addr: SocketAddr, body: &str) -> String {
+    return_config_with_route_options(listen_addr, body, "")
+}
+
+fn return_config_with_route_options(
+    listen_addr: SocketAddr,
+    body: &str,
+    route_options: &str,
+) -> String {
     format!(
-        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Return(\n                status: 200,\n                location: \"\",\n                body: Some({:?}),\n            ),\n        ),\n    ],\n)\n",
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Return(\n                status: 200,\n                location: \"\",\n                body: Some({:?}),\n            ),\n{route_options}        ),\n    ],\n)\n",
         listen_addr.to_string(),
         body,
         ready_route = READY_ROUTE_CONFIG,
+        route_options = route_options,
     )
 }

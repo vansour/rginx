@@ -1,3 +1,4 @@
+use std::error::Error as StdError;
 use std::path::PathBuf;
 
 use super::health::{
@@ -177,10 +178,23 @@ impl ProxyClient {
                 .request(request)
                 .await
                 .map(|response| response.map(crate::handler::boxed_body))
-                .map_err(|error| Error::Server(format!("upstream request failed: {error}"))),
+                .map_err(|error| {
+                    Error::Server(format_error_chain("upstream request failed", &error))
+                }),
             Self::Http3(client) => client.request(upstream, peer, request).await,
         }
     }
+}
+
+fn format_error_chain(prefix: &str, error: &(dyn StdError + 'static)) -> String {
+    let mut message = format!("{prefix}: {error}");
+    let mut current = error.source();
+    while let Some(source) = current {
+        message.push_str(": ");
+        message.push_str(&source.to_string());
+        current = source.source();
+    }
+    message
 }
 
 fn build_client_for_profile(profile: &UpstreamClientProfile) -> Result<ProxyClient, Error> {
