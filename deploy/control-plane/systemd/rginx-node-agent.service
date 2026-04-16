@@ -1,0 +1,18 @@
+[Unit]
+Description=rginx node agent
+After=network-online.target rginx.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=rginx
+Group=rginx
+Environment=RGINX_CONTROL_PLANE_ORIGIN=http://127.0.0.1:8080
+Environment=RGINX_ADMIN_SOCKET=/run/rginx/admin.sock
+ExecStart=/usr/local/bin/rginx-node-agent
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

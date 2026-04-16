@@ -1,0 +1,158 @@
+name: rginx-control-plane
+
+services:
+  postgres:
+    image: postgres:18-trixie
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${RGINX_CONTROL_DB_NAME:-rginx_control}
+      POSTGRES_USER: ${RGINX_CONTROL_DB_USER:-rginx}
+      POSTGRES_PASSWORD: ${RGINX_CONTROL_DB_PASSWORD:-rginx}
+    networks:
+      - control-plane
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -h 127.0.0.1 -p 5432 -U ${RGINX_CONTROL_DB_USER:-rginx} -d ${RGINX_CONTROL_DB_NAME:-rginx_control} >/dev/null && psql -h 127.0.0.1 -p 5432 -U ${RGINX_CONTROL_DB_USER:-rginx} -d ${RGINX_CONTROL_DB_NAME:-rginx_control} -Atqc \"select 1 from information_schema.tables where table_schema = 'public' and table_name = 'cp_agent_tasks'\" | grep -qx 1",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    ports:
+      - "${RGINX_CONTROL_POSTGRES_PUBLISH:-127.0.0.1:5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql
+      - ./migrations/postgres:/docker-entrypoint-initdb.d:ro
+
+  dragonfly:
+    image: ghcr.io/dragonflydb/dragonfly:latest
+    restart: unless-stopped
+    networks:
+      - control-plane
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "redis-cli -h 127.0.0.1 -p 6379 ping | grep PONG >/dev/null",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    ports:
+      - "${RGINX_CONTROL_DRAGONFLY_PUBLISH:-127.0.0.1:6379}:6379"
+    volumes:
+      - dragonfly-data:/data
+
+  control-api:
+    image: rginx-control:${RGINX_CONTROL_IMAGE_TAG:-dev}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: rginx-control
+      args:
+        RGINX_BUILD_VERSION: ${RGINX_BUILD_VERSION:-dev}
+        RGINX_BUILD_REVISION: ${RGINX_BUILD_REVISION:-local}
+        RGINX_BUILD_CREATED: ${RGINX_BUILD_CREATED:-unknown}
+    init: true
+    restart: unless-stopped
+    networks:
+      - control-plane
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      dragonfly:
+        condition: service_healthy
+    environment:
+      RGINX_CONTROL_DB_HOST: ${RGINX_CONTROL_DB_HOST:-postgres}
+      RGINX_CONTROL_DB_PORT: ${RGINX_CONTROL_DB_PORT:-5432}
+      RGINX_CONTROL_DB_USER: ${RGINX_CONTROL_DB_USER:-rginx}
+      RGINX_CONTROL_DB_PASSWORD: ${RGINX_CONTROL_DB_PASSWORD:-rginx}
+      RGINX_CONTROL_DB_NAME: ${RGINX_CONTROL_DB_NAME:-rginx_control}
+      RGINX_CONTROL_DB_MAX_CONNECTIONS: ${RGINX_CONTROL_DB_MAX_CONNECTIONS:-10}
+      RGINX_CONTROL_DRAGONFLY_HOST: ${RGINX_CONTROL_DRAGONFLY_HOST:-dragonfly}
+      RGINX_CONTROL_DRAGONFLY_PORT: ${RGINX_CONTROL_DRAGONFLY_PORT:-6379}
+      RGINX_CONTROL_DRAGONFLY_KEY_PREFIX: ${RGINX_CONTROL_DRAGONFLY_KEY_PREFIX:-rginx:control}
+      RGINX_CONTROL_API_ADDR: ${RGINX_CONTROL_API_ADDR:-0.0.0.0:8080}
+      RGINX_CONTROL_AUTH_SESSION_SECRET: ${RGINX_CONTROL_AUTH_SESSION_SECRET:-change-me-for-local-dev}
+      RGINX_CONTROL_AUTH_SESSION_TTL_SECS: ${RGINX_CONTROL_AUTH_SESSION_TTL_SECS:-86400}
+      RGINX_CONTROL_AGENT_SHARED_TOKEN: ${RGINX_CONTROL_AGENT_SHARED_TOKEN:-change-me-for-node-agent}
+      RGINX_CONTROL_NODE_OFFLINE_THRESHOLD_SECS: ${RGINX_CONTROL_NODE_OFFLINE_THRESHOLD_SECS:-30}
+    command: ["api"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    ports:
+      - "${RGINX_CONTROL_API_PUBLISH:-127.0.0.1:8080}:8080"
+
+  control-worker:
+    image: rginx-control:${RGINX_CONTROL_IMAGE_TAG:-dev}
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: rginx-control
+      args:
+        RGINX_BUILD_VERSION: ${RGINX_BUILD_VERSION:-dev}
+        RGINX_BUILD_REVISION: ${RGINX_BUILD_REVISION:-local}
+        RGINX_BUILD_CREATED: ${RGINX_BUILD_CREATED:-unknown}
+    init: true
+    restart: unless-stopped
+    networks:
+      - control-plane
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      dragonfly:
+        condition: service_healthy
+    environment:
+      RGINX_CONTROL_DB_HOST: ${RGINX_CONTROL_DB_HOST:-postgres}
+      RGINX_CONTROL_DB_PORT: ${RGINX_CONTROL_DB_PORT:-5432}
+      RGINX_CONTROL_DB_USER: ${RGINX_CONTROL_DB_USER:-rginx}
+      RGINX_CONTROL_DB_PASSWORD: ${RGINX_CONTROL_DB_PASSWORD:-rginx}
+      RGINX_CONTROL_DB_NAME: ${RGINX_CONTROL_DB_NAME:-rginx_control}
+      RGINX_CONTROL_DB_MAX_CONNECTIONS: ${RGINX_CONTROL_DB_MAX_CONNECTIONS:-10}
+      RGINX_CONTROL_DRAGONFLY_HOST: ${RGINX_CONTROL_DRAGONFLY_HOST:-dragonfly}
+      RGINX_CONTROL_DRAGONFLY_PORT: ${RGINX_CONTROL_DRAGONFLY_PORT:-6379}
+      RGINX_CONTROL_DRAGONFLY_KEY_PREFIX: ${RGINX_CONTROL_DRAGONFLY_KEY_PREFIX:-rginx:control}
+      RGINX_CONTROL_WORKER_CONCURRENCY: ${RGINX_CONTROL_WORKER_CONCURRENCY:-2}
+      RGINX_CONTROL_WORKER_POLL_INTERVAL_SECS: ${RGINX_CONTROL_WORKER_POLL_INTERVAL_SECS:-5}
+      RGINX_CONTROL_NODE_OFFLINE_THRESHOLD_SECS: ${RGINX_CONTROL_NODE_OFFLINE_THRESHOLD_SECS:-30}
+    command: ["worker"]
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  postgres-data:
+  dragonfly-data:
+
+networks:
+  control-plane:
+    driver: bridge
