@@ -1,7 +1,4 @@
-use axum::{
-    Router, middleware,
-    routing::get_service,
-};
+use axum::{Router, middleware, routing::get_service};
 use tower_http::services::{ServeDir, ServeFile};
 
 use crate::state::AppState;

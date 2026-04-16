@@ -739,10 +739,9 @@ impl DeploymentService {
             .find_id_by_idempotency_key(&idempotency_key)
             .await
             .map_err(|error| ServiceError::Internal(error.to_string()))?
+            && self.get_deployment_detail(&existing_id).await.is_ok()
         {
-            if self.get_deployment_detail(&existing_id).await.is_ok() {
-                return Ok(0);
-            }
+            return Ok(0);
         }
 
         let now = Utc::now();
