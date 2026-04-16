@@ -6,11 +6,7 @@ pub async fn run(
     config: ControlWorkerConfig,
     services: ControlPlaneServices,
 ) -> anyhow::Result<()> {
-    tracing::info!(
-        concurrency = config.concurrency,
-        poll_interval_secs = config.poll_interval.as_secs(),
-        "control worker started"
-    );
+    tracing::info!(poll_interval_secs = config.poll_interval.as_secs(), "control worker started");
 
     let mut ticker = tokio::time::interval(config.poll_interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -21,7 +17,6 @@ pub async fn run(
                 match services.worker().collect_tick_report().await {
                     Ok(report) => {
                         tracing::info!(
-                            concurrency = config.concurrency,
                             service = %report.service_name,
                             known_nodes = report.known_nodes,
                             active_deployments = report.active_deployments,
@@ -36,7 +31,6 @@ pub async fn run(
                     }
                     Err(error) => {
                         tracing::warn!(
-                            concurrency = config.concurrency,
                             error = %error,
                             "control worker failed to collect runtime context"
                         );

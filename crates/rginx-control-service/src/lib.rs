@@ -15,6 +15,7 @@ mod worker;
 pub use alerts::AlertService;
 pub use audit::AuditService;
 pub use auth::AuthService;
+pub use auth::{AuthenticatedNodeAgent, IssuedNodeAgentToken};
 pub use config::{ControlPlaneAuthConfig, ControlPlaneServiceConfig};
 pub use dashboard::DashboardService;
 pub use deployments::{DeploymentReconcileReport, DeploymentService};

@@ -90,6 +90,8 @@ pub type NodeAgentHeartbeatRequest = NodeAgentReport;
 pub struct NodeAgentWriteResponse {
     pub node: NodeSummary,
     pub accepted_at_unix_ms: u64,
+    pub agent_token: Option<String>,
+    pub agent_token_expires_at_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

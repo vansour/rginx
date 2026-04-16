@@ -36,16 +36,16 @@
 
 - `/api/v1/agent/register`
 - `/api/v1/agent/heartbeat`
-- `/api/v1/agent/tasks:poll`
-- `/api/v1/agent/tasks/{task_id}:ack`
-- `/api/v1/agent/tasks/{task_id}:complete`
+- `/api/v1/agent/tasks/poll`
+- `/api/v1/agent/tasks/{task_id}/ack`
+- `/api/v1/agent/tasks/{task_id}/complete`
 - `/api/v1/agent/snapshots`
 
 ## 3. 命名规则
 
 - 集合资源使用复数：`/nodes`
 - 单资源使用路径参数：`/nodes/{node_id}`
-- 动作语义只在确实不是 CRUD 时使用，例如 `:poll`、`:complete`
+- 动作语义只在确实不是 CRUD 时使用，例如 `/poll`、`/complete`
 - 路由参数统一使用小写蛇形或业务 id，不使用驼峰
 
 ## 4. 成功响应约定
@@ -185,6 +185,7 @@
 
 推荐路由：
 
+- `POST /api/v1/events/session`
 - `GET /api/v1/events`
 
 推荐事件类型：
@@ -242,20 +243,20 @@ Phase 0 基线要求：
 - `POST /api/v1/revisions/drafts`
 - `GET /api/v1/revisions/drafts/{draft_id}`
 - `PUT /api/v1/revisions/drafts/{draft_id}`
-- `POST /api/v1/revisions/drafts/{draft_id}:validate`
-- `GET /api/v1/revisions/drafts/{draft_id}:diff`
-- `POST /api/v1/revisions/drafts/{draft_id}:publish`
+- `POST /api/v1/revisions/drafts/{draft_id}/validate`
+- `GET /api/v1/revisions/drafts/{draft_id}/diff`
+- `POST /api/v1/revisions/drafts/{draft_id}/publish`
 
 当前 Phase 8 已落地的发布编排路由：
 
 - `GET /api/v1/deployments`
 - `POST /api/v1/deployments`
 - `GET /api/v1/deployments/{deployment_id}`
-- `POST /api/v1/deployments/{deployment_id}:pause`
-- `POST /api/v1/deployments/{deployment_id}:resume`
-- `POST /api/v1/agent/tasks:poll`
-- `POST /api/v1/agent/tasks/{task_id}:ack`
-- `POST /api/v1/agent/tasks/{task_id}:complete`
+- `POST /api/v1/deployments/{deployment_id}/pause`
+- `POST /api/v1/deployments/{deployment_id}/resume`
+- `POST /api/v1/agent/tasks/poll`
+- `POST /api/v1/agent/tasks/{task_id}/ack`
+- `POST /api/v1/agent/tasks/{task_id}/complete`
 
 当前 Phase 9 已落地的审计 / 告警 / 运维路由：
 

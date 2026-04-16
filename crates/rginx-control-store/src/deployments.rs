@@ -858,6 +858,8 @@ impl DeploymentRepository {
             acknowledged_at_unix_ms: unix_time_ms(
                 acked_at.or(completed_at).unwrap_or(dispatched_at),
             )?,
+            agent_token: None,
+            agent_token_expires_at_unix_ms: None,
         }))
     }
 
@@ -1003,6 +1005,8 @@ impl DeploymentRepository {
                 || format!("invalid task state `{final_state}` loaded from postgres"),
             )?,
             completed_at_unix_ms: unix_time_ms(completed_at.unwrap_or(dispatched_at))?,
+            agent_token: None,
+            agent_token_expires_at_unix_ms: None,
         }))
     }
 

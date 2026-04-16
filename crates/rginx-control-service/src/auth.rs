@@ -1,12 +1,14 @@
 use std::num::NonZeroU32;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{Duration, Utc};
 use ring::{
-    pbkdf2,
+    hmac, pbkdf2,
     rand::{SecureRandom, SystemRandom},
 };
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -26,6 +28,28 @@ const PASSWORD_HASH_LEN: usize = 32;
 const PASSWORD_SALT_LEN: usize = 16;
 const SESSION_TOKEN_LEN: usize = 32;
 const ID_TOKEN_LEN: usize = 12;
+const NODE_AGENT_TOKEN_SCOPE: &str = "node_agent_v1";
+const NODE_AGENT_TOKEN_TTL_SECS: i64 = 3600;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthenticatedNodeAgent {
+    pub node_id: String,
+    pub cluster_id: String,
+    pub expires_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssuedNodeAgentToken {
+    pub token: String,
+    pub expires_at_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct NodeAgentTokenClaims {
+    node_id: String,
+    cluster_id: String,
+    expires_at_unix_ms: u64,
+}
 
 #[derive(Debug, Clone)]
 pub struct AuthService {
@@ -76,27 +100,27 @@ impl AuthService {
         let stored_user = match maybe_user {
             Some(user) if user.user.active => user,
             _ => {
-                self.record_failed_login(
+                self.record_failed_login_best_effort(
                     request_id,
                     request.username.trim(),
                     user_agent,
                     remote_addr,
                     "unknown user or inactive account",
                 )
-                .await?;
+                .await;
                 return Err(ServiceError::InvalidCredentials);
             }
         };
 
         if !self.verify_password(&stored_user, &request.password)? {
-            self.record_failed_login(
+            self.record_failed_login_best_effort(
                 request_id,
                 &stored_user.user.username,
                 user_agent,
                 remote_addr,
                 "password mismatch",
             )
-            .await?;
+            .await;
             return Err(ServiceError::InvalidCredentials);
         }
 
@@ -127,10 +151,10 @@ impl AuthService {
             resource_id: session_id,
             result: "succeeded".to_string(),
             details: json!({
-                "username": stored_user.user.username,
-                "roles": stored_user.user.roles.iter().map(|role| role.as_str()).collect::<Vec<_>>(),
-                "user_agent": user_agent,
-                "remote_addr": remote_addr,
+                    "username": stored_user.user.username.clone(),
+                    "roles": stored_user.user.roles.iter().map(|role| role.as_str()).collect::<Vec<_>>(),
+                    "user_agent": user_agent,
+                    "remote_addr": remote_addr,
             }),
             created_at: issued_at,
         };
@@ -169,7 +193,7 @@ impl AuthService {
                     resource_id: actor.session.session_id.clone(),
                     result: "succeeded".to_string(),
                     details: json!({
-                        "username": actor.user.username,
+                        "username": actor.user.username.clone(),
                         "user_agent": user_agent,
                         "remote_addr": remote_addr,
                     }),
@@ -255,10 +279,10 @@ impl AuthService {
                     resource_id: new_user.user_id.clone(),
                     result: "succeeded".to_string(),
                     details: json!({
-                        "username": new_user.username,
-                        "display_name": new_user.display_name,
+                        "username": new_user.username.clone(),
+                        "display_name": new_user.display_name.clone(),
                         "role": new_user.role.as_str(),
-                        "created_by": actor.user.username,
+                        "created_by": actor.user.username.clone(),
                         "user_agent": user_agent,
                         "remote_addr": remote_addr,
                     }),
@@ -269,6 +293,48 @@ impl AuthService {
             .map_err(|error| ServiceError::Internal(error.to_string()))?;
 
         Ok(CreateLocalUserResponse { user })
+    }
+
+    pub fn mint_node_agent_token(
+        &self,
+        node_id: &str,
+        cluster_id: &str,
+    ) -> ServiceResult<IssuedNodeAgentToken> {
+        if node_id.trim().is_empty() || cluster_id.trim().is_empty() {
+            return Err(ServiceError::BadRequest(
+                "node_id and cluster_id should not be empty".to_string(),
+            ));
+        }
+
+        let expires_at = Utc::now() + Duration::seconds(NODE_AGENT_TOKEN_TTL_SECS);
+        let expires_at_unix_ms = u64::try_from(expires_at.timestamp_millis()).unwrap_or(u64::MAX);
+        let claims = NodeAgentTokenClaims {
+            node_id: node_id.trim().to_string(),
+            cluster_id: cluster_id.trim().to_string(),
+            expires_at_unix_ms,
+        };
+        let token = self.sign_claims(NODE_AGENT_TOKEN_SCOPE, &claims)?;
+
+        Ok(IssuedNodeAgentToken { token, expires_at_unix_ms })
+    }
+
+    pub fn authenticate_node_agent_token(
+        &self,
+        token: &str,
+    ) -> ServiceResult<AuthenticatedNodeAgent> {
+        let claims: NodeAgentTokenClaims = self.verify_claims(NODE_AGENT_TOKEN_SCOPE, token)?;
+        if claims.node_id.trim().is_empty() || claims.cluster_id.trim().is_empty() {
+            return Err(ServiceError::Unauthorized);
+        }
+        if claims.expires_at_unix_ms <= unix_time_ms(SystemTime::now()) {
+            return Err(ServiceError::Unauthorized);
+        }
+
+        Ok(AuthenticatedNodeAgent {
+            node_id: claims.node_id,
+            cluster_id: claims.cluster_id,
+            expires_at_unix_ms: claims.expires_at_unix_ms,
+        })
     }
 
     fn auth_config(&self) -> ServiceResult<&ControlPlaneAuthConfig> {
@@ -364,8 +430,67 @@ impl AuthService {
         Ok(URL_SAFE_NO_PAD.encode(bytes))
     }
 
+    fn sign_claims<T: Serialize>(&self, scope: &str, claims: &T) -> ServiceResult<String> {
+        let payload = serde_json::to_vec(claims)
+            .map_err(|error| ServiceError::Internal(error.to_string()))?;
+        let key = hmac::Key::new(hmac::HMAC_SHA256, self.auth_config()?.session_secret.as_bytes());
+        let mut signing_input = Vec::with_capacity(scope.len() + 1 + payload.len());
+        signing_input.extend_from_slice(scope.as_bytes());
+        signing_input.push(b':');
+        signing_input.extend_from_slice(&payload);
+        let signature = hmac::sign(&key, &signing_input);
+
+        Ok(format!(
+            "{}.{}",
+            URL_SAFE_NO_PAD.encode(payload),
+            URL_SAFE_NO_PAD.encode(signature.as_ref())
+        ))
+    }
+
+    fn verify_claims<T: for<'de> Deserialize<'de>>(
+        &self,
+        scope: &str,
+        token: &str,
+    ) -> ServiceResult<T> {
+        let (encoded_payload, encoded_signature) =
+            token.split_once('.').ok_or(ServiceError::Unauthorized)?;
+        let payload =
+            URL_SAFE_NO_PAD.decode(encoded_payload).map_err(|_| ServiceError::Unauthorized)?;
+        let signature =
+            URL_SAFE_NO_PAD.decode(encoded_signature).map_err(|_| ServiceError::Unauthorized)?;
+
+        let key = hmac::Key::new(hmac::HMAC_SHA256, self.auth_config()?.session_secret.as_bytes());
+        let mut signing_input = Vec::with_capacity(scope.len() + 1 + payload.len());
+        signing_input.extend_from_slice(scope.as_bytes());
+        signing_input.push(b':');
+        signing_input.extend_from_slice(&payload);
+        hmac::verify(&key, &signing_input, &signature).map_err(|_| ServiceError::Unauthorized)?;
+
+        serde_json::from_slice(&payload).map_err(|_| ServiceError::Unauthorized)
+    }
+
     fn generate_id(&self, prefix: &str) -> ServiceResult<String> {
         Ok(format!("{prefix}_{}", self.generate_random_token(ID_TOKEN_LEN)?))
+    }
+
+    async fn record_failed_login_best_effort(
+        &self,
+        request_id: &str,
+        username: &str,
+        user_agent: Option<String>,
+        remote_addr: Option<String>,
+        reason: &str,
+    ) {
+        if let Err(error) =
+            self.record_failed_login(request_id, username, user_agent, remote_addr, reason).await
+        {
+            tracing::warn!(
+                request_id = %request_id,
+                username = %username,
+                error = %error,
+                "failed to persist failed-login audit record"
+            );
+        }
     }
 
     async fn record_failed_login(
@@ -398,4 +523,8 @@ impl AuthService {
             .await
             .map_err(|error| ServiceError::Internal(error.to_string()))
     }
+}
+
+fn unix_time_ms(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH).unwrap_or_default().as_millis().min(u128::from(u64::MAX)) as u64
 }

@@ -992,13 +992,12 @@ export async function getAuditLog(auditId: string): Promise<AuditLogEntry> {
   return data;
 }
 
-export function buildEventsUrl(params?: { nodeId?: string; deploymentId?: string }): string {
-  const token = getStoredAuthToken();
-  if (!token) {
-    throw new Error("missing control-plane auth token");
-  }
+export async function ensureEventsSession(): Promise<void> {
+  await client.post("/api/v1/events/session");
+}
 
-  const query = new URLSearchParams({ access_token: token });
+export function buildEventsUrl(params?: { nodeId?: string; deploymentId?: string }): string {
+  const query = new URLSearchParams();
   if (params?.nodeId) {
     query.set("node_id", params.nodeId);
   }
@@ -1006,5 +1005,6 @@ export function buildEventsUrl(params?: { nodeId?: string; deploymentId?: string
     query.set("deployment_id", params.deploymentId);
   }
 
-  return `/api/v1/events?${query.toString()}`;
+  const suffix = query.toString();
+  return `/api/v1/events${suffix ? `?${suffix}` : ""}`;
 }

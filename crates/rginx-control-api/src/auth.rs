@@ -1,7 +1,8 @@
 use axum::{
     extract::FromRequestParts,
-    http::{header, request::Parts},
+    http::{HeaderMap, header, request::Parts},
 };
+use rginx_control_service::AuthenticatedNodeAgent;
 use rginx_control_types::{AuthRole, AuthenticatedActor};
 
 use crate::error::ApiError;
@@ -17,7 +18,16 @@ pub struct OperatorGuard(pub AuthenticatedActor);
 pub struct SuperAdminGuard(pub AuthenticatedActor);
 
 #[derive(Debug, Clone)]
-pub struct AgentGuard;
+pub struct ViewerTokenGuard {
+    pub actor: AuthenticatedActor,
+    pub token: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct BootstrapAgentGuard;
+
+#[derive(Debug, Clone)]
+pub struct BoundAgentGuard(pub AuthenticatedNodeAgent);
 
 impl FromRequestParts<AppState> for ViewerGuard {
     type Rejection = ApiError;
@@ -26,7 +36,7 @@ impl FromRequestParts<AppState> for ViewerGuard {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let actor = authenticate(parts, state).await?;
+        let (actor, _) = authenticate(parts, state).await?;
         ensure_role(&actor, AuthRole::Viewer)?;
         Ok(Self(actor))
     }
@@ -39,7 +49,7 @@ impl FromRequestParts<AppState> for OperatorGuard {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let actor = authenticate(parts, state).await?;
+        let (actor, _) = authenticate(parts, state).await?;
         ensure_role(&actor, AuthRole::Operator)?;
         Ok(Self(actor))
     }
@@ -52,21 +62,34 @@ impl FromRequestParts<AppState> for SuperAdminGuard {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let actor = authenticate(parts, state).await?;
+        let (actor, _) = authenticate(parts, state).await?;
         ensure_role(&actor, AuthRole::SuperAdmin)?;
         Ok(Self(actor))
     }
 }
 
-impl FromRequestParts<AppState> for AgentGuard {
+impl FromRequestParts<AppState> for ViewerTokenGuard {
     type Rejection = ApiError;
 
     async fn from_request_parts(
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let token =
-            bearer_token(parts).ok_or_else(|| ApiError::unauthorized("missing bearer token"))?;
+        let (actor, token) = authenticate(parts, state).await?;
+        ensure_role(&actor, AuthRole::Viewer)?;
+        Ok(Self { actor, token })
+    }
+}
+
+impl FromRequestParts<AppState> for BootstrapAgentGuard {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let token = bearer_token(&parts.headers)
+            .ok_or_else(|| ApiError::unauthorized("missing bearer token"))?;
         if token == state.agent_shared_token() {
             Ok(Self)
         } else {
@@ -75,10 +98,29 @@ impl FromRequestParts<AppState> for AgentGuard {
     }
 }
 
-async fn authenticate(parts: &Parts, state: &AppState) -> Result<AuthenticatedActor, ApiError> {
-    let token =
-        bearer_token(parts).ok_or_else(|| ApiError::unauthorized("missing bearer token"))?;
-    state.services().auth().authenticate_token(token).await.map_err(ApiError::from)
+impl FromRequestParts<AppState> for BoundAgentGuard {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let token = bearer_token(&parts.headers)
+            .ok_or_else(|| ApiError::unauthorized("missing bearer token"))?;
+        let identity =
+            state.services().auth().authenticate_node_agent_token(token).map_err(ApiError::from)?;
+        Ok(Self(identity))
+    }
+}
+
+async fn authenticate(
+    parts: &Parts,
+    state: &AppState,
+) -> Result<(AuthenticatedActor, String), ApiError> {
+    let token = bearer_token(&parts.headers)
+        .ok_or_else(|| ApiError::unauthorized("missing bearer token"))?;
+    let actor = state.services().auth().authenticate_token(token).await.map_err(ApiError::from)?;
+    Ok((actor, token.to_string()))
 }
 
 fn ensure_role(actor: &AuthenticatedActor, required: AuthRole) -> Result<(), ApiError> {
@@ -89,7 +131,7 @@ fn ensure_role(actor: &AuthenticatedActor, required: AuthRole) -> Result<(), Api
     }
 }
 
-fn bearer_token(parts: &Parts) -> Option<&str> {
-    let header_value = parts.headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+pub fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    let header_value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     header_value.strip_prefix("Bearer ").or_else(|| header_value.strip_prefix("bearer "))
 }

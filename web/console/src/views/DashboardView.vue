@@ -5,6 +5,7 @@ import MetricCard from "../components/MetricCard.vue";
 import {
   buildEventsUrl,
   clearStoredAuthToken,
+  ensureEventsSession,
   extractApiErrorMessage,
   getAuditLogs,
   getDashboard,
@@ -104,8 +105,9 @@ function closeDashboardStream(): void {
   streamState.value = "idle";
 }
 
-function openDashboardStream(): void {
+async function openDashboardStream(): Promise<void> {
   closeDashboardStream();
+  await ensureEventsSession();
 
   try {
     dashboardEventSource = new EventSource(buildEventsUrl());
@@ -169,7 +171,7 @@ async function loadProtectedState(): Promise<void> {
   dashboard.value = dashboardValue;
   nodes.value = nodesValue;
   auditLogs.value = auditValue;
-  openDashboardStream();
+  await openDashboardStream();
 }
 
 function resetProtectedState(): void {

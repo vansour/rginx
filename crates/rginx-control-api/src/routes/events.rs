@@ -3,8 +3,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{
+    Json,
     extract::{Query, State},
+    http::{HeaderMap, HeaderValue, header},
     response::sse::{Event, KeepAlive, Sse},
+    response::{IntoResponse, Response},
 };
 use futures_util::stream;
 use rginx_control_types::{
@@ -12,26 +15,40 @@ use rginx_control_types::{
 };
 use serde::Deserialize;
 
+use crate::auth::{ViewerTokenGuard, bearer_token};
 use crate::error::{ApiError, ApiResult};
 use crate::state::AppState;
 
 static SSE_EVENT_COUNTER: AtomicU64 = AtomicU64::new(1);
+pub(crate) const EVENTS_SESSION_COOKIE_NAME: &str = "rginx_control_events_session";
 
 #[derive(Debug, Deserialize)]
 pub struct EventsQuery {
-    pub access_token: Option<String>,
     pub node_id: Option<String>,
     pub deployment_id: Option<String>,
 }
 
+pub async fn create_session(
+    ViewerTokenGuard { actor, token }: ViewerTokenGuard,
+) -> ApiResult<Response> {
+    let max_age_secs = event_session_max_age_secs(actor.session.expires_at_unix_ms);
+    let mut response = Json(serde_json::json!({ "status": "ok" })).into_response();
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&build_event_session_cookie_value(&token, max_age_secs))
+            .expect("event session cookie should be valid"),
+    );
+    Ok(response)
+}
+
 pub async fn stream_events(
     Query(query): Query<EventsQuery>,
+    headers: HeaderMap,
     State(state): State<AppState>,
 ) -> ApiResult<Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>>> {
-    let access_token = query
-        .access_token
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| ApiError::unauthorized("missing access_token query parameter"))?;
+    let access_token = event_session_token(&headers)
+        .or_else(|| bearer_token(&headers).map(ToOwned::to_owned))
+        .ok_or_else(|| ApiError::unauthorized("missing event session"))?;
     let actor =
         state.services().auth().authenticate_token(&access_token).await.map_err(ApiError::from)?;
     if !actor.user.roles.iter().copied().any(|role| role.grants(AuthRole::Viewer)) {
@@ -151,4 +168,29 @@ fn next_event_id(prefix: &str) -> String {
 
 fn unix_time_ms(time: SystemTime) -> u64 {
     time.duration_since(UNIX_EPOCH).unwrap_or_default().as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+pub(crate) fn build_event_session_cookie_value(token: &str, max_age_secs: u64) -> String {
+    format!(
+        "{EVENTS_SESSION_COOKIE_NAME}={token}; HttpOnly; Path=/api/v1/events; SameSite=Strict; Max-Age={max_age_secs}"
+    )
+}
+
+pub(crate) fn clear_event_session_cookie_value() -> String {
+    format!(
+        "{EVENTS_SESSION_COOKIE_NAME}=; HttpOnly; Path=/api/v1/events; SameSite=Strict; Max-Age=0"
+    )
+}
+
+fn event_session_max_age_secs(expires_at_unix_ms: u64) -> u64 {
+    let now = unix_time_ms(SystemTime::now());
+    let remaining_ms = expires_at_unix_ms.saturating_sub(now);
+    remaining_ms.saturating_add(999).checked_div(1000).unwrap_or_default().max(1)
+}
+
+fn event_session_token(headers: &HeaderMap) -> Option<String> {
+    headers.get(header::COOKIE)?.to_str().ok()?.split(';').find_map(|segment| {
+        let (name, value) = segment.trim().split_once('=')?;
+        (name == EVENTS_SESSION_COOKIE_NAME).then(|| value.to_string())
+    })
 }

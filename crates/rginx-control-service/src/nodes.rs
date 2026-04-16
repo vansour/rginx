@@ -61,7 +61,12 @@ impl NodeService {
             .await
             .map_err(|error| ServiceError::Internal(error.to_string()))?;
 
-        Ok(NodeAgentWriteResponse { node, accepted_at_unix_ms: unix_time_ms(SystemTime::now()) })
+        Ok(NodeAgentWriteResponse {
+            node,
+            accepted_at_unix_ms: unix_time_ms(SystemTime::now()),
+            agent_token: None,
+            agent_token_expires_at_unix_ms: None,
+        })
     }
 
     pub async fn record_heartbeat(
@@ -96,7 +101,12 @@ impl NodeService {
             .await
             .map_err(|error| ServiceError::Internal(error.to_string()))?;
 
-        Ok(NodeAgentWriteResponse { node, accepted_at_unix_ms: unix_time_ms(SystemTime::now()) })
+        Ok(NodeAgentWriteResponse {
+            node,
+            accepted_at_unix_ms: unix_time_ms(SystemTime::now()),
+            agent_token: None,
+            agent_token_expires_at_unix_ms: None,
+        })
     }
 
     pub async fn list_nodes(&self) -> ServiceResult<Vec<NodeSummary>> {

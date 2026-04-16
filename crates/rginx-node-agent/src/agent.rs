@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -12,9 +13,10 @@ use tokio::net::UnixStream;
 
 use rginx_control_types::{
     DeploymentTaskKind, NodeAgentHeartbeatRequest, NodeAgentRegistrationRequest, NodeAgentTask,
-    NodeAgentTaskAckRequest, NodeAgentTaskCompleteRequest, NodeAgentTaskCompleteResponse,
-    NodeAgentTaskPollRequest, NodeAgentTaskPollResponse, NodeAgentWriteResponse,
-    NodeLifecycleState, NodeRuntimeReport, NodeSnapshotIngestRequest, NodeSnapshotIngestResponse,
+    NodeAgentTaskAckRequest, NodeAgentTaskAckResponse, NodeAgentTaskCompleteRequest,
+    NodeAgentTaskCompleteResponse, NodeAgentTaskPollRequest, NodeAgentTaskPollResponse,
+    NodeAgentWriteResponse, NodeLifecycleState, NodeRuntimeReport, NodeSnapshotIngestRequest,
+    NodeSnapshotIngestResponse,
 };
 
 use crate::config::NodeAgentConfig;
@@ -486,7 +488,8 @@ async fn read_admin_snapshot(socket_path: &Path) -> Result<AdminSnapshot> {
 struct ControlPlaneClient {
     client: Client,
     origin: String,
-    bearer_token: String,
+    bootstrap_token: String,
+    bound_token: Arc<RwLock<Option<String>>>,
 }
 
 impl ControlPlaneClient {
@@ -497,7 +500,8 @@ impl ControlPlaneClient {
                 .build()
                 .context("failed to build node-agent HTTP client")?,
             origin: config.control_plane_origin.clone(),
-            bearer_token: config.control_plane_agent_token.clone(),
+            bootstrap_token: config.control_plane_agent_token.clone(),
+            bound_token: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -505,33 +509,60 @@ impl ControlPlaneClient {
         &self,
         request: &NodeAgentRegistrationRequest,
     ) -> Result<NodeAgentWriteResponse> {
-        self.post_json("/api/v1/agent/register", request, None).await
+        let response: NodeAgentWriteResponse =
+            self.post_json("/api/v1/agent/register", request, None, true).await?;
+        self.refresh_bound_token(
+            response.agent_token.as_deref(),
+            response.agent_token_expires_at_unix_ms,
+            "register",
+        )?;
+        Ok(response)
     }
 
     async fn heartbeat(
         &self,
         request: &NodeAgentHeartbeatRequest,
     ) -> Result<NodeAgentWriteResponse> {
-        self.post_json("/api/v1/agent/heartbeat", request, None).await
+        let response: NodeAgentWriteResponse =
+            self.post_json("/api/v1/agent/heartbeat", request, None, false).await?;
+        self.refresh_bound_token(
+            response.agent_token.as_deref(),
+            response.agent_token_expires_at_unix_ms,
+            "heartbeat",
+        )?;
+        Ok(response)
     }
 
     async fn ingest_snapshot(
         &self,
         request: &NodeSnapshotIngestRequest,
     ) -> Result<NodeSnapshotIngestResponse> {
-        self.post_json("/api/v1/agent/snapshots", request, None).await
+        self.post_json("/api/v1/agent/snapshots", request, None, false).await
     }
 
     async fn poll_task(
         &self,
         request: &NodeAgentTaskPollRequest,
     ) -> Result<NodeAgentTaskPollResponse> {
-        self.post_json("/api/v1/agent/tasks/poll", request, None).await
+        let response: NodeAgentTaskPollResponse =
+            self.post_json("/api/v1/agent/tasks/poll", request, None, false).await?;
+        self.refresh_bound_token(
+            response.agent_token.as_deref(),
+            response.agent_token_expires_at_unix_ms,
+            "task poll",
+        )?;
+        Ok(response)
     }
 
     async fn ack_task(&self, task_id: &str, request: &NodeAgentTaskAckRequest) -> Result<()> {
-        let _: serde_json::Value =
-            self.post_json(&format!("/api/v1/agent/tasks/{task_id}/ack"), request, None).await?;
+        let response: NodeAgentTaskAckResponse = self
+            .post_json(&format!("/api/v1/agent/tasks/{task_id}/ack"), request, None, false)
+            .await?;
+        self.refresh_bound_token(
+            response.agent_token.as_deref(),
+            response.agent_token_expires_at_unix_ms,
+            "task ack",
+        )?;
         Ok(())
     }
 
@@ -541,12 +572,20 @@ impl ControlPlaneClient {
         request: &NodeAgentTaskCompleteRequest,
         idempotency_key: Option<String>,
     ) -> Result<NodeAgentTaskCompleteResponse> {
-        self.post_json(
-            &format!("/api/v1/agent/tasks/{task_id}/complete"),
-            request,
-            idempotency_key,
-        )
-            .await
+        let response: NodeAgentTaskCompleteResponse = self
+            .post_json(
+                &format!("/api/v1/agent/tasks/{task_id}/complete"),
+                request,
+                idempotency_key,
+                false,
+            )
+            .await?;
+        self.refresh_bound_token(
+            response.agent_token.as_deref(),
+            response.agent_token_expires_at_unix_ms,
+            "task completion",
+        )?;
+        Ok(response)
     }
 
     async fn post_json<TRequest, TResponse>(
@@ -554,6 +593,7 @@ impl ControlPlaneClient {
         path: &str,
         request: &TRequest,
         idempotency_key: Option<String>,
+        use_bootstrap_token: bool,
     ) -> Result<TResponse>
     where
         TRequest: Serialize + ?Sized,
@@ -561,7 +601,7 @@ impl ControlPlaneClient {
     {
         let url = format!("{}{}", self.origin, path);
         let response = self
-            .request_builder(&url, idempotency_key)
+            .request_builder(&url, idempotency_key, use_bootstrap_token)
             .json(request)
             .send()
             .await
@@ -575,13 +615,45 @@ impl ControlPlaneClient {
             .with_context(|| format!("failed to decode node-agent response from {url}"))
     }
 
-    fn request_builder(&self, url: &str, idempotency_key: Option<String>) -> RequestBuilder {
-        let builder = self.client.post(url).bearer_auth(&self.bearer_token);
+    fn request_builder(
+        &self,
+        url: &str,
+        idempotency_key: Option<String>,
+        use_bootstrap_token: bool,
+    ) -> RequestBuilder {
+        let token = if use_bootstrap_token {
+            self.bootstrap_token.clone()
+        } else {
+            self.bound_token
+                .read()
+                .expect("bound token lock should be readable")
+                .clone()
+                .unwrap_or_else(|| self.bootstrap_token.clone())
+        };
+        let builder = self.client.post(url).bearer_auth(token);
         if let Some(idempotency_key) = idempotency_key {
             builder.header("Idempotency-Key", idempotency_key)
         } else {
             builder
         }
+    }
+
+    fn refresh_bound_token(
+        &self,
+        token: Option<&str>,
+        expires_at_unix_ms: Option<u64>,
+        operation: &str,
+    ) -> Result<()> {
+        let token = token.ok_or_else(|| {
+            anyhow!("control plane {operation} response did not include a bound agent token")
+        })?;
+        if expires_at_unix_ms.is_none() {
+            bail!("control plane {operation} response did not include token expiry");
+        }
+
+        *self.bound_token.write().expect("bound token lock should be writable") =
+            Some(token.to_string());
+        Ok(())
     }
 }
 

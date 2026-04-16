@@ -58,6 +58,7 @@ pub fn router() -> Router<crate::state::AppState> {
         .route("/api/v1/revisions/drafts/{draft_id}/publish", post(revisions::publish_draft))
         .route("/api/v1/nodes", get(nodes::list_nodes))
         .route("/api/v1/nodes/{node_id}", get(nodes::get_node_detail))
+        .route("/api/v1/events/session", post(events::create_session))
         .route("/api/v1/events", get(events::stream_events))
         .route("/api/v1/audit-logs", get(audit::list_audit_logs))
         .route("/api/v1/audit-logs/{audit_id}", get(audit::get_audit_log))

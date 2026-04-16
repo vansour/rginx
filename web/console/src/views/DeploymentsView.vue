@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import axios from "axios";
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 
@@ -8,6 +9,7 @@ import {
   clearStoredAuthToken,
   type ControlPlaneDeploymentEvent,
   createDeployment,
+  ensureEventsSession,
   extractApiErrorMessage,
   getDeployment,
   getDeployments,
@@ -91,6 +93,20 @@ function resetUnauthorized(): void {
   void router.replace({ name: "dashboard" });
 }
 
+function handleAuthFailure(caught: unknown): boolean {
+  if (!axios.isAxiosError(caught)) {
+    return false;
+  }
+
+  const status = caught.response?.status;
+  if (status !== 401 && status !== 403) {
+    return false;
+  }
+
+  resetUnauthorized();
+  return true;
+}
+
 function closeDeploymentStream(): void {
   if (deploymentEventSource) {
     deploymentEventSource.close();
@@ -98,8 +114,9 @@ function closeDeploymentStream(): void {
   }
 }
 
-function openDeploymentStream(deploymentId: string): void {
+async function openDeploymentStream(deploymentId: string): Promise<void> {
   closeDeploymentStream();
+  await ensureEventsSession();
 
   try {
     deploymentEventSource = new EventSource(buildEventsUrl({ deploymentId }));
@@ -267,7 +284,12 @@ watch(
   () => selectedSummary.value?.deployment_id,
   (deploymentId) => {
     if (deploymentId) {
-      openDeploymentStream(deploymentId);
+      void openDeploymentStream(deploymentId).catch((caught) => {
+        if (handleAuthFailure(caught)) {
+          return;
+        }
+        error.value = extractApiErrorMessage(caught);
+      });
     } else {
       closeDeploymentStream();
     }

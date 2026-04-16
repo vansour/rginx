@@ -1,5 +1,3 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use axum::{
     Json,
     http::StatusCode,
@@ -7,6 +5,8 @@ use axum::{
 };
 use rginx_control_service::ServiceError;
 use serde_json::json;
+
+use crate::request_context::synthetic_request_id;
 
 #[derive(Debug)]
 pub struct ApiError {
@@ -53,11 +53,6 @@ impl ApiError {
     pub fn with_request_id(mut self, request_id: impl Into<String>) -> Self {
         self.request_id = Some(request_id.into());
         self
-    }
-
-    fn synthetic_request_id() -> String {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
-        format!("req_{now}")
     }
 }
 
@@ -115,7 +110,7 @@ impl IntoResponse for ApiError {
             "error": {
                 "code": self.code,
                 "message": self.message,
-                "request_id": self.request_id.unwrap_or_else(Self::synthetic_request_id),
+                "request_id": self.request_id.unwrap_or_else(synthetic_request_id),
                 "retryable": self.retryable,
                 "details": {},
             }

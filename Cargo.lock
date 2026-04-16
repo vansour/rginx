@@ -2104,9 +2104,11 @@ dependencies = [
  "rginx-control-store",
  "rginx-control-types",
  "ring",
+ "serde",
  "serde_json",
  "sha2 0.11.0",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]

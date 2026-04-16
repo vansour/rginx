@@ -55,7 +55,7 @@ tar czf backup-control-plane-configs.tar.gz \
 推荐先停服务：
 
 ```bash
-docker compose stop control-api control-worker console
+docker compose stop control-api control-worker
 ```
 
 ## 4. PostgreSQL 恢复
@@ -94,13 +94,13 @@ docker compose exec dragonfly redis-cli FLUSHALL
 
 ```bash
 docker compose up -d postgres dragonfly
-docker compose up -d migrate
-docker compose up -d control-api control-worker console
+docker compose up -d control-api control-worker
 ```
 
 说明：
 
-- `migrate` 在恢复后再次执行是安全的，因为迁移脚本使用了 `if not exists` / `add column if not exists`
+- 当前 compose 拓扑没有独立的 `console` 或 `migrate` 服务，Console 静态资源已并入 `control-api`
+- Postgres 迁移脚本只在空数据目录初始化时由 `docker-entrypoint-initdb.d` 自动执行；恢复现有库时不应再假设会有额外迁移容器
 - 控制面真实业务状态以已恢复的 Postgres 数据为准
 
 ## 7. 恢复后验证

@@ -43,14 +43,12 @@
 
 用于：
 
-- worker 并发度
 - 队列轮询周期
 - deployment 超时
 - 清理任务周期
 
 示例：
 
-- `RGINX_CONTROL_WORKER_CONCURRENCY`
 - `RGINX_CONTROL_WORKER_POLL_INTERVAL_SECS`
 
 ### 2.3 Postgres

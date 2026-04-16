@@ -11,9 +11,8 @@ use rginx_control_store::{
 };
 use rginx_control_types::{
     AuthenticatedActor, CreateDeploymentRequest, CreateDeploymentResponse, DeploymentDetail,
-    DeploymentStatus, DeploymentSummary, NodeAgentTaskAckRequest, NodeAgentTaskAckResponse,
-    NodeAgentTaskCompleteRequest, NodeAgentTaskCompleteResponse, NodeAgentTaskPollRequest,
-    NodeAgentTaskPollResponse, NodeLifecycleState,
+    DeploymentStatus, DeploymentSummary, NodeAgentTaskAckResponse, NodeAgentTaskCompleteRequest,
+    NodeAgentTaskCompleteResponse, NodeAgentTaskPollResponse, NodeLifecycleState,
 };
 
 use crate::{ServiceError, ServiceResult};
@@ -22,6 +21,7 @@ static DEPLOYMENT_EVENT_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 const DEPLOYMENT_RESOURCE_TYPE: &str = "deployment";
 const DEPLOYMENT_TASK_RESOURCE_TYPE: &str = "deployment_task";
+const ACTIVE_CLUSTER_DEPLOYMENT_INDEX: &str = "cp_deployments_one_active_per_cluster_idx";
 
 #[derive(Debug, Clone, Default)]
 pub struct DeploymentReconcileReport {
@@ -184,15 +184,22 @@ impl DeploymentService {
             )
             .await
             .map_err(|error| {
+                let error_message = error.to_string();
                 if let Some(ref key) = idempotency_key
-                    && error.to_string().contains("cp_deployments_idempotency_key_idx")
+                    && error_message.contains("cp_deployments_idempotency_key_idx")
                 {
                     return ServiceError::Conflict(format!(
                         "deployment idempotency key `{key}` already exists"
                     ));
                 }
+                if error_message.contains(ACTIVE_CLUSTER_DEPLOYMENT_INDEX) {
+                    return ServiceError::Conflict(format!(
+                        "deployment lock not acquired for cluster `{}`; another active deployment already exists",
+                        request.cluster_id
+                    ));
+                }
 
-                ServiceError::Internal(error.to_string())
+                ServiceError::Internal(error_message)
             })?;
 
         Ok(CreateDeploymentResponse { deployment, reused: false })
@@ -294,35 +301,41 @@ impl DeploymentService {
 
     pub async fn poll_task(
         &self,
-        request: NodeAgentTaskPollRequest,
+        node_id: &str,
+        cluster_id: &str,
     ) -> ServiceResult<NodeAgentTaskPollResponse> {
-        validate_node_identity(&request.node_id, &request.cluster_id)?;
+        validate_node_identity(node_id, cluster_id)?;
         let task = self
             .store
             .deployment_repository()
-            .poll_task_for_node(&request.node_id, &request.cluster_id)
+            .poll_task_for_node(node_id, cluster_id)
             .await
             .map_err(|error| ServiceError::Internal(error.to_string()))?;
 
-        Ok(NodeAgentTaskPollResponse { task, polled_at_unix_ms: unix_time_ms(SystemTime::now()) })
+        Ok(NodeAgentTaskPollResponse {
+            task,
+            polled_at_unix_ms: unix_time_ms(SystemTime::now()),
+            agent_token: None,
+            agent_token_expires_at_unix_ms: None,
+        })
     }
 
     pub async fn ack_task(
         &self,
         task_id: &str,
-        request: NodeAgentTaskAckRequest,
+        node_id: &str,
         request_id: &str,
         user_agent: Option<String>,
         remote_addr: Option<String>,
     ) -> ServiceResult<NodeAgentTaskAckResponse> {
-        if request.node_id.trim().is_empty() {
+        if node_id.trim().is_empty() {
             return Err(ServiceError::BadRequest("node_id should not be empty".to_string()));
         }
 
         let response = self
             .store
             .deployment_repository()
-            .ack_task(task_id, &request.node_id)
+            .ack_task(task_id, node_id)
             .await
             .map_err(|error| ServiceError::Internal(error.to_string()))?
             .ok_or_else(|| ServiceError::NotFound(format!("task `{task_id}` was not found")))?;
@@ -330,7 +343,7 @@ impl DeploymentService {
             audit_id: self.generate_id("audit"),
             request_id: request_id.to_string(),
             cluster_id: None,
-            actor_id: format!("agent:{}", request.node_id),
+            actor_id: format!("agent:{node_id}"),
             action: "deployment.task_acknowledged".to_string(),
             resource_type: DEPLOYMENT_TASK_RESOURCE_TYPE.to_string(),
             resource_id: task_id.to_string(),
@@ -352,13 +365,14 @@ impl DeploymentService {
     pub async fn complete_task(
         &self,
         task_id: &str,
+        node_id: &str,
         request: NodeAgentTaskCompleteRequest,
         idempotency_key: Option<String>,
         request_id: &str,
         user_agent: Option<String>,
         remote_addr: Option<String>,
     ) -> ServiceResult<NodeAgentTaskCompleteResponse> {
-        if request.node_id.trim().is_empty() {
+        if node_id.trim().is_empty() {
             return Err(ServiceError::BadRequest("node_id should not be empty".to_string()));
         }
 
@@ -367,7 +381,7 @@ impl DeploymentService {
             .deployment_repository()
             .complete_task(
                 task_id,
-                &request.node_id,
+                node_id,
                 &TaskCompletionRecord {
                     succeeded: request.succeeded,
                     message: request.message.clone(),
@@ -382,7 +396,7 @@ impl DeploymentService {
             audit_id: self.generate_id("audit"),
             request_id: request_id.to_string(),
             cluster_id: None,
-            actor_id: format!("agent:{}", request.node_id),
+            actor_id: format!("agent:{node_id}"),
             action: if request.succeeded {
                 "deployment.task_succeeded".to_string()
             } else {
@@ -733,7 +747,8 @@ impl DeploymentService {
 
         let now = Utc::now();
         let rollback_deployment_id = self.generate_id("deploy");
-        self.store
+        let create_result = self
+            .store
             .deployment_repository()
             .create_deployment_with_audit(
                 &CreateDeploymentRecord {
@@ -783,8 +798,19 @@ impl DeploymentService {
                     created_at: now,
                 },
             )
-            .await
-            .map_err(|error| ServiceError::Internal(error.to_string()))?;
+            .await;
+        if let Err(error) = create_result {
+            let error_message = error.to_string();
+            if error_message.contains(ACTIVE_CLUSTER_DEPLOYMENT_INDEX) {
+                tracing::warn!(
+                    cluster_id = %progress.cluster_id,
+                    deployment_id = %progress.deployment_id,
+                    "skipping auto rollback because another active deployment already exists"
+                );
+                return Ok(0);
+            }
+            return Err(ServiceError::Internal(error_message));
+        }
 
         Ok(1)
     }

@@ -17,11 +17,14 @@ pub async fn get_metrics(State(state): State<AppState>) -> Response {
             body,
         )
             .into_response(),
-        Err(error) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            [(header::CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8"))],
-            format!("metrics collection failed: {error}"),
-        )
-            .into_response(),
+        Err(error) => {
+            tracing::warn!(error = %error, "metrics collection failed");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(header::CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8"))],
+                "metrics collection failed".to_string(),
+            )
+                .into_response()
+        }
     }
 }

@@ -253,6 +253,8 @@ pub struct NodeAgentTaskPollRequest {
 pub struct NodeAgentTaskPollResponse {
     pub task: Option<NodeAgentTask>,
     pub polled_at_unix_ms: u64,
+    pub agent_token: Option<String>,
+    pub agent_token_expires_at_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -266,6 +268,8 @@ pub struct NodeAgentTaskAckResponse {
     pub deployment_id: String,
     pub state: DeploymentTaskState,
     pub acknowledged_at_unix_ms: u64,
+    pub agent_token: Option<String>,
+    pub agent_token_expires_at_unix_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -282,4 +286,6 @@ pub struct NodeAgentTaskCompleteResponse {
     pub deployment_id: String,
     pub state: DeploymentTaskState,
     pub completed_at_unix_ms: u64,
+    pub agent_token: Option<String>,
+    pub agent_token_expires_at_unix_ms: Option<u64>,
 }

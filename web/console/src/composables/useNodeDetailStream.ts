@@ -5,6 +5,7 @@ import { useRouter } from "vue-router";
 import {
   buildEventsUrl,
   clearStoredAuthToken,
+  ensureEventsSession,
   extractApiErrorMessage,
   getMe,
   getNodeDetail,
@@ -60,8 +61,9 @@ export function useNodeDetailStream(nodeId: Ref<string>) {
     return true;
   }
 
-  function openStream(): void {
+  async function openStream(): Promise<void> {
     closeStream();
+    await ensureEventsSession();
 
     try {
       eventSource = new EventSource(buildEventsUrl({ nodeId: nodeId.value }));
@@ -117,7 +119,7 @@ export function useNodeDetailStream(nodeId: Ref<string>) {
       const [currentActor, currentDetail] = await Promise.all([getMe(), getNodeDetail(nodeId.value)]);
       actor.value = currentActor;
       detail.value = currentDetail;
-      openStream();
+      await openStream();
     } catch (caught) {
       if (handleAuthFailure(caught)) {
         loading.value = false;
