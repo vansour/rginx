@@ -6,3 +6,6 @@ docs/
 /flamegraph-*.svg
 __pycache__/
 *.py[cod]
+/.env
+web/console/node_modules/
+web/console/dist/

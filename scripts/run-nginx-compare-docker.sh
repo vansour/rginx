@@ -89,7 +89,7 @@ mkdir -p "${OUT_DIR}"
 
 if [[ "${BUILD_IMAGE}" -eq 1 ]]; then
     log "building Docker image ${IMAGE_TAG}"
-    docker build -t "${IMAGE_TAG}" -f "${ROOT_DIR}/docker/nginx-compare/Dockerfile" "${ROOT_DIR}"
+    docker build -t "${IMAGE_TAG}" --target nginx-compare -f "${ROOT_DIR}/Dockerfile" "${ROOT_DIR}"
 fi
 
 log "running comparison in Docker"

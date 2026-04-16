@@ -105,7 +105,7 @@
 - 上游 HTTP/3 生产级传输专项计划见 `ARCHITECTURE_UPSTREAM_HTTP3_PRODUCTION_PLAN.md`
 - 上游 HTTP/3 生产级传输阶段 0 基线见 `ARCHITECTURE_UPSTREAM_HTTP3_PHASE0_BASELINE.md`
 - 无缓存边缘传输专项计划见 `ARCHITECTURE_EDGE_TRANSPORT_STREAMING_PLAN.md`
-- 当前已完成阶段：Phase 0、Phase 1、Phase 2、Phase 3、Phase 4、Phase 5、Phase 6、Phase 7
+- HTTP/3 规划当前已完成阶段：Phase 0、Phase 1、Phase 2、Phase 3、Phase 4、Phase 5、Phase 6、Phase 7、Phase 8
 
 ## 仓库结构
 
@@ -113,19 +113,72 @@
 | --- | --- |
 | `crates/rginx-app` | 二进制入口、CLI、集成测试 |
 | `crates/rginx-config` | 配置加载、校验、编译 |
+| `crates/rginx-control-api` | 控制面 `axum` 后端入口 |
+| `crates/rginx-control-service` | 控制面领域服务层，承接业务编排与只读聚合逻辑 |
+| `crates/rginx-control-store` | 控制面数据访问层，统一封装 Postgres / Dragonfly 访问边界 |
+| `crates/rginx-control-worker` | 控制面后台 worker 与异步任务入口 |
+| `crates/rginx-control-types` | 控制面 API / agent 共享 DTO |
 | `crates/rginx-core` | 共享运行时模型与基础类型 |
 | `crates/rginx-http` | HTTP server、handler、proxy、TLS、限流、指标 |
+| `crates/rginx-node-agent` | 节点本地 agent，负责注册、心跳、任务拉取、本地配置发布 / 回滚与 `admin.sock` 采集 |
 | `crates/rginx-runtime` | 运行时编排、reload、restart、admin、active health |
 | `crates/rginx-observability` | tracing / logging 初始化 |
 | `configs/` | 默认活跃配置目录镜像 |
+| `adr/` | 控制面与系统级架构决策记录 |
+| `web/console` | Vue 3 + Vite 控制台前端 |
+| `migrations/` | 控制面数据库迁移 |
+| `CONTROL_PLANE_BACKUP_AND_RECOVERY.md` | 控制面备份恢复手册 |
+| `CONTROL_PLANE_DRAGONFLY_KEYSPACE.md` | 控制面 Dragonfly keyspace 规划与命名基线 |
 | `example/` | 更完整的配置参考 |
 | `docs/` | 维护与重构类开发文档，例如 `refactor-plan.md` |
-| `deploy/` | systemd / supervisor 示例 |
+| `Dockerfile` | 控制面多目标 Docker 构建入口，统一使用 Debian `trixie` 基底 |
+| `compose.yaml` | 控制面单一 Docker Compose 入口 |
+| `docker/` | Docker 辅助文档与脚本 |
+| `deploy/` | 边缘节点与控制面的 systemd / supervisor 示例 |
 | `scripts/` | 安装、卸载、`.deb` 打包、APT 仓库发布、benchmark、soak、release 脚本 |
 
 主路径大致是：
 
 `CLI -> load_and_compile -> ConfigSnapshot -> SharedState -> accept loop -> handler::dispatch -> route action -> access log`
+
+当前控制面分层路径大致是：
+
+`Vue console -> axum API -> control-service -> control-store -> Postgres / Dragonfly`
+
+异步与节点链路大致是：
+
+`control-worker -> deployment tasks / status sync -> node agent -> local admin.sock -> rginx`
+
+当前控制面只读诊断能力已覆盖：
+
+- Dashboard 实时总览与节点状态 SSE 刷新
+- 节点详情页：runtime listeners、vhost / route traffic、upstream health / stats、最近 snapshots / events
+- TLS / OCSP 页面：listener 证书、OCSP、SNI / default certificate bindings、mTLS、upstream TLS 诊断
+
+当前控制面配置版本管理能力已覆盖：
+
+- Revision 列表与详情查看
+- Draft 创建、编辑与持久化
+- 直接复用 `rginx-config` 的 validate / compile dry-run
+- Draft 对 base revision / 最新 revision 的文本 diff
+- 将通过校验的 draft 发布成可部署 revision
+
+当前控制面发布编排能力已覆盖：
+
+- Deployment 列表、详情、暂停 / 继续
+- 单集群滚动发布与并发窗口
+- failure threshold 驱动的中止与 pending target 取消
+- agent task pull / ack / complete 闭环
+- 失败后面向已成功节点的自动 rollback deployment 创建
+
+当前控制面审计与运维能力已覆盖：
+
+- Dashboard 派生告警概览
+- Audit 页面与过滤查询
+- deployment 维度 SSE 事件追踪
+- Prometheus `/metrics` 抓取端点
+- `x-request-id` 回写与结构化 request logging
+- Postgres / Dragonfly 备份恢复手册
 
 ## 快速开始
 
@@ -133,6 +186,55 @@
 
 - Linux
 - Rust `1.94.1+`
+
+### Docker 启动
+
+控制面容器统一使用 Debian `trixie` 系基底。  
+主入口是仓库根目录的 [compose.yaml](/root/github/rginx/compose.yaml)，控制面自研产物统一从根目录 [Dockerfile](/root/github/rginx/Dockerfile) 构建为单一镜像 `rginx-control`。
+`control-api` 和 `control-worker` 复用同一个镜像，前端 `console` 静态构建产物也直接并入该镜像，由 `control-api` 在根路径提供。
+数据库和缓存服务直接使用官方 `postgres:18-trixie` / `ghcr.io/dragonflydb/dragonfly:latest` 镜像，由 Compose 统一编排，不进入根 `Dockerfile`。
+
+边缘节点默认不走 Docker，继续通过 APT 安装 `rginx` 并由 systemd 管理。
+
+```bash
+cp .env.example .env
+docker compose --env-file .env up -d --build
+```
+
+启动后默认访问：
+
+- Console: `http://127.0.0.1:8080/`
+- Control API: `http://127.0.0.1:8080/healthz`
+- Prometheus Metrics: `http://127.0.0.1:8080/metrics`
+
+默认发布端口只绑定在本机回环地址。如需对外提供单机部署入口，调整 `.env` 中的
+`RGINX_CONTROL_API_PUBLISH` 即可。
+
+首次空 `postgres-data` volume 启动时，Postgres 官方 initdb 机制会自动执行 `migrations/postgres/*.sql`，并写入最小 seed 数据，因此 dashboard 默认读取的是 Postgres 中的真实初始化记录，而不是内存样例。
+控制台默认本地账号如下：
+
+- `admin` / `change-me-now`
+- `operator` / `change-me-now`
+- `viewer` / `change-me-now`
+
+Phase 5 起，控制面还要求配置 `RGINX_CONTROL_AGENT_SHARED_TOKEN`，供边缘节点上的
+`rginx-node-agent` 通过独立 bearer token 注册和上报心跳。
+
+边缘节点默认不加入 Docker。完成 APT 安装后，可直接在节点主机上运行：
+
+```bash
+RGINX_CONTROL_PLANE_ORIGIN=http://<control-api>:8080 \
+RGINX_CONTROL_AGENT_SHARED_TOKEN=change-me-for-node-agent \
+RGINX_NODE_ID=edge-hz-01 \
+RGINX_CLUSTER_ID=cluster-mainland \
+RGINX_NODE_ADVERTISE_ADDR=10.0.2.15:8443 \
+RGINX_ADMIN_SOCKET=/run/rginx/admin.sock \
+RGINX_NODE_BINARY=/usr/sbin/rginx \
+RGINX_NODE_CONFIG_PATH=/etc/rginx/rginx.ron \
+RGINX_NODE_CONFIG_BACKUP_DIR=/var/lib/rginx-node-agent/backups \
+RGINX_NODE_CONFIG_STAGING_DIR=/var/lib/rginx-node-agent/staging \
+cargo run -p rginx-node-agent
+```
 
 ### 源码运行
 
