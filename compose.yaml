@@ -19,7 +19,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "pg_isready -h 127.0.0.1 -p 5432 -U ${RGINX_CONTROL_DB_USER:-rginx} -d ${RGINX_CONTROL_DB_NAME:-rginx_control} >/dev/null && psql -h 127.0.0.1 -p 5432 -U ${RGINX_CONTROL_DB_USER:-rginx} -d ${RGINX_CONTROL_DB_NAME:-rginx_control} -Atqc \"select 1 from information_schema.tables where table_schema = 'public' and table_name = 'cp_agent_tasks'\" | grep -qx 1",
+          "export PGPASSWORD=\"$$POSTGRES_PASSWORD\" && pg_isready -h 127.0.0.1 -p 5432 -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\" >/dev/null && psql -h 127.0.0.1 -p 5432 -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\" -Atqc \"select 1 from information_schema.tables where table_schema = 'public' and table_name = 'cp_agent_tasks'\" | grep -qx 1",
         ]
       interval: 5s
       timeout: 5s
@@ -28,6 +28,7 @@ services:
     ports:
       - "${RGINX_CONTROL_POSTGRES_PUBLISH:-127.0.0.1:5432}:5432"
     volumes:
+      # postgres:18-trixie defaults PGDATA to /var/lib/postgresql/18/docker.
       - postgres-data:/var/lib/postgresql
       - ./migrations/postgres:/docker-entrypoint-initdb.d:ro
 

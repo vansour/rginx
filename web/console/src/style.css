@@ -572,7 +572,7 @@ a {
 
 @media (max-width: 720px) {
   .page-shell {
-    width: min(100% - 24px, 1200px);
+    width: min(calc(100% - 24px), 1200px);
     padding-top: 24px;
   }
 

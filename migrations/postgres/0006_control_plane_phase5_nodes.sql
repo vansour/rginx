@@ -10,7 +10,14 @@ alter table cp_nodes
 
 update cp_nodes as n
 set admin_socket_path = hb.admin_socket_path,
-    last_snapshot_version = coalesce((hb.payload ->> 'snapshot_version')::bigint, n.last_snapshot_version),
+    last_snapshot_version = coalesce(
+        case
+            when (hb.payload ->> 'snapshot_version') ~ '^[0-9]+$'
+                then (hb.payload ->> 'snapshot_version')::bigint
+            else null
+        end,
+        n.last_snapshot_version
+    ),
     updated_at = now()
 from (
     select distinct on (node_id)

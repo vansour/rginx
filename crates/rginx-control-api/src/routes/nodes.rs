@@ -12,9 +12,15 @@ use crate::state::AppState;
 
 pub async fn list_nodes(
     ViewerGuard(_actor): ViewerGuard,
+    request_context: RequestContext,
     State(state): State<AppState>,
 ) -> ApiResult<Json<Vec<NodeSummary>>> {
-    let nodes = state.services().nodes().list_nodes().await.map_err(ApiError::from)?;
+    let nodes = state
+        .services()
+        .nodes()
+        .list_nodes()
+        .await
+        .map_err(|error| ApiError::from(error).with_request_id(request_context.request_id))?;
     Ok(Json(nodes))
 }
 

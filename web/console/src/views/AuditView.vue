@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import axios from "axios";
 import { onMounted, reactive, ref } from "vue";
 import { useRouter } from "vue-router";
 
@@ -40,6 +41,20 @@ function resetUnauthorized(): void {
   void router.replace({ name: "dashboard" });
 }
 
+function handleAuthFailure(caught: unknown): boolean {
+  if (!axios.isAxiosError(caught)) {
+    return false;
+  }
+
+  const status = caught.response?.status;
+  if (status !== 401 && status !== 403) {
+    return false;
+  }
+
+  resetUnauthorized();
+  return true;
+}
+
 async function loadAuditLogs(): Promise<void> {
   querying.value = true;
   error.value = null;
@@ -59,8 +74,7 @@ async function loadAuditLogs(): Promise<void> {
       selectedAudit.value = await getAuditLog(selectedAudit.value.audit_id);
     }
   } catch (caught) {
-    if (String(caught).includes("401") || String(caught).includes("403")) {
-      resetUnauthorized();
+    if (handleAuthFailure(caught)) {
       return;
     }
     error.value = extractApiErrorMessage(caught);
@@ -74,6 +88,9 @@ async function selectAudit(auditId: string): Promise<void> {
   try {
     selectedAudit.value = await getAuditLog(auditId);
   } catch (caught) {
+    if (handleAuthFailure(caught)) {
+      return;
+    }
     error.value = extractApiErrorMessage(caught);
   }
 }
@@ -90,6 +107,9 @@ onMounted(async () => {
     actor.value = await getMe();
     await loadAuditLogs();
   } catch (caught) {
+    if (handleAuthFailure(caught)) {
+      return;
+    }
     error.value = extractApiErrorMessage(caught);
   } finally {
     loading.value = false;
