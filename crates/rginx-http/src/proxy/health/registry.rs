@@ -9,7 +9,8 @@ use rginx_core::{ConfigSnapshot, Upstream, UpstreamLoadBalance, UpstreamPeer};
 use serde::{Deserialize, Serialize};
 
 use crate::handler::BoxError;
-use crate::proxy::HealthChangeNotifier;
+use crate::proxy::clients::ProxyClient;
+use crate::proxy::{HealthChangeNotifier, ResolvedUpstreamPeer, UpstreamResolverRuntimeSnapshot};
 
 #[derive(Debug, Clone, Copy)]
 struct PeerHealthPolicy {
@@ -56,9 +57,30 @@ struct PeerHealth {
     state: Mutex<PeerHealthState>,
 }
 
+type PeerHealthMap = HashMap<String, Arc<PeerHealth>>;
+type UpstreamPeerHealthMap = HashMap<String, PeerHealthMap>;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PeerHealthSnapshot {
     pub peer_url: String,
+    pub backup: bool,
+    pub weight: u32,
+    pub available: bool,
+    pub passive_consecutive_failures: u32,
+    pub passive_cooldown_remaining_ms: Option<u64>,
+    pub passive_pending_recovery: bool,
+    pub active_unhealthy: bool,
+    pub active_consecutive_successes: u32,
+    pub active_requests: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedEndpointHealthSnapshot {
+    pub endpoint_key: String,
+    pub logical_peer_url: String,
+    pub display_url: String,
+    pub dial_addr: String,
+    pub server_name: String,
     pub backup: bool,
     pub weight: u32,
     pub available: bool,
@@ -76,19 +98,21 @@ pub struct UpstreamHealthSnapshot {
     pub unhealthy_after_failures: u32,
     pub cooldown_ms: u64,
     pub active_health_enabled: bool,
+    pub resolver: UpstreamResolverRuntimeSnapshot,
     pub peers: Vec<PeerHealthSnapshot>,
+    pub endpoints: Vec<ResolvedEndpointHealthSnapshot>,
 }
 
 #[derive(Clone)]
 pub(crate) struct PeerHealthRegistry {
     policies: Arc<HashMap<String, PeerHealthPolicy>>,
-    peers: Arc<HashMap<String, HashMap<String, Arc<PeerHealth>>>>,
-    peer_order: Arc<HashMap<String, Vec<UpstreamPeer>>>,
+    peers: Arc<UpstreamPeerHealthMap>,
+    endpoint_peers: Arc<Mutex<UpstreamPeerHealthMap>>,
     notifier: Option<HealthChangeNotifier>,
 }
 
 pub(crate) struct SelectedPeers {
-    pub peers: Vec<UpstreamPeer>,
+    pub peers: Vec<ResolvedUpstreamPeer>,
     pub skipped_unhealthy: usize,
 }
 
@@ -130,35 +154,36 @@ impl PeerHealthRegistry {
                 (upstream_name.clone(), peers)
             })
             .collect::<HashMap<_, _>>();
-        let peer_order = config
+        let endpoint_peers = config
             .upstreams
-            .iter()
-            .map(|(upstream_name, upstream)| (upstream_name.clone(), upstream.peers.clone()))
+            .keys()
+            .map(|upstream_name| (upstream_name.clone(), HashMap::new()))
             .collect::<HashMap<_, _>>();
 
         Self {
             policies: Arc::new(policies),
             peers: Arc::new(peers),
-            peer_order: Arc::new(peer_order),
+            endpoint_peers: Arc::new(Mutex::new(endpoint_peers)),
             notifier,
         }
     }
 
-    pub(crate) fn select_peers(
+    pub(crate) async fn select_peers(
         &self,
+        client: &ProxyClient,
         upstream: &Upstream,
         client_ip: std::net::IpAddr,
         limit: usize,
     ) -> SelectedPeers {
         if upstream.load_balance == UpstreamLoadBalance::LeastConn {
-            return self.select_peers_by_least_conn(upstream, limit);
+            return self.select_peers_by_least_conn(client, upstream, limit).await;
         }
 
         if !upstream.has_primary_peers() {
-            return self.select_peers_in_pool(upstream, client_ip, limit, true);
+            return self.select_peers_in_pool(client, upstream, client_ip, limit, true).await;
         }
 
-        let primary = self.select_peers_in_pool(upstream, client_ip, limit, false);
+        let primary = self.select_peers_in_pool(client, upstream, client_ip, limit, false).await;
         if limit == 0 {
             return SelectedPeers { peers: Vec::new(), skipped_unhealthy: 0 };
         }
@@ -166,7 +191,7 @@ impl PeerHealthRegistry {
         if primary.peers.is_empty() {
             return merge_selected_peers(
                 primary,
-                self.select_peers_in_pool(upstream, client_ip, limit, true),
+                self.select_peers_in_pool(client, upstream, client_ip, limit, true).await,
             );
         }
 
@@ -177,40 +202,46 @@ impl PeerHealthRegistry {
         let remaining = limit - primary.peers.len();
         merge_selected_peers(
             primary,
-            self.select_peers_in_pool(upstream, client_ip, remaining, true),
+            self.select_peers_in_pool(client, upstream, client_ip, remaining, true).await,
         )
     }
 
-    fn select_peers_by_least_conn(&self, upstream: &Upstream, limit: usize) -> SelectedPeers {
-        if limit == 0 {
-            return SelectedPeers { peers: Vec::new(), skipped_unhealthy: 0 };
-        }
-
-        if !upstream.has_primary_peers() {
-            return self.select_peers_by_least_conn_in_pool(upstream, limit, true);
-        }
-
-        let primary = self.select_peers_by_least_conn_in_pool(upstream, limit, false);
-        if primary.peers.is_empty() {
-            return merge_selected_peers(
-                primary,
-                self.select_peers_by_least_conn_in_pool(upstream, limit, true),
-            );
-        }
-
-        if primary.peers.len() == limit {
-            return primary;
-        }
-
-        let remaining = limit - primary.peers.len();
-        merge_selected_peers(
-            primary,
-            self.select_peers_by_least_conn_in_pool(upstream, remaining, true),
-        )
-    }
-
-    fn select_peers_in_pool(
+    async fn select_peers_by_least_conn(
         &self,
+        client: &ProxyClient,
+        upstream: &Upstream,
+        limit: usize,
+    ) -> SelectedPeers {
+        if limit == 0 {
+            return SelectedPeers { peers: Vec::new(), skipped_unhealthy: 0 };
+        }
+
+        if !upstream.has_primary_peers() {
+            return self.select_peers_by_least_conn_in_pool(client, upstream, limit, true).await;
+        }
+
+        let primary = self.select_peers_by_least_conn_in_pool(client, upstream, limit, false).await;
+        if primary.peers.is_empty() {
+            return merge_selected_peers(
+                primary,
+                self.select_peers_by_least_conn_in_pool(client, upstream, limit, true).await,
+            );
+        }
+
+        if primary.peers.len() == limit {
+            return primary;
+        }
+
+        let remaining = limit - primary.peers.len();
+        merge_selected_peers(
+            primary,
+            self.select_peers_by_least_conn_in_pool(client, upstream, remaining, true).await,
+        )
+    }
+
+    async fn select_peers_in_pool(
+        &self,
+        client: &ProxyClient,
         upstream: &Upstream,
         client_ip: std::net::IpAddr,
         limit: usize,
@@ -222,11 +253,12 @@ impl PeerHealthRegistry {
             upstream.primary_peers_for_client_ip(client_ip, upstream.peers.len())
         };
 
-        self.select_available_peers(upstream, ordered, limit)
+        self.select_available_peers(client, upstream, ordered, limit).await
     }
 
-    fn select_peers_by_least_conn_in_pool(
+    async fn select_peers_by_least_conn_in_pool(
         &self,
+        client: &ProxyClient,
         upstream: &Upstream,
         limit: usize,
         backup: bool,
@@ -239,10 +271,23 @@ impl PeerHealthRegistry {
                 continue;
             }
 
-            if self.is_available(&upstream.name, &peer.url) {
-                available.push((self.active_requests(&upstream.name, &peer.url), order, peer));
-            } else {
-                skipped_unhealthy += 1;
+            let endpoints: Vec<ResolvedUpstreamPeer> =
+                client.resolve_peer(&peer).await.unwrap_or_default();
+            for endpoint in endpoints {
+                self.ensure_endpoint(
+                    &upstream.name,
+                    &endpoint.endpoint_key,
+                    &endpoint.logical_peer_url,
+                );
+                if self.is_available(&upstream.name, &endpoint.endpoint_key) {
+                    available.push((
+                        self.active_requests(&upstream.name, &endpoint.endpoint_key),
+                        order,
+                        endpoint,
+                    ));
+                } else {
+                    skipped_unhealthy += 1;
+                }
             }
         }
 
@@ -250,6 +295,7 @@ impl PeerHealthRegistry {
             projected_least_conn_load(left.0, left.2.weight, right.0, right.2.weight)
                 .then(right.2.weight.cmp(&left.2.weight))
                 .then(left.1.cmp(&right.1))
+                .then(left.2.dial_authority.cmp(&right.2.dial_authority))
         });
 
         SelectedPeers {
@@ -258,8 +304,9 @@ impl PeerHealthRegistry {
         }
     }
 
-    fn select_available_peers(
+    async fn select_available_peers(
         &self,
+        client: &ProxyClient,
         upstream: &Upstream,
         ordered: Vec<UpstreamPeer>,
         limit: usize,
@@ -268,25 +315,67 @@ impl PeerHealthRegistry {
             return SelectedPeers { peers: Vec::new(), skipped_unhealthy: 0 };
         }
 
-        let mut selected = Vec::new();
+        let mut batches = Vec::new();
         let mut skipped_unhealthy = 0;
 
         for peer in ordered {
-            if self.is_available(&upstream.name, &peer.url) {
-                selected.push(peer);
-                if selected.len() == limit {
-                    break;
-                }
-            } else {
-                skipped_unhealthy += 1;
+            let mut endpoints: Vec<ResolvedUpstreamPeer> =
+                client.resolve_peer(&peer).await.unwrap_or_default();
+            for endpoint in &endpoints {
+                self.ensure_endpoint(
+                    &upstream.name,
+                    &endpoint.endpoint_key,
+                    &endpoint.logical_peer_url,
+                );
             }
+            endpoints.sort_by(|left, right| {
+                self.active_requests(&upstream.name, &left.endpoint_key)
+                    .cmp(&self.active_requests(&upstream.name, &right.endpoint_key))
+                    .then(left.dial_authority.cmp(&right.dial_authority))
+            });
+
+            let mut available = Vec::new();
+            for endpoint in endpoints {
+                self.ensure_endpoint(
+                    &upstream.name,
+                    &endpoint.endpoint_key,
+                    &endpoint.logical_peer_url,
+                );
+                if self.is_available(&upstream.name, &endpoint.endpoint_key) {
+                    available.push(endpoint);
+                } else {
+                    skipped_unhealthy += 1;
+                }
+            }
+            if !available.is_empty() {
+                batches.push(available);
+            }
+        }
+
+        let mut selected = Vec::new();
+        let mut depth = 0usize;
+        while selected.len() < limit {
+            let mut advanced = false;
+            for batch in &batches {
+                if let Some(endpoint) = batch.get(depth) {
+                    selected.push(endpoint.clone());
+                    advanced = true;
+                    if selected.len() == limit {
+                        break;
+                    }
+                }
+            }
+            if !advanced {
+                break;
+            }
+            depth += 1;
         }
 
         SelectedPeers { peers: selected, skipped_unhealthy }
     }
 
     pub(crate) fn record_success(&self, upstream_name: &str, peer_url: &str) -> bool {
-        if let Some(health) = self.get(upstream_name, peer_url) {
+        if let Some(health) = self.get_health(upstream_name, peer_url) {
             let recovered = health.record_success();
             self.notify_change(upstream_name);
             return recovered;
@@ -300,7 +389,7 @@ impl PeerHealthRegistry {
             return PeerFailureStatus { consecutive_failures: 0, entered_cooldown: false };
         };
 
-        self.get(upstream_name, peer_url)
+        self.get_health(upstream_name, peer_url)
             .map(|health| {
                 let status = health.record_failure(policy);
                 self.notify_change(upstream_name);
@@ -310,7 +399,7 @@ impl PeerHealthRegistry {
     }
 
     fn is_available(&self, upstream_name: &str, peer_url: &str) -> bool {
-        self.get(upstream_name, peer_url).is_none_or(|health| health.is_available())
+        self.get_health(upstream_name, peer_url).is_none_or(|health| health.is_available())
     }
 
     pub(crate) fn record_active_success(
@@ -319,7 +408,7 @@ impl PeerHealthRegistry {
         peer_url: &str,
         healthy_successes_required: u32,
     ) -> ActiveProbeStatus {
-        self.get(upstream_name, peer_url)
+        self.get_health(upstream_name, peer_url)
             .map(|health| {
                 let status = health.record_active_success(healthy_successes_required);
                 self.notify_change(upstream_name);
@@ -333,7 +422,7 @@ impl PeerHealthRegistry {
     }
 
     pub(crate) fn record_active_failure(&self, upstream_name: &str, peer_url: &str) -> bool {
-        self.get(upstream_name, peer_url).is_some_and(|health| {
+        self.get_health(upstream_name, peer_url).is_some_and(|health| {
             let changed = health.record_active_failure();
             self.notify_change(upstream_name);
             changed
@@ -345,7 +434,7 @@ impl PeerHealthRegistry {
         upstream_name: &str,
         peer_url: &str,
     ) -> ActivePeerGuard {
-        let peer = self.get(upstream_name, peer_url).cloned();
+        let peer = self.get_health(upstream_name, peer_url);
         if let Some(ref peer) = peer {
             let transitioned_from_idle = peer.increment_active_requests();
             if transitioned_from_idle {
@@ -361,51 +450,104 @@ impl PeerHealthRegistry {
     }
 
     fn active_requests(&self, upstream_name: &str, peer_url: &str) -> u64 {
-        self.get(upstream_name, peer_url).map(|health| health.active_requests()).unwrap_or(0)
+        self.get_health(upstream_name, peer_url).map(|health| health.active_requests()).unwrap_or(0)
     }
 
-    fn get(&self, upstream_name: &str, peer_url: &str) -> Option<&Arc<PeerHealth>> {
-        self.peers.get(upstream_name).and_then(|upstream_peers| upstream_peers.get(peer_url))
+    fn get_health(&self, upstream_name: &str, peer_url: &str) -> Option<Arc<PeerHealth>> {
+        self.get_endpoint(upstream_name, peer_url)
+            .or_else(|| self.get_logical_peer(upstream_name, peer_url))
     }
 
-    pub(crate) fn snapshot(&self) -> Vec<UpstreamHealthSnapshot> {
-        let mut snapshots = Vec::with_capacity(self.peer_order.len());
+    fn get_logical_peer(&self, upstream_name: &str, peer_url: &str) -> Option<Arc<PeerHealth>> {
+        self.peers
+            .get(upstream_name)
+            .and_then(|upstream_peers| upstream_peers.get(peer_url))
+            .cloned()
+    }
 
-        for (upstream_name, peers) in self.peer_order.iter() {
-            let Some(policy) = self.policies.get(upstream_name).copied() else {
-                continue;
-            };
+    fn get_endpoint(&self, upstream_name: &str, peer_url: &str) -> Option<Arc<PeerHealth>> {
+        self.endpoint_peers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(upstream_name)
+            .and_then(|upstream_peers| upstream_peers.get(peer_url))
+            .cloned()
+    }
 
-            let peer_snapshots = peers
-                .iter()
-                .map(|peer| {
-                    self.get(upstream_name, &peer.url)
+    fn ensure_endpoint(
+        &self,
+        upstream_name: &str,
+        endpoint_key: &str,
+        logical_peer_url: &str,
+    ) -> Arc<PeerHealth> {
+        let mut endpoints =
+            self.endpoint_peers.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        endpoints
+            .entry(upstream_name.to_string())
+            .or_default()
+            .entry(endpoint_key.to_string())
+            .or_insert_with(|| {
+                if endpoint_key == logical_peer_url {
+                    self.get_logical_peer(upstream_name, logical_peer_url)
+                        .unwrap_or_else(|| Arc::new(PeerHealth::default()))
+                } else {
+                    Arc::new(PeerHealth::default())
+                }
+            })
+            .clone()
+    }
+
+    pub(crate) fn snapshot_for_upstream(
+        &self,
+        upstream: &Upstream,
+        resolver: UpstreamResolverRuntimeSnapshot,
+        endpoints: Vec<ResolvedUpstreamPeer>,
+    ) -> UpstreamHealthSnapshot {
+        let policy = self
+            .policies
+            .get(&upstream.name)
+            .copied()
+            .unwrap_or_else(|| PeerHealthPolicy::from_upstream(upstream));
+
+        let endpoint_snapshots = endpoints
+            .iter()
+            .map(|endpoint| {
+                self.get_health(&upstream.name, &endpoint.endpoint_key)
+                    .map(|health| health.snapshot_endpoint(endpoint))
+                    .unwrap_or_else(|| default_endpoint_snapshot(endpoint))
+            })
+            .collect::<Vec<_>>();
+
+        let peer_snapshots = upstream
+            .peers
+            .iter()
+            .map(|peer| {
+                let peer_endpoints = endpoint_snapshots
+                    .iter()
+                    .filter(|endpoint| endpoint.logical_peer_url == peer.url)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if !peer_endpoints.is_empty() {
+                    aggregate_peer_snapshot(peer, &peer_endpoints)
+                } else {
+                    self.peers
+                        .get(&upstream.name)
+                        .and_then(|upstream_peers| upstream_peers.get(&peer.url))
                         .map(|health| health.snapshot(peer))
-                        .unwrap_or_else(|| PeerHealthSnapshot {
-                            peer_url: peer.url.clone(),
-                            backup: peer.backup,
-                            weight: peer.weight,
-                            available: true,
-                            passive_consecutive_failures: 0,
-                            passive_cooldown_remaining_ms: None,
-                            passive_pending_recovery: false,
-                            active_unhealthy: false,
-                            active_consecutive_successes: 0,
-                            active_requests: 0,
-                        })
-                })
-                .collect::<Vec<_>>();
+                        .unwrap_or_else(|| default_peer_snapshot(peer, !peer_is_hostname(peer)))
+                }
+            })
+            .collect::<Vec<_>>();
 
-            snapshots.push(UpstreamHealthSnapshot {
-                upstream_name: upstream_name.clone(),
-                unhealthy_after_failures: policy.unhealthy_after_failures,
-                cooldown_ms: policy.cooldown.as_millis().min(u128::from(u64::MAX)) as u64,
-                active_health_enabled: policy.active_health_enabled,
-                peers: peer_snapshots,
-            });
+        UpstreamHealthSnapshot {
+            upstream_name: upstream.name.clone(),
+            unhealthy_after_failures: policy.unhealthy_after_failures,
+            cooldown_ms: policy.cooldown.as_millis().min(u128::from(u64::MAX)) as u64,
+            active_health_enabled: policy.active_health_enabled,
+            resolver,
+            peers: peer_snapshots,
+            endpoints: endpoint_snapshots,
         }
-
-        snapshots
     }
 
     fn notify_change(&self, upstream_name: &str) {
@@ -521,6 +663,106 @@ impl PeerHealth {
             active_requests: state.active_requests,
         }
     }
+
+    fn snapshot_endpoint(&self, endpoint: &ResolvedUpstreamPeer) -> ResolvedEndpointHealthSnapshot {
+        let now = Instant::now();
+        let state = lock_peer_health(&self.state);
+        let passive_cooldown_remaining_ms = state
+            .passive
+            .unhealthy_until
+            .and_then(|until| until.checked_duration_since(now))
+            .map(|remaining| remaining.as_millis().min(u128::from(u64::MAX)) as u64);
+        let passive_available = state.passive.unhealthy_until.is_none_or(|until| until <= now);
+
+        ResolvedEndpointHealthSnapshot {
+            endpoint_key: endpoint.endpoint_key.clone(),
+            logical_peer_url: endpoint.logical_peer_url.clone(),
+            display_url: endpoint.display_url.clone(),
+            dial_addr: endpoint.socket_addr.to_string(),
+            server_name: endpoint.server_name.clone(),
+            backup: endpoint.backup,
+            weight: endpoint.weight,
+            available: passive_available && !state.active.unhealthy,
+            passive_consecutive_failures: state.passive.consecutive_failures,
+            passive_cooldown_remaining_ms,
+            passive_pending_recovery: state.passive.pending_recovery,
+            active_unhealthy: state.active.unhealthy,
+            active_consecutive_successes: state.active.consecutive_successes,
+            active_requests: state.active_requests,
+        }
+    }
+}
+
+fn default_peer_snapshot(peer: &UpstreamPeer, available: bool) -> PeerHealthSnapshot {
+    PeerHealthSnapshot {
+        peer_url: peer.url.clone(),
+        backup: peer.backup,
+        weight: peer.weight,
+        available,
+        passive_consecutive_failures: 0,
+        passive_cooldown_remaining_ms: None,
+        passive_pending_recovery: false,
+        active_unhealthy: false,
+        active_consecutive_successes: 0,
+        active_requests: 0,
+    }
+}
+
+fn default_endpoint_snapshot(endpoint: &ResolvedUpstreamPeer) -> ResolvedEndpointHealthSnapshot {
+    ResolvedEndpointHealthSnapshot {
+        endpoint_key: endpoint.endpoint_key.clone(),
+        logical_peer_url: endpoint.logical_peer_url.clone(),
+        display_url: endpoint.display_url.clone(),
+        dial_addr: endpoint.socket_addr.to_string(),
+        server_name: endpoint.server_name.clone(),
+        backup: endpoint.backup,
+        weight: endpoint.weight,
+        available: true,
+        passive_consecutive_failures: 0,
+        passive_cooldown_remaining_ms: None,
+        passive_pending_recovery: false,
+        active_unhealthy: false,
+        active_consecutive_successes: 0,
+        active_requests: 0,
+    }
+}
+
+fn aggregate_peer_snapshot(
+    peer: &UpstreamPeer,
+    endpoints: &[ResolvedEndpointHealthSnapshot],
+) -> PeerHealthSnapshot {
+    let available = endpoints.iter().any(|endpoint| endpoint.available);
+    let passive_consecutive_failures =
+        endpoints.iter().map(|endpoint| endpoint.passive_consecutive_failures).max().unwrap_or(0);
+    let passive_cooldown_remaining_ms =
+        endpoints.iter().filter_map(|endpoint| endpoint.passive_cooldown_remaining_ms).max();
+    let passive_pending_recovery =
+        endpoints.iter().any(|endpoint| endpoint.passive_pending_recovery);
+    let active_unhealthy = endpoints.iter().all(|endpoint| endpoint.active_unhealthy);
+    let active_consecutive_successes =
+        endpoints.iter().map(|endpoint| endpoint.active_consecutive_successes).max().unwrap_or(0);
+    let active_requests = endpoints.iter().map(|endpoint| endpoint.active_requests).sum();
+
+    PeerHealthSnapshot {
+        peer_url: peer.url.clone(),
+        backup: peer.backup,
+        weight: peer.weight,
+        available,
+        passive_consecutive_failures,
+        passive_cooldown_remaining_ms,
+        passive_pending_recovery,
+        active_unhealthy,
+        active_consecutive_successes,
+        active_requests,
+    }
+}
+
+fn peer_is_hostname(peer: &UpstreamPeer) -> bool {
+    peer.url
+        .parse::<http::Uri>()
+        .ok()
+        .and_then(|uri| uri.host().map(str::to_string))
+        .is_some_and(|host| host.parse::<std::net::IpAddr>().is_err())
 }
 
 pub(crate) struct ActivePeerGuard {
@@ -615,16 +857,38 @@ fn projected_least_conn_load(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::net::{IpAddr, SocketAddr};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use rginx_core::{
-        ActiveHealthCheck, Upstream, UpstreamLoadBalance, UpstreamPeer, UpstreamProtocol,
-        UpstreamSettings, UpstreamTls,
+        ActiveHealthCheck, Upstream, UpstreamDnsPolicy, UpstreamLoadBalance, UpstreamPeer,
+        UpstreamProtocol, UpstreamSettings, UpstreamTls,
     };
 
-    use super::{PeerHealth, PeerHealthRegistry};
+    use super::{PeerHealth, PeerHealthRegistry, UpstreamResolverRuntimeSnapshot};
+    use crate::proxy::ResolvedUpstreamPeer;
+
+    fn resolved_peer(peer: &UpstreamPeer) -> ResolvedUpstreamPeer {
+        let socket_addr = peer
+            .authority
+            .parse::<SocketAddr>()
+            .unwrap_or_else(|_| SocketAddr::new(IpAddr::from([127, 0, 0, 1]), 80));
+        ResolvedUpstreamPeer {
+            url: peer.url.clone(),
+            logical_peer_url: peer.url.clone(),
+            endpoint_key: peer.url.clone(),
+            display_url: peer.url.clone(),
+            scheme: peer.scheme.clone(),
+            upstream_authority: peer.authority.clone(),
+            dial_authority: peer.authority.clone(),
+            socket_addr,
+            server_name: socket_addr.ip().to_string(),
+            weight: peer.weight,
+            backup: peer.backup,
+        }
+    }
 
     #[test]
     fn get_supports_borrowed_upstream_and_peer_lookups() {
@@ -635,24 +899,18 @@ mod tests {
                 "backend".to_string(),
                 HashMap::from([("http://127.0.0.1:8080".to_string(), expected.clone())]),
             )])),
-            peer_order: Arc::new(HashMap::from([(
+            endpoint_peers: Arc::new(std::sync::Mutex::new(HashMap::from([(
                 "backend".to_string(),
-                vec![UpstreamPeer {
-                    url: "http://127.0.0.1:8080".to_string(),
-                    scheme: "http".to_string(),
-                    authority: "127.0.0.1:8080".to_string(),
-                    weight: 1,
-                    backup: false,
-                }],
-            )])),
+                HashMap::from([("http://127.0.0.1:8080".to_string(), expected.clone())]),
+            )]))),
             notifier: None,
         };
 
         let actual = registry
-            .get("backend", "http://127.0.0.1:8080")
+            .get_endpoint("backend", "http://127.0.0.1:8080")
             .expect("borrowed lookup should find peer");
 
-        assert!(Arc::ptr_eq(actual, &expected));
+        assert!(Arc::ptr_eq(&actual, &expected));
 
         let guard = registry.track_active_request("backend", "http://127.0.0.1:8080");
         assert_eq!(registry.active_requests("backend", "http://127.0.0.1:8080"), 1);
@@ -675,6 +933,7 @@ mod tests {
             UpstreamSettings {
                 protocol: UpstreamProtocol::Auto,
                 load_balance: UpstreamLoadBalance::RoundRobin,
+                dns: UpstreamDnsPolicy::default(),
                 server_name: true,
                 server_name_override: None,
                 tls_versions: None,
@@ -748,7 +1007,12 @@ mod tests {
         assert!(failure.entered_cooldown);
         assert!(registry.record_active_failure("backend", "http://127.0.0.1:8080"));
 
-        let snapshots = registry.snapshot();
+        let upstream = config.upstreams["backend"].as_ref();
+        let snapshots = [registry.snapshot_for_upstream(
+            upstream,
+            UpstreamResolverRuntimeSnapshot::default(),
+            vec![resolved_peer(&upstream.peers[0])],
+        )];
         assert_eq!(snapshots.len(), 1);
         let upstream = &snapshots[0];
         assert_eq!(upstream.upstream_name, "backend");
@@ -783,16 +1047,13 @@ mod tests {
                     Arc::new(PeerHealth::default()),
                 )]),
             )])),
-            peer_order: Arc::new(HashMap::from([(
+            endpoint_peers: Arc::new(std::sync::Mutex::new(HashMap::from([(
                 "backend".to_string(),
-                vec![UpstreamPeer {
-                    url: "http://127.0.0.1:8080".to_string(),
-                    scheme: "http".to_string(),
-                    authority: "127.0.0.1:8080".to_string(),
-                    weight: 1,
-                    backup: false,
-                }],
-            )])),
+                HashMap::from([(
+                    "http://127.0.0.1:8080".to_string(),
+                    Arc::new(PeerHealth::default()),
+                )]),
+            )]))),
             notifier: Some(Arc::new({
                 let notifications = notifications.clone();
                 move |_upstream_name| {

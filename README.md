@@ -1,850 +1,170 @@
 # rginx
 
-`rginx` 是一个面向中小规模部署的 Rust 入口反向代理。
+`rginx` 是一个 Rust monorepo，当前包含三条主线：
 
-当前版本：`v0.1.3-rc.11`
+- `rginx`：Linux 上的边缘反向代理二进制
+- `rginx-web`：控制面 Web 进程，内含 API、浏览器 Console、后台 worker，以及可选权威 DNS 运行时
+- `rginx-node-agent`：节点本地 agent，负责和控制面同步发布、状态与快照
 
-它的目标很收口：
+当前版本：`0.1.3-rc.11`
 
-- 做 HTTP / HTTPS 入口反代
-- 做 API gateway 前置代理
-- 做 gRPC ingress 和 grpc-web 入口转换
-- 做 LB / CDN 后方的边缘反代
-- 稳定覆盖 TLS 终止、Host/Path 路由、上游代理、健康检查、热重载、优雅重启、基础流量治理和本地可观测性
+本仓库不再维护额外文档目录；根 `README.md` 是唯一持续更新的说明入口。
 
-它不是当前阶段的目标：
+## 能力概览
 
-- 不是静态文件服务器
-- 不是公网远程管理面
-- 不是完整 nginx DSL 兼容层
-- 不是 `stream` / `mail` / FastCGI / uwsgi 入口代理
-- 不是“所有场景都能替代 nginx”的 drop-in replacement
+### 边缘代理
 
-## 当前能力
+- HTTP/1.1、HTTPS、HTTP/2、HTTP/3 入口
+- Host / Path 路由
+- `Return` 与反向代理处理器
+- upstream `round_robin`、`ip_hash`、`least_conn`
+- `weight`、`backup`、幂等请求 failover
+- 下游 TLS、SNI、OCSP、mTLS、ALPN、TLS 版本控制
+- 上游 TLS、mTLS、HTTP/2、HTTP/3、`server_name_override`
+- gRPC、grpc-web、trailers、`grpc-timeout`
+- 压缩、限流、CIDR allow/deny、`trusted_proxies`
+- 热重载、优雅重启、平滑退出
+- 本地只读运维命令：`status`、`snapshot`、`delta`、`wait`、`traffic`、`peers`、`upstreams`
 
-- RON 配置加载、相对 `include` 和字符串环境变量展开
-- 单进程多 worker 运行时，支持 `worker_threads` 和 `accept_workers`
-- 兼容旧 `server.listen` 单入口模型
-- 支持显式多监听模型 `listeners: []`
-- `Exact("/foo")` / `Prefix("/api")` 路由匹配
-- 按 `grpc_service` / `grpc_method` 细分 gRPC 路由
-- `Proxy` / `Return` 两种处理器
-- upstream `round_robin` / `ip_hash` / `least_conn`
-- peer `weight` / `backup`
-- 幂等或可重放请求的 failover
-- 入站 HTTP/2（TLS / ALPN）
-- 入站 HTTP/3（TLS / QUIC / Alt-Svc）
-- HTTP/3 下游路由级 ACL / 限流 / 压缩 / request-id / access log / traffic 统计
-- 上游 HTTP/3（显式 `protocol: Http3`）
-- gRPC / grpc-web over HTTP/3
-- HTTP/3 下的 gRPC trailers / deadline 语义
-- 面向 HTTP/3 upstream 的主动 gRPC health check
-- HTTP/3 listener 的 TLS / SNI / OCSP 诊断
-- HTTP/3 listener 的 reload / restart / drain 语义
-- HTTP/3 已纳入默认 fast/slow test gate、TLS gate、soak 和 benchmark 入口
-- 下游 TLS 版本控制（`TLS1.2` / `TLS1.3`）
-- 下游 ALPN 控制
-- 无 SNI 客户端的默认证书回退
-- 动态 OCSP 拉取、缓存与刷新（基于证书 AIA + `ocsp_staple_path` 缓存文件）
-- 下游 mTLS 客户端证书校验（`Optional` / `Required`）
-- 上游 mTLS 客户端证书
-- 上游 TLS 版本控制
-- 上游证书校验深度和静态 CRL
-- 上游 HTTP/2（HTTPS / TLS / ALPN）
-- 基础 gRPC over HTTP/2 代理
-- 基础 grpc-web binary / text 转换
-- 请求 / 响应 trailers 透传
-- `grpc-timeout` deadline
-- 本地代理错误到 `grpc-status` / `grpc-message` 的转换
-- 非法 `grpc-web-text` 请求体到 `grpc-status = 3` 的拒绝
-- 下游提前取消时 `grpc-status = 1` 可观测性
-- br / gzip 响应压缩协商
-- HTTP/1.1 `Upgrade` / WebSocket 透传
-- listener / server 级超时治理
-- upstream 细粒度超时、连接池、TCP / HTTP/2 keepalive 调优
-- 被动健康检查
-- 主动 HTTP 健康检查
-- 主动 gRPC health check
-- 主动健康检查按 peer 的稳定初始 jitter
-- 路由级 CIDR allow / deny
-- 路由级限流
-- `trusted_proxies`
-- 入站 `PROXY protocol` v1
-- hostname upstream peer，新建连接时可重新解析
-- 自动透传或生成 `X-Request-ID`
-- 自定义 access log 模板
-- `Ctrl-C` / `SIGTERM` / `SIGQUIT` 平滑退出
-- `SIGHUP` 热重载
-- Linux 下显式 fd 继承式优雅重启
-- `rginx check`
-- 本地只读运维面：`snapshot / snapshot-version / delta / wait / status / counters / traffic / peers / upstreams`
+### 控制面
 
-## HTTP/3 规划
+- `rginx-web` 提供统一 Web 入口
+- 浏览器 Console 由 `rginx-control-console` 编译为 WASM 后静态嵌入
+- Postgres 负责持久化，Dragonfly 负责热路径状态与任务协同
+- 后台 worker 负责部署推进、状态同步与轮询编排
+- 可选权威 DNS 运行时可直接由 `rginx-web` 挂载
 
-当前仓库已经完成 HTTP/3 NGINX 对齐计划的全部阶段：
+### 节点联动
 
-- 下游 HTTP/3 ingress
-- `Return` / 基础 `Proxy`
-- `Alt-Svc` 广播
-- ACL / 限流 / 压缩 / request-id / access log / traffic 统计
-- 上游 HTTP/3 基础代理
-- 上游 HTTP/3 `server_name_override` / client identity
-- gRPC over HTTP/3
-- grpc-web over HTTP/3
-- HTTP/3 下的 gRPC deadline / trailers 行为
-- 面向 HTTP/3 upstream 的主动 gRPC health check
-- HTTP/3 listener 的 TLS / SNI / OCSP 诊断
-- HTTP/3 listener 的 reload / restart / drain 语义
-- HTTP/3 listener 的 0-RTT / replay-safe route 策略
-- HTTP/3 listener 的 QUIC runtime telemetry / dedicated release gate / focused soak
-- HTTP/3 已纳入默认 fast/slow test gate、TLS gate、soak 和 benchmark 入口
+- `rginx-node-agent` 负责节点注册、心跳、任务拉取与结果回传
+- agent 可对接本地 `admin.sock`，回传 runtime snapshot
+- 控制面与 agent 共享 DTO 位于 `rginx-control-types`
 
-- 分阶段实施计划见 `ARCHITECTURE_HTTP3_NGINX_ALIGNMENT_PLAN.md`
-- 阶段 0 基线见 `HTTP3_PHASE0_BASELINE.md`
-- 阶段 7 release gate 说明见 `HTTP3_PHASE7_RELEASE.md`
-- 上游 HTTP/3 生产级传输专项计划见 `ARCHITECTURE_UPSTREAM_HTTP3_PRODUCTION_PLAN.md`
-- 上游 HTTP/3 生产级传输阶段 0 基线见 `ARCHITECTURE_UPSTREAM_HTTP3_PHASE0_BASELINE.md`
-- 无缓存边缘传输专项计划见 `ARCHITECTURE_EDGE_TRANSPORT_STREAMING_PLAN.md`
-- HTTP/3 规划当前已完成阶段：Phase 0、Phase 1、Phase 2、Phase 3、Phase 4、Phase 5、Phase 6、Phase 7、Phase 8
-
-## 仓库结构
+## Workspace 结构
 
 | 路径 | 作用 |
 | --- | --- |
-| `crates/rginx-app` | 二进制入口、CLI、集成测试 |
+| `crates/rginx-app` | `rginx` 二进制、CLI、集成测试 |
 | `crates/rginx-config` | 配置加载、校验、编译 |
-| `crates/rginx-control-api` | 控制面 `axum` 后端入口 |
-| `crates/rginx-control-service` | 控制面领域服务层，承接业务编排与只读聚合逻辑 |
-| `crates/rginx-control-store` | 控制面数据访问层，统一封装 Postgres / Dragonfly 访问边界 |
-| `crates/rginx-control-worker` | 控制面后台 worker 与异步任务入口 |
-| `crates/rginx-control-types` | 控制面 API / agent 共享 DTO |
-| `crates/rginx-core` | 共享运行时模型与基础类型 |
-| `crates/rginx-http` | HTTP server、handler、proxy、TLS、限流、指标 |
-| `crates/rginx-node-agent` | 节点本地 agent，负责注册、心跳、任务拉取、本地配置发布 / 回滚与 `admin.sock` 采集 |
-| `crates/rginx-runtime` | 运行时编排、reload、restart、admin、active health |
+| `crates/rginx-core` | 共享核心模型 |
+| `crates/rginx-http` | HTTP server、proxy、TLS、HTTP/3、限流、状态快照 |
+| `crates/rginx-runtime` | reload / restart / shutdown / health orchestration |
 | `crates/rginx-observability` | tracing / logging 初始化 |
-| `configs/` | 默认活跃配置目录镜像 |
-| `adr/` | 控制面与系统级架构决策记录 |
-| `web/console` | Vue 3 + Vite 控制台前端 |
-| `migrations/` | 控制面数据库迁移 |
-| `CONTROL_PLANE_BACKUP_AND_RECOVERY.md` | 控制面备份恢复手册 |
-| `CONTROL_PLANE_DRAGONFLY_KEYSPACE.md` | 控制面 Dragonfly keyspace 规划与命名基线 |
-| `example/` | 更完整的配置参考 |
-| `docs/` | 维护与重构类开发文档，例如 `refactor-plan.md` |
-| `Dockerfile` | 控制面多目标 Docker 构建入口，统一使用 Debian `trixie` 基底 |
-| `compose.yaml` | 控制面单一 Docker Compose 入口 |
-| `docker/` | Docker 辅助文档与脚本 |
-| `deploy/` | 边缘节点与控制面的 systemd / supervisor 示例 |
-| `scripts/` | 安装、卸载、`.deb` 打包、APT 仓库发布、benchmark、soak、release 脚本 |
+| `crates/rginx-web` | 控制面 Web 进程 |
+| `crates/rginx-control-console` | Dioxus 控制台前端 |
+| `crates/rginx-control-service` | 控制面业务服务层 |
+| `crates/rginx-control-store` | 控制面数据访问层 |
+| `crates/rginx-control-types` | 控制面与 agent 共享类型 |
+| `crates/rginx-node-agent` | 节点 agent |
+| `crates/rginx-dns` | 权威 DNS 运行时基础能力 |
+| `configs/` | 默认边缘代理配置 |
+| `deploy/` | systemd / supervisor 示例 |
+| `docker/` | Docker 相关构建目录 |
+| `scripts/` | 安装、测试、发布、验证脚本 |
 
-主路径大致是：
+## 环境要求
 
-`CLI -> load_and_compile -> ConfigSnapshot -> SharedState -> accept loop -> handler::dispatch -> route action -> access log`
-
-当前控制面分层路径大致是：
-
-`Vue console -> axum API -> control-service -> control-store -> Postgres / Dragonfly`
-
-异步与节点链路大致是：
-
-`control-worker -> deployment tasks / status sync -> node agent -> local admin.sock -> rginx`
-
-当前控制面只读诊断能力已覆盖：
-
-- Dashboard 实时总览与节点状态 SSE 刷新
-- 节点详情页：runtime listeners、vhost / route traffic、upstream health / stats、最近 snapshots / events
-- TLS / OCSP 页面：listener 证书、OCSP、SNI / default certificate bindings、mTLS、upstream TLS 诊断
-
-当前控制面配置版本管理能力已覆盖：
-
-- Revision 列表与详情查看
-- Draft 创建、编辑与持久化
-- 直接复用 `rginx-config` 的 validate / compile dry-run
-- Draft 对 base revision / 最新 revision 的文本 diff
-- 将通过校验的 draft 发布成可部署 revision
-
-当前控制面发布编排能力已覆盖：
-
-- Deployment 列表、详情、暂停 / 继续
-- 单集群滚动发布与并发窗口
-- failure threshold 驱动的中止与 pending target 取消
-- agent task pull / ack / complete 闭环
-- 失败后面向已成功节点的自动 rollback deployment 创建
-
-当前控制面审计与运维能力已覆盖：
-
-- Dashboard 派生告警概览
-- Audit 页面与过滤查询
-- deployment 维度 SSE 事件追踪
-- Prometheus `/metrics` 抓取端点
-- `x-request-id` 回写与结构化 request logging
-- Postgres / Dragonfly 备份恢复手册
+- Rust `1.94.1`
+- Linux：`rginx` 边缘代理仅支持 Linux
+- Docker / Docker Compose：本地控制面联调推荐使用
+- 控制面依赖 Postgres 与 Dragonfly
 
 ## 快速开始
 
-### 环境
+### 本地验证边缘代理
 
-- Linux
-- Rust `1.94.1+`
-
-### Docker 启动
-
-控制面容器统一使用 Debian `trixie` 系基底。  
-主入口是仓库根目录的 [compose.yaml](/root/github/rginx/compose.yaml)，控制面自研产物统一从根目录 [Dockerfile](/root/github/rginx/Dockerfile) 构建为单一镜像 `rginx-control`。
-`control-api` 和 `control-worker` 复用同一个镜像，前端 `console` 静态构建产物也直接并入该镜像，由 `control-api` 在根路径提供。
-数据库和缓存服务直接使用官方 `postgres:18-trixie` / `ghcr.io/dragonflydb/dragonfly:latest` 镜像，由 Compose 统一编排，不进入根 `Dockerfile`。
-
-边缘节点默认不走 Docker，继续通过 APT 安装 `rginx` 并由 systemd 管理。
+默认配置文件是 [configs/rginx.ron](/root/github/rginx/configs/rginx.ron)。
 
 ```bash
-cp .env.example .env
-docker compose --env-file .env up -d --build
+cargo run -p rginx -- -t
+cargo run -p rginx -- check
+cargo run -p rginx --
 ```
 
-启动后默认访问：
+默认会加载：
 
-- Console: `http://127.0.0.1:8080/`
-- Control API: `http://127.0.0.1:8080/healthz`
-- Prometheus Metrics: `http://127.0.0.1:8080/metrics`
-
-默认发布端口只绑定在本机回环地址。如需对外提供单机部署入口，调整 `.env` 中的
-`RGINX_CONTROL_API_PUBLISH` 即可。
-
-首次空 `postgres-data` volume 启动时，Postgres 官方 initdb 机制会自动执行 `migrations/postgres/*.sql`，并写入最小 seed 数据，因此 dashboard 默认读取的是 Postgres 中的真实初始化记录，而不是内存样例。
-控制台默认本地账号如下：
-
-- `admin` / `change-me-now`
-- `operator` / `change-me-now`
-- `viewer` / `change-me-now`
-
-Phase 5 起，控制面还要求配置 `RGINX_CONTROL_AGENT_SHARED_TOKEN`，供边缘节点上的
-`rginx-node-agent` 通过独立 bearer token 注册和上报心跳。
-
-边缘节点默认不加入 Docker。完成 APT 安装后，可直接在节点主机上运行：
-
-```bash
-RGINX_CONTROL_PLANE_ORIGIN=http://<control-api>:8080 \
-RGINX_CONTROL_AGENT_SHARED_TOKEN=change-me-for-node-agent \
-RGINX_NODE_ID=edge-hz-01 \
-RGINX_CLUSTER_ID=cluster-mainland \
-RGINX_NODE_ADVERTISE_ADDR=10.0.2.15:8443 \
-RGINX_ADMIN_SOCKET=/run/rginx/admin.sock \
-RGINX_NODE_BINARY=/usr/sbin/rginx \
-RGINX_NODE_CONFIG_PATH=/etc/rginx/rginx.ron \
-RGINX_NODE_CONFIG_BACKUP_DIR=/var/lib/rginx-node-agent/backups \
-RGINX_NODE_CONFIG_STAGING_DIR=/var/lib/rginx-node-agent/staging \
-cargo run -p rginx-node-agent
-```
-
-### 源码运行
-
-仓库默认配置在 `configs/rginx.ron`：
-
-```bash
-cargo run -p rginx -- --config configs/rginx.ron
-```
-
-启动前先检查配置：
-
-```bash
-cargo run -p rginx -- check --config configs/rginx.ron
-cargo run -p rginx -- -t --config configs/rginx.ron
-```
-
-如果先构建：
-
-```bash
-cargo build -p rginx
-./target/debug/rginx --config configs/rginx.ron
-./target/debug/rginx check --config configs/rginx.ron
-./target/debug/rginx status --config configs/rginx.ron
-```
-
-### 测试分层
-
-阶段 0 之后，仓库把测试入口分成了快测和慢测两层：
-
-```bash
-./scripts/test-fast.sh
-./scripts/run-clippy-gate.sh
-./scripts/test-slow.sh
-```
-
-- `test-fast.sh` 运行 `rginx-core`、`rginx-config`、`rginx-http`、`rginx-runtime`、`rginx-observability` 的 crate 内测试，以及 `rginx` 二进制本身的单测；其中已经包含 HTTP/3 运行时与控制面单测。
-- `run-clippy-gate.sh` 运行 workspace 级 `cargo clippy --all-targets --all-features -- -D warnings`，并读取仓库根目录的 `clippy.toml` 作为默认 lint 基线。
-- `test-slow.sh` 顺序执行 `crates/rginx-app/tests/` 下的全部集成测试目标，并显式要求 `http3`、`upstream_http3`、`grpc_http3`、`reload`、`admin`、`check` 这些 HTTP/3 gate 目标存在。
-- `scripts/run-tls-gate.sh` 继续保留给 TLS 相关回归门禁和发布前检查；现在也包含 downstream / upstream / gRPC over HTTP/3 回归。
-
-### 热更新边界
-
-当前 `SIGHUP` 热重载支持：
-
-- 路由、vhost、upstream、TLS 相关业务配置变更
-- 显式 `listeners: []` 模型下的 listener 新增与删除
-- `include` 片段更新
-
-当前仍然要求显式重启的字段：
-
-- `listen`
-- `listeners[].listen`
-- `runtime.worker_threads`
-- `runtime.accept_workers`
-
-也就是说，显式 listener 可以热增删，但既有 listener 的 `listen` 地址变化仍属于 restart boundary。
-
-更完整的运行时语义见：
-
-- `docs/reload-semantics.md`
-- `docs/runtime-architecture.md`
-
-### 安装
-
-从当前源码仓库安装：
-
-```bash
-./scripts/install.sh --mode source
-```
-
-从 GitHub Release 安装：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/vansour/rginx/main/scripts/install.sh | \
-  bash -s -- --mode release --version <tag>
-```
-
-常用参数：
-
-```bash
-./scripts/install.sh --mode source --force
-```
-
-安装后默认路径：
-
-- 二进制：`/usr/sbin/rginx`
-- 主配置：`/etc/rginx/rginx.ron`
-- 站点片段：`/etc/rginx/conf.d/*.ron`
-- pid：`/run/rginx/rginx.pid`
-- admin socket：`/run/rginx/admin.sock`
-
-卸载：
-
-```bash
-rginx-uninstall
-rginx-uninstall --purge-config
-```
-
-### APT / Debian 安装
-
-如果你想要和 `nginx` 一样走 `apt install` / `apt remove` / `apt purge` 这条链路，仓库里现在已经补了 `.deb` 打包和 APT 仓库发布脚本。
-
-先在源码仓库里构建 Debian 包：
-
-```bash
-./scripts/build-deb.sh
-```
-
-默认会产出：
-
-```bash
-target/debian/rginx_<version>_<arch>.deb
-```
-
-本机通过 `apt` 安装本地包：
-
-```bash
-sudo apt install ./target/debian/rginx_<version>_<arch>.deb
-```
-
-安装后：
-
-- 二进制：`/usr/sbin/rginx`
-- systemd unit：`/lib/systemd/system/rginx.service`
-- 主配置：`/etc/rginx/rginx.ron`
-- 站点片段：`/etc/rginx/conf.d/*.ron`
-
-APT 生命周期：
-
-```bash
-sudo apt remove rginx
-sudo apt purge rginx
-```
-
-语义和 `nginx` 一样：
-
-- `apt remove rginx` 会卸载程序，但保留 `/etc/rginx/*` 配置
-- `apt purge rginx` 会连同 `/etc/rginx/*` 一起清掉
-
-注意：
-
-- APT 安装场景下不要再用 `rginx-uninstall`，应该让 `apt remove/purge` 接管整个生命周期
-- 包的 `postinst` 会创建 `rginx` system user，并按 Debian `nginx` 包的方式完成 `daemon-reload`、enable 状态维护，以及首次安装启动 / 升级重启
-- systemd unit 会在 `ExecStartPre` 先做一次 `rginx -t`
-- 安装后的默认服务用户仍是 `rginx`，并通过 `CAP_NET_BIND_SERVICE` 支持绑定 `80/443`
-
-安装完成后可直接查看服务状态：
-
-```bash
-sudo systemctl status rginx
-```
-
-### 发布成 APT 仓库
-
-如果你希望最终用户直接：
-
-```bash
-sudo apt update
-sudo apt install rginx
-```
-
-那还需要把 `.deb` 发布成一个签名过的 APT 仓库。仓库里提供了：
-
-```bash
-./scripts/publish-apt-repo.sh
-```
-
-示例：
-
-```bash
-./scripts/build-deb.sh
-./scripts/publish-apt-repo.sh \
-  --repo-root ./target/apt-repo \
-  --deb-dir ./target/debian \
-  --gpg-key packages@example.com \
-  --export-key ./target/apt-repo/rginx-archive-keyring.gpg
-```
-
-这会生成标准静态仓库结构：
-
-```text
-target/apt-repo/
-  pool/
-  dists/stable/
-    Release
-    InRelease
-    Release.gpg
-    main/binary-amd64/Packages{,.gz}
-    ...
-```
-
-把这个目录挂到 HTTP/HTTPS 静态站点后，客户端就可以这样接入：
-
-```bash
-curl -fsSL https://packages.example.com/rginx/rginx-archive-keyring.gpg \
-  | sudo tee /usr/share/keyrings/rginx-archive-keyring.gpg >/dev/null
-
-echo "deb [signed-by=/usr/share/keyrings/rginx-archive-keyring.gpg] https://packages.example.com/rginx stable main" \
-  | sudo tee /etc/apt/sources.list.d/rginx.list
-
-sudo apt update
-sudo apt install rginx
-```
-
-### GitHub Actions 自动发布
-
-仓库里的 [release.yml](/root/github/rginx/.github/workflows/release.yml) 现在已经扩成完整 release 流水线：
-
-- tag `v*` 时先校验 tag 和跑测试
-- 在 `ubuntu-24.04` 上产出 `linux-amd64` tarball 和 `amd64 .deb`
-- 在 `ubuntu-24.04-arm` 上产出 `linux-arm64` tarball 和 `arm64 .deb`
-- 把 tarball、`.deb` 和 `SHA256SUMS.txt` 上传到 GitHub Release
-- 对稳定 tag 额外生成签名过的 APT 仓库并发布到 GitHub Pages
-
-当前约定：
-
-- 预发布 tag，例如 `v0.1.3-rc.11`：发布 GitHub Release 资产，但不更新 APT 仓库
-- 稳定 tag，例如 `v0.1.3`：同时发布 GitHub Release 和 GitHub Pages APT 仓库
-
-要让稳定版自动发布 APT 仓库，还需要一次性配置：
-
-1. 在仓库 `Settings -> Pages` 里把 Source 设成 `GitHub Actions`
-2. 在仓库 `Settings -> Secrets and variables -> Actions` 里配置这些 secrets
-
-必需 secrets：
-
-- `APT_GPG_PRIVATE_KEY`
-  内容是 ASCII-armored 的私钥块，用来签 `Release` / `InRelease`
-- `APT_GPG_KEY_ID`
-  用于签名的 key id、fingerprint 或 email
-
-可选 secret：
-
-- `APT_GPG_PASSPHRASE`
-  如果私钥带 passphrase，就配置这个；无口令私钥可以不配
-
-稳定版自动发布成功后，默认 GitHub Pages URL 通常是：
-
-```text
-https://<owner>.github.io/<repo>/apt
-```
-
-然后用户就可以按前面的方式接入：
-
-```bash
-curl -fsSL https://<owner>.github.io/<repo>/apt/rginx-archive-keyring.gpg \
-  | sudo tee /usr/share/keyrings/rginx-archive-keyring.gpg >/dev/null
-
-echo "deb [signed-by=/usr/share/keyrings/rginx-archive-keyring.gpg] https://<owner>.github.io/<repo>/apt stable main" \
-  | sudo tee /etc/apt/sources.list.d/rginx.list
-
-sudo apt update
-sudo apt install rginx
-```
-
-## 配置概览
-
-配置格式是 RON。
-
-### 兼容旧模型
-
-```ron
-Config(
-    runtime: RuntimeConfig(
-        shutdown_timeout_secs: 10,
-        worker_threads: None,
-        accept_workers: None,
-    ),
-    server: ServerConfig(
-        listen: "0.0.0.0:80",
-        server_names: [],
-        trusted_proxies: [],
-        tls: None,
-    ),
-    upstreams: [],
-    locations: [
-        LocationConfig(
-            matcher: Exact("/"),
-            handler: Return(
-                status: 200,
-                location: "",
-                body: Some("ok\n"),
-            ),
-        ),
-    ],
-    servers: [],
-)
-```
-
-### 显式多监听模型
-
-```ron
-Config(
-    runtime: RuntimeConfig(
-        shutdown_timeout_secs: 10,
-    ),
-    listeners: [
-        ListenerConfig(
-            name: "http",
-            listen: "0.0.0.0:80",
-        ),
-        ListenerConfig(
-            name: "https",
-            listen: "0.0.0.0:443",
-            tls: Some(ServerTlsConfig(
-                cert_path: "/etc/rginx/certs/default.crt",
-                key_path: "/etc/rginx/certs/default.key",
-                versions: Some([Tls12, Tls13]),
-                cipher_suites: Some([Tls13Aes256GcmSha384, Tls13Aes128GcmSha256]),
-                key_exchange_groups: Some([X25519, Secp256r1]),
-                session_resumption: Some(true),
-                session_tickets: Some(false),
-                session_cache_size: Some(256),
-                session_ticket_count: Some(2),
-            )),
-        ),
-    ],
-    server: ServerConfig(
-        server_names: ["example.com"],
-    ),
-    upstreams: [],
-    locations: [
-        LocationConfig(
-            matcher: Exact("/"),
-            handler: Return(
-                status: 200,
-                location: "",
-                body: Some("ok\n"),
-            ),
-        ),
-    ],
-    servers: [],
-)
-```
-
-### 默认仓库配置
-
-- `configs/rginx.ron`
-- `configs/conf.d/default.ron`
-
-更完整参考：
-
-- `example/rginx.ron`
-- `example/conf.d/default.ron`
-
-### 预处理能力
-
-支持两类轻量预处理：
-
-- 独立一行的 `// @include "relative/path.ron"`
-- 独立一行的 `// @include "conf.d/*.ron"`
-- 双引号字符串里的 `${VAR}` 和 `${VAR:-default}`
-
-示例：
-
-```ron
-server: ServerConfig(
-    listen: "${rginx_listen:-0.0.0.0:80}",
-),
-servers: [
-    // @include "conf.d/*.ron"
-],
-```
-
-边界：
-
-- `include` 路径相对当前配置文件所在目录
-- 通配目前只支持 `*.ron`
-- 环境变量只在普通双引号字符串里展开
-- 缺失的 `${VAR}` 直接报错
-- 需要字面量 `$` 时写 `$$`
-
-## 常用运维命令
-
-### 配置检查
-
-```bash
-rginx check --config /etc/rginx/rginx.ron
-rginx -t --config /etc/rginx/rginx.ron
-```
-
-成功输出会带上：
-
-- `listener_model=legacy|explicit`
-- `listeners=<count>`
-- `reload_requires_restart_for=listen,listeners[].listen,runtime.worker_threads,runtime.accept_workers`
-- `reload_tls_updates=...`
-- `tls_expiring_certificates=...`
-
-这些字段的作用很直接：
-
-- 告诉你当前是兼容旧 listener 还是显式 listener 模型
-- 告诉你当前 listener 数量
-- 明确哪些字段属于启动期边界，后续不能靠 `reload` 热替换
-- 明确哪些 TLS 字段可以通过 `reload` 热更新
-- 提前暴露即将过期的证书
-
-### reload / restart / stop
-
-```bash
-rginx -s reload
-rginx -s restart
-rginx -s quit
-rginx -s stop
-```
-
-也可以直接发信号：
-
-```bash
-kill -HUP <pid>
-kill -TERM <pid>
-kill -QUIT <pid>
-```
-
-建议这样理解：
-
-- `reload`
-  - 适用于路由、upstream、ACL、限流、vhost 级 TLS 这类可原地替换项
-- `restart`
-  - 适用于监听地址、listener 集合、`runtime.worker_threads`、`runtime.accept_workers` 这类启动期结构变化
-
-如果你对启动期边界字段发送 `reload`：
-
-- 失败原因会进入运行日志
-- `rginx status` 的 `last_reload` 会带上具体变化字段
-
-### 本地只读状态
+- [configs/rginx.ron](/root/github/rginx/configs/rginx.ron)
+- [configs/conf.d/default.ron](/root/github/rginx/configs/conf.d/default.ron)
 
 常用命令：
 
 ```bash
-rginx snapshot
-rginx snapshot --include traffic --include upstreams
-rginx snapshot-version
-rginx delta --since-version 12
-rginx wait --since-version 12 --timeout-ms 5000
+rginx -t
+rginx -s reload
 rginx status
-rginx counters
-rginx traffic --window-secs 300
-rginx peers
-rginx upstreams --window-secs 300
+rginx snapshot --include status --include traffic
+rginx traffic --window-secs 60
 ```
 
-当前有两种稳定输出口径：
+### 本地启动控制面
 
-- 文本型命令：
-  - `status / counters / traffic / peers / upstreams`
-  - 每行一条记录
-  - `kind=<record-type> key=value ...`
-- 结构化命令：
-  - `snapshot / delta`
-  - pretty JSON
-
-文本型输出示例：
-
-```text
-kind=status revision=3 listen=127.0.0.1:8080 active_connections=0 reload_failures=1
-kind=counters downstream_requests_total=42 downstream_responses_2xx_total=40
-kind=traffic_listener listener=default downstream_requests_total=42 grpc_requests_total=3
-kind=peer_health_peer upstream=backend peer=http://127.0.0.1:9000 available=true
-kind=upstream_stats upstream=backend peer_attempts_total=42 failovers_total=1
-```
-
-现在 `status` / `snapshot` 里也会包含 TLS 运行时视图，例如：
-
-- listener 是否启用 TLS
-- SNI 名称集合
-- 证书路径与到期时间
-- mTLS listener 分布和握手失败分类计数
-
-## benchmark / soak
-
-固定 benchmark 矩阵：
+先准备环境变量：
 
 ```bash
-python3 scripts/run-benchmark-matrix.py \
-  --http1-url http://127.0.0.1:18080/ \
-  --https-url https://127.0.0.1:18443/ \
-  --http2-url https://127.0.0.1:18443/ \
-  --http3-url https://127.0.0.1:18443/ \
-  --grpc-url https://127.0.0.1:18443/grpc.health.v1.Health/Check \
-  --grpc-http3-url https://127.0.0.1:18443/grpc.health.v1.Health/Check \
-  --grpc-web-url http://127.0.0.1:18080/grpc.health.v1.Health/Check \
-  --grpc-web-text-url http://127.0.0.1:18080/grpc.health.v1.Health/Check \
-  --requests 200 \
-  --concurrency 16
+cp .env.example .env
 ```
 
-固定 soak 矩阵：
+再启动：
 
 ```bash
-./scripts/run-soak.sh --iterations 1
+docker compose up --build -d
 ```
 
-HTTP/3 专项 soak：
+默认入口：
+
+- Console / API: `http://127.0.0.1:8080`
+- Postgres: `127.0.0.1:5432`
+- Dragonfly: `127.0.0.1:6379`
+
+本地开发默认管理员账号来自 [.env.example](/root/github/rginx/.env.example)：
+
+- username: `admin`
+- password: `admin`
+
+如果要同时启用权威 DNS，在 `.env` 中设置：
+
+- `RGINX_CONTROL_DNS_UDP_ADDR`
+- `RGINX_CONTROL_DNS_TCP_ADDR`
+
+### 节点 agent
+
+节点侧 systemd 示例位于：
+
+- [rginx.service](/root/github/rginx/deploy/systemd/rginx.service)
+- [rginx-node-agent.service](/root/github/rginx/deploy/control-plane/systemd/rginx-node-agent.service)
+- [rginx-node-agent.env.example](/root/github/rginx/deploy/control-plane/systemd/rginx-node-agent.env.example)
+
+## 开发与验证
+
+完整检查命令：
 
 ```bash
-./scripts/run-http3-soak.sh --iterations 3
+cargo check --workspace --all-targets --message-format short
+cargo test --workspace --all-targets --no-fail-fast
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-HTTP/3 release gate：
+仓库内置脚本：
 
 ```bash
-./scripts/run-http3-release-gate.sh --soak-iterations 3
+scripts/test-fast.sh
+scripts/test-slow.sh
+scripts/run-clippy-gate.sh
+scripts/run-tls-gate.sh
+scripts/run-http3-gate.sh
+scripts/test-control-plane-compose.sh
+scripts/test-control-console-e2e.sh
 ```
 
-当前建议至少用下面这些命令把工作区收口成可继续迭代的稳定基线：
+## 构建与交付
 
-```bash
-./scripts/test-fast.sh
-./scripts/run-clippy-gate.sh
-./scripts/test-slow.sh
-./scripts/run-soak.sh --iterations 1
-./scripts/run-http3-gate.sh
-```
-
-如果你需要本地对比 `rginx` 和 `nginx` 的基准结果，可以继续用：
-
-```bash
-python3 scripts/nginx_compare/main.py \
-  --workspace . \
-  --out-dir target/nginx-compare
-```
-
-当前 compare harness 会实际跑 `rginx` 的 HTTP/3 场景；`nginx` 一侧在这套本地构建配置下会被标记为 unsupported，因为当前 harness 没有启用 QUIC/HTTP/3 构建链路。
-
-### TLS Release Gate
-
-每次改动 TLS 相关逻辑，发布前至少确认：
-
-```bash
-./scripts/test-fast.sh
-./scripts/run-clippy-gate.sh
-./scripts/test-slow.sh
-./scripts/run-tls-gate.sh
-./scripts/run-soak.sh --iterations 1
-rginx check --config /etc/rginx/rginx.ron
-```
-
-建议把这几项当成 TLS 子系统的最小发布门槛：
-
-- 下游 TLS / SNI / 默认证书回退通过
-- downstream / upstream / gRPC over HTTP/3 regression 通过
-- 下游 mTLS 通过
-- 上游 HTTPS / mTLS / HTTP2 / SNI 通过
-- access log / admin / check 的 TLS 可观测性通过
-- reload / restart 边界没有回归
-
-## 部署
-
-仓库内提供：
-
-- `deploy/systemd/rginx.service`
-- `deploy/supervisor/rginx.conf`
-
-systemd：
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now rginx
-sudo systemctl reload rginx
-sudo systemctl restart rginx
-sudo systemctl status rginx
-```
-
-supervisor：
-
-```bash
-sudo supervisorctl reread
-sudo supervisorctl update
-sudo supervisorctl restart rginx
-sudo supervisorctl status rginx
-```
-
-上线前至少确认：
-
-```bash
-rginx check --config /etc/rginx/rginx.ron
-rginx snapshot --config /etc/rginx/rginx.ron
-rginx status --config /etc/rginx/rginx.ron
-rginx counters --config /etc/rginx/rginx.ron
-rginx traffic --config /etc/rginx/rginx.ron
-rginx peers --config /etc/rginx/rginx.ron
-rginx upstreams --config /etc/rginx/rginx.ron
-```
-
-## 当前限制
-
-- Linux only
-- 入站 HTTP/2 只支持 TLS / ALPN，不支持明文 `h2c`
-- 上游 HTTP/2 当前要求 `https://` peer，不支持明文 `h2c`
-- active gRPC health check 当前也要求 `https://` peer
-- 上游 TLS 名称策略目前分两层：`server_name` 控制是否发送 SNI，`server_name_override` 控制证书校验目标 / SNI 覆盖名
-- reload 不能修改：
-  - `listen`
-  - listener 集合
-  - `runtime.worker_threads`
-  - `runtime.accept_workers`
-- body limit 当前是 listener / server 级，不是 route 级
-- `PROXY protocol` 当前只支持 inbound v1
-- upstream peer 只接受 `scheme://authority`，不接受 path / query
-- 当前只承诺基础 `grpc-web` binary / text 模式，不承诺更完整高级兼容语义
-
-## 参考入口
-
-- 默认活跃配置镜像：`configs/`
-- 更完整配置参考：`example/`
-- 部署示例：`deploy/`
-- 安装、release、benchmark、soak：`scripts/`
+- [Dockerfile](/root/github/rginx/Dockerfile) 当前提供 `rginx-web` 镜像构建
+- [compose.yaml](/root/github/rginx/compose.yaml) 是本地控制面一体化入口
+- [scripts/install.sh](/root/github/rginx/scripts/install.sh) / [scripts/uninstall.sh](/root/github/rginx/scripts/uninstall.sh) 用于边缘节点安装与卸载
 
 ## 许可证
 
-`MIT OR Apache-2.0`
+双许可证：
+
+- [LICENSE-MIT](/root/github/rginx/LICENSE-MIT)
+- [LICENSE-APACHE](/root/github/rginx/LICENSE-APACHE)

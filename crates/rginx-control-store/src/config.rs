@@ -1,7 +1,14 @@
 use std::env;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use sqlx::postgres::PgConnectOptions;
+
+#[derive(Debug, Clone)]
+pub struct BootstrapAdminConfig {
+    pub username: String,
+    pub password: String,
+    pub display_name: String,
+}
 
 #[derive(Debug, Clone)]
 pub struct ControlPlaneStoreConfig {
@@ -14,6 +21,7 @@ pub struct ControlPlaneStoreConfig {
     pub dragonfly_host: String,
     pub dragonfly_port: u16,
     pub dragonfly_key_prefix: String,
+    pub bootstrap_admin: BootstrapAdminConfig,
 }
 
 impl Default for ControlPlaneStoreConfig {
@@ -28,34 +36,62 @@ impl Default for ControlPlaneStoreConfig {
             dragonfly_host: "127.0.0.1".to_string(),
             dragonfly_port: 6379,
             dragonfly_key_prefix: "rginx:control".to_string(),
+            bootstrap_admin: BootstrapAdminConfig {
+                username: "admin".to_string(),
+                password: "admin".to_string(),
+                display_name: "Local Admin".to_string(),
+            },
         }
     }
 }
 
 impl ControlPlaneStoreConfig {
     pub fn from_env() -> Result<Self> {
+        let defaults = Self::default();
+        let bootstrap_admin_username = env::var("RGINX_CONTROL_BOOTSTRAP_ADMIN_USERNAME")
+            .unwrap_or_else(|_| defaults.bootstrap_admin.username.clone());
+        let bootstrap_admin_password = env::var("RGINX_CONTROL_BOOTSTRAP_ADMIN_PASSWORD")
+            .unwrap_or_else(|_| defaults.bootstrap_admin.password.clone());
+        let bootstrap_admin_display_name = env::var("RGINX_CONTROL_BOOTSTRAP_ADMIN_DISPLAY_NAME")
+            .unwrap_or_else(|_| defaults.bootstrap_admin.display_name.clone());
+
+        if bootstrap_admin_username.trim().is_empty() {
+            bail!("RGINX_CONTROL_BOOTSTRAP_ADMIN_USERNAME should not be empty");
+        }
+        if bootstrap_admin_password.is_empty() {
+            bail!("RGINX_CONTROL_BOOTSTRAP_ADMIN_PASSWORD should not be empty");
+        }
+        if bootstrap_admin_display_name.trim().is_empty() {
+            bail!("RGINX_CONTROL_BOOTSTRAP_ADMIN_DISPLAY_NAME should not be empty");
+        }
+
         Ok(Self {
-            db_host: env::var("RGINX_CONTROL_DB_HOST").unwrap_or_else(|_| Self::default().db_host),
+            db_host: env::var("RGINX_CONTROL_DB_HOST").unwrap_or_else(|_| defaults.db_host.clone()),
             db_port: env::var("RGINX_CONTROL_DB_PORT")
-                .unwrap_or_else(|_| Self::default().db_port.to_string())
+                .unwrap_or_else(|_| defaults.db_port.to_string())
                 .parse()
                 .context("RGINX_CONTROL_DB_PORT should be a valid u16")?,
-            db_user: env::var("RGINX_CONTROL_DB_USER").unwrap_or_else(|_| Self::default().db_user),
+            db_user: env::var("RGINX_CONTROL_DB_USER").unwrap_or_else(|_| defaults.db_user.clone()),
             db_password: env::var("RGINX_CONTROL_DB_PASSWORD")
-                .unwrap_or_else(|_| Self::default().db_password),
-            db_name: env::var("RGINX_CONTROL_DB_NAME").unwrap_or_else(|_| Self::default().db_name),
+                .unwrap_or_else(|_| defaults.db_password.clone()),
+            db_name: env::var("RGINX_CONTROL_DB_NAME").unwrap_or_else(|_| defaults.db_name.clone()),
             db_max_connections: env::var("RGINX_CONTROL_DB_MAX_CONNECTIONS")
-                .unwrap_or_else(|_| Self::default().db_max_connections.to_string())
+                .unwrap_or_else(|_| defaults.db_max_connections.to_string())
                 .parse()
                 .context("RGINX_CONTROL_DB_MAX_CONNECTIONS should be a valid u32")?,
             dragonfly_host: env::var("RGINX_CONTROL_DRAGONFLY_HOST")
-                .unwrap_or_else(|_| Self::default().dragonfly_host),
+                .unwrap_or_else(|_| defaults.dragonfly_host.clone()),
             dragonfly_port: env::var("RGINX_CONTROL_DRAGONFLY_PORT")
-                .unwrap_or_else(|_| Self::default().dragonfly_port.to_string())
+                .unwrap_or_else(|_| defaults.dragonfly_port.to_string())
                 .parse()
                 .context("RGINX_CONTROL_DRAGONFLY_PORT should be a valid u16")?,
             dragonfly_key_prefix: env::var("RGINX_CONTROL_DRAGONFLY_KEY_PREFIX")
-                .unwrap_or_else(|_| Self::default().dragonfly_key_prefix),
+                .unwrap_or_else(|_| defaults.dragonfly_key_prefix.clone()),
+            bootstrap_admin: BootstrapAdminConfig {
+                username: bootstrap_admin_username.trim().to_string(),
+                password: bootstrap_admin_password,
+                display_name: bootstrap_admin_display_name.trim().to_string(),
+            },
         })
     }
 

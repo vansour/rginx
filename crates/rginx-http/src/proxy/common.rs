@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) fn build_proxy_uri(
-    peer: &UpstreamPeer,
+    peer: &ResolvedUpstreamPeer,
     original_uri: &Uri,
     strip_prefix: Option<&str>,
 ) -> Result<Uri, http::Error> {
@@ -25,7 +25,7 @@ pub(super) fn build_proxy_uri(
 
     Uri::builder()
         .scheme(peer.scheme.as_str())
-        .authority(peer.authority.as_str())
+        .authority(peer.dial_authority.as_str())
         .path_and_query(path_and_query)
         .build()
 }

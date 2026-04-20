@@ -35,10 +35,10 @@ fn replayable_idempotent_requests_retry_once() {
         body: PreparedRequestBody::Replayable { body: Bytes::new(), trailers: None },
         peer_failover_enabled: true,
     };
-    let peers = vec![peer("http://127.0.0.1:9000"), peer("http://127.0.0.1:9001")];
+    let peers = [peer("http://127.0.0.1:9000"), peer("http://127.0.0.1:9001")];
 
-    assert!(can_retry_peer_request(&prepared, &peers, 0));
-    assert!(!can_retry_peer_request(&prepared, &peers, 1));
+    assert!(can_retry_peer_request(&prepared, peers.len(), 0));
+    assert!(!can_retry_peer_request(&prepared, peers.len(), 1));
 }
 
 #[test]
@@ -50,9 +50,9 @@ fn streaming_requests_do_not_retry() {
         body: PreparedRequestBody::Streaming(None),
         peer_failover_enabled: false,
     };
-    let peers = vec![peer("http://127.0.0.1:9000"), peer("http://127.0.0.1:9001")];
+    let peers = [peer("http://127.0.0.1:9000"), peer("http://127.0.0.1:9001")];
 
-    assert!(!can_retry_peer_request(&prepared, &peers, 0));
+    assert!(!can_retry_peer_request(&prepared, peers.len(), 0));
 }
 
 #[test]
@@ -64,8 +64,8 @@ fn idempotent_method_detection_matches_retry_policy() {
     assert!(!is_idempotent_method(&Method::PATCH));
 }
 
-#[test]
-fn ip_hash_keeps_the_same_primary_peer_for_the_same_client_ip() {
+#[tokio::test]
+async fn ip_hash_keeps_the_same_primary_peer_for_the_same_client_ip() {
     let upstream = Upstream::new(
         "backend".to_string(),
         vec![
@@ -83,9 +83,11 @@ fn ip_hash_keeps_the_same_primary_peer_for_the_same_client_ip() {
     let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
 
     let first =
-        clients.select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 2);
+        select(&clients, snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 2)
+            .await;
     let second =
-        clients.select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 2);
+        select(&clients, snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 2)
+            .await;
 
     assert_eq!(
         first.peers.iter().map(|peer| peer.url.as_str()).collect::<Vec<_>>(),
@@ -93,8 +95,8 @@ fn ip_hash_keeps_the_same_primary_peer_for_the_same_client_ip() {
     );
 }
 
-#[test]
-fn ip_hash_skips_unhealthy_primary_and_uses_the_next_peer() {
+#[tokio::test]
+async fn ip_hash_skips_unhealthy_primary_and_uses_the_next_peer() {
     let upstream = Upstream::new(
         "backend".to_string(),
         vec![
@@ -114,7 +116,8 @@ fn ip_hash_skips_unhealthy_primary_and_uses_the_next_peer() {
     let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
 
     let initial =
-        clients.select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 2);
+        select(&clients, snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 2)
+            .await;
     let primary = initial.peers[0].url.clone();
     let fallback = initial.peers[1].url.clone();
 
@@ -122,13 +125,14 @@ fn ip_hash_skips_unhealthy_primary_and_uses_the_next_peer() {
     assert!(failure.entered_cooldown);
 
     let selected =
-        clients.select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 2);
+        select(&clients, snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 2)
+            .await;
     assert_eq!(selected.skipped_unhealthy, 1);
     assert_eq!(selected.peers[0].url, fallback);
 }
 
-#[test]
-fn ip_hash_distributes_multiple_client_ips_across_peers() {
+#[tokio::test]
+async fn ip_hash_distributes_multiple_client_ips_across_peers() {
     let upstream = Upstream::new(
         "backend".to_string(),
         vec![
@@ -145,14 +149,16 @@ fn ip_hash_distributes_multiple_client_ips_across_peers() {
     let snapshot = snapshot_with_upstream("backend", Arc::new(upstream));
     let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
 
-    let unique_primaries = (1..=16)
-        .map(|suffix| {
-            let ip = format!("198.51.100.{suffix}");
-            clients.select_peers(snapshot.upstreams["backend"].as_ref(), client_ip(&ip), 1).peers[0]
-                .url
-                .clone()
-        })
-        .collect::<std::collections::HashSet<_>>();
+    let mut unique_primaries = std::collections::HashSet::new();
+    for suffix in 1..=16 {
+        let ip = format!("198.51.100.{suffix}");
+        unique_primaries.insert(
+            select(&clients, snapshot.upstreams["backend"].as_ref(), client_ip(&ip), 1).await.peers
+                [0]
+            .url
+            .clone(),
+        );
+    }
 
     assert!(
         unique_primaries.len() >= 2,
@@ -160,8 +166,8 @@ fn ip_hash_distributes_multiple_client_ips_across_peers() {
     );
 }
 
-#[test]
-fn weighted_ip_hash_prefers_heavier_peers() {
+#[tokio::test]
+async fn weighted_ip_hash_prefers_heavier_peers() {
     let upstream = Upstream::new(
         "backend".to_string(),
         vec![
@@ -177,20 +183,22 @@ fn weighted_ip_hash_prefers_heavier_peers() {
     let snapshot = snapshot_with_upstream("backend", Arc::new(upstream));
     let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
 
-    let heavy = (0..=255)
-        .filter(|suffix| {
-            let ip = format!("198.51.100.{suffix}");
-            clients.select_peers(snapshot.upstreams["backend"].as_ref(), client_ip(&ip), 1).peers[0]
-                .url
-                == "http://127.0.0.1:9000"
-        })
-        .count();
+    let mut heavy = 0;
+    for suffix in 0..=255 {
+        let ip = format!("198.51.100.{suffix}");
+        if select(&clients, snapshot.upstreams["backend"].as_ref(), client_ip(&ip), 1).await.peers
+            [0]
+        .url == "http://127.0.0.1:9000"
+        {
+            heavy += 1;
+        }
+    }
 
     assert!(heavy > 128, "expected weighted ip_hash to prefer the heavier peer");
 }
 
-#[test]
-fn backup_peer_is_only_used_as_retry_candidate_while_primary_is_healthy() {
+#[tokio::test]
+async fn backup_peer_is_only_used_as_retry_candidate_while_primary_is_healthy() {
     let upstream = Upstream::new(
         "backend".to_string(),
         vec![peer("http://127.0.0.1:9000"), peer_with_role("http://127.0.0.1:9010", 1, true)],
@@ -201,22 +209,24 @@ fn backup_peer_is_only_used_as_retry_candidate_while_primary_is_healthy() {
     let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
 
     let primary_only =
-        clients.select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 1);
+        select(&clients, snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 1)
+            .await;
     assert_eq!(
         primary_only.peers.iter().map(|peer| peer.url.as_str()).collect::<Vec<_>>(),
         vec!["http://127.0.0.1:9000"]
     );
 
     let with_retry =
-        clients.select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 2);
+        select(&clients, snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 2)
+            .await;
     assert_eq!(
         with_retry.peers.iter().map(|peer| peer.url.as_str()).collect::<Vec<_>>(),
         vec!["http://127.0.0.1:9000", "http://127.0.0.1:9010"]
     );
 }
 
-#[test]
-fn backup_peer_is_selected_when_primary_pool_is_unhealthy() {
+#[tokio::test]
+async fn backup_peer_is_selected_when_primary_pool_is_unhealthy() {
     let upstream = Upstream::new(
         "backend".to_string(),
         vec![peer("http://127.0.0.1:9000"), peer_with_role("http://127.0.0.1:9010", 1, true)],
@@ -234,7 +244,8 @@ fn backup_peer_is_selected_when_primary_pool_is_unhealthy() {
     assert!(failure.entered_cooldown);
 
     let selected =
-        clients.select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 1);
+        select(&clients, snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 1)
+            .await;
     assert_eq!(selected.skipped_unhealthy, 1);
     assert_eq!(
         selected.peers.iter().map(|peer| peer.url.as_str()).collect::<Vec<_>>(),
@@ -242,8 +253,8 @@ fn backup_peer_is_selected_when_primary_pool_is_unhealthy() {
     );
 }
 
-#[test]
-fn least_conn_prefers_peers_with_fewer_active_requests() {
+#[tokio::test]
+async fn least_conn_prefers_peers_with_fewer_active_requests() {
     let upstream = Upstream::new(
         "backend".to_string(),
         vec![
@@ -265,7 +276,8 @@ fn least_conn_prefers_peers_with_fewer_active_requests() {
     let _peer_b_1 = clients.track_active_request("backend", "http://127.0.0.1:9001");
 
     let selected =
-        clients.select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 3);
+        select(&clients, snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 3)
+            .await;
 
     assert_eq!(
         selected.peers.iter().map(|peer| peer.url.as_str()).collect::<Vec<_>>(),
@@ -273,8 +285,8 @@ fn least_conn_prefers_peers_with_fewer_active_requests() {
     );
 }
 
-#[test]
-fn least_conn_uses_configured_peer_order_to_break_ties() {
+#[tokio::test]
+async fn least_conn_uses_configured_peer_order_to_break_ties() {
     let upstream = Upstream::new(
         "backend".to_string(),
         vec![
@@ -292,7 +304,8 @@ fn least_conn_uses_configured_peer_order_to_break_ties() {
     let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
 
     let selected =
-        clients.select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 3);
+        select(&clients, snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 3)
+            .await;
 
     assert_eq!(
         selected.peers.iter().map(|peer| peer.url.as_str()).collect::<Vec<_>>(),
@@ -300,8 +313,8 @@ fn least_conn_uses_configured_peer_order_to_break_ties() {
     );
 }
 
-#[test]
-fn weighted_least_conn_prefers_higher_capacity_peer_when_projected_load_ties() {
+#[tokio::test]
+async fn weighted_least_conn_prefers_higher_capacity_peer_when_projected_load_ties() {
     let upstream = Upstream::new(
         "backend".to_string(),
         vec![
@@ -321,7 +334,8 @@ fn weighted_least_conn_prefers_higher_capacity_peer_when_projected_load_ties() {
     let _peer_a_2 = clients.track_active_request("backend", "http://127.0.0.1:9000");
 
     let selected =
-        clients.select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 2);
+        select(&clients, snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 2)
+            .await;
 
     assert_eq!(
         selected.peers.iter().map(|peer| peer.url.as_str()).collect::<Vec<_>>(),
@@ -329,8 +343,8 @@ fn weighted_least_conn_prefers_higher_capacity_peer_when_projected_load_ties() {
     );
 }
 
-#[test]
-fn least_conn_ignores_backup_peers_while_primary_pool_is_available() {
+#[tokio::test]
+async fn least_conn_ignores_backup_peers_while_primary_pool_is_available() {
     let upstream = Upstream::new(
         "backend".to_string(),
         vec![peer("http://127.0.0.1:9000"), peer_with_role("http://127.0.0.1:9010", 1, true)],
@@ -344,7 +358,8 @@ fn least_conn_ignores_backup_peers_while_primary_pool_is_available() {
     let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
 
     let selected =
-        clients.select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 1);
+        select(&clients, snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 1)
+            .await;
     assert_eq!(
         selected.peers.iter().map(|peer| peer.url.as_str()).collect::<Vec<_>>(),
         vec!["http://127.0.0.1:9000"]

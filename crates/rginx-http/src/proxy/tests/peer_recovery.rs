@@ -1,7 +1,7 @@
 use super::*;
 
-#[test]
-fn unhealthy_peer_is_skipped_after_consecutive_failures() {
+#[tokio::test]
+async fn unhealthy_peer_is_skipped_after_consecutive_failures() {
     let snapshot = snapshot_with_upstream_policy(
         "backend",
         vec![peer("http://127.0.0.1:9000"), peer("http://127.0.0.1:9001")],
@@ -11,7 +11,8 @@ fn unhealthy_peer_is_skipped_after_consecutive_failures() {
     let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
 
     let first =
-        clients.select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 2);
+        select(&clients, snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 2)
+            .await;
     assert_eq!(first.skipped_unhealthy, 0);
     assert_eq!(
         first.peers.iter().map(|peer| peer.url.as_str()).collect::<Vec<_>>(),
@@ -27,7 +28,8 @@ fn unhealthy_peer_is_skipped_after_consecutive_failures() {
     assert!(second_failure.entered_cooldown);
 
     let selected =
-        clients.select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 2);
+        select(&clients, snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 2)
+            .await;
     assert_eq!(selected.skipped_unhealthy, 1);
     assert_eq!(
         selected.peers.iter().map(|peer| peer.url.as_str()).collect::<Vec<_>>(),
@@ -49,7 +51,8 @@ async fn unhealthy_peer_recovers_after_cooldown() {
     assert!(failure.entered_cooldown);
 
     let immediately =
-        clients.select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 2);
+        select(&clients, snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 2)
+            .await;
     assert_eq!(immediately.skipped_unhealthy, 1);
     assert_eq!(
         immediately.peers.iter().map(|peer| peer.url.as_str()).collect::<Vec<_>>(),
@@ -59,7 +62,8 @@ async fn unhealthy_peer_recovers_after_cooldown() {
     tokio::time::sleep(Duration::from_millis(30)).await;
 
     let recovered =
-        clients.select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 2);
+        select(&clients, snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 2)
+            .await;
     assert_eq!(recovered.skipped_unhealthy, 0);
     assert_eq!(recovered.peers.len(), 2);
 }
@@ -97,8 +101,8 @@ async fn successful_request_after_cooldown_reports_passive_recovery() {
     tokio::time::sleep(Duration::from_millis(30)).await;
 
     assert_eq!(
-        clients
-            .select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 1)
+        select(&clients, snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 1,)
+            .await
             .peers
             .len(),
         1
@@ -126,8 +130,8 @@ fn successful_request_resets_peer_failure_count() {
     assert!(!after_reset.entered_cooldown);
 }
 
-#[test]
-fn peer_health_policy_is_applied_per_upstream() {
+#[tokio::test]
+async fn peer_health_policy_is_applied_per_upstream() {
     let fast_fail = Arc::new(Upstream::new(
         "fast-fail".to_string(),
         vec![peer("http://127.0.0.1:9000")],
@@ -162,40 +166,36 @@ fn peer_health_policy_is_applied_per_upstream() {
     assert_eq!(tolerant_failure.consecutive_failures, 1);
     assert!(!tolerant_failure.entered_cooldown);
 
-    let fast_selected = clients.select_peers(
-        snapshot.upstreams["fast-fail"].as_ref(),
-        client_ip("198.51.100.10"),
-        1,
-    );
+    let fast_selected =
+        select(&clients, snapshot.upstreams["fast-fail"].as_ref(), client_ip("198.51.100.10"), 1)
+            .await;
     assert!(fast_selected.peers.is_empty());
     assert_eq!(fast_selected.skipped_unhealthy, 1);
 
-    let tolerant_selected = clients.select_peers(
-        snapshot.upstreams["tolerant"].as_ref(),
-        client_ip("198.51.100.10"),
-        1,
-    );
+    let tolerant_selected =
+        select(&clients, snapshot.upstreams["tolerant"].as_ref(), client_ip("198.51.100.10"), 1)
+            .await;
     assert_eq!(tolerant_selected.peers.len(), 1);
     assert_eq!(tolerant_selected.skipped_unhealthy, 0);
 }
 
-#[test]
-fn active_health_requires_recovery_threshold_before_peer_is_reused() {
+#[tokio::test]
+async fn active_health_requires_recovery_threshold_before_peer_is_reused() {
     let snapshot =
         snapshot_with_active_health("backend", vec![peer("http://127.0.0.1:9000")], "/healthz", 2);
     let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
 
     assert_eq!(
-        clients
-            .select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 1)
+        select(&clients, snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 1,)
+            .await
             .peers
             .len(),
         1
     );
     assert!(clients.record_active_peer_failure("backend", "http://127.0.0.1:9000"));
     assert!(
-        clients
-            .select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 1)
+        select(&clients, snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 1,)
+            .await
             .peers
             .is_empty()
     );
@@ -204,8 +204,8 @@ fn active_health_requires_recovery_threshold_before_peer_is_reused() {
     assert!(!first_success.recovered);
     assert_eq!(first_success.consecutive_successes, 1);
     assert!(
-        clients
-            .select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 1)
+        select(&clients, snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 1,)
+            .await
             .peers
             .is_empty()
     );
@@ -214,8 +214,8 @@ fn active_health_requires_recovery_threshold_before_peer_is_reused() {
     assert!(second_success.recovered);
     assert_eq!(second_success.consecutive_successes, 2);
     assert_eq!(
-        clients
-            .select_peers(snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 1)
+        select(&clients, snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 1,)
+            .await
             .peers
             .len(),
         1
@@ -238,17 +238,17 @@ async fn active_health_probe_tracks_status_transitions() {
 
     probe_upstream_peer(clients.clone(), upstream.clone(), peer.clone()).await;
     assert!(
-        clients.select_peers(upstream.as_ref(), client_ip("198.51.100.10"), 1).peers.is_empty()
+        select(&clients, upstream.as_ref(), client_ip("198.51.100.10"), 1).await.peers.is_empty()
     );
 
     probe_upstream_peer(clients.clone(), upstream.clone(), peer.clone()).await;
     assert!(
-        clients.select_peers(upstream.as_ref(), client_ip("198.51.100.10"), 1).peers.is_empty()
+        select(&clients, upstream.as_ref(), client_ip("198.51.100.10"), 1).await.peers.is_empty()
     );
 
     probe_upstream_peer(clients.clone(), upstream.clone(), peer).await;
     assert_eq!(
-        clients.select_peers(upstream.as_ref(), client_ip("198.51.100.10"), 1).peers.len(),
+        select(&clients, upstream.as_ref(), client_ip("198.51.100.10"), 1).await.peers.len(),
         1
     );
 }

@@ -20,6 +20,7 @@ use listeners::{
 };
 
 pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
+    rginx_http::install_default_crypto_provider();
     let state = RuntimeState::new(config_path, config)?;
     let current_config = state.current_config().await;
     let inherited_listeners = crate::restart::take_inherited_listeners_from_env()?;

@@ -10,8 +10,8 @@ use rcgen::{
 };
 use rginx_core::{
     Listener, ReturnAction, Route, RouteAccessControl, RouteAction, RouteMatcher, RuntimeSettings,
-    Server, Upstream, UpstreamLoadBalance, UpstreamPeer, UpstreamProtocol, UpstreamSettings,
-    UpstreamTls, VirtualHost,
+    Server, Upstream, UpstreamDnsPolicy, UpstreamLoadBalance, UpstreamPeer, UpstreamProtocol,
+    UpstreamSettings, UpstreamTls, VirtualHost,
 };
 
 use super::{
@@ -76,6 +76,7 @@ fn snapshot_with_upstream(listen: &str) -> ConfigSnapshot {
             UpstreamSettings {
                 protocol: UpstreamProtocol::Auto,
                 load_balance: UpstreamLoadBalance::RoundRobin,
+                dns: UpstreamDnsPolicy::default(),
                 server_name: true,
                 server_name_override: None,
                 tls_versions: None,

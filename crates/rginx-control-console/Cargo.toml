@@ -1,0 +1,27 @@
+[package]
+name = "rginx-control-console"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme.workspace = true
+rust-version.workspace = true
+description = "Dioxus-based browser console for the rginx control plane."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+dioxus = { version = "0.7.5", default-features = false, features = ["web", "router", "signals", "hooks", "macro", "html", "launch", "document"] }
+gloo-net = { version = "0.7.0", default-features = false, features = ["http", "json"] }
+gloo-storage = "0.4.0"
+js-sys = "0.3"
+rginx-control-types = { path = "../rginx-control-types" }
+serde.workspace = true
+serde_json.workspace = true
+serde-wasm-bindgen.workspace = true
+wasm-bindgen = "0.2.118"
+web-sys = { version = "0.3.82", features = ["Event", "EventSource", "EventSourceInit", "MessageEvent", "RequestCredentials"] }

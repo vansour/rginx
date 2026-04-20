@@ -3,7 +3,7 @@ use h3::client;
 use http::{HeaderMap, Request, Response};
 use hyper::body::{Frame, SizeHint};
 use std::collections::HashMap;
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex, Notify, mpsc};
@@ -20,6 +20,7 @@ type H3RequestStream = h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, By
 pub(crate) struct Http3Client {
     client_config: quinn::ClientConfig,
     connect_timeout: Duration,
+    resolver: Arc<UpstreamResolver>,
     endpoints: Arc<Http3ClientEndpoints>,
     sessions: Arc<Mutex<HashMap<Http3SessionKey, Http3SessionEntry>>>,
 }
@@ -86,25 +87,51 @@ impl Drop for Http3Session {
 }
 
 impl Http3Client {
-    pub(super) fn new(client_config: quinn::ClientConfig, connect_timeout: Duration) -> Self {
+    pub(super) fn new(
+        client_config: quinn::ClientConfig,
+        connect_timeout: Duration,
+        resolver: Arc<UpstreamResolver>,
+    ) -> Self {
         Self {
             client_config,
             connect_timeout,
+            resolver,
             endpoints: Arc::new(Http3ClientEndpoints::default()),
             sessions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
+    pub(super) async fn resolve_peer(
+        &self,
+        peer: &UpstreamPeer,
+    ) -> Result<Vec<ResolvedUpstreamPeer>, Error> {
+        self.resolver.resolve_peer(peer).await
+    }
+
+    pub(super) async fn cached_peer_endpoints(
+        &self,
+        peer: &UpstreamPeer,
+    ) -> Result<Vec<ResolvedUpstreamPeer>, Error> {
+        self.resolver.cached_peer_endpoints(peer).await
+    }
+
+    pub(super) async fn resolver_snapshot(&self) -> UpstreamResolverRuntimeSnapshot {
+        self.resolver.snapshot().await
+    }
+
     pub(super) async fn request(
         &self,
         upstream: &Upstream,
-        peer: &UpstreamPeer,
+        peer: &ResolvedUpstreamPeer,
         request: Request<HttpBody>,
     ) -> Result<Response<HttpBody>, Error> {
-        let remote_addr = resolve_peer_socket_addr(peer)?;
         let server_name = server_name_for_peer(upstream, peer)?;
-        let session =
-            self.session_for(Http3SessionKey { remote_addr, server_name }, &peer.url).await?;
+        let session = self
+            .session_for(
+                Http3SessionKey { remote_addr: peer.socket_addr, server_name },
+                &peer.display_url,
+            )
+            .await?;
         let mut send_request = session.sender().await;
 
         let (parts, mut body) = request.into_parts();
@@ -121,7 +148,7 @@ impl Http3Client {
             session.mark_closed();
             Error::Server(format!(
                 "failed to send upstream http3 request headers to `{}`: {error}",
-                peer.url
+                peer.display_url
             ))
         })?;
 
@@ -130,7 +157,7 @@ impl Http3Client {
             let frame = frame.map_err(|error| {
                 Error::Server(format!(
                     "failed to read downstream request body for upstream http3 `{}`: {error}",
-                    peer.url
+                    peer.display_url
                 ))
             })?;
             match frame.into_data() {
@@ -140,7 +167,7 @@ impl Http3Client {
                             session.mark_closed();
                             Error::Server(format!(
                                 "failed to send upstream http3 request body to `{}`: {error}",
-                                peer.url
+                                peer.display_url
                             ))
                         })?;
                     }
@@ -151,7 +178,7 @@ impl Http3Client {
                             session.mark_closed();
                             Error::Server(format!(
                                 "failed to send upstream http3 request trailers to `{}`: {error}",
-                                peer.url
+                                peer.display_url
                             ))
                         })?;
                         finalized = true;
@@ -164,7 +191,7 @@ impl Http3Client {
                 session.mark_closed();
                 Error::Server(format!(
                     "failed to finish upstream http3 request to `{}`: {error}",
-                    peer.url
+                    peer.display_url
                 ))
             })?;
         }
@@ -173,13 +200,14 @@ impl Http3Client {
             session.mark_closed();
             Error::Server(format!(
                 "failed to receive upstream http3 response headers from `{}`: {error}",
-                peer.url
+                peer.display_url
             ))
         })?;
 
         let (parts, _) = response.into_parts();
         let size_hint = response_size_hint(&parts.headers);
-        let body = streaming_response_body(request_stream, session, peer.url.clone(), size_hint);
+        let body =
+            streaming_response_body(request_stream, session, peer.display_url.clone(), size_hint);
         let mut response_builder = Response::builder().status(parts.status);
         for (name, value) in &parts.headers {
             response_builder = response_builder.header(name, value);
@@ -460,39 +488,13 @@ fn is_clean_http3_response_shutdown(error: &impl std::fmt::Display) -> bool {
         || error.contains("Application { code: H3_NO_ERROR")
 }
 
-/// Resolves the selected upstream peer authority into a socket address.
-fn resolve_peer_socket_addr(peer: &UpstreamPeer) -> Result<SocketAddr, Error> {
-    peer.authority
-        .to_socket_addrs()
-        .map_err(|error| {
-            Error::Server(format!(
-                "failed to resolve upstream http3 peer authority `{}`: {error}",
-                peer.authority
-            ))
-        })?
-        .next()
-        .ok_or_else(|| {
-            Error::Server(format!(
-                "upstream http3 peer authority `{}` did not resolve to any address",
-                peer.authority
-            ))
-        })
-}
-
 /// Determines the TLS server name to use for an upstream HTTP/3 connection.
-fn server_name_for_peer(upstream: &Upstream, peer: &UpstreamPeer) -> Result<String, Error> {
+fn server_name_for_peer(upstream: &Upstream, peer: &ResolvedUpstreamPeer) -> Result<String, Error> {
     if let Some(server_name_override) = upstream.server_name_override.as_ref() {
         return Ok(server_name_override.clone());
     }
 
-    peer.url.parse::<http::Uri>().ok().and_then(|uri| uri.host().map(str::to_string)).ok_or_else(
-        || {
-            Error::Server(format!(
-                "failed to derive TLS server name for upstream http3 peer `{}`",
-                peer.url
-            ))
-        },
-    )
+    Ok(peer.server_name.clone())
 }
 
 #[cfg(test)]
@@ -500,9 +502,15 @@ mod tests {
     use super::*;
     use http::StatusCode;
     use http_body_util::BodyExt;
-    use rginx_core::{UpstreamLoadBalance, UpstreamSettings, UpstreamTls};
+    use rginx_core::{UpstreamDnsPolicy, UpstreamLoadBalance, UpstreamSettings, UpstreamTls};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Instant;
+
+    fn test_resolver() -> Arc<UpstreamResolver> {
+        Arc::new(
+            UpstreamResolver::new(UpstreamDnsPolicy::default()).expect("resolver should build"),
+        )
+    }
 
     #[tokio::test]
     async fn reuses_cached_endpoint_for_repeated_ipv4_requests() {
@@ -515,7 +523,7 @@ mod tests {
             true,
         )
         .expect("http3 client config should build");
-        let client = Http3Client::new(client_config, Duration::from_secs(1));
+        let client = Http3Client::new(client_config, Duration::from_secs(1), test_resolver());
         let remote_addr: SocketAddr = "127.0.0.1:443".parse().unwrap();
 
         assert_eq!(client.cached_endpoint_count().await, 0);
@@ -545,7 +553,8 @@ mod tests {
             true,
         )
         .expect("http3 client config should build");
-        let client = Http3Client::new(client_config, Duration::from_secs(1));
+        let resolver = test_resolver();
+        let client = Http3Client::new(client_config, Duration::from_secs(1), resolver.clone());
         let accepted_connections = Arc::new(AtomicUsize::new(0));
         let request_count = Arc::new(AtomicUsize::new(0));
         let (listen_addr, server_task) =
@@ -564,6 +573,7 @@ mod tests {
             UpstreamSettings {
                 protocol: UpstreamProtocol::Http3,
                 load_balance: UpstreamLoadBalance::RoundRobin,
+                dns: UpstreamDnsPolicy::default(),
                 server_name: true,
                 server_name_override: Some("localhost".to_string()),
                 tls_versions: None,
@@ -587,7 +597,13 @@ mod tests {
                 active_health_check: None,
             },
         ));
-        let peer = upstream.peers[0].clone();
+        let peer = resolver
+            .resolve_peer(&upstream.peers[0])
+            .await
+            .expect("peer should resolve")
+            .into_iter()
+            .next()
+            .expect("resolved peer should exist");
 
         let first = client
             .request(upstream.as_ref(), &peer, test_request(&peer.url, "/first"))
@@ -624,7 +640,8 @@ mod tests {
             true,
         )
         .expect("http3 client config should build");
-        let client = Http3Client::new(client_config, Duration::from_secs(1));
+        let resolver = test_resolver();
+        let client = Http3Client::new(client_config, Duration::from_secs(1), resolver.clone());
         let delay = Duration::from_millis(300);
         let (listen_addr, server_task) = spawn_test_http3_server(
             Arc::new(AtomicUsize::new(0)),
@@ -645,6 +662,7 @@ mod tests {
             UpstreamSettings {
                 protocol: UpstreamProtocol::Http3,
                 load_balance: UpstreamLoadBalance::RoundRobin,
+                dns: UpstreamDnsPolicy::default(),
                 server_name: true,
                 server_name_override: Some("localhost".to_string()),
                 tls_versions: None,
@@ -668,7 +686,13 @@ mod tests {
                 active_health_check: None,
             },
         ));
-        let peer = upstream.peers[0].clone();
+        let peer = resolver
+            .resolve_peer(&upstream.peers[0])
+            .await
+            .expect("peer should resolve")
+            .into_iter()
+            .next()
+            .expect("resolved peer should exist");
 
         let started = Instant::now();
         let response = client

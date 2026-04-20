@@ -5,18 +5,20 @@ use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
-use reqwest::{Client, RequestBuilder};
+use reqwest::{Client, Method, RequestBuilder};
+use rginx_dns::{InMemoryDnsRuntime, serve as serve_dns};
 use serde::{Serialize, de::DeserializeOwned};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
+use tokio::sync::watch;
 
 use rginx_control_types::{
-    DeploymentTaskKind, NodeAgentHeartbeatRequest, NodeAgentRegistrationRequest, NodeAgentTask,
-    NodeAgentTaskAckRequest, NodeAgentTaskAckResponse, NodeAgentTaskCompleteRequest,
-    NodeAgentTaskCompleteResponse, NodeAgentTaskPollRequest, NodeAgentTaskPollResponse,
-    NodeAgentWriteResponse, NodeLifecycleState, NodeRuntimeReport, NodeSnapshotIngestRequest,
-    NodeSnapshotIngestResponse,
+    DeploymentTaskKind, NodeAgentDnsSnapshotResponse, NodeAgentHeartbeatRequest,
+    NodeAgentRegistrationRequest, NodeAgentTask, NodeAgentTaskAckRequest, NodeAgentTaskAckResponse,
+    NodeAgentTaskCompleteRequest, NodeAgentTaskCompleteResponse, NodeAgentTaskPollRequest,
+    NodeAgentTaskPollResponse, NodeAgentWriteResponse, NodeLifecycleState, NodeRuntimeReport,
+    NodeSnapshotIngestRequest, NodeSnapshotIngestResponse,
 };
 
 use crate::config::NodeAgentConfig;
@@ -29,19 +31,49 @@ pub async fn run(config: NodeAgentConfig) -> anyhow::Result<()> {
         role = %config.role,
         lifecycle_state = %config.lifecycle_state.as_str(),
         control_plane_origin = %config.control_plane_origin,
+        dns_udp_bind_addr = ?config.dns_udp_bind_addr,
+        dns_tcp_bind_addr = ?config.dns_tcp_bind_addr,
         admin_socket_path = %config.admin_socket_path.display(),
         rginx_binary_path = %config.rginx_binary_path.display(),
         config_path = %config.config_path.display(),
         "node agent started"
     );
 
-    let client = ControlPlaneClient::new(&config)?;
-    let mut last_sent_snapshot_version = None;
+    let dns_runtime = build_dns_runtime(&config);
+    let (dns_shutdown_tx, dns_shutdown_rx) = watch::channel(false);
+    let mut dns_task = dns_runtime.as_ref().map(|runtime| {
+        let server_config = runtime.server_config();
+        let engine: Arc<dyn rginx_dns::DnsQueryEngine> = runtime.clone();
+        tokio::spawn(async move {
+            serve_dns(server_config, engine, dns_shutdown_rx)
+                .await
+                .context("node agent authoritative dns server stopped unexpectedly")
+        })
+    });
 
-    let initial_payload = build_payload(&config).await;
-    register_once(&client, &initial_payload).await;
-    send_snapshot_if_needed(&client, &initial_payload.snapshot, &mut last_sent_snapshot_version)
-        .await;
+    let client = ControlPlaneClient::new(&config)?;
+    let mut last_sent_snapshot_fingerprint = None::<String>;
+    let mut last_applied_dns_revision_id = None::<String>;
+
+    let registration_payload = build_payload(&config, dns_runtime.as_deref()).await;
+    register_once(&client, &registration_payload).await;
+    if let Err(error) = sync_dns_snapshot(
+        &client,
+        &config,
+        dns_runtime.as_deref(),
+        &mut last_applied_dns_revision_id,
+    )
+    .await
+    {
+        tracing::warn!(node_id = %config.node_id, error = %error, "node agent dns snapshot sync failed after registration");
+    }
+    let initial_payload = build_payload(&config, dns_runtime.as_deref()).await;
+    send_snapshot_if_needed(
+        &client,
+        &initial_payload.snapshot,
+        &mut last_sent_snapshot_fingerprint,
+    )
+    .await;
 
     let mut heartbeat_ticker = tokio::time::interval(config.heartbeat_interval);
     heartbeat_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -53,8 +85,20 @@ pub async fn run(config: NodeAgentConfig) -> anyhow::Result<()> {
 
     loop {
         tokio::select! {
+            result = wait_optional_task(&mut dns_task) => {
+                let _ = dns_shutdown_tx.send(true);
+                return flatten_task_result(result, "node agent dns task");
+            }
             _ = heartbeat_ticker.tick() => {
-                let payload = build_payload(&config).await;
+                if let Err(error) = sync_dns_snapshot(
+                    &client,
+                    &config,
+                    dns_runtime.as_deref(),
+                    &mut last_applied_dns_revision_id,
+                ).await {
+                    tracing::warn!(node_id = %config.node_id, error = %error, "node agent dns snapshot sync failed");
+                }
+                let payload = build_payload(&config, dns_runtime.as_deref()).await;
                 match client.heartbeat(&payload.report).await {
                     Ok(response) => {
                         tracing::info!(
@@ -65,7 +109,12 @@ pub async fn run(config: NodeAgentConfig) -> anyhow::Result<()> {
                             status_reason = ?response.node.status_reason,
                             "node agent heartbeat accepted"
                         );
-                        send_snapshot_if_needed(&client, &payload.snapshot, &mut last_sent_snapshot_version).await;
+                        send_snapshot_if_needed(
+                            &client,
+                            &payload.snapshot,
+                            &mut last_sent_snapshot_fingerprint,
+                        )
+                        .await;
                     }
                     Err(error) => {
                         tracing::warn!(node_id = %config.node_id, error = %error, "node agent heartbeat failed");
@@ -79,6 +128,10 @@ pub async fn run(config: NodeAgentConfig) -> anyhow::Result<()> {
             }
             result = tokio::signal::ctrl_c() => {
                 result?;
+                let _ = dns_shutdown_tx.send(true);
+                if let Some(task) = dns_task {
+                    flatten_task_result(task.await, "node agent dns task")?;
+                }
                 tracing::info!("node agent received shutdown signal");
                 return Ok(());
             }
@@ -111,12 +164,21 @@ async fn register_once(client: &ControlPlaneClient, payload: &BuiltAgentPayload)
 async fn send_snapshot_if_needed(
     client: &ControlPlaneClient,
     snapshot: &Option<NodeSnapshotIngestRequest>,
-    last_sent_snapshot_version: &mut Option<u64>,
+    last_sent_snapshot_fingerprint: &mut Option<String>,
 ) {
     let Some(snapshot) = snapshot else {
         return;
     };
-    if Some(snapshot.snapshot_version) == *last_sent_snapshot_version {
+    let fingerprint = serde_json::to_string(snapshot).unwrap_or_else(|error| {
+        tracing::warn!(
+            node_id = %snapshot.node_id,
+            snapshot_version = snapshot.snapshot_version,
+            error = %error,
+            "failed to fingerprint node snapshot payload; falling back to observed timestamp"
+        );
+        format!("{}:{}", snapshot.snapshot_version, snapshot.observed_at_unix_ms)
+    });
+    if Some(fingerprint.as_str()) == last_sent_snapshot_fingerprint.as_deref() {
         return;
     }
 
@@ -128,7 +190,7 @@ async fn send_snapshot_if_needed(
                 captured_at_unix_ms = response.snapshot.captured_at_unix_ms,
                 "node agent snapshot accepted"
             );
-            *last_sent_snapshot_version = Some(response.snapshot.snapshot_version);
+            *last_sent_snapshot_fingerprint = Some(fingerprint);
         }
         Err(error) => {
             tracing::warn!(
@@ -349,7 +411,55 @@ fn run_rginx_command(config: &NodeAgentConfig, args: &[&str], label: &str) -> Re
     bail!("{} failed with status {} stdout=`{}` stderr=`{}`", label, output.status, stdout, stderr);
 }
 
-async fn build_payload(config: &NodeAgentConfig) -> BuiltAgentPayload {
+fn build_dns_runtime(config: &NodeAgentConfig) -> Option<Arc<InMemoryDnsRuntime>> {
+    let runtime =
+        Arc::new(InMemoryDnsRuntime::new(config.dns_udp_bind_addr, config.dns_tcp_bind_addr));
+    runtime.enabled().then_some(runtime)
+}
+
+async fn sync_dns_snapshot(
+    client: &ControlPlaneClient,
+    config: &NodeAgentConfig,
+    dns_runtime: Option<&InMemoryDnsRuntime>,
+    last_applied_dns_revision_id: &mut Option<String>,
+) -> Result<()> {
+    let Some(dns_runtime) = dns_runtime else {
+        return Ok(());
+    };
+
+    let response = client.get_dns_snapshot().await?;
+    let revision_id = response.snapshot.as_ref().map(|snapshot| snapshot.revision_id.clone());
+    dns_runtime.replace_snapshots(response.snapshot.into_iter().collect());
+
+    match (last_applied_dns_revision_id.as_deref(), revision_id.as_deref()) {
+        (previous, current) if previous == current => {}
+        (_, Some(current)) => {
+            tracing::info!(
+                node_id = %config.node_id,
+                cluster_id = %config.cluster_id,
+                revision_id = %current,
+                "node agent loaded authoritative dns snapshot"
+            );
+        }
+        (Some(previous), None) => {
+            tracing::info!(
+                node_id = %config.node_id,
+                cluster_id = %config.cluster_id,
+                previous_revision_id = %previous,
+                "node agent cleared authoritative dns snapshot"
+            );
+        }
+        (None, None) => {}
+    }
+
+    *last_applied_dns_revision_id = revision_id;
+    Ok(())
+}
+
+async fn build_payload(
+    config: &NodeAgentConfig,
+    dns_runtime: Option<&InMemoryDnsRuntime>,
+) -> BuiltAgentPayload {
     let observed_at_unix_ms = unix_time_ms(SystemTime::now());
     let runtime = collect_runtime(&config.admin_socket_path).await;
     let state = if runtime.report.error.is_some() {
@@ -373,23 +483,62 @@ async fn build_payload(config: &NodeAgentConfig) -> BuiltAgentPayload {
             observed_at_unix_ms,
             runtime: runtime.report,
         },
-        snapshot: runtime.snapshot.map(|snapshot| NodeSnapshotIngestRequest {
-            node_id: config.node_id.clone(),
-            cluster_id: config.cluster_id.clone(),
-            observed_at_unix_ms,
-            snapshot_version: snapshot.snapshot_version,
-            schema_version: snapshot.schema_version,
-            captured_at_unix_ms: snapshot.captured_at_unix_ms,
-            pid: snapshot.pid,
-            binary_version: snapshot.binary_version,
-            included_modules: snapshot.included_modules,
-            status: snapshot.status,
-            counters: snapshot.counters,
-            traffic: snapshot.traffic,
-            peer_health: snapshot.peer_health,
-            upstreams: snapshot.upstreams,
+        snapshot: runtime.snapshot.map(|mut snapshot| {
+            attach_dns_status(&config.cluster_id, &mut snapshot, dns_runtime);
+            NodeSnapshotIngestRequest {
+                node_id: config.node_id.clone(),
+                cluster_id: config.cluster_id.clone(),
+                observed_at_unix_ms,
+                snapshot_version: snapshot.snapshot_version,
+                schema_version: snapshot.schema_version,
+                captured_at_unix_ms: snapshot.captured_at_unix_ms,
+                pid: snapshot.pid,
+                binary_version: snapshot.binary_version,
+                included_modules: snapshot.included_modules,
+                status: snapshot.status,
+                counters: snapshot.counters,
+                traffic: snapshot.traffic,
+                peer_health: snapshot.peer_health,
+                upstreams: snapshot.upstreams,
+            }
         }),
     }
+}
+
+fn attach_dns_status(
+    cluster_id: &str,
+    snapshot: &mut AdminSnapshot,
+    dns_runtime: Option<&InMemoryDnsRuntime>,
+) {
+    let Some(dns_runtime) = dns_runtime else {
+        return;
+    };
+    let dns_status = match serde_json::to_value(dns_runtime.cluster_status(cluster_id)) {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::warn!(cluster_id = %cluster_id, error = %error, "failed to encode dns runtime status");
+            return;
+        }
+    };
+
+    let status = match snapshot.status.take() {
+        Some(Value::Object(mut status)) => {
+            status.insert("dns".to_string(), dns_status);
+            Value::Object(status)
+        }
+        Some(existing_status) => {
+            let mut status = Map::new();
+            status.insert("runtime".to_string(), existing_status);
+            status.insert("dns".to_string(), dns_status);
+            Value::Object(status)
+        }
+        None => {
+            let mut status = Map::new();
+            status.insert("dns".to_string(), dns_status);
+            Value::Object(status)
+        }
+    };
+    snapshot.status = Some(status);
 }
 
 fn normalize_agent_state(state: NodeLifecycleState) -> NodeLifecycleState {
@@ -540,6 +689,17 @@ impl ControlPlaneClient {
         self.post_json("/api/v1/agent/snapshots", request, None, false).await
     }
 
+    async fn get_dns_snapshot(&self) -> Result<NodeAgentDnsSnapshotResponse> {
+        let response: NodeAgentDnsSnapshotResponse =
+            self.get_json("/api/v1/agent/dns/snapshot", false).await?;
+        self.refresh_bound_token(
+            response.agent_token.as_deref(),
+            response.agent_token_expires_at_unix_ms,
+            "dns snapshot fetch",
+        )?;
+        Ok(response)
+    }
+
     async fn poll_task(
         &self,
         request: &NodeAgentTaskPollRequest,
@@ -601,7 +761,7 @@ impl ControlPlaneClient {
     {
         let url = format!("{}{}", self.origin, path);
         let response = self
-            .request_builder(&url, idempotency_key, use_bootstrap_token)
+            .request_builder(Method::POST, &url, idempotency_key, use_bootstrap_token)
             .json(request)
             .send()
             .await
@@ -615,8 +775,28 @@ impl ControlPlaneClient {
             .with_context(|| format!("failed to decode node-agent response from {url}"))
     }
 
+    async fn get_json<TResponse>(&self, path: &str, use_bootstrap_token: bool) -> Result<TResponse>
+    where
+        TResponse: DeserializeOwned,
+    {
+        let url = format!("{}{}", self.origin, path);
+        let response = self
+            .request_builder(Method::GET, &url, None, use_bootstrap_token)
+            .send()
+            .await
+            .with_context(|| format!("failed to GET node-agent payload from {url}"))?;
+        let response = response
+            .error_for_status()
+            .with_context(|| format!("control plane rejected node-agent request to {url}"))?;
+        response
+            .json::<TResponse>()
+            .await
+            .with_context(|| format!("failed to decode node-agent response from {url}"))
+    }
+
     fn request_builder(
         &self,
+        method: Method,
         url: &str,
         idempotency_key: Option<String>,
         use_bootstrap_token: bool,
@@ -630,7 +810,7 @@ impl ControlPlaneClient {
                 .clone()
                 .unwrap_or_else(|| self.bootstrap_token.clone())
         };
-        let builder = self.client.post(url).bearer_auth(token);
+        let builder = self.client.request(method, url).bearer_auth(token);
         if let Some(idempotency_key) = idempotency_key {
             builder.header("Idempotency-Key", idempotency_key)
         } else {
@@ -718,6 +898,25 @@ struct AdminSnapshot {
     traffic: Option<Value>,
     peer_health: Option<Value>,
     upstreams: Option<Value>,
+}
+
+fn flatten_task_result(
+    result: Result<anyhow::Result<()>, tokio::task::JoinError>,
+    task_name: &str,
+) -> anyhow::Result<()> {
+    match result {
+        Ok(inner) => inner,
+        Err(error) => Err(anyhow!("{task_name} failed to join: {error}")),
+    }
+}
+
+async fn wait_optional_task(
+    task: &mut Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
+) -> Result<anyhow::Result<()>, tokio::task::JoinError> {
+    match task {
+        Some(task) => task.await,
+        None => std::future::pending().await,
+    }
 }
 
 fn unix_time_ms(time: SystemTime) -> u64 {

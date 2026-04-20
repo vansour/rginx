@@ -147,11 +147,13 @@ pub async fn forward_request(
         }
     };
     let can_failover = prepared_request.can_failover();
-    let selected = clients.select_peers(
-        target.upstream.as_ref(),
-        client_address.client_ip,
-        if can_failover { MAX_FAILOVER_ATTEMPTS } else { 1 },
-    );
+    let selected = clients
+        .select_peers(
+            target.upstream.as_ref(),
+            client_address.client_ip,
+            if can_failover { MAX_FAILOVER_ATTEMPTS } else { 1 },
+        )
+        .await;
     let peers = selected.peers;
     if peers.is_empty() {
         tracing::warn!(
@@ -190,7 +192,8 @@ pub async fn forward_request(
                 tracing::warn!(
                     request_id = %downstream.request_id,
                     upstream = %target.upstream_name,
-                    peer = %peer.url,
+                    peer = %peer.display_url,
+                    logical_peer = %peer.logical_peer_url,
                     upstream_sni_enabled = target.upstream.server_name,
                     upstream_server_name = target.upstream.server_name_override.as_deref().unwrap_or("-"),
                     upstream_verify = super::upstream_tls_verify_label(&target.upstream.tls),
@@ -204,8 +207,8 @@ pub async fn forward_request(
                 );
             }
         };
-        state.record_upstream_peer_attempt(&target.upstream_name, &peer.url);
-        let active_peer = clients.track_active_request(&target.upstream_name, &peer.url);
+        state.record_upstream_peer_attempt(&target.upstream_name, &peer.logical_peer_url);
+        let active_peer = clients.track_active_request(&target.upstream_name, &peer.endpoint_key);
 
         match wait_for_upstream_stage(
             upstream_request_timeout,
@@ -216,13 +219,15 @@ pub async fn forward_request(
         .await
         {
             Ok(Ok(mut response)) => {
-                state.record_upstream_peer_success(&target.upstream_name, &peer.url);
+                state.record_upstream_peer_success(&target.upstream_name, &peer.logical_peer_url);
                 state.record_upstream_completed_response(&target.upstream_name);
-                let recovered = clients.record_peer_success(&target.upstream_name, &peer.url);
+                let recovered =
+                    clients.record_peer_success(&target.upstream_name, &peer.endpoint_key);
                 if recovered {
                     tracing::info!(
                         upstream = %target.upstream_name,
-                        peer = %peer.url,
+                        peer = %peer.display_url,
+                        logical_peer = %peer.logical_peer_url,
                         "upstream peer recovered from passive health check cooldown"
                     );
                 }
@@ -230,7 +235,8 @@ pub async fn forward_request(
                     tracing::info!(
                         request_id = %downstream.request_id,
                         upstream = %target.upstream_name,
-                        peer = %peer.url,
+                        peer = %peer.display_url,
+                        logical_peer = %peer.logical_peer_url,
                         attempt = attempt_index + 1,
                         "upstream failover request succeeded"
                     );
@@ -252,14 +258,14 @@ pub async fn forward_request(
                         downstream_upgrade,
                         upstream_upgrade,
                         target.upstream_name.clone(),
-                        peer.url.clone(),
+                        peer.display_url.clone(),
                         active_peer,
                         connection_guard,
                     ));
                     return build_downstream_response(
                         response,
                         &target.upstream_name,
-                        &peer.url,
+                        &peer.display_url,
                         response_idle_timeout,
                         grpc_response_deadline.clone(),
                         grpc_web_mode.as_ref(),
@@ -270,25 +276,29 @@ pub async fn forward_request(
                 return build_downstream_response(
                     response,
                     &target.upstream_name,
-                    &peer.url,
+                    &peer.display_url,
                     response_idle_timeout,
                     grpc_response_deadline,
                     grpc_web_mode.as_ref(),
                     Some(active_peer),
                 );
             }
-            Ok(Err(error)) if can_retry_peer_request(&prepared_request, &peers, attempt_index) => {
-                state.record_upstream_peer_failure(&target.upstream_name, &peer.url);
+            Ok(Err(error))
+                if can_retry_peer_request(&prepared_request, peers.len(), attempt_index) =>
+            {
+                state.record_upstream_peer_failure(&target.upstream_name, &peer.logical_peer_url);
                 let tls_failure = super::classify_upstream_tls_failure(&error);
                 state.record_upstream_peer_failure_class(&target.upstream_name, tls_failure);
                 state.record_upstream_failover(&target.upstream_name);
-                let failure = clients.record_peer_failure(&target.upstream_name, &peer.url);
+                let failure =
+                    clients.record_peer_failure(&target.upstream_name, &peer.endpoint_key);
                 let next_peer = &peers[attempt_index + 1];
                 tracing::warn!(
                     request_id = %downstream.request_id,
                     upstream = %target.upstream_name,
-                    failed_peer = %peer.url,
-                    next_peer = %next_peer.url,
+                    failed_peer = %peer.display_url,
+                    failed_logical_peer = %peer.logical_peer_url,
+                    next_peer = %next_peer.display_url,
                     attempt = attempt_index + 1,
                     upstream_sni_enabled = target.upstream.server_name,
                     upstream_server_name = target.upstream.server_name_override.as_deref().unwrap_or("-"),
@@ -305,7 +315,8 @@ pub async fn forward_request(
                     tracing::info!(
                         request_id = %downstream.request_id,
                         upstream = %target.upstream_name,
-                        peer = %peer.url,
+                        peer = %peer.display_url,
+                        logical_peer = %peer.logical_peer_url,
                         max_request_body_bytes,
                         %error,
                         "rejecting streamed request body that exceeds configured server limit"
@@ -322,7 +333,8 @@ pub async fn forward_request(
                     tracing::warn!(
                         request_id = %downstream.request_id,
                         upstream = %target.upstream_name,
-                        peer = %peer.url,
+                        peer = %peer.display_url,
+                        logical_peer = %peer.logical_peer_url,
                         upstream_sni_enabled = target.upstream.server_name,
                         upstream_server_name = target.upstream.server_name_override.as_deref().unwrap_or("-"),
                         upstream_verify = super::upstream_tls_verify_label(&target.upstream.tls),
@@ -336,14 +348,16 @@ pub async fn forward_request(
                         format!("invalid downstream request body: {error}\n"),
                     );
                 }
-                state.record_upstream_peer_failure(&target.upstream_name, &peer.url);
+                state.record_upstream_peer_failure(&target.upstream_name, &peer.logical_peer_url);
                 let tls_failure = super::classify_upstream_tls_failure(&error);
                 state.record_upstream_peer_failure_class(&target.upstream_name, tls_failure);
-                let failure = clients.record_peer_failure(&target.upstream_name, &peer.url);
+                let failure =
+                    clients.record_peer_failure(&target.upstream_name, &peer.endpoint_key);
                 tracing::warn!(
                     request_id = %downstream.request_id,
                     upstream = %target.upstream_name,
-                    peer = %peer.url,
+                    peer = %peer.display_url,
+                    logical_peer = %peer.logical_peer_url,
                     upstream_sni_enabled = target.upstream.server_name,
                     upstream_server_name = target.upstream.server_name_override.as_deref().unwrap_or("-"),
                     upstream_verify = super::upstream_tls_verify_label(&target.upstream.tls),
@@ -359,16 +373,18 @@ pub async fn forward_request(
                     format!("upstream `{}` is unavailable\n", target.upstream_name),
                 );
             }
-            Err(error) if can_retry_peer_request(&prepared_request, &peers, attempt_index) => {
-                state.record_upstream_peer_timeout(&target.upstream_name, &peer.url);
+            Err(error) if can_retry_peer_request(&prepared_request, peers.len(), attempt_index) => {
+                state.record_upstream_peer_timeout(&target.upstream_name, &peer.logical_peer_url);
                 state.record_upstream_failover(&target.upstream_name);
-                let failure = clients.record_peer_failure(&target.upstream_name, &peer.url);
+                let failure =
+                    clients.record_peer_failure(&target.upstream_name, &peer.endpoint_key);
                 let next_peer = &peers[attempt_index + 1];
                 tracing::warn!(
                     request_id = %downstream.request_id,
                     upstream = %target.upstream_name,
-                    failed_peer = %peer.url,
-                    next_peer = %next_peer.url,
+                    failed_peer = %peer.display_url,
+                    failed_logical_peer = %peer.logical_peer_url,
+                    next_peer = %next_peer.display_url,
                     attempt = attempt_index + 1,
                     timeout_ms = upstream_request_timeout.as_millis() as u64,
                     upstream_sni_enabled = target.upstream.server_name,
@@ -382,12 +398,14 @@ pub async fn forward_request(
                 );
             }
             Err(error) => {
-                state.record_upstream_peer_timeout(&target.upstream_name, &peer.url);
-                let failure = clients.record_peer_failure(&target.upstream_name, &peer.url);
+                state.record_upstream_peer_timeout(&target.upstream_name, &peer.logical_peer_url);
+                let failure =
+                    clients.record_peer_failure(&target.upstream_name, &peer.endpoint_key);
                 tracing::warn!(
                     request_id = %downstream.request_id,
                     upstream = %target.upstream_name,
-                    peer = %peer.url,
+                    peer = %peer.display_url,
+                    logical_peer = %peer.logical_peer_url,
                     timeout_ms = upstream_request_timeout.as_millis() as u64,
                     upstream_sni_enabled = target.upstream.server_name,
                     upstream_server_name = target.upstream.server_name_override.as_deref().unwrap_or("-"),

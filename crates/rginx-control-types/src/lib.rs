@@ -3,6 +3,7 @@ mod audit;
 mod auth;
 mod dashboard;
 mod deployments;
+mod dns;
 mod events;
 mod meta;
 mod nodes;
@@ -12,7 +13,7 @@ pub use alerts::{AlertSeverity, ControlPlaneAlertSummary};
 pub use audit::{AuditLogEntry, AuditLogSummary};
 pub use auth::{
     AuthLoginRequest, AuthLoginResponse, AuthRole, AuthSessionSummary, AuthUserSummary,
-    AuthenticatedActor, CreateLocalUserRequest, CreateLocalUserResponse,
+    AuthenticatedActor,
 };
 pub use dashboard::DashboardSummary;
 pub use deployments::{
@@ -22,9 +23,19 @@ pub use deployments::{
     NodeAgentTaskAckResponse, NodeAgentTaskCompleteRequest, NodeAgentTaskCompleteResponse,
     NodeAgentTaskPollRequest, NodeAgentTaskPollResponse,
 };
+pub use dns::{
+    CreateDnsDeploymentRequest, CreateDnsDeploymentResponse, CreateDnsDraftRequest,
+    DnsAnswerTarget, DnsDeploymentDetail, DnsDeploymentStatus, DnsDeploymentSummary,
+    DnsDeploymentTargetState, DnsDeploymentTargetSummary, DnsDiffResponse, DnsDraftDetail,
+    DnsDraftSummary, DnsDraftValidationState, DnsPlan, DnsPublishedSnapshot, DnsRecordSet,
+    DnsRecordType, DnsResolvedValue, DnsRevisionDetail, DnsRevisionListItem, DnsRuntimeQueryStat,
+    DnsRuntimeStatus, DnsSimulationRequest, DnsSimulationResponse, DnsTargetKind,
+    DnsValidationReport, DnsZoneSpec, NodeAgentDnsSnapshotResponse, PublishDnsDraftRequest,
+    PublishDnsDraftResponse, UpdateDnsDraftRequest,
+};
 pub use events::{
-    ControlPlaneAlertsEvent, ControlPlaneDeploymentEvent, ControlPlaneNodeDetailEvent,
-    ControlPlaneOverviewEvent,
+    ControlPlaneAlertsEvent, ControlPlaneDeploymentEvent, ControlPlaneDnsDeploymentEvent,
+    ControlPlaneNodeDetailEvent, ControlPlaneOverviewEvent,
 };
 pub use meta::{CONTROL_API_VERSION, ControlPlaneMeta, ServiceHealth};
 pub use nodes::{

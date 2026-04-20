@@ -360,6 +360,7 @@ async fn clear_ocsp_cache_file(path: &Path) -> Result<bool, String> {
 }
 
 fn build_ocsp_client() -> Result<OcspClient, String> {
+    rginx_http::install_default_crypto_provider();
     let roots = load_native_root_store()?;
     let tls_config = ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
     let connector = HttpsConnectorBuilder::new()
@@ -415,6 +416,7 @@ mod tests {
     }
 
     fn test_ocsp_client() -> OcspClient {
+        rginx_http::install_default_crypto_provider();
         let tls_config = ClientConfig::builder()
             .with_root_certificates(RootCertStore::empty())
             .with_no_client_auth();

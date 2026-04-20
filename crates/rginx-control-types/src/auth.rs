@@ -5,22 +5,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthRole {
-    Viewer,
-    Operator,
     SuperAdmin,
 }
 
 impl AuthRole {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Viewer => "viewer",
-            Self::Operator => "operator",
             Self::SuperAdmin => "super_admin",
         }
-    }
-
-    pub fn grants(self, required: Self) -> bool {
-        self >= required
     }
 }
 
@@ -29,8 +21,6 @@ impl FromStr for AuthRole {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
-            "viewer" => Ok(Self::Viewer),
-            "operator" => Ok(Self::Operator),
             "super_admin" => Ok(Self::SuperAdmin),
             _ => Err(format!("unknown auth role `{value}`")),
         }
@@ -70,17 +60,4 @@ pub struct AuthLoginRequest {
 pub struct AuthLoginResponse {
     pub token: String,
     pub actor: AuthenticatedActor,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateLocalUserRequest {
-    pub username: String,
-    pub display_name: String,
-    pub password: String,
-    pub role: AuthRole,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CreateLocalUserResponse {
-    pub user: AuthUserSummary,
 }

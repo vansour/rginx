@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ControlPlaneAlertSummary, DashboardSummary, DeploymentDetail, NodeDetailResponse, NodeSummary,
+    ControlPlaneAlertSummary, DashboardSummary, DeploymentDetail, DnsDeploymentDetail,
+    NodeDetailResponse, NodeSummary,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,6 +25,13 @@ pub struct ControlPlaneDeploymentEvent {
     pub event_id: String,
     pub emitted_at_unix_ms: u64,
     pub detail: DeploymentDetail,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControlPlaneDnsDeploymentEvent {
+    pub event_id: String,
+    pub emitted_at_unix_ms: u64,
+    pub detail: DnsDeploymentDetail,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

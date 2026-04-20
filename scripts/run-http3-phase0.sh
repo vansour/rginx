@@ -7,38 +7,25 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 RUN_GATE=1
 RUN_SOAK=1
-RUN_COMPARE=0
 SOAK_ITERATIONS=1
-COMPARE_OUT_DIR="${ROOT_DIR}/target/http3-phase0/nginx-compare"
-COMPARE_ARGS=()
 
 usage() {
     cat <<'EOF'
-Usage: run-http3-phase0.sh [options] [-- compare-args...]
+Usage: run-http3-phase0.sh [options]
 
 Phase 0 HTTP/3 baseline runner. By default it runs:
   1. the dedicated HTTP/3 regression gate
   2. a focused HTTP/3 soak subset
-
-Optional:
-  3. the nginx comparison Docker harness
 
 Options:
   --skip-gate
       Skip the dedicated HTTP/3 regression gate
   --skip-soak
       Skip the focused HTTP/3 soak subset
-  --with-compare
-      Also run the nginx comparison Docker harness
   --soak-iterations <n>
       Repeat the focused HTTP/3 soak subset n times, default: 1
-  --compare-out-dir <dir>
-      Output directory for nginx comparison artifacts
   -h, --help
       Show help
-
-Any additional arguments after `--` are passed through to
-`scripts/run-nginx-compare-docker.sh`.
 EOF
 }
 
@@ -61,24 +48,10 @@ while [[ $# -gt 0 ]]; do
             RUN_SOAK=0
             shift
             ;;
-        --with-compare)
-            RUN_COMPARE=1
-            shift
-            ;;
         --soak-iterations)
             [[ $# -ge 2 ]] || die "--soak-iterations requires a value"
             SOAK_ITERATIONS="$2"
             shift 2
-            ;;
-        --compare-out-dir)
-            [[ $# -ge 2 ]] || die "--compare-out-dir requires a value"
-            COMPARE_OUT_DIR="$2"
-            shift 2
-            ;;
-        --)
-            shift
-            COMPARE_ARGS=("$@")
-            break
             ;;
         -h|--help)
             usage
@@ -117,13 +90,6 @@ if [[ "${RUN_SOAK}" -eq 1 ]]; then
             cargo test -p rginx --locked --test "${test_name}" -- --nocapture --test-threads=1
         done
     done
-fi
-
-if [[ "${RUN_COMPARE}" -eq 1 ]]; then
-    log "running nginx comparison harness"
-    "${ROOT_DIR}/scripts/run-nginx-compare-docker.sh" \
-        --out-dir "${COMPARE_OUT_DIR}" \
-        -- "${COMPARE_ARGS[@]}"
 fi
 
 log "HTTP/3 Phase 0 baseline run completed"

@@ -30,6 +30,7 @@ base64.workspace = true
 brotli.workspace = true
 bytes.workspace = true
 chrono.workspace = true
+ctor.workspace = true
 flate2.workspace = true
 h3.workspace = true
 h3-quinn.workspace = true

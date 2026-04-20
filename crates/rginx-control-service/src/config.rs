@@ -23,7 +23,7 @@ pub struct ControlPlaneServiceConfig {
 impl Default for ControlPlaneServiceConfig {
     fn default() -> Self {
         Self {
-            service_name: "rginx-control-api".to_string(),
+            service_name: "rginx-web".to_string(),
             api_version: CONTROL_API_VERSION.to_string(),
             ui_path: "/".to_string(),
             node_agent_path: "rginx-node-agent".to_string(),
@@ -34,7 +34,7 @@ impl Default for ControlPlaneServiceConfig {
 }
 
 impl ControlPlaneServiceConfig {
-    pub fn for_api() -> Result<Self> {
+    pub fn for_web() -> Result<Self> {
         let session_secret = env::var("RGINX_CONTROL_AUTH_SESSION_SECRET")
             .context("RGINX_CONTROL_AUTH_SESSION_SECRET is required")?;
         if session_secret.trim().is_empty() {
@@ -62,16 +62,5 @@ impl ControlPlaneServiceConfig {
             }),
             ..Self::default()
         })
-    }
-
-    pub fn for_worker() -> Self {
-        let mut config =
-            Self { service_name: "rginx-control-worker".to_string(), ..Self::default() };
-        if let Ok(value) = env::var("RGINX_CONTROL_NODE_OFFLINE_THRESHOLD_SECS")
-            && let Ok(seconds) = value.parse::<u64>()
-        {
-            config.node_offline_threshold = Duration::from_secs(seconds);
-        }
-        config
     }
 }

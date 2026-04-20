@@ -161,7 +161,7 @@ impl PreparedProxyRequest {
 
     pub(super) fn build_for_peer(
         &mut self,
-        peer: &UpstreamPeer,
+        peer: &ResolvedUpstreamPeer,
         target: &ProxyTarget,
         client_address: &ClientAddress,
         forwarded_proto: &str,
@@ -172,7 +172,7 @@ impl PreparedProxyRequest {
         let uri = build_proxy_uri(peer, &self.uri, target.strip_prefix.as_deref())?;
         sanitize_request_headers(
             &mut headers,
-            &peer.authority,
+            &peer.upstream_authority,
             original_host,
             client_address,
             forwarded_proto,
@@ -183,7 +183,7 @@ impl PreparedProxyRequest {
 
         tracing::debug!(
             upstream = %target.upstream.name,
-            peer = %peer.url,
+            peer = %peer.display_url,
             uri = %uri,
             "forwarding request to upstream"
         );
@@ -344,10 +344,10 @@ pub(super) fn is_idempotent_method(method: &Method) -> bool {
 
 pub(super) fn can_retry_peer_request(
     prepared_request: &PreparedProxyRequest,
-    peers: &[UpstreamPeer],
+    peer_count: usize,
     attempt_index: usize,
 ) -> bool {
-    prepared_request.can_failover() && attempt_index + 1 < peers.len()
+    prepared_request.can_failover() && attempt_index + 1 < peer_count
 }
 
 #[cfg(test)]

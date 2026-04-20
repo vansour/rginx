@@ -16,6 +16,10 @@ pub use acceptor::build_tls_acceptor;
 #[cfg(test)]
 pub(crate) use sni::best_matching_wildcard_certificates;
 
+pub(crate) fn install_default_crypto_provider() {
+    provider::install_default_crypto_provider();
+}
+
 pub fn build_ocsp_request_for_certificate(path: &std::path::Path) -> Result<Vec<u8>> {
     ocsp::build_ocsp_request_for_certificate(path)
 }

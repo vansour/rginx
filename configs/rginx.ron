@@ -4,8 +4,8 @@ Config(
     ),
     server: ServerConfig(
         listen: "0.0.0.0:80",
-        // TLS examples live in `example/rginx.ron`.
-        // If you enable HTTPS here, run `rginx check` and the TLS release gate from README before deploying.
+        // Add TLS here when you want HTTPS on the default listener.
+        // Validate with `rginx -t` or `rginx check` before deploying.
         // Example:
         // tls: Some(ServerTlsConfig(
         //     cert_path: "/etc/rginx/certs/default.crt",
@@ -15,8 +15,7 @@ Config(
         //     session_tickets: Some(false),
         // )),
         // Fresh installs should work without any upstream dependencies.
-        // Reverse-proxy examples live in `example/rginx.ron`.
-        // For per-vhost certificate overrides, see `configs/conf.d/default.ron`.
+        // Add virtual hosts in `configs/conf.d/*.ron` when you need host-based routing.
     ),
     upstreams: [],
     locations: [

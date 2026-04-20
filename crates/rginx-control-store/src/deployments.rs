@@ -634,7 +634,7 @@ impl DeploymentRepository {
         )
         .bind(deployment_id)
         .bind(if paused { "paused" } else { "running" })
-        .bind(if paused { Some("paused by operator") } else { None })
+        .bind(if paused { Some("paused by administrator") } else { None })
         .execute(self.store.postgres())
         .await
         .with_context(|| {

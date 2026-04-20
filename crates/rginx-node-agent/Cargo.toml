@@ -14,6 +14,7 @@ description = "Node-local agent that bridges the rginx admin socket with the con
 [dependencies]
 anyhow.workspace = true
 reqwest.workspace = true
+rginx-dns = { path = "../rginx-dns" }
 rginx-control-types = { path = "../rginx-control-types" }
 rginx-observability = { path = "../rginx-observability" }
 serde.workspace = true

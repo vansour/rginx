@@ -13,19 +13,13 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use rginx_control_store::{
-    ControlPlaneStore, NewAuditLogEntry, NewAuthSession, NewLocalUserRecord, StoredPasswordUser,
+    ControlPlaneStore, NewAuditLogEntry, NewAuthSession, StoredPasswordUser,
 };
-use rginx_control_types::{
-    AuthLoginRequest, AuthLoginResponse, AuthUserSummary, AuthenticatedActor,
-    CreateLocalUserRequest, CreateLocalUserResponse,
-};
+use rginx_control_types::{AuthLoginRequest, AuthLoginResponse, AuthenticatedActor};
 
 use crate::{ControlPlaneAuthConfig, ServiceError, ServiceResult};
 
 const PASSWORD_SCHEME: &str = "pbkdf2_sha256";
-const PASSWORD_ITERATIONS: u32 = 100_000;
-const PASSWORD_HASH_LEN: usize = 32;
-const PASSWORD_SALT_LEN: usize = 16;
 const SESSION_TOKEN_LEN: usize = 32;
 const ID_TOKEN_LEN: usize = 12;
 const NODE_AGENT_TOKEN_SCOPE: &str = "node_agent_v1";
@@ -214,87 +208,6 @@ impl AuthService {
         actor.clone()
     }
 
-    pub async fn list_users(&self) -> ServiceResult<Vec<AuthUserSummary>> {
-        self.store
-            .auth_repository()
-            .list_users()
-            .await
-            .map_err(|error| ServiceError::Internal(error.to_string()))
-    }
-
-    pub async fn create_local_user(
-        &self,
-        actor: &AuthenticatedActor,
-        request: CreateLocalUserRequest,
-        request_id: &str,
-        user_agent: Option<String>,
-        remote_addr: Option<String>,
-    ) -> ServiceResult<CreateLocalUserResponse> {
-        if request.username.trim().is_empty() {
-            return Err(ServiceError::BadRequest("username should not be empty".to_string()));
-        }
-        if request.display_name.trim().is_empty() {
-            return Err(ServiceError::BadRequest("display_name should not be empty".to_string()));
-        }
-        if request.password.len() < 10 {
-            return Err(ServiceError::BadRequest(
-                "password should be at least 10 characters".to_string(),
-            ));
-        }
-
-        if self
-            .store
-            .auth_repository()
-            .find_user_credentials_by_username(request.username.trim())
-            .await
-            .map_err(|error| ServiceError::Internal(error.to_string()))?
-            .is_some()
-        {
-            return Err(ServiceError::Conflict(format!(
-                "user `{}` already exists",
-                request.username.trim()
-            )));
-        }
-
-        let created_at = Utc::now();
-        let new_user = NewLocalUserRecord {
-            user_id: self.generate_id("usr")?,
-            username: request.username.trim().to_string(),
-            display_name: request.display_name.trim().to_string(),
-            password_hash: self.hash_password(&request.password)?,
-            role: request.role,
-        };
-        let user = self
-            .store
-            .auth_repository()
-            .create_local_user_with_audit(
-                &new_user,
-                &NewAuditLogEntry {
-                    audit_id: self.generate_id("audit")?,
-                    request_id: request_id.to_string(),
-                    cluster_id: None,
-                    actor_id: actor.user.user_id.clone(),
-                    action: "auth.user_created".to_string(),
-                    resource_type: "user".to_string(),
-                    resource_id: new_user.user_id.clone(),
-                    result: "succeeded".to_string(),
-                    details: json!({
-                        "username": new_user.username.clone(),
-                        "display_name": new_user.display_name.clone(),
-                        "role": new_user.role.as_str(),
-                        "created_by": actor.user.username.clone(),
-                        "user_agent": user_agent,
-                        "remote_addr": remote_addr,
-                    }),
-                    created_at,
-                },
-            )
-            .await
-            .map_err(|error| ServiceError::Internal(error.to_string()))?;
-
-        Ok(CreateLocalUserResponse { user })
-    }
-
     pub fn mint_node_agent_token(
         &self,
         node_id: &str,
@@ -341,28 +254,6 @@ impl AuthService {
         self.auth_config
             .as_ref()
             .ok_or_else(|| ServiceError::Internal("auth service is not configured".to_string()))
-    }
-
-    fn hash_password(&self, password: &str) -> ServiceResult<String> {
-        let mut salt = [0_u8; PASSWORD_SALT_LEN];
-        SystemRandom::new()
-            .fill(&mut salt)
-            .map_err(|_| ServiceError::Internal("failed to generate password salt".to_string()))?;
-
-        let mut output = [0_u8; PASSWORD_HASH_LEN];
-        pbkdf2::derive(
-            pbkdf2::PBKDF2_HMAC_SHA256,
-            NonZeroU32::new(PASSWORD_ITERATIONS).expect("non-zero iterations"),
-            &salt,
-            password.as_bytes(),
-            &mut output,
-        );
-
-        Ok(format!(
-            "{PASSWORD_SCHEME}${PASSWORD_ITERATIONS}${}${}",
-            URL_SAFE_NO_PAD.encode(salt),
-            URL_SAFE_NO_PAD.encode(output)
-        ))
     }
 
     fn verify_password(

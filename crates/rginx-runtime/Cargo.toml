@@ -29,3 +29,6 @@ serde_json.workspace = true
 socket2 = "0.5.10"
 tokio = { workspace = true, features = ["io-util", "process"] }
 tracing.workspace = true
+
+[dev-dependencies]
+ctor.workspace = true

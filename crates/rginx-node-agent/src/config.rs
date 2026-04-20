@@ -1,4 +1,5 @@
 use std::env;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -15,6 +16,8 @@ pub struct NodeAgentConfig {
     pub running_version: String,
     pub control_plane_origin: String,
     pub control_plane_agent_token: String,
+    pub dns_udp_bind_addr: Option<SocketAddr>,
+    pub dns_tcp_bind_addr: Option<SocketAddr>,
     pub admin_socket_path: PathBuf,
     pub rginx_binary_path: PathBuf,
     pub config_path: PathBuf,
@@ -46,6 +49,8 @@ impl NodeAgentConfig {
                 .parse()
                 .context("RGINX_NODE_AGENT_TASK_POLL_SECS should be a positive integer")?,
         );
+        let dns_udp_bind_addr = optional_socket_addr_from_env("RGINX_NODE_DNS_UDP_ADDR")?;
+        let dns_tcp_bind_addr = optional_socket_addr_from_env("RGINX_NODE_DNS_TCP_ADDR")?;
 
         Ok(Self {
             node_id: env::var("RGINX_NODE_ID").unwrap_or_else(|_| "edge-dev-01".to_string()),
@@ -62,6 +67,8 @@ impl NodeAgentConfig {
                 .to_string(),
             control_plane_agent_token: env::var("RGINX_CONTROL_AGENT_SHARED_TOKEN")
                 .context("RGINX_CONTROL_AGENT_SHARED_TOKEN is required")?,
+            dns_udp_bind_addr,
+            dns_tcp_bind_addr,
             admin_socket_path: env::var("RGINX_ADMIN_SOCKET")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from("/run/rginx/admin.sock")),
@@ -85,5 +92,16 @@ impl NodeAgentConfig {
             task_poll_interval,
             request_timeout,
         })
+    }
+}
+
+fn optional_socket_addr_from_env(name: &str) -> Result<Option<SocketAddr>> {
+    match env::var(name) {
+        Ok(value) if value.trim().is_empty() => Ok(None),
+        Ok(value) => value
+            .parse()
+            .with_context(|| format!("{name} should be a valid socket address"))
+            .map(Some),
+        Err(_) => Ok(None),
     }
 }
