@@ -1,5 +1,10 @@
 #![allow(dead_code)]
 
+#[ctor::ctor]
+fn install_test_crypto_provider() {
+    rginx_http::install_default_crypto_provider();
+}
+
 use std::env;
 use std::fs;
 use std::io::{Read, Write};

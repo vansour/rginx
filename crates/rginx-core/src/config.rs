@@ -22,8 +22,8 @@ pub use tls::{
     TlsVersion, VirtualHostTls,
 };
 pub use upstream::{
-    ActiveHealthCheck, Upstream, UpstreamLoadBalance, UpstreamPeer, UpstreamProtocol,
-    UpstreamSettings, UpstreamTls,
+    ActiveHealthCheck, Upstream, UpstreamDnsPolicy, UpstreamLoadBalance, UpstreamPeer,
+    UpstreamProtocol, UpstreamSettings, UpstreamTls,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

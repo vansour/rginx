@@ -94,6 +94,7 @@ impl SharedState {
     }
 
     fn from_parts(config: ConfigSnapshot, config_path: Option<PathBuf>) -> Result<Self> {
+        crate::install_default_crypto_provider();
         let snapshot_version = Arc::new(AtomicU64::new(0));
         let snapshot_notify = Arc::new(Notify::new());
         let snapshot_components = Arc::new(SnapshotComponentVersions::default());

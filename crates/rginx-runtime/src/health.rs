@@ -169,8 +169,8 @@ mod tests {
 
     use rginx_core::{
         ActiveHealthCheck, ConfigSnapshot, Listener, RuntimeSettings, Server, Upstream,
-        UpstreamLoadBalance, UpstreamPeer, UpstreamProtocol, UpstreamSettings, UpstreamTls,
-        VirtualHost,
+        UpstreamDnsPolicy, UpstreamLoadBalance, UpstreamPeer, UpstreamProtocol, UpstreamSettings,
+        UpstreamTls, VirtualHost,
     };
     use rginx_http::SharedState;
 
@@ -295,6 +295,7 @@ mod tests {
         UpstreamSettings {
             protocol: UpstreamProtocol::Auto,
             load_balance: UpstreamLoadBalance::RoundRobin,
+            dns: UpstreamDnsPolicy::default(),
             server_name: true,
             server_name_override: None,
             tls_versions: None,

@@ -9,8 +9,9 @@ use rginx_control_types::{
     AuditLogEntry, AuditLogSummary, AuthRole, AuthSessionSummary, AuthUserSummary,
     AuthenticatedActor, ConfigCompileSummary, ConfigDraftDetail, ConfigDraftSummary,
     ConfigDraftValidationState, ConfigRevisionDetail, ConfigRevisionListItem,
-    ConfigRevisionSummary, ConfigValidationReport, DeploymentSummary, NodeAgentRegistrationRequest,
-    NodeSnapshotDetail, NodeSnapshotIngestRequest, NodeSnapshotMeta, NodeSummary,
+    ConfigRevisionSummary, ConfigValidationReport, DeploymentSummary, DnsDeploymentSummary,
+    NodeAgentRegistrationRequest, NodeSnapshotDetail, NodeSnapshotIngestRequest, NodeSnapshotMeta,
+    NodeSummary,
 };
 
 use crate::config::ControlPlaneStoreConfig;
@@ -30,9 +31,11 @@ pub struct DashboardSnapshot {
     pub drifted_nodes: u32,
     pub total_revisions: u64,
     pub active_deployments: u32,
+    pub active_dns_deployments: u32,
     pub latest_revision: Option<ConfigRevisionSummary>,
     pub recent_nodes: Vec<NodeSummary>,
     pub recent_deployments: Vec<DeploymentSummary>,
+    pub recent_dns_deployments: Vec<DnsDeploymentSummary>,
 }
 
 #[derive(Debug, Clone)]
@@ -46,6 +49,7 @@ pub struct BackendDependencyStatus {
 pub struct WorkerRuntimeContext {
     pub known_nodes: usize,
     pub active_deployments: usize,
+    pub active_dns_deployments: usize,
     pub dependencies: Vec<BackendDependencyStatus>,
 }
 
@@ -53,15 +57,6 @@ pub struct WorkerRuntimeContext {
 pub struct StoredPasswordUser {
     pub user: AuthUserSummary,
     pub password_hash: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct NewLocalUserRecord {
-    pub user_id: String,
-    pub username: String,
-    pub display_name: String,
-    pub password_hash: String,
-    pub role: AuthRole,
 }
 
 #[derive(Debug, Clone)]
@@ -194,6 +189,14 @@ impl ControlPlaneStore {
         crate::DeploymentRepository::new(self.clone())
     }
 
+    pub fn dns_repository(&self) -> crate::DnsRepository {
+        crate::DnsRepository::new(self.clone())
+    }
+
+    pub fn dns_deployment_repository(&self) -> crate::DnsDeploymentRepository {
+        crate::DnsDeploymentRepository::new(self.clone())
+    }
+
     pub fn worker_runtime_repository(&self) -> WorkerRuntimeRepository {
         WorkerRuntimeRepository { store: self.clone() }
     }
@@ -228,7 +231,8 @@ impl DashboardRepository {
                 (select count(*) from cp_nodes where state = 'offline') as offline_nodes,
                 (select count(*) from cp_nodes where state = 'drifted') as drifted_nodes,
                 (select count(*) from cp_config_revisions) as total_revisions,
-                (select count(*) from cp_deployments where status in ('running', 'paused')) as active_deployments
+                (select count(*) from cp_deployments where status in ('running', 'paused')) as active_deployments,
+                (select count(*) from cp_dns_deployments where status in ('running', 'paused')) as active_dns_deployments
             "#,
         )
         .fetch_one(self.store.postgres())
@@ -325,6 +329,14 @@ impl DashboardRepository {
         .into_iter()
         .map(map_deployment_row)
         .collect::<Result<Vec<_>>>()?;
+        let recent_dns_deployments = self
+            .store
+            .dns_deployment_repository()
+            .list_deployments()
+            .await?
+            .into_iter()
+            .take(usize::try_from(DASHBOARD_RECENT_LIMIT).unwrap_or_default())
+            .collect::<Vec<_>>();
 
         Ok(DashboardSnapshot {
             total_clusters: count_to_u32(
@@ -347,9 +359,14 @@ impl DashboardRepository {
                 aggregate_row.try_get("active_deployments")?,
                 "active_deployments",
             )?,
+            active_dns_deployments: count_to_u32(
+                aggregate_row.try_get("active_dns_deployments")?,
+                "active_dns_deployments",
+            )?,
             latest_revision,
             recent_nodes,
             recent_deployments,
+            recent_dns_deployments,
         })
     }
 }
@@ -829,11 +846,21 @@ impl WorkerRuntimeRepository {
         .fetch_one(self.store.postgres())
         .await
         .context("failed to count active control-plane deployments")?;
+        let active_dns_deployments = sqlx::query_scalar::<_, i64>(
+            "select count(*) from cp_dns_deployments where status in ('running', 'paused')",
+        )
+        .fetch_one(self.store.postgres())
+        .await
+        .context("failed to count active dns deployments")?;
         let dependencies = self.store.dependency_repository().load_dependency_statuses().await;
 
         Ok(WorkerRuntimeContext {
             known_nodes: count_to_usize(known_nodes, "known_nodes")?,
             active_deployments: count_to_usize(active_deployments, "active_deployments")?,
+            active_dns_deployments: count_to_usize(
+                active_dns_deployments,
+                "active_dns_deployments",
+            )?,
             dependencies,
         })
     }
@@ -1650,101 +1677,6 @@ impl AuthRepository {
             }
             None => Ok(None),
         }
-    }
-
-    pub async fn list_users(&self) -> Result<Vec<AuthUserSummary>> {
-        let rows = sqlx::query(
-            r#"
-            select user_id, username, display_name, is_active, created_at
-            from cp_users
-            order by created_at asc, username asc
-            "#,
-        )
-        .fetch_all(self.store.postgres())
-        .await
-        .context("failed to list control-plane users")?;
-
-        let mut users = Vec::with_capacity(rows.len());
-        for row in rows {
-            let user_id: String = row.try_get("user_id").context("user_id should be present")?;
-            users.push(AuthUserSummary {
-                user_id: user_id.clone(),
-                username: row.try_get("username").context("username should be present")?,
-                display_name: row
-                    .try_get("display_name")
-                    .context("display_name should be present")?,
-                active: row.try_get("is_active").context("is_active should be present")?,
-                roles: load_roles_for_user(self.store.postgres(), &user_id).await?,
-                created_at_unix_ms: unix_time_ms(
-                    row.try_get::<DateTime<Utc>, _>("created_at")
-                        .context("created_at should be present")?,
-                )?,
-            });
-        }
-
-        Ok(users)
-    }
-
-    pub async fn create_local_user_with_audit(
-        &self,
-        user: &NewLocalUserRecord,
-        audit: &NewAuditLogEntry,
-    ) -> Result<AuthUserSummary> {
-        let mut transaction = self
-            .store
-            .postgres()
-            .begin()
-            .await
-            .context("failed to start local-user creation transaction")?;
-
-        sqlx::query(
-            r#"
-            insert into cp_users (
-                user_id,
-                username,
-                display_name,
-                password_hash,
-                is_active,
-                created_at,
-                updated_at
-            )
-            values ($1, $2, $3, $4, true, now(), now())
-            "#,
-        )
-        .bind(&user.user_id)
-        .bind(&user.username)
-        .bind(&user.display_name)
-        .bind(&user.password_hash)
-        .execute(&mut *transaction)
-        .await
-        .with_context(|| format!("failed to insert control-plane user `{}`", user.username))?;
-
-        sqlx::query(
-            r#"
-            insert into cp_user_roles (user_id, role_id)
-            values ($1, $2)
-            "#,
-        )
-        .bind(&user.user_id)
-        .bind(user.role.as_str())
-        .execute(&mut *transaction)
-        .await
-        .with_context(|| {
-            format!("failed to assign role `{}` to user `{}`", user.role.as_str(), user.username)
-        })?;
-
-        insert_audit_entry(&mut transaction, audit).await?;
-
-        transaction.commit().await.context("failed to commit local-user creation transaction")?;
-
-        Ok(AuthUserSummary {
-            user_id: user.user_id.clone(),
-            username: user.username.clone(),
-            display_name: user.display_name.clone(),
-            active: true,
-            roles: vec![user.role],
-            created_at_unix_ms: unix_time_ms(Utc::now())?,
-        })
     }
 
     pub async fn create_session_with_audit(

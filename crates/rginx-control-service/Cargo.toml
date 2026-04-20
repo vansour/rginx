@@ -15,6 +15,7 @@ description = "Domain services for the rginx control plane."
 anyhow.workspace = true
 base64.workspace = true
 chrono.workspace = true
+ipnet.workspace = true
 rginx-config = { path = "../rginx-config" }
 rginx-control-store = { path = "../rginx-control-store" }
 rginx-control-types = { path = "../rginx-control-types" }

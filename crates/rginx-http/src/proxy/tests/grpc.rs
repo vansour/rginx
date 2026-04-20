@@ -218,8 +218,8 @@ async fn build_active_health_request_builds_grpc_probe_request() {
         healthy_successes_required: 1,
     };
 
-    let request =
-        build_active_health_request(&upstream, &peer, &check).expect("request should build");
+    let request = build_active_health_request(&upstream, &resolved_peer(&peer), &check)
+        .expect("request should build");
 
     assert_eq!(request.method(), Method::POST);
     assert_eq!(request.version(), Version::HTTP_2);

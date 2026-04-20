@@ -3,7 +3,7 @@ use super::*;
 
 impl SharedState {
     pub async fn peer_health_snapshot(&self) -> Vec<UpstreamHealthSnapshot> {
-        self.inner.read().await.clients.peer_health_snapshot()
+        self.inner.read().await.clients.peer_health_snapshot().await
     }
 
     pub fn upstream_stats_snapshot(&self) -> Vec<UpstreamStatsSnapshot> {

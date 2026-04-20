@@ -23,6 +23,7 @@ http.workspace = true
 http-body-util.workspace = true
 h3.workspace = true
 h3-quinn.workspace = true
+hickory-resolver.workspace = true
 hyper.workspace = true
 hyper-rustls.workspace = true
 hyper-util.workspace = true
@@ -40,9 +41,11 @@ sha1.workspace = true
 sha2.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util"] }
 tokio-rustls.workspace = true
+tower-service.workspace = true
 tracing.workspace = true
 webpki.workspace = true
 
 [dev-dependencies]
+ctor.workspace = true
 rcgen = "0.14"
 tempfile = "3.27"

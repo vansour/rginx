@@ -1,7 +1,7 @@
 VirtualHostConfig(
     server_names: ["app.example.com"],
-    // For per-vhost certificate overrides, see the commented TLS examples in `example/conf.d/default.ron`.
-    // Reverse-proxy examples live in `example/conf.d/default.ron`.
+    // Add per-vhost TLS here when this hostname should use its own certificate.
+    // Replace the sample `Return` handlers below with proxy routes for real traffic.
     // Example:
     // tls: Some(VirtualHostTlsConfig(
     //     cert_path: "/etc/rginx/certs/app.example.com.crt",

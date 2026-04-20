@@ -4,14 +4,14 @@ use std::time::Duration;
 
 use rginx_core::{
     ActiveHealthCheck, ConfigSnapshot, Listener, RuntimeSettings, Server, Upstream,
-    UpstreamLoadBalance, UpstreamPeer, UpstreamProtocol, UpstreamSettings, UpstreamTls,
-    VirtualHost,
+    UpstreamDnsPolicy, UpstreamLoadBalance, UpstreamPeer, UpstreamProtocol, UpstreamSettings,
+    UpstreamTls, VirtualHost,
 };
 
 use super::ProxyClients;
 
-#[test]
-fn peer_health_snapshot_delegates_to_registry() {
+#[tokio::test]
+async fn peer_health_snapshot_delegates_to_registry() {
     let upstream = Arc::new(Upstream::new(
         "backend".to_string(),
         vec![UpstreamPeer {
@@ -25,6 +25,7 @@ fn peer_health_snapshot_delegates_to_registry() {
         UpstreamSettings {
             protocol: UpstreamProtocol::Auto,
             load_balance: UpstreamLoadBalance::RoundRobin,
+            dns: UpstreamDnsPolicy::default(),
             server_name: true,
             server_name_override: None,
             tls_versions: None,
@@ -93,7 +94,7 @@ fn peer_health_snapshot_delegates_to_registry() {
     };
 
     let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
-    let snapshot = clients.peer_health_snapshot();
+    let snapshot = clients.peer_health_snapshot().await;
     assert_eq!(snapshot.len(), 1);
     assert_eq!(snapshot[0].upstream_name, "backend");
     assert_eq!(snapshot[0].peers.len(), 1);

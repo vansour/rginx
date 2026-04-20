@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>rginx 运维控制台</title>
+    <meta
+      name="description"
+      content="rginx 边缘网络运维控制台，统一查看节点、站点配置、DNS 与发布状态。"
+    />
+    <link rel="stylesheet" href="./console.css" />
+  </head>
+  <body>
+    <div class="boot-layer" id="boot-layer">
+      <div class="boot-card">
+        <span class="boot-mark">RG</span>
+        <div>
+          <strong>rginx Console</strong>
+          <p>正在加载控制台前端…</p>
+        </div>
+      </div>
+    </div>
+    <div id="app"></div>
+    <noscript>
+      <div class="boot-layer boot-layer--static">
+        <div class="boot-card">
+          <span class="boot-mark">RG</span>
+          <div>
+            <strong>需要启用 JavaScript</strong>
+            <p>控制台依赖浏览器 JavaScript 与 WASM 运行环境。</p>
+          </div>
+        </div>
+      </div>
+    </noscript>
+    <script type="module">
+      const bootLayer = document.getElementById("boot-layer");
+      const setBootState = (state, message) => {
+        if (!bootLayer) return;
+        bootLayer.dataset.state = state;
+        const paragraph = bootLayer.querySelector("p");
+        if (paragraph && message) paragraph.textContent = message;
+      };
+
+      try {
+        const { default: init } = await import("./console.js");
+        await init("./console_bg.wasm");
+        setBootState("ready");
+        window.setTimeout(() => bootLayer?.remove(), 180);
+      } catch (error) {
+        console.error("failed to bootstrap rginx console", error);
+        setBootState("error", "控制台加载失败，请刷新页面或检查镜像内前端产物。");
+      }
+    </script>
+  </body>
+</html>

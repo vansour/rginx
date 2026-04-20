@@ -1,4 +1,4 @@
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -50,10 +50,38 @@ impl UpstreamLoadBalance {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UpstreamDnsPolicy {
+    pub resolver_addrs: Vec<SocketAddr>,
+    pub min_ttl: Duration,
+    pub max_ttl: Duration,
+    pub negative_ttl: Duration,
+    pub stale_if_error: Duration,
+    pub refresh_before_expiry: Duration,
+    pub prefer_ipv4: bool,
+    pub prefer_ipv6: bool,
+}
+
+impl Default for UpstreamDnsPolicy {
+    fn default() -> Self {
+        Self {
+            resolver_addrs: Vec::new(),
+            min_ttl: Duration::from_secs(5),
+            max_ttl: Duration::from_secs(300),
+            negative_ttl: Duration::from_secs(30),
+            stale_if_error: Duration::from_secs(60),
+            refresh_before_expiry: Duration::from_secs(10),
+            prefer_ipv4: false,
+            prefer_ipv6: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct UpstreamSettings {
     pub protocol: UpstreamProtocol,
     pub load_balance: UpstreamLoadBalance,
+    pub dns: UpstreamDnsPolicy,
     pub server_name: bool,
     pub server_name_override: Option<String>,
     pub tls_versions: Option<Vec<TlsVersion>>,
@@ -84,6 +112,7 @@ pub struct Upstream {
     pub tls: UpstreamTls,
     pub protocol: UpstreamProtocol,
     pub load_balance: UpstreamLoadBalance,
+    pub dns: UpstreamDnsPolicy,
     pub server_name: bool,
     pub server_name_override: Option<String>,
     pub tls_versions: Option<Vec<TlsVersion>>,
@@ -121,6 +150,7 @@ impl Upstream {
             tls,
             protocol: settings.protocol,
             load_balance: settings.load_balance,
+            dns: settings.dns,
             server_name: settings.server_name,
             server_name_override: settings.server_name_override,
             tls_versions: settings.tls_versions,

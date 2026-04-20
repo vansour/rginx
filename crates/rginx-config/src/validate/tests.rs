@@ -1408,6 +1408,7 @@ fn base_config() -> Config {
                 backup: false,
             }],
             tls: None,
+            dns: None,
             protocol: UpstreamProtocolConfig::Auto,
             load_balance: UpstreamLoadBalanceConfig::RoundRobin,
             server_name: None,

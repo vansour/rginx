@@ -21,8 +21,8 @@ use http_body_util::{BodyExt, StreamBody};
 use hyper::body::Frame;
 use rcgen::{CertifiedKey, KeyPair};
 use rginx_core::{
-    ActiveHealthCheck, ClientIdentity, Error, TlsVersion, Upstream, UpstreamLoadBalance,
-    UpstreamPeer, UpstreamProtocol, UpstreamSettings, UpstreamTls,
+    ActiveHealthCheck, ClientIdentity, Error, TlsVersion, Upstream, UpstreamDnsPolicy,
+    UpstreamLoadBalance, UpstreamPeer, UpstreamProtocol, UpstreamSettings, UpstreamTls,
 };
 
 use super::clients::{ProxyClients, load_custom_ca_store};
@@ -44,7 +44,8 @@ use super::request_body::{
     PreparedProxyRequest, PreparedRequestBody, can_retry_peer_request, is_idempotent_method,
 };
 use super::{
-    build_proxy_uri, probe_upstream_peer, sanitize_request_headers, upstream_request_version,
+    ResolvedUpstreamPeer, build_proxy_uri, probe_upstream_peer, sanitize_request_headers,
+    upstream_request_version,
 };
 use crate::client_ip::{ClientAddress, ClientIpSource};
 use tempfile::TempDir;
@@ -59,6 +60,7 @@ fn upstream_settings(protocol: UpstreamProtocol) -> UpstreamSettings {
     UpstreamSettings {
         protocol,
         load_balance: UpstreamLoadBalance::RoundRobin,
+        dns: UpstreamDnsPolicy::default(),
         server_name: true,
         server_name_override: None,
         tls_versions: None,
@@ -100,6 +102,54 @@ fn peer_with_role(url: &str, weight: u32, backup: bool) -> UpstreamPeer {
         weight,
         backup,
     }
+}
+
+fn resolved_peer_from_url(url: &str) -> ResolvedUpstreamPeer {
+    let uri: http::Uri = url.parse().expect("peer URL should parse");
+    let scheme = uri.scheme_str().expect("peer should have scheme").to_string();
+    let authority = uri.authority().expect("peer should have authority").to_string();
+    let host = uri.host().expect("peer should have host").to_string();
+    let port = uri.port_u16().unwrap_or_else(|| if scheme == "https" { 443 } else { 80 });
+    let socket_addr = host
+        .parse::<IpAddr>()
+        .map(|ip| SocketAddr::new(ip, port))
+        .unwrap_or_else(|_| SocketAddr::new("127.0.0.1".parse().unwrap(), port));
+
+    ResolvedUpstreamPeer {
+        url: url.to_string(),
+        logical_peer_url: url.to_string(),
+        endpoint_key: url.to_string(),
+        display_url: format!("{scheme}://{authority}"),
+        scheme,
+        upstream_authority: authority.clone(),
+        dial_authority: authority,
+        socket_addr,
+        server_name: host,
+        weight: 1,
+        backup: false,
+    }
+}
+
+fn resolved_peer(peer: &UpstreamPeer) -> ResolvedUpstreamPeer {
+    let mut resolved = resolved_peer_from_url(&peer.url);
+    resolved.url = peer.url.clone();
+    resolved.logical_peer_url = peer.url.clone();
+    resolved.endpoint_key = peer.url.clone();
+    resolved.display_url = peer.url.clone();
+    resolved.upstream_authority = peer.authority.clone();
+    resolved.dial_authority = peer.authority.clone();
+    resolved.weight = peer.weight;
+    resolved.backup = peer.backup;
+    resolved
+}
+
+async fn select(
+    clients: &ProxyClients,
+    upstream: &Upstream,
+    client_ip: IpAddr,
+    limit: usize,
+) -> super::health::SelectedPeers {
+    clients.select_peers(upstream, client_ip, limit).await
 }
 
 fn default_server() -> rginx_core::Server {

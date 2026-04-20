@@ -13,6 +13,10 @@ mod transition;
 
 pub const MAX_OCSP_RESPONSE_BYTES: usize = 128 * 1024;
 
+pub fn install_default_crypto_provider() {
+    tls::install_default_crypto_provider();
+}
+
 pub use client_ip::TlsClientIdentity;
 pub use proxy::{PeerHealthSnapshot, UpstreamHealthSnapshot};
 pub use server::serve;
@@ -36,3 +40,9 @@ pub use transition::{
     ConfigTransitionBoundary, ConfigTransitionKind, ConfigTransitionPlan,
     config_transition_boundary, plan_config_transition, validate_config_transition,
 };
+
+#[cfg(test)]
+#[ctor::ctor]
+fn install_test_crypto_provider() {
+    install_default_crypto_provider();
+}

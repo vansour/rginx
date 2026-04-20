@@ -13,6 +13,7 @@ use clap::Parser;
 use crate::cli::{Cli, Command, SignalCommand, pid_path_for_config};
 
 fn main() -> anyhow::Result<()> {
+    rginx_http::install_default_crypto_provider();
     let cli = Cli::parse();
 
     if cli.command.is_some() && cli.test_config {

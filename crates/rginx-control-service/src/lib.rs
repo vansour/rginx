@@ -4,6 +4,8 @@ mod auth;
 mod config;
 mod dashboard;
 mod deployments;
+mod dns;
+mod dns_deployments;
 mod error;
 mod health;
 mod meta;
@@ -19,6 +21,8 @@ pub use auth::{AuthenticatedNodeAgent, IssuedNodeAgentToken};
 pub use config::{ControlPlaneAuthConfig, ControlPlaneServiceConfig};
 pub use dashboard::DashboardService;
 pub use deployments::{DeploymentReconcileReport, DeploymentService};
+pub use dns::DnsService;
+pub use dns_deployments::{DnsDeploymentReconcileReport, DnsDeploymentService};
 pub use error::{ServiceError, ServiceResult};
 pub use health::HealthService;
 pub use meta::MetaService;
@@ -37,6 +41,8 @@ pub struct ControlPlaneServices {
     meta: MetaService,
     health: HealthService,
     dashboard: DashboardService,
+    dns: DnsService,
+    dns_deployments: DnsDeploymentService,
     metrics: MetricsService,
     deployments: DeploymentService,
     revisions: RevisionService,
@@ -53,6 +59,8 @@ impl ControlPlaneServices {
             meta: MetaService::new(config.clone()),
             health: HealthService::new(store.clone(), config.service_name.clone()),
             dashboard: DashboardService::new(store.clone()),
+            dns: DnsService::new(store.clone()),
+            dns_deployments: DnsDeploymentService::new(store.clone()),
             metrics: MetricsService::new(store.clone()),
             deployments: DeploymentService::new(store.clone()),
             revisions: RevisionService::new(store.clone()),
@@ -83,6 +91,14 @@ impl ControlPlaneServices {
 
     pub fn dashboard(&self) -> &DashboardService {
         &self.dashboard
+    }
+
+    pub fn dns(&self) -> &DnsService {
+        &self.dns
+    }
+
+    pub fn dns_deployments(&self) -> &DnsDeploymentService {
+        &self.dns_deployments
     }
 
     pub fn metrics(&self) -> &MetricsService {

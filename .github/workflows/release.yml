@@ -14,9 +14,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  BIN_NAME: rginx
-  CARGO_PACKAGE: rginx
-  PAGES_APT_SUBDIR: apt
+  WEB_IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/rginx-web
 
 jobs:
   verify:
@@ -126,6 +124,9 @@ jobs:
       - name: Run HTTP/3 Release Gate
         run: ./scripts/run-http3-release-gate.sh --soak-iterations 1
 
+      - name: Run Control Plane Compose Smoke Test
+        run: ./scripts/test-control-plane-compose.sh
+
   build:
     name: Build ${{ matrix.asset_name }} Assets
     needs: verify
@@ -137,17 +138,45 @@ jobs:
       matrix:
         include:
           - runner: ubuntu-24.04
+            cargo_package: rginx
+            bin_name: rginx
+            asset_prefix: rginx
+            bundle_console: false
             target: x86_64-unknown-linux-gnu
             os: linux
             arch: amd64
             archive_ext: tar.gz
-            asset_name: linux-amd64
+            asset_name: rginx-linux-amd64
           - runner: ubuntu-24.04-arm
+            cargo_package: rginx
+            bin_name: rginx
+            asset_prefix: rginx
+            bundle_console: false
             target: aarch64-unknown-linux-gnu
             os: linux
             arch: arm64
             archive_ext: tar.gz
-            asset_name: linux-arm64
+            asset_name: rginx-linux-arm64
+          - runner: ubuntu-24.04
+            cargo_package: rginx-web
+            bin_name: rginx-web
+            asset_prefix: rginx-web
+            bundle_console: true
+            target: x86_64-unknown-linux-gnu
+            os: linux
+            arch: amd64
+            archive_ext: tar.gz
+            asset_name: rginx-web-linux-amd64
+          - runner: ubuntu-24.04-arm
+            cargo_package: rginx-web
+            bin_name: rginx-web
+            asset_prefix: rginx-web
+            bundle_console: true
+            target: aarch64-unknown-linux-gnu
+            os: linux
+            arch: arm64
+            archive_ext: tar.gz
+            asset_name: rginx-web-linux-arm64
     steps:
       - name: Check Out Source
         uses: actions/checkout@v6.0.2
@@ -160,6 +189,14 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install Web Toolchain
+        if: ${{ matrix.bundle_console }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup target add wasm32-unknown-unknown
+          cargo install --locked wasm-bindgen-cli --version 0.2.118
+
       - name: Restore Rust Cache
         uses: Swatinem/rust-cache@v2.9.1
         with:
@@ -169,7 +206,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --locked --release -p "${CARGO_PACKAGE}" --target "${{ matrix.target }}"
+          cargo build --locked --release -p "${{ matrix.cargo_package }}" --target "${{ matrix.target }}"
+
+          if [[ "${{ matrix.bundle_console }}" == "true" ]]; then
+            cargo build --locked --release -p rginx-control-console --target wasm32-unknown-unknown
+          fi
 
       - name: Package Release Archive
         id: package
@@ -179,51 +220,60 @@ jobs:
 
           TAG="${{ needs.verify.outputs.tag }}"
           STAGING_ROOT="$(mktemp -d)"
-          PKG_DIR="rginx-${TAG#v}-${{ matrix.os }}-${{ matrix.arch }}"
+          PKG_DIR="${{ matrix.asset_prefix }}-${TAG#v}-${{ matrix.os }}-${{ matrix.arch }}"
           INSTALL_DIR="${STAGING_ROOT}/${PKG_DIR}"
-          ARCHIVE_NAME="rginx-${TAG}-${{ matrix.os }}-${{ matrix.arch }}.${{ matrix.archive_ext }}"
+          ARCHIVE_NAME="${{ matrix.asset_prefix }}-${TAG}-${{ matrix.os }}-${{ matrix.arch }}.${{ matrix.archive_ext }}"
 
           mkdir -p "${INSTALL_DIR}"
-          install -m 755 "target/${{ matrix.target }}/release/${BIN_NAME}" "${INSTALL_DIR}/${BIN_NAME}"
+          install -m 755 "target/${{ matrix.target }}/release/${{ matrix.bin_name }}" "${INSTALL_DIR}/${{ matrix.bin_name }}"
           cp README.md "${INSTALL_DIR}/README.md"
           cp LICENSE "${INSTALL_DIR}/LICENSE"
           cp LICENSE-APACHE "${INSTALL_DIR}/LICENSE-APACHE"
           cp LICENSE-MIT "${INSTALL_DIR}/LICENSE-MIT"
-          cp -R configs "${INSTALL_DIR}/configs"
-          cp -R scripts "${INSTALL_DIR}/scripts"
+
+          if [[ "${{ matrix.bundle_console }}" == "true" ]]; then
+            mkdir -p "${INSTALL_DIR}/control-console"
+            wasm-bindgen \
+              --target web \
+              --no-typescript \
+              --out-dir "${INSTALL_DIR}/control-console" \
+              --out-name console \
+              "target/wasm32-unknown-unknown/release/rginx_control_console.wasm"
+            cp crates/rginx-control-console/static/index.html "${INSTALL_DIR}/control-console/index.html"
+            cp crates/rginx-control-console/static/console.css "${INSTALL_DIR}/control-console/console.css"
+            cp compose.yaml "${INSTALL_DIR}/compose.yaml"
+            cp .env.example "${INSTALL_DIR}/.env.example"
+            mkdir -p "${INSTALL_DIR}/docker"
+            cp docker/README.md "${INSTALL_DIR}/docker/README.md"
+          else
+            cp -R configs "${INSTALL_DIR}/configs"
+            cp -R scripts "${INSTALL_DIR}/scripts"
+            mkdir -p "${INSTALL_DIR}/deploy"
+            cp -R deploy/systemd "${INSTALL_DIR}/deploy/systemd"
+          fi
 
           mkdir -p dist
           tar -C "${STAGING_ROOT}" -czf "dist/${ARCHIVE_NAME}" "${PKG_DIR}"
 
           echo "archive_name=${ARCHIVE_NAME}" >> "${GITHUB_OUTPUT}"
 
-      - name: Build Debian Package
-        shell: bash
-        run: |
-          set -euo pipefail
-          ./scripts/build-deb.sh \
-            --skip-build \
-            --binary "target/${{ matrix.target }}/release/${BIN_NAME}" \
-            --out-dir dist/debian
-
       - name: Upload Release Assets
         uses: actions/upload-artifact@v7.0.0
         with:
           name: release-${{ matrix.asset_name }}
-          path: |
-            dist/${{ steps.package.outputs.archive_name }}
-            dist/debian/*.deb
+          path: dist/${{ steps.package.outputs.archive_name }}
           if-no-files-found: error
 
-  build_apt_repo:
-    name: Build APT Repository
+  publish-container:
+    name: Publish rginx-web Container
     needs:
       - verify
       - build
-    if: ${{ needs.verify.outputs.prerelease != 'true' }}
+    if: ${{ needs.verify.result == 'success' && needs.build.result == 'success' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+      packages: write
     steps:
       - name: Check Out Source
         uses: actions/checkout@v6.0.2
@@ -231,157 +281,55 @@ jobs:
           fetch-depth: 0
           ref: ${{ needs.verify.outputs.tag }}
 
-      - name: Configure GitHub Pages
-        uses: actions/configure-pages@v5
+      - name: Set Up QEMU
+        uses: docker/setup-qemu-action@v3
 
-      - name: Download Build Artifacts
-        uses: actions/download-artifact@v8.0.1
+      - name: Set Up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log In To GHCR
+        uses: docker/login-action@v3
         with:
-          path: dist/artifacts
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
 
-      - name: Collect Debian Packages
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p dist/debian
-          find dist/artifacts -type f -name '*.deb' -exec mv {} dist/debian/ \;
-          ls -1 dist/debian/*.deb >/dev/null
-
-      - name: Import APT Signing Key
-        shell: bash
-        env:
-          APT_GPG_PRIVATE_KEY: ${{ secrets.APT_GPG_PRIVATE_KEY }}
-        run: |
-          set -euo pipefail
-
-          if [[ -z "${APT_GPG_PRIVATE_KEY}" ]]; then
-            echo "APT_GPG_PRIVATE_KEY secret is required for stable release publishing." >&2
-            exit 1
-          fi
-
-          export GNUPGHOME="$(mktemp -d)"
-          printf '%s' "${APT_GPG_PRIVATE_KEY}" | gpg --batch --import
-          echo "GNUPGHOME=${GNUPGHOME}" >> "${GITHUB_ENV}"
-
-      - name: Build GitHub Pages Site
-        shell: bash
-        env:
-          APT_GPG_KEY_ID: ${{ secrets.APT_GPG_KEY_ID }}
-          APT_GPG_PASSPHRASE: ${{ secrets.APT_GPG_PASSPHRASE }}
-          REPO_NAME: ${{ github.event.repository.name }}
-        run: |
-          set -euo pipefail
-
-          if [[ -z "${APT_GPG_KEY_ID}" ]]; then
-            echo "APT_GPG_KEY_ID secret is required for stable release publishing." >&2
-            exit 1
-          fi
-
-          SITE_ROOT="_site"
-          REPO_ROOT="${SITE_ROOT}/${PAGES_APT_SUBDIR}"
-          DEFAULT_REPO_URL="https://${GITHUB_REPOSITORY_OWNER}.github.io/${REPO_NAME}/${PAGES_APT_SUBDIR}"
-
-          mkdir -p "${SITE_ROOT}"
-          touch "${SITE_ROOT}/.nojekyll"
-
-          ./scripts/publish-apt-repo.sh \
-            --repo-root "${REPO_ROOT}" \
-            --deb-dir dist/debian \
-            --gpg-key "${APT_GPG_KEY_ID}" \
-            --export-key "${REPO_ROOT}/rginx-archive-keyring.gpg"
-
-          cat > "${SITE_ROOT}/index.html" <<EOF
-          <!doctype html>
-          <html lang="en">
-          <head>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1">
-            <title>rginx Packages</title>
-            <style>
-              body { font-family: sans-serif; max-width: 860px; margin: 3rem auto; padding: 0 1rem; line-height: 1.6; }
-              pre { background: #f6f8fa; padding: 1rem; overflow-x: auto; }
-              code { font-family: ui-monospace, SFMono-Regular, monospace; }
-            </style>
-          </head>
-          <body>
-            <h1>rginx Packages</h1>
-            <p>This GitHub Pages site publishes the latest stable APT repository for <code>rginx</code>.</p>
-            <p>The repository root is the <code>${PAGES_APT_SUBDIR}/</code> subdirectory of this site.</p>
-            <p>Default GitHub Pages URL:</p>
-            <pre><code>${DEFAULT_REPO_URL}</code></pre>
-            <p>Repository signing key:</p>
-            <pre><code>curl -fsSL ${DEFAULT_REPO_URL}/rginx-archive-keyring.gpg | sudo tee /usr/share/keyrings/rginx-archive-keyring.gpg >/dev/null</code></pre>
-            <p>APT source:</p>
-            <pre><code>echo "deb [signed-by=/usr/share/keyrings/rginx-archive-keyring.gpg] ${DEFAULT_REPO_URL} stable main" | sudo tee /etc/apt/sources.list.d/rginx.list
-            sudo apt update
-            sudo apt install rginx</code></pre>
-          </body>
-          </html>
-          EOF
-
-          cat > "${REPO_ROOT}/index.html" <<EOF
-          <!doctype html>
-          <html lang="en">
-          <head>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1">
-            <title>rginx APT Repository</title>
-            <style>
-              body { font-family: sans-serif; max-width: 860px; margin: 3rem auto; padding: 0 1rem; line-height: 1.6; }
-              pre { background: #f6f8fa; padding: 1rem; overflow-x: auto; }
-              code { font-family: ui-monospace, SFMono-Regular, monospace; }
-            </style>
-          </head>
-          <body>
-            <h1>rginx APT Repository</h1>
-            <p>This directory is a static APT repository signed by the release workflow.</p>
-            <p>Key file:</p>
-            <pre><code>rginx-archive-keyring.gpg</code></pre>
-            <p>Suite and component:</p>
-            <pre><code>stable main</code></pre>
-          </body>
-          </html>
-          EOF
-
-      - name: Upload GitHub Pages Artifact
-        uses: actions/upload-pages-artifact@v4
+      - name: Prepare Container Metadata
+        id: meta
+        uses: docker/metadata-action@v5
         with:
-          path: _site
+          images: ${{ env.WEB_IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ needs.verify.outputs.tag }}
+            type=raw,value=latest,enable=${{ needs.verify.outputs.prerelease != 'true' }}
 
-      - name: Clean Up Imported GnuPG Home
-        if: ${{ always() }}
+      - name: Compute Build Timestamp
+        id: build_meta
         shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -n "${GNUPGHOME:-}" && -d "${GNUPGHOME}" ]]; then
-            rm -rf "${GNUPGHOME}"
-          fi
+        run: echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${GITHUB_OUTPUT}"
 
-  deploy_apt_repo:
-    name: Deploy APT Repository
-    needs: build_apt_repo
-    if: ${{ needs.build_apt_repo.result == 'success' }}
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+      - name: Build And Push rginx-web Image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          target: rginx-web
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            RGINX_BUILD_VERSION=${{ needs.verify.outputs.tag }}
+            RGINX_BUILD_REVISION=${{ needs.verify.outputs.commit_sha }}
+            RGINX_BUILD_CREATED=${{ steps.build_meta.outputs.created }}
 
   publish:
     name: Publish GitHub Release
     needs:
       - verify
       - build
-      - build_apt_repo
-      - deploy_apt_repo
-    if: ${{ always() && needs.verify.result == 'success' && needs.build.result == 'success' && (needs.build_apt_repo.result == 'success' || needs.build_apt_repo.result == 'skipped') && (needs.deploy_apt_repo.result == 'success' || needs.deploy_apt_repo.result == 'skipped') }}
+      - publish-container
+    if: ${{ always() && needs.verify.result == 'success' && needs.build.result == 'success' && needs.publish-container.result == 'success' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -402,15 +350,14 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          find dist/artifacts -type f \( -name '*.tar.gz' -o -name '*.deb' \) -exec mv {} dist/ \;
+          find dist/artifacts -type f -name '*.tar.gz' -exec mv {} dist/ \;
           ls -1 dist/*.tar.gz >/dev/null
-          ls -1 dist/*.deb >/dev/null
 
       - name: Generate Checksums
         shell: bash
         run: |
           set -euo pipefail
-          find dist -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.deb' \) -printf '%f\n' \
+          find dist -maxdepth 1 -type f -name '*.tar.gz' -printf '%f\n' \
             | sort \
             | while IFS= read -r asset; do
                 sha256sum "dist/${asset}"
@@ -460,19 +407,36 @@ jobs:
             fi
             echo
             echo "## Assets"
-            find dist -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.deb' -o -name 'SHA256SUMS.txt' \) -printf '%f\n' \
+            find dist -maxdepth 1 -type f \( -name '*.tar.gz' -o -name 'SHA256SUMS.txt' \) -printf '%f\n' \
               | sort \
               | while IFS= read -r asset; do
                   echo "- \`${asset}\`"
                 done
             echo
+            echo "## Install"
+            echo
+            echo "### Edge Proxy"
+            echo
+            echo '```bash'
+            echo "curl -fsSL https://raw.githubusercontent.com/vansour/rginx/main/scripts/install.sh | \\"
+            echo "  bash -s -- --mode release --version ${TAG}"
+            echo '```'
+            echo
+            echo "### Control Plane"
+            echo
+            echo '```bash'
+            echo "docker pull ${WEB_IMAGE_NAME}:${TAG}"
+            echo '```'
+            echo
+            echo "也可以直接解压 \`rginx-web-${TAG}-linux-<arch>.tar.gz\`，并将 \`RGINX_CONTROL_UI_DIR\` 指向随包附带的 \`control-console/\` 目录。"
+            echo
+            echo "## Container Image"
+            echo
+            echo "- \`${WEB_IMAGE_NAME}:${TAG}\`"
             if [[ "${{ needs.verify.outputs.prerelease }}" != "true" ]]; then
-              echo "## APT Repository"
-              echo
-              echo "- Stable tags also publish a signed GitHub Pages APT repository."
-              echo "- Configure Pages once in the repository settings and add the signing secrets documented in the README."
-              echo
+              echo "- \`${WEB_IMAGE_NAME}:latest\`"
             fi
+            echo
             echo "## Changelog"
             echo "${CHANGELOG_TITLE}"
             echo
@@ -525,7 +489,7 @@ jobs:
 
           if gh release view "${TAG}" >/dev/null 2>&1; then
             gh release edit "${TAG}" --draft=false "${edit_args[@]}"
-            gh release upload "${TAG}" dist/*.tar.gz dist/*.deb dist/SHA256SUMS.txt --clobber
+            gh release upload "${TAG}" dist/*.tar.gz dist/SHA256SUMS.txt --clobber
           else
-            gh release create "${TAG}" dist/*.tar.gz dist/*.deb dist/SHA256SUMS.txt "${release_args[@]}"
+            gh release create "${TAG}" dist/*.tar.gz dist/SHA256SUMS.txt "${release_args[@]}"
           fi

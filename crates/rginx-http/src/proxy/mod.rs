@@ -13,7 +13,9 @@ pub(super) use http::{Method, Request, Response, StatusCode, Uri, Version};
 pub(super) use http_body_util::BodyExt;
 pub(super) use hyper::body::{Body as _, Frame, SizeHint};
 pub(super) use hyper::upgrade::OnUpgrade;
-pub(super) use hyper_rustls::{FixedServerNameResolver, HttpsConnector, HttpsConnectorBuilder};
+pub(super) use hyper_rustls::{
+    FixedServerNameResolver, HttpsConnector, HttpsConnectorBuilder, ResolveServerName,
+};
 pub(super) use hyper_util::client::legacy::Client;
 pub(super) use hyper_util::client::legacy::connect::HttpConnector;
 pub(super) use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
@@ -40,6 +42,7 @@ mod forward;
 mod grpc_web;
 mod health;
 mod request_body;
+mod resolver;
 #[cfg(test)]
 mod tests;
 mod upgrade;
@@ -60,3 +63,6 @@ pub use health::{PeerHealthSnapshot, UpstreamHealthSnapshot};
 use self::common::*;
 pub(crate) use error_mapping::{classify_upstream_tls_failure, upstream_tls_verify_label};
 pub(super) use grpc_web::GrpcWebMode;
+pub(crate) use resolver::{
+    ResolvedUpstreamPeer, UpstreamResolver, UpstreamResolverRuntimeSnapshot,
+};

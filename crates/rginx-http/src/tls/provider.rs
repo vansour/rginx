@@ -1,6 +1,16 @@
+use std::sync::Once;
+
 use rginx_core::{Result, ServerTls, TlsCipherSuite, TlsKeyExchangeGroup, TlsVersion};
 use rustls::SupportedCipherSuite;
 use rustls::crypto::{CryptoProvider, SupportedKxGroup};
+
+pub(super) fn install_default_crypto_provider() {
+    static INSTALL: Once = Once::new();
+
+    INSTALL.call_once(|| {
+        let _ = default_crypto_provider().install_default();
+    });
+}
 
 pub(super) fn default_crypto_provider() -> CryptoProvider {
     rustls::crypto::aws_lc_rs::default_provider()

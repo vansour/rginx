@@ -71,7 +71,7 @@ prepare_privileges() {
         return
     fi
 
-    for target in "${SBIN_DIR}" "${CONFIG_DIR}" "${DOC_DIR}" "${SHARE_DIR}"; do
+    for target in "${SBIN_DIR}" "${CONFIG_DIR}" "${DOC_DIR}" "${SHARE_DIR}" "${SYSTEMD_UNIT_DIR}"; do
         parent="$(nearest_existing_parent "${target}")"
         if [[ ! -w "${parent}" ]]; then
             have sudo || die "uninstall target requires elevated privileges, but sudo is not available"
@@ -90,14 +90,49 @@ run_root() {
     "$@"
 }
 
+systemd_is_available() {
+    [[ -d /run/systemd/system ]] && have systemctl
+}
+
+disable_systemd_unit() {
+    if ! systemd_is_available; then
+        return
+    fi
+
+    if [[ ! -f "${SYSTEMD_UNIT_PATH}" ]]; then
+        return
+    fi
+
+    log "stopping systemd unit: ${SYSTEMD_UNIT_NAME}"
+    run_root systemctl disable --now "${SYSTEMD_UNIT_NAME}" >/dev/null 2>&1 || true
+    run_root systemctl reset-failed "${SYSTEMD_UNIT_NAME}" >/dev/null 2>&1 || true
+}
+
+remove_systemd_unit() {
+    if [[ -f "${SYSTEMD_UNIT_PATH}" ]]; then
+        run_root rm -f "${SYSTEMD_UNIT_PATH}"
+        log "removed systemd unit: ${SYSTEMD_UNIT_PATH}"
+    fi
+
+    if systemd_is_available; then
+        run_root systemctl daemon-reload
+    fi
+}
+
 SBIN_DIR="/usr/sbin"
 SHARE_DIR="/usr/share/rginx"
 DOC_DIR="/usr/share/doc/rginx"
+STATE_DIR="/var/lib/rginx"
+SYSTEMD_UNIT_DIR="/etc/systemd/system"
+SYSTEMD_UNIT_NAME="rginx.service"
+SYSTEMD_UNIT_PATH="${SYSTEMD_UNIT_DIR}/${SYSTEMD_UNIT_NAME}"
 
 prepare_privileges
 
 if [[ "${YES}" -ne 1 ]]; then
     printf 'This will remove:\n'
+    printf '  - stop/disable %s\n' "${SYSTEMD_UNIT_NAME}"
+    printf '  - %s\n' "${SYSTEMD_UNIT_PATH}"
     printf '  - %s\n' "${SBIN_DIR}/rginx"
     printf '  - %s\n' "${SBIN_DIR}/rginx-uninstall"
     printf '  - %s\n' "${DOC_DIR}"
@@ -117,6 +152,8 @@ if [[ "${YES}" -ne 1 ]]; then
     esac
 fi
 
+disable_systemd_unit
+remove_systemd_unit
 run_root rm -f "${SBIN_DIR}/rginx"
 run_root rm -f "${SBIN_DIR}/rginx-uninstall"
 run_root rm -rf "${DOC_DIR}"
@@ -131,6 +168,7 @@ fi
 
 run_root rmdir "$(dirname "${DOC_DIR}")" 2>/dev/null || true
 run_root rmdir "${SHARE_DIR}" 2>/dev/null || true
+run_root rmdir "${STATE_DIR}" 2>/dev/null || true
 run_root rmdir "${PREFIX}/share" 2>/dev/null || true
 run_root rmdir "${SBIN_DIR}" 2>/dev/null || true
 

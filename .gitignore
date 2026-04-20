@@ -1,6 +1,5 @@
 /target
 .aider*
-docs/
 /perf.data
 /perf.data.*
 /flamegraph-*.svg

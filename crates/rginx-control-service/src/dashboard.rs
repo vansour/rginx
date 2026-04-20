@@ -43,12 +43,14 @@ impl DashboardService {
             drifted_nodes: snapshot.drifted_nodes,
             total_revisions: snapshot.total_revisions,
             active_deployments: snapshot.active_deployments,
+            active_dns_deployments: snapshot.active_dns_deployments,
             open_alert_count,
             critical_alert_count,
             warning_alert_count,
             latest_revision: snapshot.latest_revision,
             recent_nodes: snapshot.recent_nodes,
             recent_deployments: snapshot.recent_deployments,
+            recent_dns_deployments: snapshot.recent_dns_deployments,
             open_alerts: alerts,
         }
     }
@@ -59,7 +61,8 @@ mod tests {
     use rginx_control_store::DashboardSnapshot;
     use rginx_control_types::{
         AlertSeverity, ConfigRevisionSummary, ControlPlaneAlertSummary, DeploymentStatus,
-        DeploymentSummary, NodeLifecycleState, NodeSummary,
+        DeploymentSummary, DnsDeploymentStatus, DnsDeploymentSummary, NodeLifecycleState,
+        NodeSummary,
     };
 
     use super::DashboardService;
@@ -76,10 +79,11 @@ mod tests {
                 drifted_nodes: 0,
                 total_revisions: 3,
                 active_deployments: 1,
+                active_dns_deployments: 2,
                 latest_revision: Some(ConfigRevisionSummary {
                     revision_id: "rev_local_0001".to_string(),
                     cluster_id: "cluster-mainland".to_string(),
-                    version_label: "v0.1.3-rc.11".to_string(),
+                    version_label: "v0.1.3-rc.12".to_string(),
                     created_at_unix_ms: 1_713_513_600_000,
                     summary: "seed control-plane revision".to_string(),
                 }),
@@ -90,7 +94,7 @@ mod tests {
                         advertise_addr: "10.0.0.11:8443".to_string(),
                         role: "edge".to_string(),
                         state: NodeLifecycleState::Online,
-                        running_version: "v0.1.3-rc.11".to_string(),
+                        running_version: "v0.1.3-rc.12".to_string(),
                         admin_socket_path: "/run/rginx/admin.sock".to_string(),
                         last_seen_unix_ms: 1_713_513_600_000,
                         last_snapshot_version: Some(11),
@@ -106,7 +110,7 @@ mod tests {
                         advertise_addr: "10.0.1.21:8443".to_string(),
                         role: "edge".to_string(),
                         state: NodeLifecycleState::Draining,
-                        running_version: "v0.1.3-rc.11".to_string(),
+                        running_version: "v0.1.3-rc.12".to_string(),
                         admin_socket_path: "/run/rginx/admin.sock".to_string(),
                         last_seen_unix_ms: 1_713_513_600_000,
                         last_snapshot_version: Some(9),
@@ -121,7 +125,7 @@ mod tests {
                     deployment_id: "deploy_local_0001".to_string(),
                     cluster_id: "cluster-mainland".to_string(),
                     revision_id: "rev_local_0001".to_string(),
-                    revision_version_label: "v0.1.3-rc.11".to_string(),
+                    revision_version_label: "v0.1.3-rc.12".to_string(),
                     status: DeploymentStatus::Running,
                     target_nodes: 2,
                     healthy_nodes: 1,
@@ -133,6 +137,30 @@ mod tests {
                     created_by: "system".to_string(),
                     rollback_of_deployment_id: None,
                     rollback_revision_id: None,
+                    status_reason: None,
+                    created_at_unix_ms: 1_713_513_600_000,
+                    started_at_unix_ms: Some(1_713_513_600_000),
+                    finished_at_unix_ms: None,
+                }],
+                recent_dns_deployments: vec![DnsDeploymentSummary {
+                    deployment_id: "dns_deploy_local_0001".to_string(),
+                    cluster_id: "cluster-mainland".to_string(),
+                    revision_id: "dns_rev_local_0001".to_string(),
+                    revision_version_label: "dns-v1".to_string(),
+                    status: DnsDeploymentStatus::Running,
+                    target_nodes: 2,
+                    healthy_nodes: 1,
+                    failed_nodes: 0,
+                    active_nodes: 1,
+                    pending_nodes: 0,
+                    parallelism: 1,
+                    failure_threshold: 1,
+                    auto_rollback: false,
+                    promotes_cluster_runtime: true,
+                    created_by: "system".to_string(),
+                    rollback_of_deployment_id: None,
+                    rollback_revision_id: None,
+                    rolled_back_by_deployment_id: None,
                     status_reason: None,
                     created_at_unix_ms: 1_713_513_600_000,
                     started_at_unix_ms: Some(1_713_513_600_000),
@@ -160,8 +188,10 @@ mod tests {
         assert_eq!(summary.drifted_nodes, 0);
         assert_eq!(summary.total_revisions, 3);
         assert_eq!(summary.active_deployments, 1);
+        assert_eq!(summary.active_dns_deployments, 2);
         assert_eq!(summary.open_alert_count, 1);
         assert_eq!(summary.critical_alert_count, 1);
         assert!(summary.latest_revision.is_some());
+        assert_eq!(summary.recent_dns_deployments.len(), 1);
     }
 }

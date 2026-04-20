@@ -11,8 +11,8 @@ pub use config::{
     ReturnAction, Route, RouteAccessControl, RouteAction, RouteBufferingPolicy,
     RouteCompressionPolicy, RouteMatcher, RouteRateLimit, RuntimeSettings, Server,
     ServerCertificateBundle, ServerClientAuthMode, ServerClientAuthPolicy, ServerNameMatch,
-    ServerTls, TlsCipherSuite, TlsKeyExchangeGroup, TlsVersion, Upstream, UpstreamLoadBalance,
-    UpstreamPeer, UpstreamProtocol, UpstreamSettings, UpstreamTls, VirtualHost, VirtualHostTls,
-    best_matching_server_name_pattern, match_server_name,
+    ServerTls, TlsCipherSuite, TlsKeyExchangeGroup, TlsVersion, Upstream, UpstreamDnsPolicy,
+    UpstreamLoadBalance, UpstreamPeer, UpstreamProtocol, UpstreamSettings, UpstreamTls,
+    VirtualHost, VirtualHostTls, best_matching_server_name_pattern, match_server_name,
 };
 pub use error::{Error, Result};

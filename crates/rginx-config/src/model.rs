@@ -221,6 +221,8 @@ pub struct UpstreamConfig {
     pub peers: Vec<UpstreamPeerConfig>,
     pub tls: Option<UpstreamTlsConfig>,
     #[serde(default)]
+    pub dns: Option<UpstreamDnsConfig>,
+    #[serde(default)]
     pub protocol: UpstreamProtocolConfig,
     #[serde(default)]
     pub load_balance: UpstreamLoadBalanceConfig,
@@ -268,6 +270,26 @@ pub struct UpstreamConfig {
     pub health_check_timeout_secs: Option<u64>,
     #[serde(default)]
     pub healthy_successes_required: Option<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct UpstreamDnsConfig {
+    #[serde(default)]
+    pub resolver_addrs: Vec<String>,
+    #[serde(default)]
+    pub min_ttl_secs: Option<u64>,
+    #[serde(default)]
+    pub max_ttl_secs: Option<u64>,
+    #[serde(default)]
+    pub negative_ttl_secs: Option<u64>,
+    #[serde(default)]
+    pub stale_if_error_secs: Option<u64>,
+    #[serde(default)]
+    pub refresh_before_expiry_secs: Option<u64>,
+    #[serde(default)]
+    pub prefer_ipv4: Option<bool>,
+    #[serde(default)]
+    pub prefer_ipv6: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

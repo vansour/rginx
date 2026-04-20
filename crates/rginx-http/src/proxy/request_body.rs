@@ -1,5 +1,7 @@
 use super::grpc_web::{GrpcWebMode, GrpcWebRequestBody, GrpcWebTextDecodeBody};
 use super::*;
+use crate::handler::boxed_body;
+use std::error::Error as StdError;
 
 pub(super) struct PreparedProxyRequest {
     pub method: Method,
@@ -7,6 +9,7 @@ pub(super) struct PreparedProxyRequest {
     pub headers: HeaderMap,
     pub body: PreparedRequestBody,
     pub(super) peer_failover_enabled: bool,
+    pub(super) wait_for_streaming_body: bool,
 }
 
 pub(super) enum PreparedRequestBody {
@@ -17,6 +20,19 @@ pub(super) enum PreparedRequestBody {
 struct CollectedRequestBody {
     body: Bytes,
     trailers: Option<HeaderMap>,
+}
+
+pub(super) struct BuiltUpstreamRequest {
+    pub request: Request<HttpBody>,
+    pub body_completion: Option<StreamingBodyCompletion>,
+}
+
+pub(super) type StreamingBodyCompletion = tokio::sync::oneshot::Receiver<Result<(), BoxError>>;
+
+#[derive(Debug)]
+struct RelayedRequestBody {
+    receiver: tokio::sync::mpsc::Receiver<Result<Frame<Bytes>, BoxError>>,
+    done: bool,
 }
 
 struct PrepareRequestBodyConfig<'a> {
@@ -82,6 +98,12 @@ impl ReplayableRequestBody {
     }
 }
 
+impl RelayedRequestBody {
+    fn new(receiver: tokio::sync::mpsc::Receiver<Result<Frame<Bytes>, BoxError>>) -> Self {
+        Self { receiver, done: false }
+    }
+}
+
 impl hyper::body::Body for ReplayableRequestBody {
     type Data = Bytes;
     type Error = BoxError;
@@ -113,6 +135,46 @@ impl hyper::body::Body for ReplayableRequestBody {
         let mut hint = SizeHint::new();
         hint.set_exact(self.body.as_ref().map_or(0, |body| body.len() as u64));
         hint
+    }
+}
+
+impl hyper::body::Body for RelayedRequestBody {
+    type Data = Bytes;
+    type Error = BoxError;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        if self.done {
+            return std::task::Poll::Ready(None);
+        }
+
+        match self.receiver.poll_recv(cx) {
+            std::task::Poll::Ready(Some(Ok(frame))) => {
+                if frame.is_trailers() {
+                    self.done = true;
+                }
+                std::task::Poll::Ready(Some(Ok(frame)))
+            }
+            std::task::Poll::Ready(Some(Err(error))) => {
+                self.done = true;
+                std::task::Poll::Ready(Some(Err(error)))
+            }
+            std::task::Poll::Ready(None) => {
+                self.done = true;
+                std::task::Poll::Ready(None)
+            }
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.done
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        SizeHint::default()
     }
 }
 
@@ -150,6 +212,7 @@ impl PreparedProxyRequest {
             headers: parts.headers,
             body: prepared_body,
             peer_failover_enabled: request_buffering != RouteBufferingPolicy::Off,
+            wait_for_streaming_body: max_request_body_bytes.is_some(),
         })
     }
 
@@ -161,18 +224,18 @@ impl PreparedProxyRequest {
 
     pub(super) fn build_for_peer(
         &mut self,
-        peer: &UpstreamPeer,
+        peer: &ResolvedUpstreamPeer,
         target: &ProxyTarget,
         client_address: &ClientAddress,
         forwarded_proto: &str,
         grpc_web_mode: Option<&GrpcWebMode>,
-    ) -> Result<Request<HttpBody>, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<BuiltUpstreamRequest, Box<dyn std::error::Error + Send + Sync>> {
         let original_host = self.headers.get(HOST).cloned();
         let mut headers = self.headers.clone();
         let uri = build_proxy_uri(peer, &self.uri, target.strip_prefix.as_deref())?;
         sanitize_request_headers(
             &mut headers,
-            &peer.authority,
+            &peer.upstream_authority,
             original_host,
             client_address,
             forwarded_proto,
@@ -183,28 +246,79 @@ impl PreparedProxyRequest {
 
         tracing::debug!(
             upstream = %target.upstream.name,
-            peer = %peer.url,
+            peer = %peer.display_url,
             uri = %uri,
             "forwarding request to upstream"
         );
 
-        let mut request = Request::new(match &mut self.body {
+        let (request_body, body_completion) = match &mut self.body {
             PreparedRequestBody::Replayable { body, trailers } => {
-                ReplayableRequestBody::new(body.clone(), trailers.clone()).boxed_unsync()
+                (ReplayableRequestBody::new(body.clone(), trailers.clone()).boxed_unsync(), None)
             }
-            PreparedRequestBody::Streaming(body) => body.take().ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "streaming request body is no longer available for replay",
-                )
-            })?,
-        });
+            PreparedRequestBody::Streaming(body) => {
+                let body = body.take().ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "streaming request body is no longer available for replay",
+                    )
+                })?;
+                if self.wait_for_streaming_body {
+                    let (body, completion) = relay_streaming_request_body(body);
+                    (body, Some(completion))
+                } else {
+                    (body, None)
+                }
+            }
+        };
+        let mut request = Request::new(request_body);
         *request.method_mut() = self.method.clone();
         *request.version_mut() = upstream_request_version(target.upstream.protocol);
         *request.uri_mut() = uri;
         *request.headers_mut() = headers;
-        Ok(request)
+        Ok(BuiltUpstreamRequest { request, body_completion })
     }
+}
+
+fn relay_streaming_request_body(body: HttpBody) -> (HttpBody, StreamingBodyCompletion) {
+    let (frame_tx, frame_rx) = tokio::sync::mpsc::channel(1);
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+
+    tokio::spawn(async move {
+        let mut body = body;
+        let result = loop {
+            match body.frame().await {
+                Some(Ok(frame)) => {
+                    let reached_end = frame.is_trailers();
+                    let _ = frame_tx.send(Ok(frame)).await;
+                    if reached_end {
+                        break Ok(());
+                    }
+                }
+                Some(Err(error)) => {
+                    let _ = frame_tx.send(Err(clone_box_error(error.as_ref()))).await;
+                    break Err(clone_box_error(error.as_ref()));
+                }
+                None => break Ok(()),
+            }
+        };
+
+        drop(frame_tx);
+        let _ = completion_tx.send(result);
+    });
+
+    (boxed_body(RelayedRequestBody::new(frame_rx)), completion_rx)
+}
+
+fn clone_box_error(error: &(dyn StdError + 'static)) -> BoxError {
+    if let Some(max_request_body_bytes) = request_body_limit_error(error) {
+        return Box::new(crate::timeout::RequestBodyLimitError::new(max_request_body_bytes));
+    }
+
+    if let Some(io_error) = error.downcast_ref::<std::io::Error>() {
+        return Box::new(std::io::Error::new(io_error.kind(), io_error.to_string()));
+    }
+
+    Box::new(std::io::Error::other(error.to_string()))
 }
 
 async fn prepare_request_body(
@@ -344,10 +458,10 @@ pub(super) fn is_idempotent_method(method: &Method) -> bool {
 
 pub(super) fn can_retry_peer_request(
     prepared_request: &PreparedProxyRequest,
-    peers: &[UpstreamPeer],
+    peer_count: usize,
     attempt_index: usize,
 ) -> bool {
-    prepared_request.can_failover() && attempt_index + 1 < peers.len()
+    prepared_request.can_failover() && attempt_index + 1 < peer_count
 }
 
 #[cfg(test)]

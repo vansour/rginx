@@ -13,6 +13,8 @@ VERSION="latest"
 FORCE=0
 TMP_ROOT=""
 SUDO=""
+STAGED_SYSTEMD_UNIT=""
+RESOLVED_RELEASE_TAG=""
 
 usage() {
     cat <<'EOF'
@@ -30,6 +32,8 @@ Options:
       强制覆盖已存在的活跃配置文件
   -h, --help
       显示帮助
+
+Host install always wires rginx into systemd automatically.
 EOF
 }
 
@@ -108,7 +112,7 @@ prepare_privileges() {
         return
     fi
 
-    for target in "${SBIN_DIR}" "${CONFIG_DIR}" "${DOC_DIR}" "${SHARE_DIR}"; do
+    for target in "${SBIN_DIR}" "${CONFIG_DIR}" "${DOC_DIR}" "${SHARE_DIR}" "${SYSTEMD_UNIT_DIR}"; do
         parent="$(nearest_existing_parent "${target}")"
         if [[ ! -w "${parent}" ]]; then
             have sudo || die "install target requires elevated privileges, but sudo is not available"
@@ -215,6 +219,7 @@ stage_from_source() {
     STAGED_ROOT="${LOCAL_ROOT}"
     STAGED_BIN="${LOCAL_ROOT}/target/release/rginx"
     STAGED_UNINSTALL="${LOCAL_ROOT}/scripts/uninstall.sh"
+    STAGED_SYSTEMD_UNIT="${LOCAL_ROOT}/deploy/systemd/rginx.service"
 }
 
 stage_from_archive() {
@@ -223,6 +228,7 @@ stage_from_archive() {
     STAGED_ROOT="${LOCAL_ROOT}"
     STAGED_BIN="${LOCAL_ROOT}/rginx"
     STAGED_UNINSTALL="${LOCAL_ROOT}/scripts/uninstall.sh"
+    STAGED_SYSTEMD_UNIT="${LOCAL_ROOT}/deploy/systemd/rginx.service"
 }
 
 stage_from_release() {
@@ -237,6 +243,7 @@ stage_from_release() {
     if [[ "${tag}" == "latest" ]]; then
         tag="$(resolve_latest_release)"
     fi
+    RESOLVED_RELEASE_TAG="${tag}"
 
     TMP_ROOT="$(mktemp -d)"
     archive_name="rginx-${tag}-${RELEASE_OS}-${RELEASE_ARCH}.tar.gz"
@@ -253,6 +260,91 @@ stage_from_release() {
     STAGED_ROOT="${unpack_dir}"
     STAGED_BIN="${unpack_dir}/rginx"
     STAGED_UNINSTALL="${unpack_dir}/scripts/uninstall.sh"
+    STAGED_SYSTEMD_UNIT="${unpack_dir}/deploy/systemd/rginx.service"
+}
+
+systemd_is_available() {
+    [[ -d /run/systemd/system ]] && have systemctl
+}
+
+require_systemd() {
+    systemd_is_available || die "host installation requires systemd (missing /run/systemd/system or systemctl)"
+}
+
+group_exists() {
+    local group="$1"
+
+    if have getent; then
+        getent group "${group}" >/dev/null 2>&1
+        return
+    fi
+
+    grep -q "^${group}:" /etc/group
+}
+
+user_exists() {
+    id -u "$1" >/dev/null 2>&1
+}
+
+ensure_service_account() {
+    if ! group_exists "${SERVICE_GROUP}"; then
+        have groupadd || die "groupadd is required to create the ${SERVICE_GROUP} group"
+        log "creating system group: ${SERVICE_GROUP}"
+        run_root groupadd --system "${SERVICE_GROUP}"
+    fi
+
+    if ! user_exists "${SERVICE_USER}"; then
+        have useradd || die "useradd is required to create the ${SERVICE_USER} user"
+        log "creating system user: ${SERVICE_USER}"
+        run_root useradd \
+            --system \
+            --gid "${SERVICE_GROUP}" \
+            --home-dir "${STATE_DIR}" \
+            --create-home \
+            --shell /usr/sbin/nologin \
+            "${SERVICE_USER}"
+    fi
+}
+
+install_systemd_unit() {
+    log "installing systemd unit: ${SYSTEMD_UNIT_PATH}"
+    run_root install -D -m 644 "${STAGED_SYSTEMD_UNIT}" "${SYSTEMD_UNIT_PATH}"
+}
+
+activate_systemd_unit() {
+    log "reloading systemd"
+    run_root systemctl daemon-reload
+    run_root systemctl enable "${SYSTEMD_UNIT_NAME}" >/dev/null
+
+    if run_root systemctl is-active --quiet "${SYSTEMD_UNIT_NAME}"; then
+        log "restarting systemd unit: ${SYSTEMD_UNIT_NAME}"
+        run_root systemctl restart "${SYSTEMD_UNIT_NAME}"
+    else
+        log "starting systemd unit: ${SYSTEMD_UNIT_NAME}"
+        run_root systemctl start "${SYSTEMD_UNIT_NAME}"
+    fi
+}
+
+resolve_systemd_unit() {
+    local fallback_path fallback_url
+
+    if [[ -f "${STAGED_SYSTEMD_UNIT}" ]]; then
+        return
+    fi
+
+    if [[ "${MODE}" == "release" && -n "${RESOLVED_RELEASE_TAG}" ]]; then
+        fallback_path="${TMP_ROOT}/rginx.service"
+        fallback_url="https://raw.githubusercontent.com/${REPO_SLUG}/${RESOLVED_RELEASE_TAG}/deploy/systemd/rginx.service"
+
+        log "downloading ${fallback_url}"
+        curl -fL --retry 3 --retry-delay 1 --connect-timeout 10 "${fallback_url}" -o "${fallback_path}" \
+            || die "failed to download ${fallback_url}"
+
+        STAGED_SYSTEMD_UNIT="${fallback_path}"
+        return
+    fi
+
+    die "staged systemd unit not found: ${STAGED_SYSTEMD_UNIT}"
 }
 
 PREFIX="/usr"
@@ -262,6 +354,12 @@ SHARE_DIR="/usr/share/rginx"
 DOC_DIR="/usr/share/doc/rginx"
 CONF_D_DIR="${CONFIG_DIR}/conf.d"
 ACTIVE_CONFIG="${CONFIG_DIR}/rginx.ron"
+STATE_DIR="/var/lib/rginx"
+SERVICE_USER="rginx"
+SERVICE_GROUP="rginx"
+SYSTEMD_UNIT_DIR="/etc/systemd/system"
+SYSTEMD_UNIT_NAME="rginx.service"
+SYSTEMD_UNIT_PATH="${SYSTEMD_UNIT_DIR}/${SYSTEMD_UNIT_NAME}"
 
 resolve_mode
 
@@ -280,12 +378,14 @@ esac
 [[ -x "${STAGED_BIN}" ]] || die "staged rginx binary not found: ${STAGED_BIN}"
 [[ -d "${STAGED_ROOT}/configs" ]] || die "staged configs directory not found: ${STAGED_ROOT}/configs"
 [[ -f "${STAGED_UNINSTALL}" ]] || die "staged uninstall script not found: ${STAGED_UNINSTALL}"
+resolve_systemd_unit
 
 prepare_privileges
+require_systemd
 
 log "resolved install mode: ${MODE}"
 log "installing to prefix ${PREFIX}"
-run_root install -d "${SBIN_DIR}" "${CONFIG_DIR}" "${CONF_D_DIR}" "${SHARE_DIR}" "${DOC_DIR}"
+run_root install -d "${SBIN_DIR}" "${CONFIG_DIR}" "${CONF_D_DIR}" "${SHARE_DIR}" "${DOC_DIR}" "${SYSTEMD_UNIT_DIR}"
 
 run_root install -m 755 "${STAGED_BIN}" "${SBIN_DIR}/rginx"
 run_root install -m 755 "${STAGED_UNINSTALL}" "${SBIN_DIR}/rginx-uninstall"
@@ -322,8 +422,13 @@ if [[ -d "${STAGED_ROOT}/configs/conf.d" ]]; then
     done
 fi
 
+ensure_service_account
+install_systemd_unit
+activate_systemd_unit
+
 log "binary: ${SBIN_DIR}/rginx"
 log "uninstall: ${SBIN_DIR}/rginx-uninstall"
 log "active config (${ACTIVE_CONFIG_RESULT}): ${ACTIVE_CONFIG}"
 log "conf.d dir: ${CONF_D_DIR} (installed ${CONF_D_INSTALLED}, preserved ${CONF_D_PRESERVED})"
+log "systemd unit: ${SYSTEMD_UNIT_PATH} (enabled)"
 log "default config search will now pick ${ACTIVE_CONFIG} when running ${SBIN_DIR}/rginx"
