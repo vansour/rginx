@@ -6,7 +6,7 @@
 - `rginx-web`：控制面 Web 进程，内含 API、浏览器 Console、后台 worker，以及可选权威 DNS 运行时
 - `rginx-node-agent`：节点本地 agent，负责和控制面同步发布、状态与快照
 
-当前版本：`0.1.3-rc.11`
+当前版本：`0.1.3-rc.12`
 
 本仓库不再维护额外文档目录；根 `README.md` 是唯一持续更新的说明入口。
 

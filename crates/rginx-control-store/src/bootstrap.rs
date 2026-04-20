@@ -127,7 +127,7 @@ insert into cp_config_revisions (
 values (
     'rev_local_0001',
     'cluster-mainland',
-    'v0.1.3-rc.11',
+    'v0.1.3-rc.12',
     'seeded control-plane revision for docker bootstrap',
     jsonb_build_object(
         'entrypoint', 'configs/rginx.ron',
@@ -155,7 +155,7 @@ values
         '10.0.0.11:8443',
         'edge',
         'online',
-        'v0.1.3-rc.11',
+        'v0.1.3-rc.12',
         now() - interval '30 seconds',
         now() - interval '45 days'
     ),
@@ -165,7 +165,7 @@ values
         '10.0.1.21:8443',
         'edge',
         'draining',
-        'v0.1.3-rc.11',
+        'v0.1.3-rc.12',
         now() - interval '90 seconds',
         now() - interval '30 days'
     )
@@ -237,7 +237,7 @@ values
         'config_revision',
         'rev_local_0001',
         'succeeded',
-        jsonb_build_object('source', 'migrations', 'version_label', 'v0.1.3-rc.11'),
+        jsonb_build_object('source', 'migrations', 'version_label', 'v0.1.3-rc.12'),
         now() - interval '15 minutes'
     ),
     (
