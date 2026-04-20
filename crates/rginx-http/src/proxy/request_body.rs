@@ -1,7 +1,7 @@
 use super::grpc_web::{GrpcWebMode, GrpcWebRequestBody, GrpcWebTextDecodeBody};
 use super::*;
-use std::error::Error as StdError;
 use crate::handler::boxed_body;
+use std::error::Error as StdError;
 
 pub(super) struct PreparedProxyRequest {
     pub method: Method,
@@ -252,10 +252,9 @@ impl PreparedProxyRequest {
         );
 
         let (request_body, body_completion) = match &mut self.body {
-            PreparedRequestBody::Replayable { body, trailers } => (
-                ReplayableRequestBody::new(body.clone(), trailers.clone()).boxed_unsync(),
-                None,
-            ),
+            PreparedRequestBody::Replayable { body, trailers } => {
+                (ReplayableRequestBody::new(body.clone(), trailers.clone()).boxed_unsync(), None)
+            }
             PreparedRequestBody::Streaming(body) => {
                 let body = body.take().ok_or_else(|| {
                     std::io::Error::new(

@@ -7,9 +7,7 @@ use dioxus::prelude::*;
 
 use rginx_control_types::AuthenticatedActor;
 
-pub(crate) use pages::{
-    Dashboard, EdgeNodes, Login, NodeDetail, NodeTls, NotFound,
-};
+pub(crate) use pages::{Dashboard, EdgeNodes, Login, NodeDetail, NodeTls, NotFound};
 
 #[derive(Clone, Copy)]
 pub(crate) struct SessionContext {
@@ -210,12 +208,7 @@ fn ConsoleShell() -> Element {
 }
 
 #[component]
-fn SidebarLink(
-    to: Route,
-    active: bool,
-    marker: &'static str,
-    label: &'static str,
-) -> Element {
+fn SidebarLink(to: Route, active: bool, marker: &'static str, label: &'static str) -> Element {
     rsx! {
         Link {
             to,

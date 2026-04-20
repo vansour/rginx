@@ -85,11 +85,7 @@ pub(super) fn OverviewTrendChart(
     let bottom = 34.0_f64;
     let chart_width = width - left - right;
     let chart_height = height - top - bottom;
-    let max_value = series
-        .iter()
-        .copied()
-        .fold(0.0_f64, |acc, value| acc.max(value))
-        .max(1.0);
+    let max_value = series.iter().copied().fold(0.0_f64, |acc, value| acc.max(value)).max(1.0);
     let has_series = series.iter().any(|value| *value > 0.0);
 
     let points = series
@@ -111,12 +107,16 @@ pub(super) fn OverviewTrendChart(
     let area_points = if points.is_empty() {
         String::new()
     } else {
-        format!("{left:.2},{:.2} {points} {:.2},{:.2}", top + chart_height, left + chart_width, top + chart_height)
+        format!(
+            "{left:.2},{:.2} {points} {:.2},{:.2}",
+            top + chart_height,
+            left + chart_width,
+            top + chart_height
+        )
     };
 
-    let grid_lines = (0..=4)
-        .map(|index| top + chart_height * index as f64 / 4.0)
-        .collect::<Vec<_>>();
+    let grid_lines =
+        (0..=4).map(|index| top + chart_height * index as f64 / 4.0).collect::<Vec<_>>();
 
     let x_tick_positions = if x_ticks.len() <= 1 {
         vec![left]
@@ -138,16 +138,10 @@ pub(super) fn OverviewTrendChart(
             })
             .collect::<Vec<_>>()
     };
-    let x_axis_ticks = x_ticks
-        .iter()
-        .cloned()
-        .zip(x_tick_positions.iter().copied())
-        .collect::<Vec<_>>();
-    let y_axis_ticks = y_ticks
-        .iter()
-        .cloned()
-        .zip(y_tick_positions.iter().copied())
-        .collect::<Vec<_>>();
+    let x_axis_ticks =
+        x_ticks.iter().cloned().zip(x_tick_positions.iter().copied()).collect::<Vec<_>>();
+    let y_axis_ticks =
+        y_ticks.iter().cloned().zip(y_tick_positions.iter().copied()).collect::<Vec<_>>();
 
     rsx! {
         article { class: "overview-trend-panel",

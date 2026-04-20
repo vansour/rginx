@@ -70,15 +70,13 @@ pub fn Dashboard() -> Element {
                     stream_state.set(StreamState::Connecting);
 
                     match api::ensure_events_session().await {
-                        Ok(()) => {
-                            match build_dashboard_stream(dashboard, error, stream_state) {
-                                Ok(handle) => stream.set(Some(handle)),
-                                Err(stream_error) => {
-                                    error.set(Some(stream_error.to_string()));
-                                    stream_state.set(StreamState::Error);
-                                }
+                        Ok(()) => match build_dashboard_stream(dashboard, error, stream_state) {
+                            Ok(handle) => stream.set(Some(handle)),
+                            Err(stream_error) => {
+                                error.set(Some(stream_error.to_string()));
+                                stream_state.set(StreamState::Error);
                             }
-                        }
+                        },
                         Err(stream_error) => {
                             if handle_api_auth_error(&stream_error, session) {
                                 loading.set(false);
@@ -102,9 +100,9 @@ pub fn Dashboard() -> Element {
     }));
 
     let dashboard_snapshot = dashboard();
-    let latest_revision_id = dashboard_snapshot
-        .as_ref()
-        .and_then(|item| item.latest_revision.as_ref().map(|revision| revision.revision_id.clone()));
+    let latest_revision_id = dashboard_snapshot.as_ref().and_then(|item| {
+        item.latest_revision.as_ref().map(|revision| revision.revision_id.clone())
+    });
     let actor_snapshot = actor.clone();
     use_effect(use_reactive!(|(actor_snapshot, latest_revision_id)| {
         if actor_snapshot.is_none() {
@@ -121,8 +119,10 @@ pub fn Dashboard() -> Element {
         spawn(async move {
             match api::get_revision(&revision_id).await {
                 Ok(detail) => {
-                    let count =
-                        detail.compile_summary.map(|summary| summary.total_vhost_count).unwrap_or(0);
+                    let count = detail
+                        .compile_summary
+                        .map(|summary| summary.total_vhost_count)
+                        .unwrap_or(0);
                     accelerated_sites.set(Some(count));
                 }
                 Err(load_error) => {
