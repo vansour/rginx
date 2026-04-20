@@ -1,7 +1,7 @@
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 mod support;
 
@@ -143,24 +143,47 @@ fn upgraded_tunnels_still_count_towards_max_connections() {
     });
     server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
 
-    let mut upgraded = TcpStream::connect_timeout(&listen_addr, Duration::from_millis(200))
-        .expect("client should connect");
-    upgraded
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .expect("client read timeout should be configurable");
-    upgraded
-        .set_write_timeout(Some(Duration::from_secs(2)))
-        .expect("client write timeout should be configurable");
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let mut upgraded = loop {
+        let mut candidate = TcpStream::connect_timeout(&listen_addr, Duration::from_millis(200))
+            .expect("client should connect");
+        candidate
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("client read timeout should be configurable");
+        candidate
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .expect("client write timeout should be configurable");
 
-    write!(
-        upgraded,
-        "GET /ws HTTP/1.1\r\nHost: app.example.com\r\nConnection: keep-alive, Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGVzdC1rZXk=\r\n\r\n"
-    )
-    .expect("client should write upgrade request");
-    upgraded.flush().expect("upgrade request should flush");
+        write!(
+            candidate,
+            "GET /ws HTTP/1.1\r\nHost: app.example.com\r\nConnection: keep-alive, Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGVzdC1rZXk=\r\n\r\n"
+        )
+        .expect("client should write upgrade request");
+        candidate.flush().expect("upgrade request should flush");
 
-    let response = read_http_head(&mut upgraded);
-    assert!(response.starts_with("HTTP/1.1 101"), "unexpected upgrade response line: {response:?}");
+        match try_read_http_head(&mut candidate) {
+            Ok(response) => {
+                assert!(
+                    response.starts_with("HTTP/1.1 101"),
+                    "unexpected upgrade response line: {response:?}"
+                );
+                break candidate;
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::BrokenPipe
+                        | io::ErrorKind::ConnectionReset
+                        | io::ErrorKind::UnexpectedEof
+                ) && Instant::now() < deadline =>
+            {
+                // The readiness probe uses the only connection slot, and the close can race
+                // with the first upgrade attempt under full-suite load.
+                thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => panic!("upgrade response should be readable: {error}"),
+        }
+    };
 
     upgraded.write_all(b"ping").expect("client should write tunneled payload");
     upgraded.flush().expect("client tunneled payload should flush");
@@ -370,4 +393,25 @@ fn upgrade_proxy_config_with_server_extra(
         },
         ready_route = READY_ROUTE_CONFIG,
     )
+}
+
+fn try_read_http_head(stream: &mut TcpStream) -> io::Result<String> {
+    let mut buffer = Vec::new();
+    let mut chunk = [0u8; 256];
+
+    loop {
+        let read = stream.read(&mut chunk)?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "stream closed before the HTTP head was complete",
+            ));
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+
+        if let Some(head_end) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+            return String::from_utf8(buffer[..head_end + 4].to_vec())
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error));
+        }
+    }
 }
