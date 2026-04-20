@@ -34,6 +34,7 @@ fn replayable_idempotent_requests_retry_once() {
         headers: HeaderMap::new(),
         body: PreparedRequestBody::Replayable { body: Bytes::new(), trailers: None },
         peer_failover_enabled: true,
+        wait_for_streaming_body: false,
     };
     let peers = [peer("http://127.0.0.1:9000"), peer("http://127.0.0.1:9001")];
 
@@ -49,6 +50,7 @@ fn streaming_requests_do_not_retry() {
         headers: HeaderMap::new(),
         body: PreparedRequestBody::Streaming(None),
         peer_failover_enabled: false,
+        wait_for_streaming_body: false,
     };
     let peers = [peer("http://127.0.0.1:9000"), peer("http://127.0.0.1:9001")];
 
