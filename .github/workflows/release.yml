@@ -14,7 +14,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  WEB_IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/rginx-web
 
 jobs:
   verify:
@@ -124,9 +123,6 @@ jobs:
       - name: Run HTTP/3 Release Gate
         run: ./scripts/run-http3-release-gate.sh --soak-iterations 1
 
-      - name: Run Control Plane Compose Smoke Test
-        run: ./scripts/test-control-plane-compose.sh
-
       - name: Install Nightly Rust Toolchain For Prerelease Fuzzing
         if: ${{ steps.meta.outputs.prerelease == 'true' }}
         uses: dtolnay/rust-toolchain@master
@@ -157,7 +153,6 @@ jobs:
             cargo_package: rginx
             bin_name: rginx
             asset_prefix: rginx
-            bundle_console: false
             target: x86_64-unknown-linux-gnu
             os: linux
             arch: amd64
@@ -167,32 +162,11 @@ jobs:
             cargo_package: rginx
             bin_name: rginx
             asset_prefix: rginx
-            bundle_console: false
             target: aarch64-unknown-linux-gnu
             os: linux
             arch: arm64
             archive_ext: tar.gz
             asset_name: rginx-linux-arm64
-          - runner: ubuntu-24.04
-            cargo_package: rginx-web
-            bin_name: rginx-web
-            asset_prefix: rginx-web
-            bundle_console: true
-            target: x86_64-unknown-linux-gnu
-            os: linux
-            arch: amd64
-            archive_ext: tar.gz
-            asset_name: rginx-web-linux-amd64
-          - runner: ubuntu-24.04-arm
-            cargo_package: rginx-web
-            bin_name: rginx-web
-            asset_prefix: rginx-web
-            bundle_console: true
-            target: aarch64-unknown-linux-gnu
-            os: linux
-            arch: arm64
-            archive_ext: tar.gz
-            asset_name: rginx-web-linux-arm64
     steps:
       - name: Check Out Source
         uses: actions/checkout@v6.0.2
@@ -205,14 +179,6 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install Web Toolchain
-        if: ${{ matrix.bundle_console }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          rustup target add wasm32-unknown-unknown
-          cargo install --locked wasm-bindgen-cli --version 0.2.118
-
       - name: Restore Rust Cache
         uses: Swatinem/rust-cache@v2.9.1
         with:
@@ -223,10 +189,6 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --locked --release -p "${{ matrix.cargo_package }}" --target "${{ matrix.target }}"
-
-          if [[ "${{ matrix.bundle_console }}" == "true" ]]; then
-            cargo build --locked --release -p rginx-control-console --target wasm32-unknown-unknown
-          fi
 
       - name: Package Release Archive
         id: package
@@ -246,27 +208,11 @@ jobs:
           cp LICENSE "${INSTALL_DIR}/LICENSE"
           cp LICENSE-APACHE "${INSTALL_DIR}/LICENSE-APACHE"
           cp LICENSE-MIT "${INSTALL_DIR}/LICENSE-MIT"
-
-          if [[ "${{ matrix.bundle_console }}" == "true" ]]; then
-            mkdir -p "${INSTALL_DIR}/control-console"
-            wasm-bindgen \
-              --target web \
-              --no-typescript \
-              --out-dir "${INSTALL_DIR}/control-console" \
-              --out-name console \
-              "target/wasm32-unknown-unknown/release/rginx_control_console.wasm"
-            cp crates/rginx-control-console/static/index.html "${INSTALL_DIR}/control-console/index.html"
-            cp crates/rginx-control-console/static/console.css "${INSTALL_DIR}/control-console/console.css"
-            cp compose.yaml "${INSTALL_DIR}/compose.yaml"
-            cp .env.example "${INSTALL_DIR}/.env.example"
-            mkdir -p "${INSTALL_DIR}/docker"
-            cp docker/README.md "${INSTALL_DIR}/docker/README.md"
-          else
-            cp -R configs "${INSTALL_DIR}/configs"
-            cp -R scripts "${INSTALL_DIR}/scripts"
-            mkdir -p "${INSTALL_DIR}/deploy"
-            cp -R deploy/systemd "${INSTALL_DIR}/deploy/systemd"
-          fi
+          cp -R configs "${INSTALL_DIR}/configs"
+          cp -R scripts "${INSTALL_DIR}/scripts"
+          mkdir -p "${INSTALL_DIR}/deploy"
+          cp -R deploy/systemd "${INSTALL_DIR}/deploy/systemd"
+          cp -R deploy/supervisor "${INSTALL_DIR}/deploy/supervisor"
 
           mkdir -p dist
           tar -C "${STAGING_ROOT}" -czf "dist/${ARCHIVE_NAME}" "${PKG_DIR}"
@@ -280,72 +226,12 @@ jobs:
           path: dist/${{ steps.package.outputs.archive_name }}
           if-no-files-found: error
 
-  publish-container:
-    name: Publish rginx-web Container
-    needs:
-      - verify
-      - build
-    if: ${{ needs.verify.result == 'success' && needs.build.result == 'success' }}
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - name: Check Out Source
-        uses: actions/checkout@v6.0.2
-        with:
-          fetch-depth: 0
-          ref: ${{ needs.verify.outputs.tag }}
-
-      - name: Set Up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set Up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log In To GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ github.token }}
-
-      - name: Prepare Container Metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.WEB_IMAGE_NAME }}
-          tags: |
-            type=raw,value=${{ needs.verify.outputs.tag }}
-            type=raw,value=latest,enable=${{ needs.verify.outputs.prerelease != 'true' }}
-
-      - name: Compute Build Timestamp
-        id: build_meta
-        shell: bash
-        run: echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${GITHUB_OUTPUT}"
-
-      - name: Build And Push rginx-web Image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./Dockerfile
-          target: rginx-web
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            RGINX_BUILD_VERSION=${{ needs.verify.outputs.tag }}
-            RGINX_BUILD_REVISION=${{ needs.verify.outputs.commit_sha }}
-            RGINX_BUILD_CREATED=${{ steps.build_meta.outputs.created }}
-
   publish:
     name: Publish GitHub Release
     needs:
       - verify
       - build
-      - publish-container
-    if: ${{ always() && needs.verify.result == 'success' && needs.build.result == 'success' && needs.publish-container.result == 'success' }}
+    if: ${{ always() && needs.verify.result == 'success' && needs.build.result == 'success' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -431,27 +317,10 @@ jobs:
             echo
             echo "## Install"
             echo
-            echo "### Edge Proxy"
-            echo
             echo '```bash'
-            echo "curl -fsSL https://raw.githubusercontent.com/vansour/rginx/main/scripts/install.sh | \\"
+            echo "curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/scripts/install.sh | \\"
             echo "  bash -s -- --mode release --version ${TAG}"
             echo '```'
-            echo
-            echo "### Control Plane"
-            echo
-            echo '```bash'
-            echo "docker pull ${WEB_IMAGE_NAME}:${TAG}"
-            echo '```'
-            echo
-            echo "也可以直接解压 \`rginx-web-${TAG}-linux-<arch>.tar.gz\`，并将 \`RGINX_CONTROL_UI_DIR\` 指向随包附带的 \`control-console/\` 目录。"
-            echo
-            echo "## Container Image"
-            echo
-            echo "- \`${WEB_IMAGE_NAME}:${TAG}\`"
-            if [[ "${{ needs.verify.outputs.prerelease }}" != "true" ]]; then
-              echo "- \`${WEB_IMAGE_NAME}:latest\`"
-            fi
             echo
             echo "## Changelog"
             echo "${CHANGELOG_TITLE}"

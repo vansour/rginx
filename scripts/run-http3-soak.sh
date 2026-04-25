@@ -118,7 +118,7 @@ matrix=(
     "upstream_http3|upstream HTTP/3 pooling and proxy path"
     "grpc_http3|gRPC, grpc-web, deadlines, and health checks over HTTP/3"
     "reload|HTTP/3 reload, restart, and drain semantics"
-    "admin|HTTP/3 control-plane telemetry and snapshot output"
+    "admin|HTTP/3 admin telemetry and snapshot output"
     "check|HTTP/3 listener validation and reporting"
     "ocsp|HTTP/3 TLS / OCSP runtime state"
 )
