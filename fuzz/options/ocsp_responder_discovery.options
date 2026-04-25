@@ -1,0 +1,4 @@
+# AIA responder discovery only needs certificate-sized inputs.
+-max_len=2048
+-rss_limit_mb=768
+-timeout=5

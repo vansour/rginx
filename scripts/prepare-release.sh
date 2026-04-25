@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_SOURCE="${BASH_SOURCE[0]:-$0}"
 SCRIPT_DIR="$(cd "$(dirname "${SCRIPT_SOURCE}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+source "${SCRIPT_DIR}/fuzz-common.sh"
 
 TAG=""
 ALLOW_DIRTY=0
@@ -94,6 +95,16 @@ if [[ "${TAG}" == *-* ]]; then
     PRERELEASE=1
 fi
 
+if [[ "${PRERELEASE}" -eq 1 ]]; then
+    have rustup || die "rustup is required for prerelease fuzz smoke"
+    FUZZ_TOOLCHAIN="$(fuzz_toolchain_channel "${ROOT_DIR}/fuzz")"
+    [[ -n "${FUZZ_TOOLCHAIN}" ]] || die "failed to resolve fuzz toolchain from fuzz/rust-toolchain.toml"
+    rustup toolchain list | grep -Fq "${FUZZ_TOOLCHAIN}" \
+        || die "fuzz toolchain ${FUZZ_TOOLCHAIN} is required for prerelease fuzz smoke (run: rustup toolchain install ${FUZZ_TOOLCHAIN})"
+    cargo fuzz --help >/dev/null 2>&1 \
+        || die "cargo-fuzz is required for prerelease fuzz smoke (run: cargo install cargo-fuzz)"
+fi
+
 CURRENT_BRANCH="$(git branch --show-current)"
 if [[ "${PRERELEASE}" -ne 1 ]] && [[ "${CURRENT_BRANCH}" != "main" ]]; then
     die "stable release prep must run from the main branch"
@@ -155,6 +166,9 @@ run_step ./scripts/test-slow.sh
 run_step ./scripts/run-tls-gate.sh
 run_step ./scripts/run-http3-release-gate.sh --soak-iterations 1
 run_step ./scripts/test-control-plane-compose.sh
+if [[ "${PRERELEASE}" -eq 1 ]]; then
+    run_step ./scripts/run-fuzz-smoke.sh --seconds 10
+fi
 
 log "running: cargo run -p rginx -- --version"
 VERSION_OUTPUT="$(cargo run -p rginx -- --version | tail -n 1)"

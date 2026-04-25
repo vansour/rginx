@@ -1,3 +1,5 @@
+use std::path::Path;
+
 mod client_ip;
 mod compression;
 pub mod handler;
@@ -11,8 +13,10 @@ mod timeout;
 mod tls;
 mod transition;
 
+/// Upper bound for accepted OCSP response payloads.
 pub const MAX_OCSP_RESPONSE_BYTES: usize = 128 * 1024;
 
+/// Installs the default process-wide TLS crypto provider used by HTTP components.
 pub fn install_default_crypto_provider() {
     tls::install_default_crypto_provider();
 }
@@ -45,4 +49,16 @@ pub use transition::{
 #[ctor::ctor]
 fn install_test_crypto_provider() {
     install_default_crypto_provider();
+}
+
+/// Internal adapter used by fuzz targets to exercise certificate inspection.
+#[doc(hidden)]
+pub fn inspect_certificate_for_fuzzing(path: &Path) {
+    let _ = pki::inspect_certificate(path);
+}
+
+/// Internal adapter used by fuzz targets to exercise OCSP responder discovery.
+#[doc(hidden)]
+pub fn discover_ocsp_responder_urls_for_fuzzing(path: &Path) {
+    let _ = tls::ocsp::ocsp_responder_urls_for_certificate(path);
 }

@@ -311,7 +311,9 @@ mod tests {
     use std::sync::{Mutex, OnceLock};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{load_from_path, load_from_str};
+    use proptest::prelude::*;
+
+    use super::{expand_env_placeholders_in_ron_strings, load_from_path, load_from_str};
 
     #[test]
     fn load_from_str_expands_environment_placeholders_inside_strings() {
@@ -495,6 +497,43 @@ mod tests {
         assert!(error.to_string().contains("only `*.ron` file globs are supported"));
     }
 
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn env_placeholder_expansion_leaves_placeholder_free_sources_unchanged(
+            source in prop::collection::vec(
+                any::<char>().prop_filter("source must not contain `$`", |ch| *ch != '$'),
+                0..128,
+            )
+            .prop_map(|chars| chars.into_iter().collect::<String>())
+        ) {
+            let expanded = expand_env_placeholders_in_ron_strings(&source, Path::new("inline.ron"))
+                .expect("placeholder-free source should not fail");
+
+            prop_assert_eq!(expanded, source);
+        }
+
+        #[test]
+        fn load_from_str_round_trips_arbitrary_env_string_values(value in arbitrary_env_value()) {
+            let _guard = env_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let _scoped_env = ScopedEnvVar::set("rginx_test_prop_body", &value);
+
+            let config = load_from_str(
+                "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: \"127.0.0.1:18080\",\n    ),\n    upstreams: [],\n    locations: [\n        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Return(\n                status: 200,\n                location: \"\",\n                body: Some(\"${rginx_test_prop_body}\"),\n            ),\n        ),\n    ],\n)\n",
+                Path::new("inline.ron"),
+            )
+            .expect("config should load with arbitrary env expansion");
+
+            match &config.locations[0].handler {
+                crate::model::HandlerConfig::Return { body, .. } => {
+                    prop_assert_eq!(body.as_deref(), Some(value.as_str()));
+                }
+                _ => panic!("expected return handler"),
+            }
+        }
+    }
+
     fn temp_dir(prefix: &str) -> PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -506,5 +545,37 @@ mod tests {
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn arbitrary_env_value() -> impl Strategy<Value = String> {
+        prop::collection::vec(
+            any::<char>()
+                .prop_filter("exclude unescaped control chars invalid in RON strings", |ch| {
+                    (*ch >= ' ' && *ch != '\x7F') || matches!(*ch, '\n' | '\r' | '\t')
+                }),
+            0..64,
+        )
+        .prop_map(|chars| chars.into_iter().collect::<String>())
+    }
+
+    struct ScopedEnvVar {
+        key: &'static str,
+    }
+
+    impl ScopedEnvVar {
+        fn set(key: &'static str, value: &str) -> Self {
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            unsafe {
+                std::env::remove_var(self.key);
+            }
+        }
     }
 }

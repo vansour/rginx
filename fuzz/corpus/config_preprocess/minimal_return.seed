@@ -1,0 +1,19 @@
+Config(
+    runtime: RuntimeConfig(
+        shutdown_timeout_secs: 2,
+    ),
+    server: ServerConfig(
+        listen: "127.0.0.1:18080",
+    ),
+    upstreams: [],
+    locations: [
+        LocationConfig(
+            matcher: Exact("/"),
+            handler: Return(
+                status: 200,
+                location: "",
+                body: Some("ok\n"),
+            ),
+        ),
+    ],
+)

@@ -3,6 +3,13 @@
 /perf.data
 /perf.data.*
 /flamegraph-*.svg
+/fuzz/artifacts
+/fuzz/corpus/*
+!/fuzz/corpus/*/
+/fuzz/corpus/*/*
+!/fuzz/corpus/*/*.seed
+/fuzz/coverage
+/fuzz/target
 __pycache__/
 *.py[cod]
 /.env
