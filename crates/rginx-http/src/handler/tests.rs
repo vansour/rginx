@@ -752,6 +752,29 @@ async fn finalize_downstream_response_injects_alt_svc_when_provided() {
 }
 
 #[tokio::test]
+async fn finalize_downstream_response_preserves_existing_date_header() {
+    let request_headers = HeaderMap::new();
+    let compression_options = ResponseCompressionOptions::default();
+    let upstream_date = HeaderValue::from_static("Tue, 15 Nov 1994 08:12:31 GMT");
+    let mut response = text_response(StatusCode::OK, "text/plain; charset=utf-8", "hello");
+    response.headers_mut().insert(http::header::DATE, upstream_date.clone());
+
+    let finalized = finalize_downstream_response(
+        &http::Method::GET,
+        &request_headers,
+        &compression_options,
+        HeaderValue::from_static("req-date"),
+        response,
+        None,
+        None,
+        default_server_header(),
+    )
+    .await;
+
+    assert_eq!(finalized.response.headers().get(http::header::DATE), Some(&upstream_date));
+}
+
+#[tokio::test]
 async fn finalize_downstream_response_respects_response_buffering_off() {
     let mut request_headers = HeaderMap::new();
     request_headers.insert(http::header::ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
