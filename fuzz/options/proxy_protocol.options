@@ -1,0 +1,3 @@
+# Keep PROXY protocol inputs close to the real header envelope.
+-max_len=256
+-timeout=5

@@ -103,6 +103,10 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Install Nightly Rust Toolchain For Prerelease Fuzzing
+        if: ${{ steps.meta.outputs.prerelease == 'true' }}
+        uses: dtolnay/rust-toolchain@nightly
+
       - name: Restore Rust Cache
         uses: Swatinem/rust-cache@v2.9.1
 
@@ -126,6 +130,14 @@ jobs:
 
       - name: Run Control Plane Compose Smoke Test
         run: ./scripts/test-control-plane-compose.sh
+
+      - name: Install cargo-fuzz For Prerelease Verify
+        if: ${{ steps.meta.outputs.prerelease == 'true' }}
+        run: cargo install cargo-fuzz --locked
+
+      - name: Run Prerelease Fuzz Smoke
+        if: ${{ steps.meta.outputs.prerelease == 'true' }}
+        run: ./scripts/run-fuzz-smoke.sh --seconds 10
 
   build:
     name: Build ${{ matrix.asset_name }} Assets
@@ -444,6 +456,11 @@ jobs:
             echo
           } > dist/release-summary.md
 
+          RELEASE_NOTES_FILE="RELEASE_NOTES_${TAG}.md"
+          if [[ -f "${RELEASE_NOTES_FILE}" ]]; then
+            cp "${RELEASE_NOTES_FILE}" dist/release-curated-notes.md
+          fi
+
           if [[ -n "${PREVIOUS_TAG}" ]]; then
             gh api \
               --method POST \
@@ -465,8 +482,15 @@ jobs:
               --jq '.body' > dist/generated-notes.md
           fi
 
-          cat dist/release-summary.md > dist/release-body.md
-          printf '\n' >> dist/release-body.md
+          if [[ -f dist/release-curated-notes.md ]]; then
+            cat dist/release-curated-notes.md > dist/release-body.md
+            printf '\n\n' >> dist/release-body.md
+            cat dist/release-summary.md >> dist/release-body.md
+            printf '\n' >> dist/release-body.md
+          else
+            cat dist/release-summary.md > dist/release-body.md
+            printf '\n' >> dist/release-body.md
+          fi
           cat dist/generated-notes.md >> dist/release-body.md
 
       - name: Create Or Update Release

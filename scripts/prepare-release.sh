@@ -155,6 +155,9 @@ run_step ./scripts/test-slow.sh
 run_step ./scripts/run-tls-gate.sh
 run_step ./scripts/run-http3-release-gate.sh --soak-iterations 1
 run_step ./scripts/test-control-plane-compose.sh
+if [[ "${PRERELEASE}" -eq 1 ]]; then
+    run_step ./scripts/run-fuzz-smoke.sh --seconds 10
+fi
 
 log "running: cargo run -p rginx -- --version"
 VERSION_OUTPUT="$(cargo run -p rginx -- --version | tail -n 1)"

@@ -6,9 +6,9 @@
 - `rginx-web`：控制面 Web 进程，内含 API、浏览器 Console、后台 worker，以及可选权威 DNS 运行时
 - `rginx-node-agent`：节点本地 agent，负责和控制面同步发布、状态与快照
 
-当前版本：`0.1.3-rc.12`
+当前版本：`0.1.3-rc.13`
 
-本仓库不再维护额外文档目录；根 `README.md` 是唯一持续更新的说明入口。
+根 `README.md` 仍是 monorepo 总入口；边缘代理 HTTP/3 / fuzz / prerelease 文档见 `docs/` 与 `fuzz/README.md`。
 
 ## 能力概览
 
@@ -58,8 +58,10 @@
 | `crates/rginx-node-agent` | 节点 agent |
 | `crates/rginx-dns` | 权威 DNS 运行时基础能力 |
 | `configs/` | 默认边缘代理配置 |
+| `docs/` | HTTP/3、release gate 与阶段化架构文档 |
 | `deploy/` | systemd / supervisor 示例 |
 | `docker/` | Docker 相关构建目录 |
+| `fuzz/` | `cargo-fuzz` target、seed corpus、dictionary 与 coverage 入口 |
 | `scripts/` | 安装、测试、发布、验证脚本 |
 
 ## 环境要求
@@ -154,13 +156,30 @@ scripts/run-tls-gate.sh
 scripts/run-http3-gate.sh
 scripts/test-control-plane-compose.sh
 scripts/test-control-console-e2e.sh
+scripts/run-fuzz-smoke.sh --seconds 10
 ```
+
+当前 fuzz harness 覆盖 5 个高风险输入面：
+
+- `proxy_protocol`
+- `config_preprocess`
+- `ocsp_response`
+- `certificate_inspect`
+- `ocsp_responder_discovery`
+
+版本化 `*.seed` 是 smoke / coverage 的默认输入，target-specific 字典和 libFuzzer 参数位于 `fuzz/dictionaries/` 与 `fuzz/options/`。详细说明见 `fuzz/README.md`。
 
 ## 构建与交付
 
 - [Dockerfile](/root/github/rginx/Dockerfile) 当前提供 `rginx-web` 镜像构建
 - [compose.yaml](/root/github/rginx/compose.yaml) 是本地控制面一体化入口
 - [scripts/install.sh](/root/github/rginx/scripts/install.sh) / [scripts/uninstall.sh](/root/github/rginx/scripts/uninstall.sh) 用于边缘节点安装与卸载
+
+### Release / Prerelease
+
+- 预发布 tag 现在会在 release verify 和 `scripts/prepare-release.sh` 里额外执行 `./scripts/run-fuzz-smoke.sh --seconds 10`
+- 如果仓库根目录存在 `RELEASE_NOTES_<tag>.md`，release workflow 会优先把它拼进 GitHub Release 正文
+- `RELEASE_NOTES_v0.1.3-rc.13.md` 记录了这次 `rc.13` 的 fuzz hardening 与 prerelease gate 收口点
 
 ## 许可证
 

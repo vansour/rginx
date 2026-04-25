@@ -1,3 +1,5 @@
+use std::path::Path;
+
 mod client_ip;
 mod compression;
 pub mod handler;
@@ -45,4 +47,14 @@ pub use transition::{
 #[ctor::ctor]
 fn install_test_crypto_provider() {
     install_default_crypto_provider();
+}
+
+#[doc(hidden)]
+pub fn inspect_certificate_for_fuzzing(path: &Path) {
+    let _ = pki::inspect_certificate(path);
+}
+
+#[doc(hidden)]
+pub fn discover_ocsp_responder_urls_for_fuzzing(path: &Path) {
+    let _ = tls::ocsp::ocsp_responder_urls_for_certificate(path);
 }

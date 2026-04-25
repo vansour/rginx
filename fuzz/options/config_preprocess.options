@@ -1,0 +1,3 @@
+# Config preprocessing benefits from multi-line inputs, but doesn't need unbounded blobs.
+-max_len=2048
+-timeout=5

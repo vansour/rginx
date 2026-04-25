@@ -1,3 +1,7 @@
+use std::io::ErrorKind;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+
+use proptest::prelude::*;
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair};
 use rustls::pki_types::{CertificateDer, pem::PemObject};
 
@@ -33,6 +37,69 @@ fn proxy_protocol_v1_rejects_invalid_headers() {
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
 }
 
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(128))]
+
+    #[test]
+    fn proxy_protocol_v1_handles_arbitrary_headers_without_panicking(
+        header in any::<String>(),
+        trust_remote_addr in any::<bool>(),
+    ) {
+        match parse_proxy_protocol_v1(&header, remote_proxy_peer_addr(), trust_remote_addr) {
+            Ok(_) => {}
+            Err(error) => prop_assert_eq!(error.kind(), ErrorKind::InvalidData),
+        }
+    }
+
+    #[test]
+    fn proxy_protocol_v1_parses_generated_tcp4_headers(
+        source_ip in any::<[u8; 4]>().prop_map(Ipv4Addr::from),
+        destination_ip in any::<[u8; 4]>().prop_map(Ipv4Addr::from),
+        source_port in any::<u16>(),
+        destination_port in any::<u16>(),
+    ) {
+        let header = format!(
+            "PROXY TCP4 {source_ip} {destination_ip} {source_port} {destination_port}\r\n"
+        );
+        let expected = SocketAddr::new(source_ip.into(), source_port);
+
+        prop_assert_eq!(
+            parse_proxy_protocol_v1(&header, remote_proxy_peer_addr(), true)
+                .expect("generated TCP4 header should parse"),
+            Some(expected)
+        );
+        prop_assert_eq!(
+            parse_proxy_protocol_v1(&header, remote_proxy_peer_addr(), false)
+                .expect("generated TCP4 header should still parse when untrusted"),
+            None
+        );
+    }
+
+    #[test]
+    fn proxy_protocol_v1_parses_generated_tcp6_headers(
+        source_ip in any::<[u8; 16]>().prop_map(Ipv6Addr::from),
+        destination_ip in any::<[u8; 16]>().prop_map(Ipv6Addr::from),
+        source_port in any::<u16>(),
+        destination_port in any::<u16>(),
+    ) {
+        let header = format!(
+            "PROXY TCP6 {source_ip} {destination_ip} {source_port} {destination_port}\r\n"
+        );
+        let expected = SocketAddr::new(source_ip.into(), source_port);
+
+        prop_assert_eq!(
+            parse_proxy_protocol_v1(&header, remote_proxy_peer_addr(), true)
+                .expect("generated TCP6 header should parse"),
+            Some(expected)
+        );
+        prop_assert_eq!(
+            parse_proxy_protocol_v1(&header, remote_proxy_peer_addr(), false)
+                .expect("generated TCP6 header should still parse when untrusted"),
+            None
+        );
+    }
+}
+
 #[test]
 fn parse_tls_client_identity_extracts_subject_and_dns_san() {
     let mut params = CertificateParams::new(vec!["localhost".to_string()])
@@ -54,6 +121,10 @@ fn parse_tls_client_identity_extracts_subject_and_dns_san() {
     assert!(identity.san_dns_names.iter().any(|san| san == "localhost"));
     assert_eq!(identity.chain_length, 1);
     assert_eq!(identity.chain_subjects.len(), 1);
+}
+
+fn remote_proxy_peer_addr() -> SocketAddr {
+    SocketAddr::from((Ipv4Addr::new(10, 0, 0, 1), 4000))
 }
 
 #[test]

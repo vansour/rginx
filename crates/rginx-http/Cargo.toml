@@ -47,5 +47,6 @@ webpki.workspace = true
 
 [dev-dependencies]
 ctor.workspace = true
+proptest = "1"
 rcgen = "0.14"
 tempfile = "3.27"
