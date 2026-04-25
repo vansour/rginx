@@ -212,6 +212,7 @@ jobs:
           cp -R scripts "${INSTALL_DIR}/scripts"
           mkdir -p "${INSTALL_DIR}/deploy"
           cp -R deploy/systemd "${INSTALL_DIR}/deploy/systemd"
+          cp -R deploy/supervisor "${INSTALL_DIR}/deploy/supervisor"
 
           mkdir -p dist
           tar -C "${STAGING_ROOT}" -czf "dist/${ARCHIVE_NAME}" "${PKG_DIR}"
@@ -317,7 +318,7 @@ jobs:
             echo "## Install"
             echo
             echo '```bash'
-            echo "curl -fsSL https://raw.githubusercontent.com/vansour/rginx/main/scripts/install.sh | \\"
+            echo "curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/scripts/install.sh | \\"
             echo "  bash -s -- --mode release --version ${TAG}"
             echo '```'
             echo

@@ -43,7 +43,7 @@
 
 ## 快速开始
 
-默认配置文件是 [configs/rginx.ron](/root/github/rginx/configs/rginx.ron)。
+默认配置文件是 [configs/rginx.ron](configs/rginx.ron)。
 
 ```bash
 cargo run -p rginx -- -t
@@ -53,8 +53,8 @@ cargo run -p rginx --
 
 默认会加载：
 
-- [configs/rginx.ron](/root/github/rginx/configs/rginx.ron)
-- [configs/conf.d/default.ron](/root/github/rginx/configs/conf.d/default.ron)
+- [configs/rginx.ron](configs/rginx.ron)
+- [configs/conf.d/default.ron](configs/conf.d/default.ron)
 
 常用命令：
 
@@ -68,8 +68,8 @@ rginx traffic --window-secs 60
 
 systemd / supervisor 示例：
 
-- [rginx.service](/root/github/rginx/deploy/systemd/rginx.service)
-- [rginx.conf](/root/github/rginx/deploy/supervisor/rginx.conf)
+- [rginx.service](deploy/systemd/rginx.service)
+- [rginx.conf](deploy/supervisor/rginx.conf)
 
 ## 开发与验证
 
@@ -105,9 +105,9 @@ scripts/run-fuzz-smoke.sh --seconds 10
 
 ## 构建与交付
 
-- [scripts/install.sh](/root/github/rginx/scripts/install.sh) / [scripts/uninstall.sh](/root/github/rginx/scripts/uninstall.sh) 用于安装与卸载
+- [scripts/install.sh](scripts/install.sh) / [scripts/uninstall.sh](scripts/uninstall.sh) 用于安装与卸载
 - release workflow 只发布 `rginx` Linux 归档和校验文件
-- 预发布 tag 会在 release verify 和 [prepare-release.sh](/root/github/rginx/scripts/prepare-release.sh) 里额外执行 `./scripts/run-fuzz-smoke.sh --seconds 10`
+- 预发布 tag 会在 release verify 和 [prepare-release.sh](scripts/prepare-release.sh) 里额外执行 `./scripts/run-fuzz-smoke.sh --seconds 10`
 
 如果仓库根目录存在 `RELEASE_NOTES_<tag>.md`，release workflow 会优先把它拼进 GitHub Release 正文。
 
@@ -115,5 +115,5 @@ scripts/run-fuzz-smoke.sh --seconds 10
 
 双许可证：
 
-- [LICENSE-MIT](/root/github/rginx/LICENSE-MIT)
-- [LICENSE-APACHE](/root/github/rginx/LICENSE-APACHE)
+- [LICENSE-MIT](LICENSE-MIT)
+- [LICENSE-APACHE](LICENSE-APACHE)
