@@ -296,7 +296,7 @@ pub(super) async fn finalize_downstream_response(
 }
 
 fn current_http_date() -> HeaderValue {
-    let value = chrono::Utc::now().format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+    let value = httpdate::fmt_http_date(std::time::SystemTime::now());
     HeaderValue::from_str(&value).expect("formatted HTTP date should be a valid header")
 }
 

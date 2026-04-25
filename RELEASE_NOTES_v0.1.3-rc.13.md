@@ -62,5 +62,4 @@ Release-oriented validation passed for `v0.1.3-rc.13` with:
   short smoke path behind manual dispatch
 - fuzz smoke is currently a prerelease gate, not a stable-release-only
   differentiator
-- the nginx comparison harness remains external to the normal test matrix and is
-  still optional for prerelease preparation
+- the HTTP/3 release gate does not include an in-repo nginx comparison harness

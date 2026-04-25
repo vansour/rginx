@@ -21,6 +21,7 @@ flate2.workspace = true
 futures-util.workspace = true
 http.workspace = true
 http-body-util.workspace = true
+httpdate.workspace = true
 h3.workspace = true
 h3-quinn.workspace = true
 hickory-resolver.workspace = true

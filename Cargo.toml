@@ -33,6 +33,7 @@ futures-util = "0.3"
 flate2 = "1.1"
 http = "1.4"
 http-body-util = "0.1"
+httpdate = "1.0"
 h3 = "0.0.8"
 h3-quinn = "0.0.10"
 hickory-resolver = "0.24.4"
@@ -56,5 +57,5 @@ tokio-rustls = "0.26"
 tower-service = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-uuid = { version = "1.18", features = ["v7"] }
+uuid = { version = "1.18", features = ["v7", "std"] }
 webpki = { package = "rustls-webpki", version = "0.103.11", default-features = false, features = ["std", "aws-lc-rs"] }

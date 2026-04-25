@@ -272,6 +272,10 @@ fn assert_generated_request_id(value: Option<&str>) {
     assert_eq!(value.as_bytes()[13], b'-');
     assert_eq!(value.as_bytes()[14], b'7', "generated request id should be UUIDv7");
     assert_eq!(value.as_bytes()[18], b'-');
+    assert!(
+        matches!(value.as_bytes()[19], b'8' | b'9' | b'a' | b'b'),
+        "generated request id should use the RFC 4122 variant, got {value:?}"
+    );
     assert_eq!(value.as_bytes()[23], b'-');
     assert!(
         value.chars().filter(|ch| *ch != '-').all(|ch| ch.is_ascii_hexdigit()),

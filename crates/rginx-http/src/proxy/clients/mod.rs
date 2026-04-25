@@ -26,15 +26,31 @@ pub(super) use tls::load_custom_ca_store;
 type HyperProxyClient = Client<HttpsConnector<HttpConnector<FixedEndpointResolver>>, HttpBody>;
 pub(crate) type HealthChangeNotifier = Arc<dyn Fn(&str) + Send + Sync + 'static>;
 
+const ENDPOINT_CLIENT_CACHE_MIN_CAPACITY: usize = 16;
+const ENDPOINT_CLIENT_CACHE_MAX_CAPACITY: usize = 1024;
+const ENDPOINT_CLIENT_CACHE_POOL_MULTIPLIER: usize = 4;
+
 #[derive(Clone)]
 pub(crate) struct HttpProxyClient {
-    // Hyper pools by request URI authority; keep one client per selected socket so
-    // logical upstream authority does not collapse all resolved endpoints together.
-    endpoint_clients: Arc<Mutex<HashMap<SocketAddr, HyperProxyClient>>>,
+    // Hyper pools by selected socket. `pool_max_idle_per_host` applies to every
+    // endpoint client, so effective idle capacity is per live endpoint until LRU
+    // eviction trims stale DNS endpoints from this bounded cache.
+    endpoint_clients: Arc<Mutex<EndpointClientCache>>,
     resolver: Arc<UpstreamResolver>,
     profile: UpstreamClientProfile,
     tls_config: ClientConfig,
     server_name_override: Option<ServerName<'static>>,
+}
+
+struct EndpointClientCache {
+    entries: HashMap<SocketAddr, EndpointClientCacheEntry>,
+    capacity: usize,
+    next_access: u64,
+}
+
+struct EndpointClientCacheEntry {
+    client: HyperProxyClient,
+    last_used: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -96,7 +112,7 @@ pub struct ProxyClients {
 
 #[derive(Clone)]
 pub(crate) enum ProxyClient {
-    Http(HttpProxyClient),
+    Http(Arc<HttpProxyClient>),
     Http3(http3::Http3Client),
 }
 
@@ -269,20 +285,57 @@ impl ProxyClient {
 
 impl HttpProxyClient {
     fn client_for_peer(&self, peer: &ResolvedUpstreamPeer) -> Result<HyperProxyClient, Error> {
-        if let Some(client) = self
-            .endpoint_clients
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(&peer.socket_addr)
-            .cloned()
-        {
+        let mut endpoint_clients =
+            self.endpoint_clients.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(client) = endpoint_clients.get(peer.socket_addr) {
             return Ok(client);
         }
 
+        // Keep construction under the cache lock so concurrent requests for the
+        // same newly resolved endpoint do not build duplicate Hyper clients.
         let client = build_hyper_client_for_endpoint(self, peer.socket_addr)?;
-        let mut endpoint_clients =
-            self.endpoint_clients.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        Ok(endpoint_clients.entry(peer.socket_addr).or_insert_with(|| client).clone())
+        Ok(endpoint_clients.insert(peer.socket_addr, client))
+    }
+}
+
+impl EndpointClientCache {
+    fn new(capacity: usize) -> Self {
+        Self { entries: HashMap::new(), capacity: capacity.max(1), next_access: 0 }
+    }
+
+    fn get(&mut self, socket_addr: SocketAddr) -> Option<HyperProxyClient> {
+        let last_used = self.next_access();
+        self.entries.get_mut(&socket_addr).map(|entry| {
+            entry.last_used = last_used;
+            entry.client.clone()
+        })
+    }
+
+    fn insert(&mut self, socket_addr: SocketAddr, client: HyperProxyClient) -> HyperProxyClient {
+        if !self.entries.contains_key(&socket_addr) && self.entries.len() >= self.capacity {
+            self.evict_lru();
+        }
+        let last_used = self.next_access();
+        self.entries
+            .insert(socket_addr, EndpointClientCacheEntry { client: client.clone(), last_used });
+        client
+    }
+
+    fn evict_lru(&mut self) {
+        let Some(socket_addr) = self
+            .entries
+            .iter()
+            .min_by_key(|(_socket_addr, entry)| entry.last_used)
+            .map(|(socket_addr, _entry)| *socket_addr)
+        else {
+            return;
+        };
+        self.entries.remove(&socket_addr);
+    }
+
+    fn next_access(&mut self) -> u64 {
+        self.next_access = self.next_access.saturating_add(1);
+        self.next_access
     }
 }
 
@@ -355,13 +408,15 @@ fn build_client_for_profile(profile: &UpstreamClientProfile) -> Result<ProxyClie
         })
         .transpose()?;
 
-    Ok(ProxyClient::Http(HttpProxyClient {
-        endpoint_clients: Arc::new(Mutex::new(HashMap::new())),
+    Ok(ProxyClient::Http(Arc::new(HttpProxyClient {
+        endpoint_clients: Arc::new(Mutex::new(EndpointClientCache::new(
+            endpoint_client_cache_capacity(profile.pool_max_idle_per_host),
+        ))),
         resolver,
         profile: profile.clone(),
         tls_config,
         server_name_override,
-    }))
+    })))
 }
 
 fn build_hyper_client_for_endpoint(
@@ -406,4 +461,10 @@ fn build_hyper_client_for_endpoint(
     }
 
     Ok(client_builder.build(connector))
+}
+
+fn endpoint_client_cache_capacity(pool_max_idle_per_host: usize) -> usize {
+    pool_max_idle_per_host
+        .saturating_mul(ENDPOINT_CLIENT_CACHE_POOL_MULTIPLIER)
+        .clamp(ENDPOINT_CLIENT_CACHE_MIN_CAPACITY, ENDPOINT_CLIENT_CACHE_MAX_CAPACITY)
 }

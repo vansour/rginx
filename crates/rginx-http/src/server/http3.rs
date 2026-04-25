@@ -798,9 +798,15 @@ fn is_clean_http3_accept_close(error: &h3::error::ConnectionError) -> bool {
         return true;
     }
 
-    // h3 does not expose all nested quic error variants publicly. Quinn reports
-    // a client-side clean HTTP/3 close as `ApplicationClose: 0x0`.
-    error.to_string().contains("ApplicationClose: 0x0")
+    // h3 keeps the remote QUIC error variant private, so callers cannot
+    // downcast the nested Quinn error. Keep this fallback exact to avoid
+    // downgrading unrelated accept failures that merely mention the same code.
+    let message = error.to_string();
+    matches!(
+        message.as_str(),
+        "Remote error: Error undefined by h3: closed by peer: ApplicationClose: 0x0"
+            | "Remote error: Error undefined by h3: closed by peer: ApplicationClose: 0"
+    )
 }
 
 /// Logs the completion result of a spawned HTTP/3 connection task.
