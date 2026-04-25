@@ -1,6 +1,10 @@
 use std::error::Error as StdError;
+use std::future::{Ready, ready};
+use std::io;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::task::{Context, Poll};
 
 use super::health::{
     ActivePeerGuard, ActiveProbeStatus, PeerFailureStatus, PeerHealthRegistry, SelectedPeers,
@@ -8,6 +12,8 @@ use super::health::{
 };
 use super::*;
 use rginx_core::{ClientIdentity, TlsVersion};
+use rustls::ClientConfig;
+use tower_service::Service;
 
 mod http3;
 #[cfg(test)]
@@ -17,19 +23,39 @@ mod tls;
 #[cfg(test)]
 pub(super) use tls::load_custom_ca_store;
 
-pub type HyperProxyClient = Client<HttpsConnector<HttpConnector>, HttpBody>;
+type HyperProxyClient = Client<HttpsConnector<HttpConnector<FixedEndpointResolver>>, HttpBody>;
 pub(crate) type HealthChangeNotifier = Arc<dyn Fn(&str) + Send + Sync + 'static>;
+
+const ENDPOINT_CLIENT_CACHE_MIN_CAPACITY: usize = 16;
+const ENDPOINT_CLIENT_CACHE_MAX_CAPACITY: usize = 1024;
+const ENDPOINT_CLIENT_CACHE_POOL_MULTIPLIER: usize = 4;
 
 #[derive(Clone)]
 pub(crate) struct HttpProxyClient {
-    client: Box<HyperProxyClient>,
+    // Hyper pools by selected socket. `pool_max_idle_per_host` applies to every
+    // endpoint client, so effective idle capacity is per live endpoint until LRU
+    // eviction trims stale DNS endpoints from this bounded cache.
+    endpoint_clients: Arc<Mutex<EndpointClientCache>>,
     resolver: Arc<UpstreamResolver>,
-    server_name_resolver: DynamicServerNameResolver,
+    profile: UpstreamClientProfile,
+    tls_config: ClientConfig,
+    server_name_override: Option<ServerName<'static>>,
 }
 
-#[derive(Clone, Default)]
-struct DynamicServerNameResolver {
-    endpoint_server_names: Arc<Mutex<HashMap<String, String>>>,
+struct EndpointClientCache {
+    entries: HashMap<SocketAddr, EndpointClientCacheEntry>,
+    capacity: usize,
+    next_access: u64,
+}
+
+struct EndpointClientCacheEntry {
+    client: HyperProxyClient,
+    last_used: u64,
+}
+
+#[derive(Clone, Debug)]
+struct FixedEndpointResolver {
+    socket_addr: SocketAddr,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -86,7 +112,7 @@ pub struct ProxyClients {
 
 #[derive(Clone)]
 pub(crate) enum ProxyClient {
-    Http(HttpProxyClient),
+    Http(Arc<HttpProxyClient>),
     Http3(http3::Http3Client),
 }
 
@@ -243,9 +269,8 @@ impl ProxyClient {
     ) -> Result<Response<HttpBody>, Error> {
         match self {
             Self::Http(client) => {
-                client.server_name_resolver.register(&peer.dial_authority, &peer.server_name);
+                let client = client.client_for_peer(peer)?;
                 client
-                    .client
                     .request(request)
                     .await
                     .map(|response| response.map(crate::handler::boxed_body))
@@ -258,37 +283,79 @@ impl ProxyClient {
     }
 }
 
-impl DynamicServerNameResolver {
-    fn register(&self, authority: &str, server_name: &str) {
-        self.endpoint_server_names
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(authority.to_string(), server_name.to_string());
+impl HttpProxyClient {
+    fn client_for_peer(&self, peer: &ResolvedUpstreamPeer) -> Result<HyperProxyClient, Error> {
+        let mut endpoint_clients =
+            self.endpoint_clients.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(client) = endpoint_clients.get(peer.socket_addr) {
+            return Ok(client);
+        }
+
+        // Keep construction under the cache lock so concurrent requests for the
+        // same newly resolved endpoint do not build duplicate Hyper clients.
+        let client = build_hyper_client_for_endpoint(self, peer.socket_addr)?;
+        Ok(endpoint_clients.insert(peer.socket_addr, client))
     }
 }
 
-impl ResolveServerName for DynamicServerNameResolver {
-    fn resolve(
-        &self,
-        uri: &Uri,
-    ) -> Result<ServerName<'static>, Box<dyn std::error::Error + Sync + Send>> {
-        let authority = uri.authority().map(|value| value.as_str().to_string());
-        let server_name = authority
-            .as_deref()
-            .and_then(|authority| {
-                self.endpoint_server_names
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .get(authority)
-                    .cloned()
-            })
-            .or_else(|| uri.host().map(str::to_string))
-            .ok_or_else(|| {
-                Box::<dyn std::error::Error + Sync + Send>::from(
-                    "failed to resolve TLS server name from upstream URI",
-                )
-            })?;
-        ServerName::try_from(server_name).map_err(|error| Box::new(error) as _)
+impl EndpointClientCache {
+    fn new(capacity: usize) -> Self {
+        Self { entries: HashMap::new(), capacity: capacity.max(1), next_access: 0 }
+    }
+
+    fn get(&mut self, socket_addr: SocketAddr) -> Option<HyperProxyClient> {
+        let last_used = self.next_access();
+        self.entries.get_mut(&socket_addr).map(|entry| {
+            entry.last_used = last_used;
+            entry.client.clone()
+        })
+    }
+
+    fn insert(&mut self, socket_addr: SocketAddr, client: HyperProxyClient) -> HyperProxyClient {
+        if !self.entries.contains_key(&socket_addr) && self.entries.len() >= self.capacity {
+            self.evict_lru();
+        }
+        let last_used = self.next_access();
+        self.entries
+            .insert(socket_addr, EndpointClientCacheEntry { client: client.clone(), last_used });
+        client
+    }
+
+    fn evict_lru(&mut self) {
+        let Some(socket_addr) = self
+            .entries
+            .iter()
+            .min_by_key(|(_socket_addr, entry)| entry.last_used)
+            .map(|(socket_addr, _entry)| *socket_addr)
+        else {
+            return;
+        };
+        self.entries.remove(&socket_addr);
+    }
+
+    fn next_access(&mut self) -> u64 {
+        self.next_access = self.next_access.saturating_add(1);
+        self.next_access
+    }
+}
+
+impl FixedEndpointResolver {
+    fn new(socket_addr: SocketAddr) -> Self {
+        Self { socket_addr }
+    }
+}
+
+impl Service<hyper_util::client::legacy::connect::dns::Name> for FixedEndpointResolver {
+    type Response = std::vec::IntoIter<SocketAddr>;
+    type Error = io::Error;
+    type Future = Ready<Result<Self::Response, Self::Error>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, _name: hyper_util::client::legacy::connect::dns::Name) -> Self::Future {
+        ready(Ok(vec![self.socket_addr].into_iter()))
     }
 }
 
@@ -321,12 +388,6 @@ fn build_client_for_profile(profile: &UpstreamClientProfile) -> Result<ProxyClie
         )));
     }
 
-    let mut connector = HttpConnector::new();
-    connector.enforce_http(false);
-    connector.set_connect_timeout(Some(profile.connect_timeout));
-    connector.set_keepalive(profile.tcp_keepalive);
-    connector.set_nodelay(profile.tcp_nodelay);
-
     let tls_config = tls::build_tls_config(
         &profile.tls,
         profile.tls_versions.as_deref(),
@@ -335,17 +396,47 @@ fn build_client_for_profile(profile: &UpstreamClientProfile) -> Result<ProxyClie
         profile.client_identity.as_ref(),
         profile.server_name,
     )?;
-    let builder = HttpsConnectorBuilder::new().with_tls_config(tls_config).https_or_http();
-    let dynamic_server_name_resolver = DynamicServerNameResolver::default();
-    let builder = if let Some(server_name_override) = &profile.server_name_override {
-        let server_name = ServerName::try_from(server_name_override.clone()).map_err(|error| {
-            Error::Server(format!(
-                "invalid TLS server_name_override `{server_name_override}`: {error}"
-            ))
-        })?;
-        builder.with_server_name_resolver(FixedServerNameResolver::new(server_name))
+    let server_name_override = profile
+        .server_name_override
+        .as_ref()
+        .map(|server_name_override| {
+            ServerName::try_from(server_name_override.clone()).map_err(|error| {
+                Error::Server(format!(
+                    "invalid TLS server_name_override `{server_name_override}`: {error}"
+                ))
+            })
+        })
+        .transpose()?;
+
+    Ok(ProxyClient::Http(Arc::new(HttpProxyClient {
+        endpoint_clients: Arc::new(Mutex::new(EndpointClientCache::new(
+            endpoint_client_cache_capacity(profile.pool_max_idle_per_host),
+        ))),
+        resolver,
+        profile: profile.clone(),
+        tls_config,
+        server_name_override,
+    })))
+}
+
+fn build_hyper_client_for_endpoint(
+    client: &HttpProxyClient,
+    socket_addr: SocketAddr,
+) -> Result<HyperProxyClient, Error> {
+    let profile = &client.profile;
+    let mut connector = HttpConnector::new_with_resolver(FixedEndpointResolver::new(socket_addr));
+    connector.enforce_http(false);
+    connector.set_connect_timeout(Some(profile.connect_timeout));
+    connector.set_keepalive(profile.tcp_keepalive);
+    connector.set_nodelay(profile.tcp_nodelay);
+
+    let builder =
+        HttpsConnectorBuilder::new().with_tls_config(client.tls_config.clone()).https_or_http();
+    let builder = if let Some(server_name_override) = &client.server_name_override {
+        builder
+            .with_server_name_resolver(FixedServerNameResolver::new(server_name_override.clone()))
     } else {
-        builder.with_server_name_resolver(dynamic_server_name_resolver.clone())
+        builder
     };
     let connector = match profile.protocol {
         UpstreamProtocol::Auto => builder.enable_all_versions().wrap_connector(connector),
@@ -369,9 +460,11 @@ fn build_client_for_profile(profile: &UpstreamClientProfile) -> Result<ProxyClie
         client_builder.http2_only(true);
     }
 
-    Ok(ProxyClient::Http(HttpProxyClient {
-        client: Box::new(client_builder.build(connector)),
-        resolver,
-        server_name_resolver: dynamic_server_name_resolver,
-    }))
+    Ok(client_builder.build(connector))
+}
+
+fn endpoint_client_cache_capacity(pool_max_idle_per_host: usize) -> usize {
+    pool_max_idle_per_host
+        .saturating_mul(ENDPOINT_CLIENT_CACHE_POOL_MULTIPLIER)
+        .clamp(ENDPOINT_CLIENT_CACHE_MIN_CAPACITY, ENDPOINT_CLIENT_CACHE_MAX_CAPACITY)
 }

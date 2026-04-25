@@ -51,6 +51,7 @@ pub struct Http3Config {
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub listen: Option<String>,
+    pub server_header: Option<String>,
     pub proxy_protocol: Option<bool>,
     pub default_certificate: Option<String>,
     pub server_names: Vec<String>,
@@ -71,6 +72,8 @@ pub struct ServerConfig {
 pub struct ListenerConfig {
     pub name: String,
     pub listen: String,
+    #[serde(default)]
+    pub server_header: Option<String>,
     #[serde(default)]
     pub proxy_protocol: Option<bool>,
     #[serde(default)]
@@ -435,6 +438,8 @@ impl<'de> Deserialize<'de> for ServerConfig {
             #[serde(default)]
             listen: MaybeString,
             #[serde(default)]
+            server_header: Option<String>,
+            #[serde(default)]
             proxy_protocol: Option<bool>,
             #[serde(default)]
             default_certificate: Option<String>,
@@ -467,6 +472,7 @@ impl<'de> Deserialize<'de> for ServerConfig {
         let server = ServerConfigDe::deserialize(deserializer)?;
         Ok(ServerConfig {
             listen: server.listen.0,
+            server_header: server.server_header,
             proxy_protocol: server.proxy_protocol,
             default_certificate: server.default_certificate,
             server_names: server.server_names,

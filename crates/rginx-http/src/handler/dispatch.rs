@@ -9,7 +9,15 @@ use super::response::{
 use super::*;
 use crate::client_ip::{ConnectionPeerAddrs, TlsClientIdentity};
 use crate::compression::ResponseCompressionOptions;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+static HTTP_DATE_CACHE: OnceLock<Mutex<CachedHttpDate>> = OnceLock::new();
+
+struct CachedHttpDate {
+    unix_epoch_seconds: u64,
+    value: HeaderValue,
+}
 
 #[derive(Clone, Copy)]
 struct ListenerRequestContext<'a> {
@@ -48,6 +56,7 @@ pub async fn handle(
         .cloned()
         .expect("listener id should remain available while serving requests");
     let access_log_format = listener.server.access_log_format.clone();
+    let server_header = listener.server.server_header.clone();
     let method = request.method().clone();
     let request_version = request.version();
     let request_headers = request.headers().clone();
@@ -170,6 +179,7 @@ pub async fn handle(
         response,
         grpc_request,
         alt_svc_header,
+        server_header,
     )
     .await;
     let status = finalized.status;
@@ -261,6 +271,7 @@ pub(super) async fn finalize_downstream_response(
     mut response: HttpResponse,
     grpc_request: Option<GrpcRequestMetadata<'_>>,
     alt_svc_header: Option<HeaderValue>,
+    server_header: HeaderValue,
 ) -> FinalizedDownstreamResponse {
     // The final response pipeline is intentionally explicit:
     // 1. Detect gRPC early from response headers.
@@ -283,11 +294,39 @@ pub(super) async fn finalize_downstream_response(
     if let Some(alt_svc_header) = alt_svc_header {
         response.headers_mut().insert(http::header::ALT_SVC, alt_svc_header);
     }
+    if !response.headers().contains_key(http::header::DATE) {
+        response.headers_mut().insert(http::header::DATE, current_http_date());
+    }
+    response.headers_mut().insert(http::header::SERVER, server_header);
     response.headers_mut().insert("x-request-id", request_id_header);
 
     let status = response.status();
     let body_bytes_sent = response_body_bytes_sent(method.as_str(), &response);
     FinalizedDownstreamResponse { response, status, body_bytes_sent, grpc }
+}
+
+fn current_http_date() -> HeaderValue {
+    let unix_epoch_seconds = current_unix_epoch_seconds();
+    let cache = HTTP_DATE_CACHE.get_or_init(|| Mutex::new(CachedHttpDate::new(unix_epoch_seconds)));
+    let mut cached = cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if cached.unix_epoch_seconds != unix_epoch_seconds {
+        *cached = CachedHttpDate::new(unix_epoch_seconds);
+    }
+    cached.value.clone()
+}
+
+impl CachedHttpDate {
+    fn new(unix_epoch_seconds: u64) -> Self {
+        let timestamp = UNIX_EPOCH + Duration::from_secs(unix_epoch_seconds);
+        let value = httpdate::fmt_http_date(timestamp);
+        let value =
+            HeaderValue::from_str(&value).expect("formatted HTTP date should be a valid header");
+        Self { unix_epoch_seconds, value }
+    }
+}
+
+fn current_unix_epoch_seconds() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|duration| duration.as_secs()).unwrap_or(0)
 }
 
 pub(super) fn response_body_bytes_sent(method: &str, response: &HttpResponse) -> Option<u64> {

@@ -2,12 +2,13 @@ use std::net::IpAddr;
 use std::path::Path;
 use std::time::Duration;
 
+use http::HeaderValue;
 use ipnet::IpNet;
 use rginx_core::{
-    AccessLogFormat, Error, Listener, ListenerHttp3, OcspConfig, OcspNonceMode,
-    OcspResponderPolicy, Result, Server, ServerCertificateBundle, ServerClientAuthMode,
-    ServerClientAuthPolicy, ServerTls, TlsCipherSuite, TlsKeyExchangeGroup, TlsVersion,
-    VirtualHostTls,
+    AccessLogFormat, DEFAULT_SERVER_HEADER, Error, Listener, ListenerHttp3, OcspConfig,
+    OcspNonceMode, OcspResponderPolicy, Result, Server, ServerCertificateBundle,
+    ServerClientAuthMode, ServerClientAuthPolicy, ServerTls, TlsCipherSuite, TlsKeyExchangeGroup,
+    TlsVersion, VirtualHostTls,
 };
 
 use crate::model::{
@@ -36,6 +37,7 @@ pub(super) fn compile_legacy_server(
 ) -> Result<CompiledServer> {
     let ServerConfig {
         listen,
+        server_header,
         proxy_protocol,
         default_certificate,
         server_names,
@@ -56,6 +58,7 @@ pub(super) fn compile_legacy_server(
     let compiled = compile_server_fields(
         ServerFieldConfig {
             listen,
+            server_header,
             default_certificate,
             trusted_proxies,
             keep_alive,
@@ -93,6 +96,7 @@ pub(super) fn compile_legacy_server(
 /// Compiles explicit listener blocks into runtime listener definitions.
 pub(super) fn compile_listeners(
     listeners: Vec<ListenerConfig>,
+    default_server_header: Option<String>,
     base_dir: &Path,
 ) -> Result<Vec<Listener>> {
     listeners
@@ -101,6 +105,7 @@ pub(super) fn compile_listeners(
             let ListenerConfig {
                 name,
                 listen,
+                server_header,
                 proxy_protocol,
                 default_certificate,
                 trusted_proxies,
@@ -119,6 +124,7 @@ pub(super) fn compile_listeners(
             let compiled = compile_server_fields(
                 ServerFieldConfig {
                     listen,
+                    server_header: server_header.or_else(|| default_server_header.clone()),
                     default_certificate,
                     trusted_proxies,
                     keep_alive,
@@ -289,6 +295,7 @@ struct CompiledServerFields {
 
 struct ServerFieldConfig {
     listen: String,
+    server_header: Option<String>,
     default_certificate: Option<String>,
     trusted_proxies: Vec<String>,
     keep_alive: Option<bool>,
@@ -309,6 +316,7 @@ fn compile_server_fields(
 ) -> Result<CompiledServerFields> {
     let ServerFieldConfig {
         listen,
+        server_header,
         default_certificate,
         trusted_proxies,
         keep_alive,
@@ -326,6 +334,7 @@ fn compile_server_fields(
     Ok(CompiledServerFields {
         server: Server {
             listen_addr: listen.parse()?,
+            server_header: compile_server_header(server_header)?,
             default_certificate: compile_default_certificate(default_certificate),
             trusted_proxies: compile_trusted_proxies(trusted_proxies)?,
             keep_alive: keep_alive.unwrap_or(true),
@@ -340,6 +349,14 @@ fn compile_server_fields(
         },
         server_tls,
     })
+}
+
+/// Parses the configured `Server` response header value, defaulting to `rginx`.
+fn compile_server_header(server_header: Option<String>) -> Result<HeaderValue> {
+    let value = server_header.unwrap_or_else(|| DEFAULT_SERVER_HEADER.to_string());
+    let value = value.trim();
+    HeaderValue::from_str(value)
+        .map_err(|error| Error::Config(format!("server_header `{value}` is invalid: {error}")))
 }
 
 /// Normalizes the optional default certificate server name.

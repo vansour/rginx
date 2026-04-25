@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use http::HeaderValue;
 use ipnet::IpNet;
 
 mod access_log;
@@ -282,6 +283,7 @@ pub struct RuntimeSettings {
 #[derive(Debug, Clone)]
 pub struct Server {
     pub listen_addr: SocketAddr,
+    pub server_header: HeaderValue,
     pub default_certificate: Option<String>,
     pub trusted_proxies: Vec<IpNet>,
     pub keep_alive: bool,
@@ -299,6 +301,12 @@ impl Server {
     pub fn is_trusted_proxy(&self, ip: IpAddr) -> bool {
         self.trusted_proxies.iter().any(|cidr| cidr.contains(&ip))
     }
+}
+
+pub const DEFAULT_SERVER_HEADER: &str = "rginx";
+
+pub fn default_server_header() -> HeaderValue {
+    HeaderValue::from_static(DEFAULT_SERVER_HEADER)
 }
 
 #[cfg(test)]

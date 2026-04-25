@@ -267,11 +267,19 @@ fn parse_http_response(bytes: &[u8]) -> Result<ParsedResponse, String> {
 
 fn assert_generated_request_id(value: Option<&str>) {
     let value = value.expect("response should include x-request-id");
-    assert_eq!(value.len(), "rginx-0000000000000000".len());
-    assert!(value.starts_with("rginx-"), "generated request id should use the rginx- prefix");
+    assert_eq!(value.len(), 36, "generated request id should be a UUIDv7");
+    assert_eq!(value.as_bytes()[8], b'-');
+    assert_eq!(value.as_bytes()[13], b'-');
+    assert_eq!(value.as_bytes()[14], b'7', "generated request id should be UUIDv7");
+    assert_eq!(value.as_bytes()[18], b'-');
     assert!(
-        value["rginx-".len()..].chars().all(|ch| ch.is_ascii_hexdigit()),
-        "generated request id should end with lowercase hex digits, got {value:?}"
+        matches!(value.as_bytes()[19].to_ascii_lowercase(), b'8' | b'9' | b'a' | b'b'),
+        "generated request id should use the RFC 4122 variant, got {value:?}"
+    );
+    assert_eq!(value.as_bytes()[23], b'-');
+    assert!(
+        value.chars().filter(|ch| *ch != '-').all(|ch| ch.is_ascii_hexdigit()),
+        "generated request id should use UUID hex digits, got {value:?}"
     );
 }
 

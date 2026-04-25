@@ -7,7 +7,7 @@ use http::StatusCode;
 use super::{
     AccessLogFormat, AccessLogValues, ConfigSnapshot, Listener, ListenerApplicationProtocol,
     ListenerHttp3, ListenerTransportKind, ReturnAction, Route, RouteAccessControl, RouteAction,
-    RouteMatcher, RuntimeSettings, Server, VirtualHost, match_server_name,
+    RouteMatcher, RuntimeSettings, Server, VirtualHost, default_server_header, match_server_name,
 };
 
 #[test]
@@ -43,6 +43,7 @@ fn route_access_control_denies_before_allowing() {
 fn server_matches_trusted_proxy_cidrs() {
     let server = Server {
         listen_addr: "127.0.0.1:8080".parse().unwrap(),
+        server_header: default_server_header(),
         default_certificate: None,
         trusted_proxies: vec!["10.0.0.0/8".parse().unwrap(), "::1/128".parse().unwrap()],
         keep_alive: true,
@@ -65,6 +66,7 @@ fn server_matches_trusted_proxy_cidrs() {
 fn config_snapshot_counts_routes_across_all_vhosts() {
     let server = Server {
         listen_addr: "127.0.0.1:8080".parse().unwrap(),
+        server_header: default_server_header(),
         default_certificate: None,
         trusted_proxies: Vec::new(),
         keep_alive: true,
@@ -127,6 +129,7 @@ fn listener_transport_bindings_include_udp_http3_binding_when_configured() {
         name: "default".to_string(),
         server: Server {
             listen_addr: "127.0.0.1:443".parse().unwrap(),
+            server_header: default_server_header(),
             default_certificate: None,
             trusted_proxies: Vec::new(),
             keep_alive: true,

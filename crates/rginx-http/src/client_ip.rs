@@ -144,6 +144,7 @@ mod tests {
     fn untrusted_peer_ignores_spoofed_x_forwarded_for() {
         let server = Server {
             listen_addr: "127.0.0.1:8080".parse().unwrap(),
+            server_header: rginx_core::default_server_header(),
             default_certificate: None,
             trusted_proxies: vec!["10.0.0.0/8".parse().unwrap()],
             keep_alive: true,
@@ -181,6 +182,7 @@ mod tests {
     fn trusted_peer_uses_last_untrusted_x_forwarded_for_entry() {
         let server = Server {
             listen_addr: "127.0.0.1:8080".parse().unwrap(),
+            server_header: rginx_core::default_server_header(),
             default_certificate: None,
             trusted_proxies: vec!["10.0.0.0/8".parse().unwrap()],
             keep_alive: true,
@@ -218,6 +220,7 @@ mod tests {
     fn trusted_peer_keeps_leftmost_entry_when_chain_is_all_trusted() {
         let server = Server {
             listen_addr: "127.0.0.1:8080".parse().unwrap(),
+            server_header: rginx_core::default_server_header(),
             default_certificate: None,
             trusted_proxies: vec!["10.0.0.0/8".parse().unwrap()],
             keep_alive: true,
@@ -254,6 +257,7 @@ mod tests {
     fn malformed_x_forwarded_for_falls_back_to_peer() {
         let server = Server {
             listen_addr: "127.0.0.1:8080".parse().unwrap(),
+            server_header: rginx_core::default_server_header(),
             default_certificate: None,
             trusted_proxies: vec!["10.0.0.0/8".parse().unwrap()],
             keep_alive: true,
@@ -290,6 +294,7 @@ mod tests {
     fn x_forwarded_for_entries_may_include_socket_addresses() {
         let server = Server {
             listen_addr: "127.0.0.1:8080".parse().unwrap(),
+            server_header: rginx_core::default_server_header(),
             default_certificate: None,
             trusted_proxies: vec!["10.0.0.0/8".parse().unwrap()],
             keep_alive: true,
@@ -326,6 +331,7 @@ mod tests {
     fn trusted_proxy_protocol_source_is_used_when_xff_is_absent() {
         let server = Server {
             listen_addr: "127.0.0.1:8080".parse().unwrap(),
+            server_header: rginx_core::default_server_header(),
             default_certificate: None,
             trusted_proxies: vec!["10.0.0.0/8".parse().unwrap()],
             keep_alive: true,

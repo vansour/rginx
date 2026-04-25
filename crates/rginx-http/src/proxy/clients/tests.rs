@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,7 +9,38 @@ use rginx_core::{
     UpstreamTls, VirtualHost,
 };
 
-use super::ProxyClients;
+use super::{
+    EndpointClientCache, ProxyClients, UpstreamClientProfile, build_client_for_profile,
+    build_hyper_client_for_endpoint, endpoint_client_cache_capacity,
+};
+
+#[test]
+fn endpoint_client_cache_capacity_is_bounded_by_pool_settings() {
+    assert_eq!(endpoint_client_cache_capacity(0), 16);
+    assert_eq!(endpoint_client_cache_capacity(4), 16);
+    assert_eq!(endpoint_client_cache_capacity(8), 32);
+    assert_eq!(endpoint_client_cache_capacity(usize::MAX), 1024);
+}
+
+#[test]
+fn endpoint_client_cache_evicts_least_recently_used_entry() {
+    let proxy_client = http_proxy_client_for_cache_tests();
+    let first = socket_addr(1);
+    let second = socket_addr(2);
+    let third = socket_addr(3);
+    let mut cache = EndpointClientCache::new(2);
+
+    cache.insert(first, hyper_client_for_endpoint(&proxy_client, first));
+    cache.insert(second, hyper_client_for_endpoint(&proxy_client, second));
+    assert!(cache.get(first).is_some());
+
+    cache.insert(third, hyper_client_for_endpoint(&proxy_client, third));
+
+    assert_eq!(cache.entries.len(), 2);
+    assert!(cache.entries.contains_key(&first));
+    assert!(!cache.entries.contains_key(&second));
+    assert!(cache.entries.contains_key(&third));
+}
 
 #[tokio::test]
 async fn peer_health_snapshot_delegates_to_registry() {
@@ -57,6 +89,7 @@ async fn peer_health_snapshot_delegates_to_registry() {
     ));
     let server = Server {
         listen_addr: "127.0.0.1:8080".parse().unwrap(),
+        server_header: rginx_core::default_server_header(),
         default_certificate: None,
         trusted_proxies: Vec::new(),
         keep_alive: true,
@@ -99,4 +132,43 @@ async fn peer_health_snapshot_delegates_to_registry() {
     assert_eq!(snapshot[0].upstream_name, "backend");
     assert_eq!(snapshot[0].peers.len(), 1);
     assert_eq!(snapshot[0].peers[0].peer_url, "http://127.0.0.1:9000");
+}
+
+fn http_proxy_client_for_cache_tests() -> Arc<super::HttpProxyClient> {
+    let profile = UpstreamClientProfile {
+        tls: UpstreamTls::Insecure,
+        dns: UpstreamDnsPolicy::default(),
+        tls_versions: None,
+        server_verify_depth: None,
+        server_crl_path: None,
+        client_identity: None,
+        protocol: UpstreamProtocol::Auto,
+        server_name: false,
+        server_name_override: None,
+        connect_timeout: Duration::from_secs(1),
+        pool_idle_timeout: Some(Duration::from_secs(1)),
+        pool_max_idle_per_host: 1,
+        tcp_keepalive: None,
+        tcp_nodelay: true,
+        http2_keep_alive_interval: None,
+        http2_keep_alive_timeout: Duration::from_secs(20),
+        http2_keep_alive_while_idle: false,
+    };
+
+    match build_client_for_profile(&profile).expect("proxy client should build") {
+        super::ProxyClient::Http(client) => client,
+        super::ProxyClient::Http3(_) => panic!("cache test profile should build an HTTP client"),
+    }
+}
+
+fn hyper_client_for_endpoint(
+    proxy_client: &super::HttpProxyClient,
+    socket_addr: SocketAddr,
+) -> super::HyperProxyClient {
+    build_hyper_client_for_endpoint(proxy_client, socket_addr)
+        .expect("endpoint hyper client should build")
+}
+
+fn socket_addr(last_octet: u8) -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, last_octet], 9000))
 }

@@ -164,6 +164,7 @@ mod tests {
     fn snapshot(listen: &str) -> ConfigSnapshot {
         let server = Server {
             listen_addr: listen.parse().unwrap(),
+            server_header: rginx_core::default_server_header(),
             default_certificate: None,
             trusted_proxies: Vec::new(),
             keep_alive: true,
@@ -284,6 +285,7 @@ mod tests {
                 name: "https".to_string(),
                 server: rginx_core::Server {
                     listen_addr: "127.0.0.1:8443".parse().unwrap(),
+                    server_header: rginx_core::default_server_header(),
                     ..current.listeners[0].server.clone()
                 },
                 tls_termination_enabled: false,

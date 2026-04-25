@@ -32,6 +32,7 @@ const TEST_SERVER_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkq
 struct ObservedRequest {
     version: Version,
     path: String,
+    authority: Option<String>,
     alpn_protocol: Option<String>,
 }
 
@@ -57,6 +58,37 @@ async fn proxies_to_https_upstreams_over_http2_when_alpn_negotiates_h2() {
     assert_eq!(observed.version, Version::HTTP_2);
     assert_eq!(observed.path, "/");
     assert_eq!(observed.alpn_protocol.as_deref(), Some("h2"));
+
+    server.shutdown_and_wait(Duration::from_secs(5));
+    upstream_task.await.expect("upstream h2 server task should finish");
+    fs::remove_dir_all(upstream_temp_dir).expect("upstream temp dir should be removed");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn preserves_hostname_authority_when_h2_upstream_dials_resolved_ip() {
+    let (upstream_addr, observed_rx, upstream_task, upstream_temp_dir) = spawn_h2_upstream().await;
+
+    let listen_addr = reserve_loopback_addr();
+    let upstream_url = format!("https://localhost:{}", upstream_addr.port());
+    let mut server = ServerHarness::spawn("rginx-upstream-h2-authority", |_| {
+        proxy_config_for_upstream_url(listen_addr, &upstream_url)
+    });
+    server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
+
+    let (status, body) = fetch_text_response(listen_addr, "/")
+        .expect("rginx should return a successful upstream response");
+    assert_eq!(status, 200);
+    assert_eq!(body, "upstream h2 ok\n");
+
+    let observed = tokio::time::timeout(Duration::from_secs(5), observed_rx)
+        .await
+        .expect("upstream request should be observed before timeout")
+        .expect("upstream observation channel should complete");
+    assert_eq!(observed.version, Version::HTTP_2);
+    assert_eq!(observed.path, "/");
+    assert_eq!(observed.alpn_protocol.as_deref(), Some("h2"));
+    let expected_authority = upstream_url.strip_prefix("https://").unwrap();
+    assert_eq!(observed.authority.as_deref(), Some(expected_authority));
 
     server.shutdown_and_wait(Duration::from_secs(5));
     upstream_task.await.expect("upstream h2 server task should finish");
@@ -109,6 +141,7 @@ async fn spawn_h2_upstream()
                     let _ = sender.send(ObservedRequest {
                         version: request.version(),
                         path: request.uri().path().to_string(),
+                        authority: request.uri().authority().map(|value| value.to_string()),
                         alpn_protocol,
                     });
                 }
@@ -133,10 +166,17 @@ async fn spawn_h2_upstream()
 }
 
 fn proxy_config(listen_addr: SocketAddr, upstream_addr: SocketAddr) -> String {
+    proxy_config_for_upstream_url(
+        listen_addr,
+        &format!("https://127.0.0.1:{}", upstream_addr.port()),
+    )
+}
+
+fn proxy_config_for_upstream_url(listen_addr: SocketAddr, upstream_url: &str) -> String {
     format!(
         "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [\n                UpstreamPeerConfig(\n                    url: {:?},\n                ),\n            ],\n            tls: Some(Insecure),\n            protocol: Auto,\n            server_name_override: Some(\"localhost\"),\n        ),\n    ],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Proxy(\n                upstream: \"backend\",\n            ),\n        ),\n    ],\n)\n",
         listen_addr.to_string(),
-        format!("https://127.0.0.1:{}", upstream_addr.port()),
+        upstream_url,
         ready_route = READY_ROUTE_CONFIG,
     )
 }

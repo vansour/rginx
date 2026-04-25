@@ -7,7 +7,7 @@ use http::{HeaderMap, HeaderValue, Request, StatusCode, header::HOST};
 use http_body_util::BodyExt;
 use rginx_core::{
     AccessLogFormat, ConfigSnapshot, GrpcRouteMatch, ReturnAction, Route, RouteAccessControl,
-    RouteAction, RouteMatcher, RuntimeSettings, Server, VirtualHost,
+    RouteAction, RouteMatcher, RuntimeSettings, Server, VirtualHost, default_server_header,
 };
 
 use super::access_log::{AccessLogContext, render_access_log_line};
@@ -624,6 +624,7 @@ async fn finalize_downstream_response_compresses_plain_text_responses() {
         ),
         None,
         None,
+        default_server_header(),
     )
     .await;
 
@@ -658,6 +659,7 @@ async fn finalize_downstream_response_skips_compression_for_grpc_responses() {
         text_response(StatusCode::OK, "application/grpc", "hello grpc pipeline\n".repeat(32)),
         grpc_request_metadata(&request_headers, "/grpc.health.v1.Health/Check"),
         None,
+        default_server_header(),
     )
     .await;
 
@@ -687,6 +689,7 @@ async fn finalize_downstream_response_strips_head_body_after_final_transforms() 
         ),
         None,
         None,
+        default_server_header(),
     )
     .await;
 
@@ -725,6 +728,7 @@ async fn finalize_downstream_response_injects_alt_svc_when_provided() {
         text_response(StatusCode::OK, "text/plain; charset=utf-8", "hello"),
         None,
         Some(HeaderValue::from_static("h3=\":443\"; ma=7200")),
+        HeaderValue::from_static("edge-test"),
     )
     .await;
 
@@ -736,6 +740,38 @@ async fn finalize_downstream_response_injects_alt_svc_when_provided() {
             .and_then(|value| value.to_str().ok()),
         Some("h3=\":443\"; ma=7200")
     );
+    assert_eq!(
+        finalized
+            .response
+            .headers()
+            .get(http::header::SERVER)
+            .and_then(|value| value.to_str().ok()),
+        Some("edge-test")
+    );
+    assert!(finalized.response.headers().get(http::header::DATE).is_some());
+}
+
+#[tokio::test]
+async fn finalize_downstream_response_preserves_existing_date_header() {
+    let request_headers = HeaderMap::new();
+    let compression_options = ResponseCompressionOptions::default();
+    let upstream_date = HeaderValue::from_static("Tue, 15 Nov 1994 08:12:31 GMT");
+    let mut response = text_response(StatusCode::OK, "text/plain; charset=utf-8", "hello");
+    response.headers_mut().insert(http::header::DATE, upstream_date.clone());
+
+    let finalized = finalize_downstream_response(
+        &http::Method::GET,
+        &request_headers,
+        &compression_options,
+        HeaderValue::from_static("req-date"),
+        response,
+        None,
+        None,
+        default_server_header(),
+    )
+    .await;
+
+    assert_eq!(finalized.response.headers().get(http::header::DATE), Some(&upstream_date));
 }
 
 #[tokio::test]
@@ -759,6 +795,7 @@ async fn finalize_downstream_response_respects_response_buffering_off() {
         ),
         None,
         None,
+        default_server_header(),
     )
     .await;
 
@@ -782,6 +819,7 @@ async fn finalize_downstream_response_force_compresses_small_responses() {
         text_response(StatusCode::OK, "text/plain; charset=utf-8", "a".repeat(128)),
         None,
         None,
+        default_server_header(),
     )
     .await;
 
@@ -810,6 +848,7 @@ fn grpc_web_observability_body() -> Vec<u8> {
 fn test_config(default_vhost: VirtualHost, vhosts: Vec<VirtualHost>) -> ConfigSnapshot {
     let server = Server {
         listen_addr: "127.0.0.1:8080".parse().unwrap(),
+        server_header: rginx_core::default_server_header(),
         default_certificate: None,
         trusted_proxies: Vec::new(),
         keep_alive: true,

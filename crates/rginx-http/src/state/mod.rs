@@ -72,7 +72,6 @@ pub struct SharedState {
     peer_health_component_versions: Arc<StdRwLock<HashMap<String, u64>>>,
     reload_history: Arc<Mutex<ReloadHistory>>,
     ocsp_statuses: Arc<StdRwLock<HashMap<String, OcspRuntimeStatusEntry>>>,
-    request_ids: Arc<AtomicU64>,
     config_path: Option<Arc<PathBuf>>,
 }
 
@@ -154,7 +153,6 @@ impl SharedState {
             peer_health_component_versions,
             reload_history: Arc::new(Mutex::new(ReloadHistory::default())),
             ocsp_statuses,
-            request_ids: Arc::new(AtomicU64::new(1)),
             config_path: config_path.map(Arc::new),
         })
     }

@@ -22,6 +22,7 @@ use super::{
 fn snapshot(listen: &str) -> ConfigSnapshot {
     let server = Server {
         listen_addr: listen.parse().unwrap(),
+        server_header: rginx_core::default_server_header(),
         default_certificate: None,
         trusted_proxies: Vec::new(),
         keep_alive: true,

@@ -155,6 +155,7 @@ async fn select(
 fn default_server() -> rginx_core::Server {
     rginx_core::Server {
         listen_addr: "127.0.0.1:8080".parse().unwrap(),
+        server_header: rginx_core::default_server_header(),
         default_certificate: None,
         trusted_proxies: Vec::new(),
         keep_alive: true,

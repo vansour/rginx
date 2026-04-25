@@ -15,6 +15,7 @@ pub(super) fn validate_server(server: &ServerConfig) -> Result<()> {
     validate_listener_like(ListenerLikeRef {
         owner_label: "server",
         listen: server.listen.as_deref(),
+        server_header: server.server_header.as_deref(),
         proxy_protocol: server.proxy_protocol,
         default_certificate: server.default_certificate.as_deref(),
         trusted_proxies: &server.trusted_proxies,
@@ -73,6 +74,7 @@ pub(super) fn validate_listeners(
         validate_listener_like(ListenerLikeRef {
             owner_label: &owner,
             listen: Some(listener.listen.as_str()),
+            server_header: listener.server_header.as_deref(),
             proxy_protocol: listener.proxy_protocol,
             default_certificate: listener.default_certificate.as_deref(),
             trusted_proxies: &listener.trusted_proxies,
@@ -167,6 +169,7 @@ pub(super) fn validate_server_names(
 struct ListenerLikeRef<'a> {
     owner_label: &'a str,
     listen: Option<&'a str>,
+    server_header: Option<&'a str>,
     proxy_protocol: Option<bool>,
     default_certificate: Option<&'a str>,
     trusted_proxies: &'a [String],
@@ -192,6 +195,10 @@ fn validate_listener_like(config: ListenerLikeRef<'_>) -> Result<()> {
     }
 
     let _ = config.proxy_protocol;
+
+    if let Some(server_header) = config.server_header {
+        validate_server_header(config.owner_label, server_header)?;
+    }
 
     if config.default_certificate.is_some_and(|value| value.trim().is_empty()) {
         return Err(Error::Config(format!(
@@ -351,6 +358,19 @@ fn validate_listener_like(config: ListenerLikeRef<'_>) -> Result<()> {
             }
         }
     }
+
+    Ok(())
+}
+
+fn validate_server_header(owner_label: &str, server_header: &str) -> Result<()> {
+    let value = server_header.trim();
+    if value.is_empty() {
+        return Err(Error::Config(format!("{owner_label} server_header must not be empty")));
+    }
+
+    http::HeaderValue::from_str(value).map_err(|error| {
+        Error::Config(format!("{owner_label} server_header `{server_header}` is invalid: {error}"))
+    })?;
 
     Ok(())
 }

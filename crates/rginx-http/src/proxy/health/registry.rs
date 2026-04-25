@@ -965,6 +965,7 @@ mod tests {
         );
         let server = rginx_core::Server {
             listen_addr: "127.0.0.1:8080".parse().unwrap(),
+            server_header: rginx_core::default_server_header(),
             default_certificate: None,
             trusted_proxies: Vec::new(),
             keep_alive: true,
