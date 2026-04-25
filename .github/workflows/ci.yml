@@ -90,25 +90,6 @@ jobs:
       - name: Run TLS Release Gate
         run: ./scripts/run-tls-gate.sh
 
-  control-plane-smoke:
-    name: Control Plane Smoke
-    runs-on: ubuntu-24.04
-    needs:
-      - test-fast
-      - clippy
-    steps:
-      - name: Check Out Source
-        uses: actions/checkout@v6.0.2
-
-      - name: Install Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Restore Rust Cache
-        uses: Swatinem/rust-cache@v2.9.1
-
-      - name: Run Control Plane Compose Smoke Test
-        run: ./scripts/test-control-plane-compose.sh
-
   clippy:
     name: Clippy
     runs-on: ubuntu-24.04
