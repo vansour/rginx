@@ -11,6 +11,12 @@ fuzz_toolchain_channel() {
     ' "${fuzz_dir}/rust-toolchain.toml"
 }
 
+fuzz_host_triple() {
+    local toolchain="$1"
+
+    rustup run "${toolchain}" rustc -vV | sed -n 's|host: ||p'
+}
+
 fuzz_stage_seed_corpus() {
     local fuzz_dir="$1"
     local target="$2"

@@ -81,6 +81,8 @@ FUZZ_TOOLCHAIN="$(fuzz_toolchain_channel "${FUZZ_DIR}")"
 [[ -n "${FUZZ_TOOLCHAIN}" ]] || die "failed to resolve fuzz toolchain from ${FUZZ_DIR}/rust-toolchain.toml"
 rustup toolchain list | grep -Fq "${FUZZ_TOOLCHAIN}" \
     || die "fuzz toolchain ${FUZZ_TOOLCHAIN} is not installed; run: rustup toolchain install ${FUZZ_TOOLCHAIN}"
+HOST_TRIPLE="$(fuzz_host_triple "${FUZZ_TOOLCHAIN}")"
+[[ -n "${HOST_TRIPLE}" ]] || die "failed to detect host triple for ${FUZZ_TOOLCHAIN}"
 
 TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/rginx-fuzz-smoke.XXXXXX")"
 
@@ -119,7 +121,9 @@ for target in "${targets[@]}"; do
         log "using target options ${FUZZ_DIR}/options/${target}.options"
         fuzz_args+=("${target_options[@]}")
     fi
-    fuzz_cmd=(cargo "+${FUZZ_TOOLCHAIN}" fuzz run "${target}" "${corpus_dir}")
+    # Always fuzz against the active toolchain host triple so CI-level target
+    # overrides do not force unsupported musl + sanitizer builds.
+    fuzz_cmd=(cargo "+${FUZZ_TOOLCHAIN}" fuzz run --target "${HOST_TRIPLE}" "${target}" "${corpus_dir}")
     if [[ "${#fuzz_args[@]}" -gt 0 ]]; then
         fuzz_cmd+=(-- "${fuzz_args[@]}")
     fi
