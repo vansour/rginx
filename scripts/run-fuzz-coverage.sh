@@ -112,7 +112,7 @@ FUZZ_TOOLCHAIN="$(fuzz_toolchain_channel "${FUZZ_DIR}")"
 rustup toolchain list | grep -Fq "${FUZZ_TOOLCHAIN}" \
     || die "fuzz toolchain ${FUZZ_TOOLCHAIN} is not installed; run: rustup toolchain install ${FUZZ_TOOLCHAIN}"
 
-HOST_TRIPLE="$(rustup run "${FUZZ_TOOLCHAIN}" rustc -vV | sed -n 's|host: ||p')"
+HOST_TRIPLE="$(fuzz_host_triple "${FUZZ_TOOLCHAIN}")"
 [[ -n "${HOST_TRIPLE}" ]] || die "failed to detect host triple for ${FUZZ_TOOLCHAIN}"
 
 if [[ -z "${LLVM_BIN_DIR}" ]]; then
@@ -163,7 +163,7 @@ if [[ "${#target_options[@]}" -gt 0 ]]; then
 fi
 (
     cd "${FUZZ_DIR}"
-    coverage_cmd=(cargo "+${FUZZ_TOOLCHAIN}" fuzz coverage "${TARGET}" "${CORPUS_DIR}")
+    coverage_cmd=(cargo "+${FUZZ_TOOLCHAIN}" fuzz coverage --target "${HOST_TRIPLE}" "${TARGET}" "${CORPUS_DIR}")
     if [[ "${#coverage_options[@]}" -gt 0 ]]; then
         coverage_cmd+=(-- "${coverage_options[@]}")
     fi
