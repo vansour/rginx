@@ -56,4 +56,5 @@ tokio-rustls = "0.26"
 tower-service = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1.18", features = ["v7"] }
 webpki = { package = "rustls-webpki", version = "0.103.11", default-features = false, features = ["std", "aws-lc-rs"] }

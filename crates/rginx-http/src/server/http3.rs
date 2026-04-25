@@ -650,6 +650,10 @@ async fn serve_http3_connection(
                     }
                     Ok(None) => break,
                     Err(error) => {
+                        if is_clean_http3_accept_close(&error) {
+                            tracing::debug!(%error, "http3 peer closed connection cleanly");
+                            break;
+                        }
                         state.record_http3_request_accept_error(&listener_id);
                         return Err(Error::Server(format!("http3 request accept failed: {error}")));
                     }
@@ -787,6 +791,16 @@ where
         state.record_http3_response_stream_error(listener_id);
         Error::Server(format!("failed to finish http3 response stream: {error}"))
     })
+}
+
+fn is_clean_http3_accept_close(error: &h3::error::ConnectionError) -> bool {
+    if error.is_h3_no_error() {
+        return true;
+    }
+
+    // h3 does not expose all nested quic error variants publicly. Quinn reports
+    // a client-side clean HTTP/3 close as `ApplicationClose: 0x0`.
+    error.to_string().contains("ApplicationClose: 0x0")
 }
 
 /// Logs the completion result of a spawned HTTP/3 connection task.

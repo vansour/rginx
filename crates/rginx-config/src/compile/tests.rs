@@ -61,6 +61,7 @@ fn compile_accepts_https_upstreams() {
         listeners: Vec::new(),
         server: ServerConfig {
             listen: Some("127.0.0.1:8080".to_string()),
+            server_header: None,
             proxy_protocol: None,
             default_certificate: None,
             server_names: Vec::new(),
@@ -123,6 +124,7 @@ fn compile_accepts_https_upstreams() {
     };
 
     let snapshot = compile(config).expect("https upstream should compile");
+    assert_eq!(default_listener_server(&snapshot).server_header, "rginx");
     let proxy = match &snapshot.default_vhost.routes[0].action {
         rginx_core::RouteAction::Proxy(proxy) => proxy,
         _ => panic!("expected proxy route"),
@@ -160,6 +162,49 @@ fn compile_accepts_https_upstreams() {
 }
 
 #[test]
+fn compile_applies_custom_server_header() {
+    let config = Config {
+        runtime: RuntimeConfig {
+            shutdown_timeout_secs: 10,
+            worker_threads: None,
+            accept_workers: None,
+        },
+        listeners: Vec::new(),
+        server: ServerConfig {
+            listen: Some("127.0.0.1:8080".to_string()),
+            server_header: Some("edge-rginx".to_string()),
+            proxy_protocol: None,
+            default_certificate: None,
+            server_names: Vec::new(),
+            trusted_proxies: Vec::new(),
+            keep_alive: None,
+            max_headers: None,
+            max_request_body_bytes: None,
+            max_connections: None,
+            header_read_timeout_secs: None,
+            request_body_read_timeout_secs: None,
+            response_write_timeout_secs: None,
+            access_log_format: None,
+            tls: None,
+            http3: None,
+        },
+        upstreams: Vec::new(),
+        locations: vec![test_location(
+            MatcherConfig::Exact("/".to_string()),
+            HandlerConfig::Return {
+                status: 200,
+                location: String::new(),
+                body: Some("ok\n".to_string()),
+            },
+        )],
+        servers: Vec::new(),
+    };
+
+    let snapshot = compile(config).expect("custom server_header should compile");
+    assert_eq!(default_listener_server(&snapshot).server_header, "edge-rginx");
+}
+
+#[test]
 fn compile_defaults_grpc_health_check_path_when_service_is_set() {
     let config = Config {
         runtime: RuntimeConfig {
@@ -170,6 +215,7 @@ fn compile_defaults_grpc_health_check_path_when_service_is_set() {
         listeners: Vec::new(),
         server: ServerConfig {
             listen: Some("127.0.0.1:8080".to_string()),
+            server_header: None,
             proxy_protocol: None,
             default_certificate: None,
             server_names: Vec::new(),
@@ -257,6 +303,7 @@ fn compile_applies_granular_upstream_transport_settings() {
         listeners: Vec::new(),
         server: ServerConfig {
             listen: Some("127.0.0.1:8080".to_string()),
+            server_header: None,
             proxy_protocol: None,
             default_certificate: None,
             server_names: Vec::new(),
@@ -349,6 +396,7 @@ fn compile_accepts_least_conn_load_balance() {
         listeners: Vec::new(),
         server: ServerConfig {
             listen: Some("127.0.0.1:8080".to_string()),
+            server_header: None,
             proxy_protocol: None,
             default_certificate: None,
             server_names: Vec::new(),
@@ -452,6 +500,7 @@ fn compile_applies_peer_weights() {
         listeners: Vec::new(),
         server: ServerConfig {
             listen: Some("127.0.0.1:8080".to_string()),
+            server_header: None,
             proxy_protocol: None,
             default_certificate: None,
             server_names: Vec::new(),
@@ -570,6 +619,7 @@ fn compile_accepts_backup_peers() {
         listeners: Vec::new(),
         server: ServerConfig {
             listen: Some("127.0.0.1:8080".to_string()),
+            server_header: None,
             proxy_protocol: None,
             default_certificate: None,
             server_names: Vec::new(),
@@ -688,6 +738,7 @@ fn compile_uses_legacy_request_timeout_fallbacks_and_disables_pool_idle_timeout(
         listeners: Vec::new(),
         server: ServerConfig {
             listen: Some("127.0.0.1:8080".to_string()),
+            server_header: None,
             proxy_protocol: None,
             default_certificate: None,
             server_names: Vec::new(),
@@ -793,6 +844,7 @@ fn compile_uses_default_pool_idle_timeout() {
         listeners: Vec::new(),
         server: ServerConfig {
             listen: Some("127.0.0.1:8080".to_string()),
+            server_header: None,
             proxy_protocol: None,
             default_certificate: None,
             server_names: Vec::new(),
@@ -896,6 +948,7 @@ fn compile_resolves_custom_ca_relative_to_config_base() {
         listeners: Vec::new(),
         server: ServerConfig {
             listen: Some("127.0.0.1:8080".to_string()),
+            server_header: None,
             proxy_protocol: None,
             default_certificate: None,
             server_names: Vec::new(),
@@ -1021,6 +1074,7 @@ fn compile_accepts_https_http3_upstreams() {
         listeners: Vec::new(),
         server: ServerConfig {
             listen: Some("127.0.0.1:8080".to_string()),
+            server_header: None,
             proxy_protocol: None,
             default_certificate: None,
             server_names: Vec::new(),
@@ -1123,6 +1177,7 @@ fn compile_resolves_upstream_mtls_identity_and_tls_versions_relative_to_config_b
         listeners: Vec::new(),
         server: ServerConfig {
             listen: Some("127.0.0.1:8080".to_string()),
+            server_header: None,
             proxy_protocol: None,
             default_certificate: None,
             server_names: Vec::new(),
@@ -1238,6 +1293,7 @@ fn compile_normalizes_server_name_override() {
         listeners: Vec::new(),
         server: ServerConfig {
             listen: Some("127.0.0.1:8080".to_string()),
+            server_header: None,
             proxy_protocol: None,
             default_certificate: None,
             server_names: Vec::new(),
@@ -1334,6 +1390,7 @@ fn compile_preserves_upstream_server_name_toggle() {
         listeners: Vec::new(),
         server: ServerConfig {
             listen: Some("127.0.0.1:8080".to_string()),
+            server_header: None,
             proxy_protocol: None,
             default_certificate: None,
             server_names: Vec::new(),
@@ -1436,6 +1493,7 @@ fn compile_rejects_invalid_server_name_override() {
         listeners: Vec::new(),
         server: ServerConfig {
             listen: Some("127.0.0.1:8080".to_string()),
+            server_header: None,
             proxy_protocol: None,
             default_certificate: None,
             server_names: Vec::new(),
@@ -1527,6 +1585,7 @@ fn compile_attaches_route_access_control() {
         listeners: Vec::new(),
         server: ServerConfig {
             listen: Some("127.0.0.1:8080".to_string()),
+            server_header: None,
             proxy_protocol: None,
             default_certificate: None,
             server_names: Vec::new(),
@@ -1585,6 +1644,7 @@ fn compile_attaches_route_rate_limit() {
         listeners: Vec::new(),
         server: ServerConfig {
             listen: Some("127.0.0.1:8080".to_string()),
+            server_header: None,
             proxy_protocol: None,
             default_certificate: None,
             server_names: Vec::new(),
@@ -1645,6 +1705,7 @@ fn compile_applies_route_transport_policy_defaults_and_overrides() {
         listeners: Vec::new(),
         server: ServerConfig {
             listen: Some("127.0.0.1:8080".to_string()),
+            server_header: None,
             proxy_protocol: None,
             default_certificate: None,
             server_names: Vec::new(),
@@ -1740,6 +1801,7 @@ fn compile_generates_distinct_route_and_vhost_ids() {
         listeners: Vec::new(),
         server: ServerConfig {
             listen: Some("127.0.0.1:8080".to_string()),
+            server_header: None,
             proxy_protocol: None,
             default_certificate: None,
             server_names: vec!["default.example.com".to_string()],
@@ -1805,6 +1867,7 @@ fn compile_resolves_server_tls_paths_relative_to_config_base() {
         listeners: Vec::new(),
         server: ServerConfig {
             listen: Some("127.0.0.1:8080".to_string()),
+            server_header: None,
             proxy_protocol: None,
             default_certificate: None,
             server_names: Vec::new(),
@@ -1886,6 +1949,7 @@ fn compile_preserves_server_tls_policy_fields() {
         listeners: Vec::new(),
         server: ServerConfig {
             listen: Some("127.0.0.1:8080".to_string()),
+            server_header: None,
             proxy_protocol: None,
             default_certificate: None,
             server_names: Vec::new(),
@@ -1973,6 +2037,7 @@ fn compile_preserves_server_tls_ocsp_policy_fields() {
         listeners: Vec::new(),
         server: ServerConfig {
             listen: Some("127.0.0.1:8080".to_string()),
+            server_header: None,
             proxy_protocol: None,
             default_certificate: None,
             server_names: Vec::new(),
@@ -2049,6 +2114,7 @@ fn compile_normalizes_trusted_proxy_ips_and_cidrs() {
         listeners: Vec::new(),
         server: ServerConfig {
             listen: Some("127.0.0.1:8080".to_string()),
+            server_header: None,
             proxy_protocol: None,
             default_certificate: None,
             server_names: Vec::new(),
@@ -2108,6 +2174,7 @@ fn compile_attaches_server_hardening_settings() {
         listeners: Vec::new(),
         server: ServerConfig {
             listen: Some("127.0.0.1:8080".to_string()),
+            server_header: None,
             proxy_protocol: None,
             default_certificate: None,
             server_names: Vec::new(),
@@ -2187,6 +2254,7 @@ fn compile_prioritizes_grpc_constrained_routes_with_same_path_matcher() {
         listeners: Vec::new(),
         server: ServerConfig {
             listen: Some("127.0.0.1:8080".to_string()),
+            server_header: None,
             proxy_protocol: None,
             default_certificate: None,
             server_names: Vec::new(),
@@ -2254,6 +2322,7 @@ fn compile_rejects_invalid_server_access_log_format() {
         listeners: Vec::new(),
         server: ServerConfig {
             listen: Some("127.0.0.1:8080".to_string()),
+            server_header: None,
             proxy_protocol: None,
             default_certificate: None,
             server_names: Vec::new(),
@@ -2311,6 +2380,7 @@ fn compile_supports_explicit_multi_listener_configs() {
         listeners: vec![
             ListenerConfig {
                 name: "http".to_string(),
+                server_header: None,
                 proxy_protocol: None,
                 default_certificate: None,
                 listen: "127.0.0.1:8080".to_string(),
@@ -2328,6 +2398,7 @@ fn compile_supports_explicit_multi_listener_configs() {
             },
             ListenerConfig {
                 name: "https".to_string(),
+                server_header: None,
                 proxy_protocol: None,
                 default_certificate: None,
                 listen: "127.0.0.1:8443".to_string(),
@@ -2346,6 +2417,7 @@ fn compile_supports_explicit_multi_listener_configs() {
         ],
         server: ServerConfig {
             listen: None,
+            server_header: None,
             proxy_protocol: None,
             default_certificate: None,
             server_names: vec!["example.com".to_string()],
@@ -2412,6 +2484,7 @@ fn compile_http3_listener_defaults_to_tcp_listen_addr_and_default_alt_svc_policy
         listeners: Vec::new(),
         server: ServerConfig {
             listen: Some("127.0.0.1:8443".to_string()),
+            server_header: None,
             proxy_protocol: None,
             default_certificate: None,
             server_names: vec!["localhost".to_string()],
@@ -2513,6 +2586,7 @@ fn compile_http3_applies_transport_settings_and_resolves_host_key_path() {
         listeners: Vec::new(),
         server: ServerConfig {
             listen: Some("127.0.0.1:8443".to_string()),
+            server_header: None,
             proxy_protocol: None,
             default_certificate: None,
             server_names: vec!["localhost".to_string()],

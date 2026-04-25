@@ -25,7 +25,7 @@ pub(super) fn build_proxy_uri(
 
     Uri::builder()
         .scheme(peer.scheme.as_str())
-        .authority(peer.dial_authority.as_str())
+        .authority(peer.upstream_authority.as_str())
         .path_and_query(path_and_query)
         .build()
 }

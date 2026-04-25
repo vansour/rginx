@@ -57,6 +57,7 @@ async fn peer_health_snapshot_delegates_to_registry() {
     ));
     let server = Server {
         listen_addr: "127.0.0.1:8080".parse().unwrap(),
+        server_header: rginx_core::default_server_header(),
         default_certificate: None,
         trusted_proxies: Vec::new(),
         keep_alive: true,

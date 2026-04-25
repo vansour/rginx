@@ -48,6 +48,7 @@ pub async fn handle(
         .cloned()
         .expect("listener id should remain available while serving requests");
     let access_log_format = listener.server.access_log_format.clone();
+    let server_header = listener.server.server_header.clone();
     let method = request.method().clone();
     let request_version = request.version();
     let request_headers = request.headers().clone();
@@ -170,6 +171,7 @@ pub async fn handle(
         response,
         grpc_request,
         alt_svc_header,
+        server_header,
     )
     .await;
     let status = finalized.status;
@@ -261,6 +263,7 @@ pub(super) async fn finalize_downstream_response(
     mut response: HttpResponse,
     grpc_request: Option<GrpcRequestMetadata<'_>>,
     alt_svc_header: Option<HeaderValue>,
+    server_header: HeaderValue,
 ) -> FinalizedDownstreamResponse {
     // The final response pipeline is intentionally explicit:
     // 1. Detect gRPC early from response headers.
@@ -283,11 +286,18 @@ pub(super) async fn finalize_downstream_response(
     if let Some(alt_svc_header) = alt_svc_header {
         response.headers_mut().insert(http::header::ALT_SVC, alt_svc_header);
     }
+    response.headers_mut().insert(http::header::DATE, current_http_date());
+    response.headers_mut().insert(http::header::SERVER, server_header);
     response.headers_mut().insert("x-request-id", request_id_header);
 
     let status = response.status();
     let body_bytes_sent = response_body_bytes_sent(method.as_str(), &response);
     FinalizedDownstreamResponse { response, status, body_bytes_sent, grpc }
+}
+
+fn current_http_date() -> HeaderValue {
+    let value = chrono::Utc::now().format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+    HeaderValue::from_str(&value).expect("formatted HTTP date should be a valid header")
 }
 
 pub(super) fn response_body_bytes_sent(method: &str, response: &HttpResponse) -> Option<u64> {

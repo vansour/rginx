@@ -17,6 +17,17 @@ fn proxy_uri_keeps_https_scheme() {
 }
 
 #[test]
+fn proxy_uri_uses_upstream_authority_not_resolved_dial_authority() {
+    let mut peer = resolved_peer_from_url("https://httpbingo.org");
+    peer.dial_authority = "203.0.113.10:443".to_string();
+    peer.socket_addr = "203.0.113.10:443".parse().unwrap();
+
+    let uri = build_proxy_uri(&peer, &"/anything?demo=1".parse().unwrap(), None).unwrap();
+
+    assert_eq!(uri, "https://httpbingo.org/anything?demo=1".parse::<http::Uri>().unwrap());
+}
+
+#[test]
 fn sanitize_request_headers_overwrites_x_forwarded_for_with_sanitized_chain() {
     let mut headers = HeaderMap::new();
     headers.insert(HOST, HeaderValue::from_static("client.example"));

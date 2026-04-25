@@ -560,6 +560,7 @@ mod tests {
             name: name.to_string(),
             server: Server {
                 listen_addr,
+                server_header: rginx_core::default_server_header(),
                 default_certificate: None,
                 trusted_proxies: Vec::new(),
                 keep_alive: true,

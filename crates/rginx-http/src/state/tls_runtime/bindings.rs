@@ -190,6 +190,7 @@ mod tests {
             name: name.to_string(),
             server: rginx_core::Server {
                 listen_addr: "127.0.0.1:8080".parse().unwrap(),
+                server_header: rginx_core::default_server_header(),
                 default_certificate: default_certificate.map(str::to_string),
                 trusted_proxies: Vec::new(),
                 keep_alive: true,

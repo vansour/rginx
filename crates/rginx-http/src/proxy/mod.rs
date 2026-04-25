@@ -13,9 +13,7 @@ pub(super) use http::{Method, Request, Response, StatusCode, Uri, Version};
 pub(super) use http_body_util::BodyExt;
 pub(super) use hyper::body::{Body as _, Frame, SizeHint};
 pub(super) use hyper::upgrade::OnUpgrade;
-pub(super) use hyper_rustls::{
-    FixedServerNameResolver, HttpsConnector, HttpsConnectorBuilder, ResolveServerName,
-};
+pub(super) use hyper_rustls::{FixedServerNameResolver, HttpsConnector, HttpsConnectorBuilder};
 pub(super) use hyper_util::client::legacy::Client;
 pub(super) use hyper_util::client::legacy::connect::HttpConnector;
 pub(super) use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};

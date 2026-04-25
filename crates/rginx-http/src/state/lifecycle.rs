@@ -309,8 +309,7 @@ impl SharedState {
     }
 
     pub fn next_request_id(&self) -> String {
-        let next = self.request_ids.fetch_add(1, Ordering::Relaxed);
-        format!("rginx-{next:016x}")
+        uuid::Uuid::now_v7().to_string()
     }
 
     fn mtls_status_snapshot(&self, config: &ConfigSnapshot) -> MtlsStatusSnapshot {

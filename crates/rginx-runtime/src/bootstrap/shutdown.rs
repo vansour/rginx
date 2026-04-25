@@ -140,6 +140,7 @@ mod tests {
                 name: "default".to_string(),
                 server: Server {
                     listen_addr: "127.0.0.1:0".parse().expect("socket addr should parse"),
+                    server_header: rginx_core::default_server_header(),
                     default_certificate: None,
                     trusted_proxies: Vec::new(),
                     keep_alive: true,

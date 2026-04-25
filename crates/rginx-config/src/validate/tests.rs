@@ -462,6 +462,15 @@ fn validate_rejects_empty_server_access_log_format() {
 }
 
 #[test]
+fn validate_rejects_empty_server_header() {
+    let mut config = base_config();
+    config.server.server_header = Some("   ".to_string());
+
+    let error = validate(&config).expect_err("empty server header should be rejected");
+    assert!(error.to_string().contains("server server_header must not be empty"));
+}
+
+#[test]
 fn validate_rejects_http3_without_tls_on_same_listener() {
     let mut config = base_config();
     config.server.http3 = Some(Http3Config {
@@ -1125,6 +1134,7 @@ fn validate_accepts_explicit_listeners_when_legacy_listener_fields_are_empty() {
     config.listeners = vec![
         ListenerConfig {
             name: "http".to_string(),
+            server_header: None,
             proxy_protocol: None,
             default_certificate: None,
             listen: "127.0.0.1:8080".to_string(),
@@ -1142,6 +1152,7 @@ fn validate_accepts_explicit_listeners_when_legacy_listener_fields_are_empty() {
         },
         ListenerConfig {
             name: "https".to_string(),
+            server_header: None,
             proxy_protocol: None,
             default_certificate: None,
             listen: "127.0.0.1:8443".to_string(),
@@ -1206,6 +1217,7 @@ fn validate_rejects_request_buffering_on_without_explicit_listener_body_limits()
     config.listeners = vec![
         ListenerConfig {
             name: "http".to_string(),
+            server_header: None,
             proxy_protocol: None,
             default_certificate: None,
             listen: "127.0.0.1:8080".to_string(),
@@ -1223,6 +1235,7 @@ fn validate_rejects_request_buffering_on_without_explicit_listener_body_limits()
         },
         ListenerConfig {
             name: "https".to_string(),
+            server_header: None,
             proxy_protocol: None,
             default_certificate: None,
             listen: "127.0.0.1:8443".to_string(),
@@ -1255,6 +1268,7 @@ fn validate_rejects_duplicate_listener_names_after_ascii_normalization() {
     config.listeners = vec![
         ListenerConfig {
             name: " HTTP ".to_string(),
+            server_header: None,
             proxy_protocol: None,
             default_certificate: None,
             listen: "127.0.0.1:8080".to_string(),
@@ -1272,6 +1286,7 @@ fn validate_rejects_duplicate_listener_names_after_ascii_normalization() {
         },
         ListenerConfig {
             name: "http".to_string(),
+            server_header: None,
             proxy_protocol: None,
             default_certificate: None,
             listen: "127.0.0.1:8443".to_string(),
@@ -1298,6 +1313,7 @@ fn validate_rejects_mixing_legacy_listener_fields_with_explicit_listeners() {
     let mut config = base_config();
     config.listeners = vec![ListenerConfig {
         name: "http".to_string(),
+        server_header: None,
         proxy_protocol: None,
         default_certificate: None,
         listen: "127.0.0.1:8080".to_string(),
@@ -1324,6 +1340,7 @@ fn validate_rejects_vhost_tls_without_any_tls_listener() {
     config.server.listen = None;
     config.listeners = vec![ListenerConfig {
         name: "http".to_string(),
+        server_header: None,
         proxy_protocol: None,
         default_certificate: None,
         listen: "127.0.0.1:8080".to_string(),
@@ -1385,6 +1402,7 @@ fn base_config() -> Config {
         listeners: Vec::new(),
         server: ServerConfig {
             listen: Some("127.0.0.1:8080".to_string()),
+            server_header: None,
             proxy_protocol: None,
             default_certificate: None,
             server_names: Vec::new(),

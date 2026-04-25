@@ -57,8 +57,9 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
         let compiled_server = server::compile_legacy_server(server, base_dir, any_vhost_tls)?;
         (vec![compiled_server.listener.clone()], compiled_server.server_names)
     } else {
+        let default_server_header = server.server_header;
         let default_server_names = server.server_names;
-        let listeners = server::compile_listeners(raw_listeners, base_dir)?;
+        let listeners = server::compile_listeners(raw_listeners, default_server_header, base_dir)?;
         (listeners, default_server_names)
     };
     let upstreams = upstream::compile_upstreams(raw_upstreams, base_dir)?;
