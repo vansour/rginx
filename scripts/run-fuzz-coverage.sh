@@ -14,6 +14,7 @@ OUT_DIR=""
 LLVM_BIN_DIR=""
 USE_FULL_CORPUS=0
 TEMP_ROOT=""
+coverage_options=()
 
 usage() {
     cat <<'EOF'
@@ -104,19 +105,25 @@ case "${FORMAT}" in
 esac
 
 command -v cargo >/dev/null 2>&1 || die "cargo is required"
+command -v rustup >/dev/null 2>&1 || die "rustup is required"
 cargo fuzz --help >/dev/null 2>&1 || die "cargo-fuzz is not installed; run: cargo install cargo-fuzz"
-rustup toolchain list | grep -q '^nightly' || die "nightly toolchain is not installed; run: rustup toolchain install nightly"
+FUZZ_TOOLCHAIN="$(fuzz_toolchain_channel "${FUZZ_DIR}")"
+[[ -n "${FUZZ_TOOLCHAIN}" ]] || die "failed to resolve fuzz toolchain from ${FUZZ_DIR}/rust-toolchain.toml"
+rustup toolchain list | grep -Fq "${FUZZ_TOOLCHAIN}" \
+    || die "fuzz toolchain ${FUZZ_TOOLCHAIN} is not installed; run: rustup toolchain install ${FUZZ_TOOLCHAIN}"
 
-HOST_TRIPLE="$(rustup run nightly rustc -vV | sed -n 's|host: ||p')"
-[[ -n "${HOST_TRIPLE}" ]] || die "failed to detect nightly host triple"
+HOST_TRIPLE="$(rustup run "${FUZZ_TOOLCHAIN}" rustc -vV | sed -n 's|host: ||p')"
+[[ -n "${HOST_TRIPLE}" ]] || die "failed to detect host triple for ${FUZZ_TOOLCHAIN}"
 
 if [[ -z "${LLVM_BIN_DIR}" ]]; then
-    SYSROOT="$(rustup run nightly rustc --print sysroot)"
+    SYSROOT="$(rustup run "${FUZZ_TOOLCHAIN}" rustc --print sysroot)"
     LLVM_BIN_DIR="${SYSROOT}/lib/rustlib/${HOST_TRIPLE}/bin"
 fi
 
-[[ -x "${LLVM_BIN_DIR}/llvm-cov" ]] || die "llvm-cov not found in ${LLVM_BIN_DIR}"
-[[ -x "${LLVM_BIN_DIR}/llvm-profdata" ]] || die "llvm-profdata not found in ${LLVM_BIN_DIR}"
+[[ -x "${LLVM_BIN_DIR}/llvm-cov" ]] \
+    || die "llvm-cov not found in ${LLVM_BIN_DIR}; run: rustup component add llvm-tools-preview --toolchain ${FUZZ_TOOLCHAIN}"
+[[ -x "${LLVM_BIN_DIR}/llvm-profdata" ]] \
+    || die "llvm-profdata not found in ${LLVM_BIN_DIR}; run: rustup component add llvm-tools-preview --toolchain ${FUZZ_TOOLCHAIN}"
 
 if [[ -z "${CORPUS_DIR}" ]]; then
     if [[ "${USE_FULL_CORPUS}" -eq 1 ]]; then
@@ -140,13 +147,25 @@ mkdir -p "${OUT_DIR}"
 log "generating coverage profile for ${TARGET}"
 fuzz_load_target_options "${FUZZ_DIR}" "${TARGET}" target_options
 if [[ "${#target_options[@]}" -gt 0 ]]; then
-    log "using target options ${FUZZ_DIR}/options/${TARGET}.options"
+    for option in "${target_options[@]}"; do
+        case "${option}" in
+            -max_len=*)
+                coverage_options+=("${option}")
+                ;;
+        esac
+    done
+    if [[ "${#coverage_options[@]}" -gt 0 ]]; then
+        log "using coverage-safe options from ${FUZZ_DIR}/options/${TARGET}.options"
+    fi
+    if [[ "${#coverage_options[@]}" -ne "${#target_options[@]}" ]]; then
+        log "ignoring runtime-limiting fuzz options for coverage replay"
+    fi
 fi
 (
     cd "${FUZZ_DIR}"
-    coverage_cmd=(cargo +nightly fuzz coverage "${TARGET}" "${CORPUS_DIR}")
-    if [[ "${#target_options[@]}" -gt 0 ]]; then
-        coverage_cmd+=(-- "${target_options[@]}")
+    coverage_cmd=(cargo "+${FUZZ_TOOLCHAIN}" fuzz coverage "${TARGET}" "${CORPUS_DIR}")
+    if [[ "${#coverage_options[@]}" -gt 0 ]]; then
+        coverage_cmd+=(-- "${coverage_options[@]}")
     fi
     "${coverage_cmd[@]}"
 )

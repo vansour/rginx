@@ -103,10 +103,6 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: Install Nightly Rust Toolchain For Prerelease Fuzzing
-        if: ${{ steps.meta.outputs.prerelease == 'true' }}
-        uses: dtolnay/rust-toolchain@nightly
-
       - name: Restore Rust Cache
         uses: Swatinem/rust-cache@v2.9.1
 
@@ -131,9 +127,17 @@ jobs:
       - name: Run Control Plane Compose Smoke Test
         run: ./scripts/test-control-plane-compose.sh
 
+      - name: Install Nightly Rust Toolchain For Prerelease Fuzzing
+        if: ${{ steps.meta.outputs.prerelease == 'true' }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-04-24
+
       - name: Install cargo-fuzz For Prerelease Verify
         if: ${{ steps.meta.outputs.prerelease == 'true' }}
-        run: cargo install cargo-fuzz --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
 
       - name: Run Prerelease Fuzz Smoke
         if: ${{ steps.meta.outputs.prerelease == 'true' }}

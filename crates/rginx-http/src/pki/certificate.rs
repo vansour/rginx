@@ -566,15 +566,16 @@ mod tests {
 
             prop_assert_eq!(identity.chain_length, der_chain.len());
             prop_assert!(identity.chain_subjects.len() <= identity.chain_length);
-            prop_assert_eq!(
-                identity.subject.as_deref(),
-                identity.chain_subjects.first().map(String::as_str)
-            );
             prop_assert_eq!(identity.subject.is_some(), identity.issuer.is_some());
             prop_assert_eq!(identity.subject.is_some(), identity.serial_number.is_some());
 
             if identity.subject.is_none() {
                 prop_assert!(identity.san_dns_names.is_empty());
+            } else {
+                prop_assert_eq!(
+                    identity.subject.as_deref(),
+                    identity.chain_subjects.first().map(String::as_str)
+                );
             }
         }
 

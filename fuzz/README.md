@@ -6,7 +6,7 @@
 
 ```bash
 cargo install cargo-fuzz
-rustup toolchain install nightly
+rustup toolchain install nightly-2026-04-24
 ```
 
 ## 当前目标
@@ -68,7 +68,7 @@ cargo fuzz run ocsp_responder_discovery
 ## 说明
 
 - 在 `fuzz/` 目录中执行这些命令。
-- `fuzz/rust-toolchain.toml` 会把 `fuzz/` 目录固定到 nightly。
+- `fuzz/rust-toolchain.toml` 会把 `fuzz/` 目录固定到经过验证的 nightly toolchain。
 - `fuzz/dictionaries/<target>.dict` 提供 target-specific 字典，`run-fuzz-smoke.sh` 会自动加载。
 - `fuzz/options/<target>.options` 提供 target-specific libFuzzer 参数，`run-fuzz-smoke.sh` 和 `run-fuzz-coverage.sh` 会自动加载。
 - `fuzz/corpus/<target>/*.seed` 是版本化精选输入，`refresh-fuzz-seeds.sh` 可用于重建这些 seed。

@@ -8,6 +8,10 @@ use rustls::pki_types::{CertificateDer, pem::PemObject};
 use super::connection::parse_tls_client_identity;
 use super::proxy_protocol::parse_proxy_protocol_v1;
 
+fn remote_proxy_peer_addr() -> SocketAddr {
+    SocketAddr::from((Ipv4Addr::new(10, 0, 0, 1), 4000))
+}
+
 #[test]
 fn proxy_protocol_v1_parses_tcp4_source_address() {
     let source = parse_proxy_protocol_v1(
@@ -42,7 +46,8 @@ proptest! {
 
     #[test]
     fn proxy_protocol_v1_handles_arbitrary_headers_without_panicking(
-        header in any::<String>(),
+        header in prop::collection::vec(any::<char>(), 0..256)
+            .prop_map(|chars| chars.into_iter().collect::<String>()),
         trust_remote_addr in any::<bool>(),
     ) {
         match parse_proxy_protocol_v1(&header, remote_proxy_peer_addr(), trust_remote_addr) {
@@ -121,10 +126,6 @@ fn parse_tls_client_identity_extracts_subject_and_dns_san() {
     assert!(identity.san_dns_names.iter().any(|san| san == "localhost"));
     assert_eq!(identity.chain_length, 1);
     assert_eq!(identity.chain_subjects.len(), 1);
-}
-
-fn remote_proxy_peer_addr() -> SocketAddr {
-    SocketAddr::from((Ipv4Addr::new(10, 0, 0, 1), 4000))
 }
 
 #[test]

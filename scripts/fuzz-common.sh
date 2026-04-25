@@ -1,5 +1,16 @@
 #!/usr/bin/env bash
 
+fuzz_toolchain_channel() {
+    local fuzz_dir="$1"
+
+    awk -F'"' '
+        /^[[:space:]]*channel[[:space:]]*=[[:space:]]*"/ {
+            print $2
+            exit
+        }
+    ' "${fuzz_dir}/rust-toolchain.toml"
+}
+
 fuzz_stage_seed_corpus() {
     local fuzz_dir="$1"
     local target="$2"

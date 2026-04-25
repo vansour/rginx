@@ -549,7 +549,10 @@ mod tests {
 
     fn arbitrary_env_value() -> impl Strategy<Value = String> {
         prop::collection::vec(
-            any::<char>().prop_filter("environment values must not contain NUL", |ch| *ch != '\0'),
+            any::<char>()
+                .prop_filter("exclude unescaped control chars invalid in RON strings", |ch| {
+                    (*ch >= ' ' && *ch != '\x7F') || matches!(*ch, '\n' | '\r' | '\t')
+                }),
             0..64,
         )
         .prop_map(|chars| chars.into_iter().collect::<String>())

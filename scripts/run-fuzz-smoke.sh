@@ -75,15 +75,22 @@ done
 [[ "${SECONDS_PER_TARGET}" -ge 1 ]] || die "--seconds must be >= 1"
 
 command -v cargo >/dev/null 2>&1 || die "cargo is required"
+command -v rustup >/dev/null 2>&1 || die "rustup is required"
 cargo fuzz --help >/dev/null 2>&1 || die "cargo-fuzz is not installed; run: cargo install cargo-fuzz"
-rustup toolchain list | grep -q '^nightly' || die "nightly toolchain is not installed; run: rustup toolchain install nightly"
+FUZZ_TOOLCHAIN="$(fuzz_toolchain_channel "${FUZZ_DIR}")"
+[[ -n "${FUZZ_TOOLCHAIN}" ]] || die "failed to resolve fuzz toolchain from ${FUZZ_DIR}/rust-toolchain.toml"
+rustup toolchain list | grep -Fq "${FUZZ_TOOLCHAIN}" \
+    || die "fuzz toolchain ${FUZZ_TOOLCHAIN} is not installed; run: rustup toolchain install ${FUZZ_TOOLCHAIN}"
 
 TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/rginx-fuzz-smoke.XXXXXX")"
 
 cd "${FUZZ_DIR}"
 
 if [[ "${#EXPLICIT_TARGETS[@]}" -eq 0 ]]; then
-    mapfile -t targets < <(cargo fuzz list)
+    if ! cargo_fuzz_list_output="$(cargo fuzz list 2>&1)"; then
+        die "cargo fuzz list failed: ${cargo_fuzz_list_output}"
+    fi
+    mapfile -t targets <<<"${cargo_fuzz_list_output}"
 else
     targets=("${EXPLICIT_TARGETS[@]}")
 fi
@@ -112,7 +119,7 @@ for target in "${targets[@]}"; do
         log "using target options ${FUZZ_DIR}/options/${target}.options"
         fuzz_args+=("${target_options[@]}")
     fi
-    fuzz_cmd=(cargo +nightly fuzz run "${target}" "${corpus_dir}")
+    fuzz_cmd=(cargo "+${FUZZ_TOOLCHAIN}" fuzz run "${target}" "${corpus_dir}")
     if [[ "${#fuzz_args[@]}" -gt 0 ]]; then
         fuzz_cmd+=(-- "${fuzz_args[@]}")
     fi

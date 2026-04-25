@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_SOURCE="${BASH_SOURCE[0]:-$0}"
 SCRIPT_DIR="$(cd "$(dirname "${SCRIPT_SOURCE}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+source "${SCRIPT_DIR}/fuzz-common.sh"
 
 TAG=""
 ALLOW_DIRTY=0
@@ -92,6 +93,16 @@ VERSION="${TAG#v}"
 PRERELEASE=0
 if [[ "${TAG}" == *-* ]]; then
     PRERELEASE=1
+fi
+
+if [[ "${PRERELEASE}" -eq 1 ]]; then
+    have rustup || die "rustup is required for prerelease fuzz smoke"
+    FUZZ_TOOLCHAIN="$(fuzz_toolchain_channel "${ROOT_DIR}/fuzz")"
+    [[ -n "${FUZZ_TOOLCHAIN}" ]] || die "failed to resolve fuzz toolchain from fuzz/rust-toolchain.toml"
+    rustup toolchain list | grep -Fq "${FUZZ_TOOLCHAIN}" \
+        || die "fuzz toolchain ${FUZZ_TOOLCHAIN} is required for prerelease fuzz smoke (run: rustup toolchain install ${FUZZ_TOOLCHAIN})"
+    cargo fuzz --help >/dev/null 2>&1 \
+        || die "cargo-fuzz is required for prerelease fuzz smoke (run: cargo install cargo-fuzz)"
 fi
 
 CURRENT_BRANCH="$(git branch --show-current)"

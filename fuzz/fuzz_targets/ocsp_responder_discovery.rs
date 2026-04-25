@@ -1,5 +1,7 @@
 #![no_main]
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -9,16 +11,16 @@ static CERT_PATH: OnceLock<PathBuf> = OnceLock::new();
 
 fuzz_target!(|data: &[u8]| {
     let path = responder_cert_path();
-    let _ = std::fs::write(path, data);
+    if common::write_input(path, data).is_err() {
+        return;
+    }
     rginx_http::discover_ocsp_responder_urls_for_fuzzing(path);
 });
 
 fn responder_cert_path() -> &'static Path {
-    CERT_PATH
-        .get_or_init(|| {
-            let root = std::env::temp_dir().join("rginx-fuzz-ocsp-responder-discovery");
-            let _ = std::fs::create_dir_all(&root);
-            root.join("server.pem")
-        })
-        .as_path()
+    common::process_private_temp_file(
+        &CERT_PATH,
+        "rginx-fuzz-ocsp-responder-discovery",
+        "server.pem",
+    )
 }

@@ -1,3 +1,4 @@
 # OCSP responses are binary and can be moderately sized, but smoke should stay bounded.
 -max_len=4096
+-rss_limit_mb=768
 -timeout=5

@@ -10,6 +10,7 @@ mod tests;
 pub use accept::serve;
 pub use http3::{bind_http3_endpoint, bind_http3_endpoint_with_socket, serve_http3};
 
+/// Internal adapter used by fuzz targets to exercise PROXY protocol parsing.
 #[doc(hidden)]
 pub fn parse_proxy_protocol_v1_for_fuzzing(
     header: &str,
