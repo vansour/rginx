@@ -11,6 +11,9 @@ log() {
 
 cd "${ROOT_DIR}"
 
+log "running modularization gate"
+python3 ./scripts/run-modularization-gate.py
+
 log "running fast unit and crate-local tests"
 
 matrix=(

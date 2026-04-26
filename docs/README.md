@@ -18,6 +18,13 @@
 - `ARCHITECTURE_UPSTREAM_HTTP3_PHASE0_BASELINE.md`
   - 上游 HTTP/3 专项的阶段 0 基线
 
+## 仓库治理
+
+- `ARCHITECTURE_CODEBASE_MODULARIZATION_PLAN.md`
+  - 全仓库“大文件拆分 / 单文件单职责”分阶段重构计划
+- `ARCHITECTURE_CODEBASE_MODULARIZATION_POLICY.md`
+  - 阶段 0 生效的模块化约束、文件大小限制与 gate 规则
+
 ## 维护约定
 
 - 如果 README、release notes 或 workflow 引用了新的架构文档，优先把文档放在 `docs/` 下并在这里登记。
