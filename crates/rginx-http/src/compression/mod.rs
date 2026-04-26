@@ -60,10 +60,11 @@ pub async fn maybe_encode_response(
                 encoding = content_coding.label(),
                 "failed to collect response body for compression"
             );
-            return Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(full_body(Bytes::new()))
-                .expect("static 500 response should build");
+            clear_compression_headers(&mut parts.headers);
+            parts.headers.remove(ACCEPT_RANGES);
+            parts.status = StatusCode::INTERNAL_SERVER_ERROR;
+            set_content_length(&mut parts.headers, 0);
+            return Response::from_parts(parts, full_body(Bytes::new()));
         }
     };
 
