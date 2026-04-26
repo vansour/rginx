@@ -1,97 +1,25 @@
-use std::fs;
 use std::io;
-use std::os::unix::fs::MetadataExt;
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rginx_http::{
-    HttpCountersSnapshot, RuntimeStatusSnapshot, SharedState, SnapshotDeltaSnapshot,
-    SnapshotModule, TrafficStatsSnapshot, UpstreamHealthSnapshot, UpstreamStatsSnapshot,
-};
-use serde::{Deserialize, Serialize};
+use rginx_http::{SharedState, SnapshotModule};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::watch;
-use tokio::task::{JoinError, JoinSet};
+use tokio::task::JoinSet;
 
-const INSTALLED_CONFIG_PATH: &str = "/etc/rginx/rginx.ron";
-const INSTALLED_ADMIN_SOCKET_PATH: &str = "/run/rginx/admin.sock";
-const ADMIN_SNAPSHOT_SCHEMA_VERSION: u32 = 13;
-const DEFAULT_RECENT_WINDOW_SECS: u64 = 60;
-const EXTENDED_RECENT_WINDOW_SECS: u64 = 300;
+use super::model::{
+    AdminRequest, AdminResponse, AdminSnapshot, RevisionSnapshot, SnapshotVersionSnapshot,
+};
+use super::socket::{
+    AdminSocketGuard, admin_socket_path_for_config, log_admin_connection_result,
+    set_admin_socket_permissions,
+};
+use super::{
+    ADMIN_SNAPSHOT_SCHEMA_VERSION, DEFAULT_RECENT_WINDOW_SECS, EXTENDED_RECENT_WINDOW_SECS,
+};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AdminRequest {
-    GetSnapshot { include: Option<Vec<SnapshotModule>>, window_secs: Option<u64> },
-    GetSnapshotVersion,
-    GetDelta { since_version: u64, include: Option<Vec<SnapshotModule>>, window_secs: Option<u64> },
-    WaitForSnapshotChange { since_version: u64, timeout_ms: Option<u64> },
-    GetStatus,
-    GetCounters,
-    GetTrafficStats { window_secs: Option<u64> },
-    GetPeerHealth,
-    GetUpstreamStats { window_secs: Option<u64> },
-    GetRevision,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RevisionSnapshot {
-    pub revision: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SnapshotVersionSnapshot {
-    pub snapshot_version: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AdminSnapshot {
-    pub schema_version: u32,
-    pub snapshot_version: u64,
-    pub captured_at_unix_ms: u64,
-    pub pid: u32,
-    pub binary_version: String,
-    pub included_modules: Vec<SnapshotModule>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<RuntimeStatusSnapshot>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub counters: Option<HttpCountersSnapshot>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub traffic: Option<TrafficStatsSnapshot>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub peer_health: Option<Vec<UpstreamHealthSnapshot>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub upstreams: Option<Vec<UpstreamStatsSnapshot>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "data")]
-#[allow(clippy::large_enum_variant)]
-pub enum AdminResponse {
-    Snapshot(AdminSnapshot),
-    SnapshotVersion(SnapshotVersionSnapshot),
-    Delta(SnapshotDeltaSnapshot),
-    Status(RuntimeStatusSnapshot),
-    Counters(HttpCountersSnapshot),
-    TrafficStats(TrafficStatsSnapshot),
-    PeerHealth(Vec<UpstreamHealthSnapshot>),
-    UpstreamStats(Vec<UpstreamStatsSnapshot>),
-    Revision(RevisionSnapshot),
-    Error { message: String },
-}
-
-pub fn admin_socket_path_for_config(config_path: &Path) -> PathBuf {
-    if config_path == Path::new(INSTALLED_CONFIG_PATH) {
-        return PathBuf::from(INSTALLED_ADMIN_SOCKET_PATH);
-    }
-
-    let parent = config_path.parent().unwrap_or_else(|| Path::new("."));
-    let stem = config_path.file_stem().and_then(|value| value.to_str()).unwrap_or("rginx");
-    parent.join(format!("{stem}.admin.sock"))
-}
-
-pub async fn run(
+pub(super) async fn run(
     config_path: PathBuf,
     state: SharedState,
     mut shutdown: watch::Receiver<bool>,
@@ -158,7 +86,16 @@ async fn handle_connection(stream: UnixStream, state: SharedState) -> io::Result
         io::Error::new(io::ErrorKind::InvalidData, format!("invalid admin request: {error}"))
     })?;
 
-    let response = match request {
+    let response = dispatch_request(request, &state).await?;
+    let encoded = serde_json::to_vec(&response)
+        .map_err(|error| io::Error::other(format!("invalid admin response: {error}")))?;
+    writer.write_all(&encoded).await?;
+    writer.write_all(b"\n").await?;
+    writer.flush().await
+}
+
+async fn dispatch_request(request: AdminRequest, state: &SharedState) -> io::Result<AdminResponse> {
+    Ok(match request {
         AdminRequest::GetSnapshot { include, window_secs } => {
             let window_secs = normalize_recent_window_secs(window_secs)
                 .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
@@ -233,67 +170,7 @@ async fn handle_connection(stream: UnixStream, state: SharedState) -> io::Result
         AdminRequest::GetRevision => {
             AdminResponse::Revision(RevisionSnapshot { revision: state.current_revision().await })
         }
-    };
-
-    let encoded = serde_json::to_vec(&response).map_err(|error| {
-        io::Error::new(io::ErrorKind::InvalidData, format!("invalid admin response: {error}"))
-    })?;
-    writer.write_all(&encoded).await?;
-    writer.write_all(b"\n").await?;
-    writer.flush().await
-}
-
-struct AdminSocketGuard {
-    path: PathBuf,
-    device: u64,
-    inode: u64,
-}
-
-impl AdminSocketGuard {
-    fn prepare_path(path: &Path) -> io::Result<()> {
-        if let Some(parent) = path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            fs::create_dir_all(parent)?;
-        }
-
-        if path.exists() {
-            fs::remove_file(path)?;
-        }
-
-        Ok(())
-    }
-
-    fn from_bound_path(path: &Path) -> io::Result<Self> {
-        let metadata = fs::metadata(path)?;
-        Ok(Self { path: path.to_path_buf(), device: metadata.dev(), inode: metadata.ino() })
-    }
-}
-
-impl Drop for AdminSocketGuard {
-    fn drop(&mut self) {
-        let Ok(metadata) = fs::metadata(&self.path) else {
-            return;
-        };
-        if metadata.dev() == self.device && metadata.ino() == self.inode {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
-}
-
-fn log_admin_connection_result(result: Result<(), JoinError>) {
-    if let Err(error) = result {
-        if error.is_panic() {
-            tracing::warn!(%error, "admin socket task panicked");
-        } else if !error.is_cancelled() {
-            tracing::warn!(%error, "admin socket task failed to join");
-        }
-    }
-}
-
-fn set_admin_socket_permissions(path: &Path) -> io::Result<()> {
-    let permissions = fs::Permissions::from_mode(0o600);
-    fs::set_permissions(path, permissions)
+    })
 }
 
 fn unix_time_ms(time: SystemTime) -> u64 {
@@ -312,6 +189,3 @@ fn normalize_recent_window_secs(window_secs: Option<u64>) -> Result<Option<u64>,
         )),
     }
 }
-
-#[cfg(test)]
-mod tests;

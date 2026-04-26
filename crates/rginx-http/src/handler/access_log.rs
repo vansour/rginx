@@ -1,7 +1,9 @@
 use super::dispatch::http_version_label;
 use super::grpc::GrpcObservability;
-use super::*;
+use crate::client_ip::ClientAddress;
 use crate::client_ip::TlsClientIdentity;
+use http::Version;
+use rginx_core::{AccessLogFormat, AccessLogValues};
 
 pub(super) struct AccessLogContext<'a> {
     pub(crate) request_id: &'a str,

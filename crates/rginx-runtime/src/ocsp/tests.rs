@@ -5,6 +5,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
+use hyper_rustls::HttpsConnectorBuilder;
+use hyper_util::client::legacy::Client;
+use hyper_util::rt::TokioExecutor;
+use rustls::ClientConfig;
+use rustls::RootCertStore;
+
 use super::*;
 
 fn temp_dir(prefix: &str) -> PathBuf {

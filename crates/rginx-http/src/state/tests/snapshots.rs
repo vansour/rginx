@@ -111,3 +111,10 @@ fn reload_status_snapshot_tracks_last_success_and_failure() {
         Some(2)
     );
 }
+
+#[test]
+fn reload_outcome_snapshot_serializes_variants_in_snake_case() {
+    let value = serde_json::to_value(ReloadOutcomeSnapshot::Success { revision: 2 })
+        .expect("reload outcome should serialize");
+    assert_eq!(value, serde_json::json!({ "success": { "revision": 2 } }));
+}

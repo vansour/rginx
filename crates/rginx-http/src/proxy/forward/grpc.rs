@@ -63,6 +63,21 @@ pub(super) fn grpc_protocol_request(headers: &HeaderMap) -> bool {
     mime.to_ascii_lowercase().starts_with(GRPC_CONTENT_TYPE_PREFIX)
 }
 
+pub(super) fn grpc_response_deadline(
+    request_headers: &HeaderMap,
+    upstream_name: &str,
+    upstream_request_timeout: Duration,
+) -> Option<super::response::GrpcResponseDeadline> {
+    grpc_protocol_request(request_headers).then(|| super::response::GrpcResponseDeadline {
+        deadline: TokioInstant::now() + upstream_request_timeout,
+        timeout: upstream_request_timeout,
+        timeout_message: super::error::grpc_timeout_message(
+            upstream_name,
+            upstream_request_timeout,
+        ),
+    })
+}
+
 pub(crate) fn effective_upstream_request_timeout(
     headers: &HeaderMap,
     upstream_timeout: Duration,

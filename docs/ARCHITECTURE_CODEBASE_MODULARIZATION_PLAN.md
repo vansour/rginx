@@ -180,6 +180,10 @@
 
 ### 阶段 4：拆分 rginx-runtime
 
+状态：
+
+- 已完成（2026-04-26）
+
 目标：
 
 - 把 listener 生命周期、OCSP 后台任务、管理面运行时职责分开。
@@ -200,7 +204,17 @@
 - listener reload/restart/drain 路径可按文件级职责阅读。
 - runtime 编排逻辑不再集中在单个“总装文件”。
 
+实际落地：
+
+- `bootstrap/listeners.rs` 已拆为 `listeners/` 目录下的 `group`、`bind_tcp`、`bind_udp`、`prepare`、`activate`、`reconcile`、`drain`、`join` 子模块。
+- `ocsp.rs` 已拆为 `ocsp/` 目录下的 `client`、`spec`、`state`、`refresh`、`persist`、`scheduler` 子模块。
+- `admin.rs` 已拆为 `admin/` 目录下的 `model`、`socket`、`service` 子模块。
+
 ### 阶段 5：拆分 rginx-http 的通用路径
+
+状态：
+
+- 已完成（2026-04-26）
 
 目标：
 
@@ -228,6 +242,16 @@
 
 - 通用数据面路径不再依赖“大总调度文件”。
 - 观测结构和行为逻辑从文件层面解耦。
+
+实际落地：
+
+- `compression.rs` 已拆为 `compression/` 目录下的 `options`、`accept_encoding`、`content_type`、`encode` 子模块，`mod.rs` 只保留压缩编排入口。
+- `handler/dispatch.rs` 已拆为 `dispatch/` 目录下的 `authorize`、`select`、`response`、`date`、`route` 子模块，主文件只保留请求主流程。
+- `handler/grpc.rs` 已拆为 `grpc/` 目录下的 `metadata`、`error`、`observability`、`grpc_web` 子模块。
+- `proxy/forward/mod.rs` 已拆为 `forward/` 目录下的 `types`、`setup`、`attempt`、`streaming` 子模块，建立显式的下游准备和上游尝试边界。
+- `proxy/request_body.rs` 已拆为 `request_body/` 目录下的 `model`、`prepare`、`replay`、`streaming`、`limits` 子模块。
+- `state/snapshots.rs` 已拆为 `snapshots/` 目录下的 `active`、`http`、`tls`、`reload`、`delta`、`runtime`、`upstreams`、`traffic` 子模块。
+- `state/counters.rs` 已拆为 `counters/` 目录下的 `http`、`rolling`、`grpc`、`traffic`、`upstreams`、`versions` 分段文件，并从 `state/mod.rs` 显式聚合。
 
 ### 阶段 6：拆分高风险协议模块
 

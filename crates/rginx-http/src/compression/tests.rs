@@ -58,6 +58,9 @@ fn preferred_response_encoding_honors_quality_values() {
 
     headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip;q=0"));
     assert_eq!(preferred_response_encoding(&headers), None);
+
+    headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip;Q=0.5, br;q=0.1"));
+    assert_eq!(preferred_response_encoding(&headers), Some(ContentCoding::Gzip));
 }
 
 #[tokio::test]
@@ -230,6 +233,66 @@ async fn maybe_encode_response_does_not_leave_stale_content_length_on_collect_fa
             );
         }
     }
+}
+
+#[tokio::test]
+async fn maybe_encode_response_preserves_non_compression_headers_on_collect_failure() {
+    let mut request_headers = HeaderMap::new();
+    request_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+    let options = ResponseCompressionOptions::default();
+
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+        .header(CONTENT_LENGTH, "512")
+        .header("access-control-allow-origin", "*")
+        .body(CollectErrorBody.map_err(|error| -> BoxError { Box::new(error) }).boxed_unsync())
+        .expect("response should build");
+
+    let response = maybe_encode_response(&Method::GET, &request_headers, &options, response).await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        response.headers().get("access-control-allow-origin").and_then(|value| value.to_str().ok()),
+        Some("*")
+    );
+    assert_eq!(
+        response.headers().get(CONTENT_LENGTH).and_then(|value| value.to_str().ok()),
+        Some("0")
+    );
+}
+
+#[tokio::test]
+async fn maybe_encode_response_rebuilds_buffered_fallback_length_when_compression_is_not_smaller() {
+    let mut request_headers = HeaderMap::new();
+    request_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+    let options = ResponseCompressionOptions {
+        response_buffering: RouteBufferingPolicy::On,
+        compression: RouteCompressionPolicy::Force,
+        compression_min_bytes: Some(1),
+        ..ResponseCompressionOptions::default()
+    };
+    let body = "abcdefghijklmnopqrstuvwxyz";
+
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "text/plain; charset=utf-8")
+        .header(ACCEPT_RANGES, "bytes")
+        .body(crate::handler::full_body(body))
+        .expect("response should build");
+
+    let response = maybe_encode_response(&Method::GET, &request_headers, &options, response).await;
+    assert!(response.headers().get(CONTENT_ENCODING).is_none());
+    assert_eq!(
+        response.headers().get(CONTENT_LENGTH).and_then(|value| value.to_str().ok()),
+        Some("26")
+    );
+    assert_eq!(
+        response.headers().get(ACCEPT_RANGES).and_then(|value| value.to_str().ok()),
+        Some("bytes")
+    );
+
+    let collected = response.into_body().collect().await.expect("body should collect").to_bytes();
+    assert_eq!(collected.as_ref(), body.as_bytes());
 }
 
 #[tokio::test]
