@@ -18,7 +18,7 @@ matrix=(
     "upstream_http3|upstream HTTP/3 proxying, SNI override, client identity"
     "grpc_http3|gRPC, grpc-web, deadlines, and active health checks over HTTP/3"
     "reload|HTTP/3 reload, restart, and drain semantics"
-    "admin|snapshot, status, delta, and wait control plane"
+    "admin|snapshot, status, delta, and wait runtime inspection commands"
     "check|config validation and runtime reporting for HTTP/3 listeners"
     "ocsp|dynamic OCSP refresh state for TLS-backed listeners"
 )
