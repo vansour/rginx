@@ -159,25 +159,27 @@ fn check_reports_http3_listener_bindings() {
     assert!(stdout.contains("reuse_port_enabled=true"));
     assert!(stdout.contains("advertise_alt_svc=true"));
     assert!(stdout.contains("alt_svc_max_age_secs=7200"));
-    assert!(stdout.contains("http3_max_concurrent_streams=128"));
-    assert!(stdout.contains("http3_stream_buffer_size=65536"));
-    assert!(stdout.contains("http3_active_connection_id_limit=2"));
-    assert!(stdout.contains("http3_retry=false"));
-    assert!(stdout.contains("http3_host_key_path=-"));
-    assert!(stdout.contains("http3_gso=false"));
-    assert!(stdout.contains("http3_early_data_enabled=true"));
-    assert!(stdout.contains("tls_listener listener=default"));
-    assert!(stdout.contains("http3_enabled=true"));
-    assert!(stdout.contains(&format!("http3_listen={listen_addr}")));
-    assert!(stdout.contains("http3_versions=TLS1.3"));
-    assert!(stdout.contains("http3_alpn_protocols=h3"));
-    assert!(stdout.contains("http3_max_concurrent_streams=128"));
-    assert!(stdout.contains("http3_stream_buffer_size=65536"));
-    assert!(stdout.contains("http3_active_connection_id_limit=2"));
-    assert!(stdout.contains("http3_retry=false"));
-    assert!(stdout.contains("http3_host_key_path=-"));
-    assert!(stdout.contains("http3_gso=false"));
-    assert!(stdout.contains("http3_early_data_enabled=true"));
+    let (listener_section, tls_section) = stdout
+        .split_once("tls_listener listener=default")
+        .expect("tls_listener section should be present");
+    assert!(listener_section.contains("http3_max_concurrent_streams=128"));
+    assert!(listener_section.contains("http3_stream_buffer_size=65536"));
+    assert!(listener_section.contains("http3_active_connection_id_limit=2"));
+    assert!(listener_section.contains("http3_retry=false"));
+    assert!(listener_section.contains("http3_host_key_path=-"));
+    assert!(listener_section.contains("http3_gso=false"));
+    assert!(listener_section.contains("http3_early_data_enabled=true"));
+    assert!(tls_section.contains("http3_enabled=true"));
+    assert!(tls_section.contains(&format!("http3_listen={listen_addr}")));
+    assert!(tls_section.contains("http3_versions=TLS1.3"));
+    assert!(tls_section.contains("http3_alpn_protocols=h3"));
+    assert!(tls_section.contains("http3_max_concurrent_streams=128"));
+    assert!(tls_section.contains("http3_stream_buffer_size=65536"));
+    assert!(tls_section.contains("http3_active_connection_id_limit=2"));
+    assert!(tls_section.contains("http3_retry=false"));
+    assert!(tls_section.contains("http3_host_key_path=-"));
+    assert!(tls_section.contains("http3_gso=false"));
+    assert!(tls_section.contains("http3_early_data_enabled=true"));
 
     let _ = fs::remove_dir_all(temp_dir);
 }

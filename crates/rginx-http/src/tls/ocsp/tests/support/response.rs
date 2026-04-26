@@ -6,14 +6,7 @@ pub(crate) fn build_ocsp_response_for_certificate(
 ) -> Vec<u8> {
     build_ocsp_response_for_certificate_with_signer(
         cert_path,
-        TimeOffset::Before(Duration::from_secs(24 * 60 * 60)),
-        Some(TimeOffset::After(Duration::from_secs(24 * 60 * 60))),
-        TimeOffset::Before(Duration::from_secs(60)),
-        RasnCertStatus::Good,
-        OcspResponseSigner::Issuer(issuer),
-        None,
-        false,
-        false,
+        OcspResponseOptions::new(OcspResponseSigner::Issuer(issuer)),
     )
 }
 
@@ -25,46 +18,96 @@ pub(crate) fn build_ocsp_response_for_certificate_with_offsets(
 ) -> Vec<u8> {
     build_ocsp_response_for_certificate_with_signer(
         cert_path,
-        this_update_offset,
-        Some(next_update_offset),
-        this_update_offset,
-        RasnCertStatus::Good,
-        OcspResponseSigner::Issuer(issuer),
-        None,
-        false,
-        false,
+        OcspResponseOptions::new(OcspResponseSigner::Issuer(issuer))
+            .this_update_offset(this_update_offset)
+            .next_update_offset(Some(next_update_offset))
+            .produced_at_offset(this_update_offset),
     )
 }
 
-pub(crate) fn build_ocsp_response_for_certificate_with_signer(
-    cert_path: &Path,
+pub(crate) struct OcspResponseOptions<'a> {
     this_update_offset: TimeOffset,
     next_update_offset: Option<TimeOffset>,
     produced_at_offset: TimeOffset,
     cert_status: RasnCertStatus,
-    signer: OcspResponseSigner<'_>,
-    response_nonce: Option<&[u8]>,
+    signer: OcspResponseSigner<'a>,
+    response_nonce: Option<&'a [u8]>,
     duplicate_matching_response: bool,
     tamper_signature: bool,
+}
+
+impl<'a> OcspResponseOptions<'a> {
+    pub(crate) fn new(signer: OcspResponseSigner<'a>) -> Self {
+        Self {
+            this_update_offset: TimeOffset::Before(Duration::from_secs(24 * 60 * 60)),
+            next_update_offset: Some(TimeOffset::After(Duration::from_secs(24 * 60 * 60))),
+            produced_at_offset: TimeOffset::Before(Duration::from_secs(60)),
+            cert_status: RasnCertStatus::Good,
+            signer,
+            response_nonce: None,
+            duplicate_matching_response: false,
+            tamper_signature: false,
+        }
+    }
+
+    pub(crate) fn this_update_offset(mut self, offset: TimeOffset) -> Self {
+        self.this_update_offset = offset;
+        self
+    }
+
+    pub(crate) fn next_update_offset(mut self, offset: Option<TimeOffset>) -> Self {
+        self.next_update_offset = offset;
+        self
+    }
+
+    pub(crate) fn produced_at_offset(mut self, offset: TimeOffset) -> Self {
+        self.produced_at_offset = offset;
+        self
+    }
+
+    pub(crate) fn cert_status(mut self, status: RasnCertStatus) -> Self {
+        self.cert_status = status;
+        self
+    }
+
+    pub(crate) fn response_nonce(mut self, nonce: Option<&'a [u8]>) -> Self {
+        self.response_nonce = nonce;
+        self
+    }
+
+    pub(crate) fn duplicate_matching_response(mut self, duplicate: bool) -> Self {
+        self.duplicate_matching_response = duplicate;
+        self
+    }
+
+    pub(crate) fn tamper_signature(mut self, tamper: bool) -> Self {
+        self.tamper_signature = tamper;
+        self
+    }
+}
+
+pub(crate) fn build_ocsp_response_for_certificate_with_signer(
+    cert_path: &Path,
+    options: OcspResponseOptions<'_>,
 ) -> Vec<u8> {
     let certs = load_certificate_chain_from_path(cert_path).expect("certificate chain should load");
     let cert_id =
         build_rasn_ocsp_cert_id_from_chain(&certs, cert_path).expect("CertId should build");
     let now = SystemTime::now();
-    let this_update = ocsp_time_with_offset(now, this_update_offset);
-    let produced_at = ocsp_time_with_offset(now, produced_at_offset);
-    let next_update = next_update_offset.map(|offset| ocsp_time_with_offset(now, offset));
+    let this_update = ocsp_time_with_offset(now, options.this_update_offset);
+    let produced_at = ocsp_time_with_offset(now, options.produced_at_offset);
+    let next_update = options.next_update_offset.map(|offset| ocsp_time_with_offset(now, offset));
     let mut responses = vec![RasnSingleResponse {
         cert_id: cert_id.clone(),
-        cert_status: cert_status.clone(),
+        cert_status: options.cert_status.clone(),
         this_update,
         next_update,
         single_extensions: None,
     }];
-    if duplicate_matching_response {
+    if options.duplicate_matching_response {
         responses.push(RasnSingleResponse {
             cert_id,
-            cert_status,
+            cert_status: options.cert_status,
             this_update,
             next_update,
             single_extensions: None,
@@ -73,10 +116,11 @@ pub(crate) fn build_ocsp_response_for_certificate_with_signer(
 
     let tbs_response_data = RasnResponseData {
         version: Integer::from(0),
-        responder_id: signer.responder_id(),
+        responder_id: options.signer.responder_id(),
         produced_at,
         responses,
-        response_extensions: response_nonce
+        response_extensions: options
+            .response_nonce
             .map(build_ocsp_nonce_extension)
             .transpose()
             .expect("response nonce should encode")
@@ -84,16 +128,17 @@ pub(crate) fn build_ocsp_response_for_certificate_with_signer(
     };
     let tbs_der =
         rasn::der::encode(&tbs_response_data).expect("response data should encode for signing");
-    let mut signature = signer.signing_key().sign(&tbs_der).expect("OCSP response should sign");
-    if tamper_signature {
+    let mut signature =
+        options.signer.signing_key().sign(&tbs_der).expect("OCSP response should sign");
+    if options.tamper_signature {
         signature[0] ^= 0x55;
     }
 
     let basic = RasnBasicOcspResponse {
         tbs_response_data,
-        signature_algorithm: test_signature_algorithm(signer.signing_key()),
+        signature_algorithm: test_signature_algorithm(options.signer.signing_key()),
         signature: BitString::from_slice(&signature),
-        certs: signer.embedded_certs(),
+        certs: options.signer.embedded_certs(),
     };
     let basic_der = rasn::der::encode(&basic).expect("basic OCSP response should encode");
     rasn::der::encode(&RasnOcspResponse {

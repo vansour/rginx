@@ -76,14 +76,9 @@ fn validate_ocsp_response_rejects_future_produced_at() {
     let cert_path = write_cert_chain(&temp_dir, "server", &leaf, &ca);
     let response = build_ocsp_response_for_certificate_with_signer(
         &cert_path,
-        TimeOffset::Before(Duration::from_secs(60)),
-        Some(TimeOffset::After(Duration::from_secs(24 * 60 * 60))),
-        TimeOffset::After(Duration::from_secs(60)),
-        RasnCertStatus::Good,
-        OcspResponseSigner::Issuer(&ca),
-        None,
-        false,
-        false,
+        OcspResponseOptions::new(OcspResponseSigner::Issuer(&ca))
+            .this_update_offset(TimeOffset::Before(Duration::from_secs(60)))
+            .produced_at_offset(TimeOffset::After(Duration::from_secs(60))),
     );
 
     let error = validate_ocsp_response_for_certificate(&cert_path, &response)
@@ -103,14 +98,8 @@ fn validate_ocsp_response_rejects_unknown_certificate_status() {
     let cert_path = write_cert_chain(&temp_dir, "server", &leaf, &ca);
     let response = build_ocsp_response_for_certificate_with_signer(
         &cert_path,
-        TimeOffset::Before(Duration::from_secs(24 * 60 * 60)),
-        Some(TimeOffset::After(Duration::from_secs(24 * 60 * 60))),
-        TimeOffset::Before(Duration::from_secs(60)),
-        RasnCertStatus::Unknown(()),
-        OcspResponseSigner::Issuer(&ca),
-        None,
-        false,
-        false,
+        OcspResponseOptions::new(OcspResponseSigner::Issuer(&ca))
+            .cert_status(RasnCertStatus::Unknown(())),
     );
 
     let error = validate_ocsp_response_for_certificate(&cert_path, &response)
@@ -130,14 +119,7 @@ fn validate_ocsp_response_rejects_invalid_signature() {
     let cert_path = write_cert_chain(&temp_dir, "server", &leaf, &ca);
     let response = build_ocsp_response_for_certificate_with_signer(
         &cert_path,
-        TimeOffset::Before(Duration::from_secs(24 * 60 * 60)),
-        Some(TimeOffset::After(Duration::from_secs(24 * 60 * 60))),
-        TimeOffset::Before(Duration::from_secs(60)),
-        RasnCertStatus::Good,
-        OcspResponseSigner::Issuer(&ca),
-        None,
-        false,
-        true,
+        OcspResponseOptions::new(OcspResponseSigner::Issuer(&ca)).tamper_signature(true),
     );
 
     let error = validate_ocsp_response_for_certificate(&cert_path, &response)
@@ -158,14 +140,7 @@ fn validate_ocsp_response_accepts_authorized_delegated_signer() {
     let cert_path = write_cert_chain(&temp_dir, "server", &leaf, &ca);
     let response = build_ocsp_response_for_certificate_with_signer(
         &cert_path,
-        TimeOffset::Before(Duration::from_secs(24 * 60 * 60)),
-        Some(TimeOffset::After(Duration::from_secs(24 * 60 * 60))),
-        TimeOffset::Before(Duration::from_secs(60)),
-        RasnCertStatus::Good,
-        OcspResponseSigner::Delegated(&responder),
-        None,
-        false,
-        false,
+        OcspResponseOptions::new(OcspResponseSigner::Delegated(&responder)),
     );
 
     validate_ocsp_response_for_certificate(&cert_path, &response)
@@ -185,14 +160,7 @@ fn validate_ocsp_response_rejects_delegated_signer_without_ocsp_eku() {
     let cert_path = write_cert_chain(&temp_dir, "server", &leaf, &ca);
     let response = build_ocsp_response_for_certificate_with_signer(
         &cert_path,
-        TimeOffset::Before(Duration::from_secs(24 * 60 * 60)),
-        Some(TimeOffset::After(Duration::from_secs(24 * 60 * 60))),
-        TimeOffset::Before(Duration::from_secs(60)),
-        RasnCertStatus::Good,
-        OcspResponseSigner::Delegated(&responder),
-        None,
-        false,
-        false,
+        OcspResponseOptions::new(OcspResponseSigner::Delegated(&responder)),
     );
 
     let error = validate_ocsp_response_for_certificate(&cert_path, &response)
@@ -212,14 +180,7 @@ fn validate_ocsp_response_rejects_multiple_matching_single_responses() {
     let cert_path = write_cert_chain(&temp_dir, "server", &leaf, &ca);
     let response = build_ocsp_response_for_certificate_with_signer(
         &cert_path,
-        TimeOffset::Before(Duration::from_secs(24 * 60 * 60)),
-        Some(TimeOffset::After(Duration::from_secs(24 * 60 * 60))),
-        TimeOffset::Before(Duration::from_secs(60)),
-        RasnCertStatus::Good,
-        OcspResponseSigner::Issuer(&ca),
-        None,
-        true,
-        false,
+        OcspResponseOptions::new(OcspResponseSigner::Issuer(&ca)).duplicate_matching_response(true),
     );
 
     let error = validate_ocsp_response_for_certificate(&cert_path, &response)

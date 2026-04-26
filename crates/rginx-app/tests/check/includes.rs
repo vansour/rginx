@@ -31,6 +31,10 @@ fn check_supports_relative_includes_and_environment_expansion() {
     assert!(output.status.success(), "check should succeed: {}", render_output(&output));
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains(&listen_addr.to_string()));
+    assert!(
+        stdout.contains("routes=1"),
+        "check output should include the fragment route: {stdout}"
+    );
 
     let _ = fs::remove_dir_all(temp_dir);
 }

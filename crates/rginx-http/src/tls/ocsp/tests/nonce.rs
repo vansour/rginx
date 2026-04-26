@@ -32,14 +32,7 @@ fn validate_ocsp_response_rejects_missing_required_nonce() {
     let cert_path = write_cert_chain(&temp_dir, "server", &leaf, &ca);
     let response = build_ocsp_response_for_certificate_with_signer(
         &cert_path,
-        TimeOffset::Before(Duration::from_secs(24 * 60 * 60)),
-        Some(TimeOffset::After(Duration::from_secs(24 * 60 * 60))),
-        TimeOffset::Before(Duration::from_secs(60)),
-        RasnCertStatus::Good,
-        OcspResponseSigner::Issuer(&ca),
-        None,
-        false,
-        false,
+        OcspResponseOptions::new(OcspResponseSigner::Issuer(&ca)),
     );
 
     let error = validate_ocsp_response_for_certificate_with_options(
@@ -65,14 +58,8 @@ fn validate_ocsp_response_rejects_mismatched_required_nonce() {
     let cert_path = write_cert_chain(&temp_dir, "server", &leaf, &ca);
     let response = build_ocsp_response_for_certificate_with_signer(
         &cert_path,
-        TimeOffset::Before(Duration::from_secs(24 * 60 * 60)),
-        Some(TimeOffset::After(Duration::from_secs(24 * 60 * 60))),
-        TimeOffset::Before(Duration::from_secs(60)),
-        RasnCertStatus::Good,
-        OcspResponseSigner::Issuer(&ca),
-        Some(b"response-nonce"),
-        false,
-        false,
+        OcspResponseOptions::new(OcspResponseSigner::Issuer(&ca))
+            .response_nonce(Some(b"response-nonce")),
     );
 
     let error = validate_ocsp_response_for_certificate_with_options(
@@ -98,14 +85,7 @@ fn validate_ocsp_response_accepts_missing_preferred_nonce() {
     let cert_path = write_cert_chain(&temp_dir, "server", &leaf, &ca);
     let response = build_ocsp_response_for_certificate_with_signer(
         &cert_path,
-        TimeOffset::Before(Duration::from_secs(24 * 60 * 60)),
-        Some(TimeOffset::After(Duration::from_secs(24 * 60 * 60))),
-        TimeOffset::Before(Duration::from_secs(60)),
-        RasnCertStatus::Good,
-        OcspResponseSigner::Issuer(&ca),
-        None,
-        false,
-        false,
+        OcspResponseOptions::new(OcspResponseSigner::Issuer(&ca)),
     );
 
     validate_ocsp_response_for_certificate_with_options(

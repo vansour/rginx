@@ -7,7 +7,20 @@ import sys
 from pathlib import Path
 
 
-INLINE_TEST_PATTERN = re.compile(r"(?m)^\s*mod\s+tests\s*\{")
+INLINE_TEST_PATTERN = re.compile(
+    r"(?m)^\s*(?:#\[[^\]]+\]\s*)*(?:pub(?:\s*\([^)]*\))?\s+)?mod\s+tests\s*\{"
+)
+BLOCK_COMMENT_PATTERN = re.compile(r"/\*.*?\*/", re.DOTALL)
+LINE_COMMENT_PATTERN = re.compile(r"//.*$", re.MULTILINE)
+REQUIRED_BASELINE_KEYS = (
+    "production_soft_limit",
+    "production_hard_limit",
+    "test_soft_limit",
+    "test_hard_limit",
+    "legacy_production_size_ceilings",
+    "legacy_test_size_ceilings",
+    "legacy_inline_test_files",
+)
 
 
 def repo_root() -> Path:
@@ -33,6 +46,25 @@ def line_count(path: Path) -> int:
         return sum(1 for _ in handle)
 
 
+def load_baseline(path: Path) -> dict[str, object]:
+    baseline = json.loads(path.read_text(encoding="utf-8"))
+    missing = [key for key in REQUIRED_BASELINE_KEYS if key not in baseline]
+    if missing:
+        missing_keys = ", ".join(sorted(missing))
+        raise ValueError(
+            f"baseline file {path.as_posix()} is missing required keys: {missing_keys}"
+        )
+    return baseline
+
+
+def strip_comments(text: str) -> str:
+    return LINE_COMMENT_PATTERN.sub("", BLOCK_COMMENT_PATTERN.sub("", text))
+
+
+def contains_inline_test_module(text: str) -> bool:
+    return INLINE_TEST_PATTERN.search(strip_comments(text)) is not None
+
+
 def summarize_group(title: str, entries: list[str]) -> None:
     if not entries:
         return
@@ -46,7 +78,11 @@ def main() -> int:
     baseline_path = root / "scripts" / "modularization_baseline.json"
     policy_path = root / "docs" / "ARCHITECTURE_CODEBASE_MODULARIZATION_POLICY.md"
 
-    baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+    try:
+        baseline = load_baseline(baseline_path)
+    except ValueError as exc:
+        print(f"[modularization-gate] error: {exc}", file=sys.stderr)
+        return 1
 
     prod_soft = int(baseline["production_soft_limit"])
     prod_hard = int(baseline["production_hard_limit"])
@@ -99,7 +135,7 @@ def main() -> int:
             )
 
         text = path.read_text(encoding="utf-8")
-        if INLINE_TEST_PATTERN.search(text):
+        if contains_inline_test_module(text):
             if rel not in legacy_inline_tests:
                 errors.append(
                     f"new inline test module in production file: {rel} contains `mod tests {{ ... }}`"
@@ -128,6 +164,9 @@ def main() -> int:
 
     warnings.extend(prod_soft_warnings)
     warnings.extend(test_soft_warnings)
+    warnings.extend(
+        f"legacy inline test module remains: {rel}" for rel in legacy_inline_warnings
+    )
 
     print(
         "[modularization-gate] "
