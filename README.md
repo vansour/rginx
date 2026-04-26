@@ -67,7 +67,9 @@ rginx snapshot-version
 rginx delta --since-version <version> --include status
 rginx wait --since-version <version> --timeout-ms 5000
 rginx counters
+rginx peers
 rginx traffic --window-secs 60
+rginx upstreams --window-secs 60
 ```
 
 systemd / supervisor 示例：
