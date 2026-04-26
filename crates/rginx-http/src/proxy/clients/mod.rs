@@ -194,7 +194,7 @@ impl ProxyClient {
     ) -> Result<Response<HttpBody>, Error> {
         match self {
             Self::Http(client) => {
-                let client = client.client_for_peer(peer)?;
+                let client = client.client_for_peer(peer).await?;
                 client
                     .request(request)
                     .await

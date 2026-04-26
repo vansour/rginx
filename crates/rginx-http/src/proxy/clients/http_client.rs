@@ -1,10 +1,10 @@
 use std::future::{Ready, ready};
 use std::io;
 use std::net::SocketAddr;
-use std::sync::Mutex;
 use std::task::{Context, Poll};
 
 use rustls::ClientConfig;
+use tokio::sync::Mutex;
 use tower_service::Service;
 
 use super::*;
@@ -42,12 +42,11 @@ pub(super) struct FixedEndpointResolver {
 }
 
 impl HttpProxyClient {
-    pub(super) fn client_for_peer(
+    pub(super) async fn client_for_peer(
         &self,
         peer: &ResolvedUpstreamPeer,
     ) -> Result<HyperProxyClient, Error> {
-        let mut endpoint_clients =
-            self.endpoint_clients.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut endpoint_clients = self.endpoint_clients.lock().await;
         if let Some(client) = endpoint_clients.get(peer.socket_addr) {
             return Ok(client);
         }

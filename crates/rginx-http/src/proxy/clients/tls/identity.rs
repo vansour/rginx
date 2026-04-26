@@ -43,8 +43,15 @@ pub(super) fn load_certificate_chain(path: &Path) -> Result<Vec<CertificateDer<'
         .map_err(|error| map_pem_error(path, "certificates", error))?;
 
     if certs.is_empty() {
-        let der = std::fs::read(path)?;
-        return Ok(vec![CertificateDer::from(der)]);
+        let bytes = std::fs::read(path)?;
+        if looks_like_pem(bytes.as_ref()) {
+            return Err(Error::Server(format!(
+                "certificate file `{}` contained PEM data but no PEM certificates were found",
+                path.display()
+            )));
+        }
+
+        return Ok(vec![CertificateDer::from(bytes)]);
     }
 
     Ok(certs)
@@ -70,4 +77,8 @@ fn map_pem_error(path: &Path, item: &str, error: PemError) -> Error {
             Error::Server(format!("failed to parse {item} from `{}`: {other}", path.display()))
         }
     }
+}
+
+fn looks_like_pem(bytes: &[u8]) -> bool {
+    bytes.windows("-----BEGIN ".len()).any(|window| window == b"-----BEGIN ")
 }

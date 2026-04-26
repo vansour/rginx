@@ -131,8 +131,14 @@ pub(super) fn response_size_hint(headers: &HeaderMap) -> SizeHint {
     hint
 }
 
+// Fallback matching for clean HTTP/3 shutdowns when only Display-formatted
+// errors are available here. These strings correspond to upstream quinn/h3
+// formatting of an application close with the HTTP/3 code H3_NO_ERROR.
+const QUINN_APPLICATION_CLOSE_H3_NO_ERROR: &str = "ApplicationClose: H3_NO_ERROR";
+const H3_APPLICATION_CODE_H3_NO_ERROR: &str = "Application { code: H3_NO_ERROR";
+
 fn is_clean_http3_response_shutdown(error: &impl std::fmt::Display) -> bool {
     let error = error.to_string();
-    error.contains("ApplicationClose: H3_NO_ERROR")
-        || error.contains("Application { code: H3_NO_ERROR")
+    error.contains(QUINN_APPLICATION_CLOSE_H3_NO_ERROR)
+        || error.contains(H3_APPLICATION_CODE_H3_NO_ERROR)
 }
