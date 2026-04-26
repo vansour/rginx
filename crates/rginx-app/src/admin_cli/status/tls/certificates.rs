@@ -11,6 +11,7 @@ pub(super) fn print_status_tls_certificates(
             [
                 ("scope", certificate.scope.clone()),
                 ("cert_path", certificate.cert_path.display().to_string()),
+                ("server_names", render_string_list(&certificate.server_names)),
                 (
                     "sha256",
                     certificate.fingerprint_sha256.clone().unwrap_or_else(|| "-".to_string()),
@@ -31,7 +32,11 @@ pub(super) fn print_status_tls_certificates(
                 ("path_len_constraint", render_optional_value(certificate.path_len_constraint)),
                 ("key_usage", certificate.key_usage.clone().unwrap_or_else(|| "-".to_string())),
                 ("extended_key_usage", render_string_list(&certificate.extended_key_usage)),
+                ("not_before_unix_ms", render_optional_value(certificate.not_before_unix_ms)),
+                ("not_after_unix_ms", render_optional_value(certificate.not_after_unix_ms)),
+                ("expires_in_days", render_optional_value(certificate.expires_in_days)),
                 ("chain_length", certificate.chain_length.to_string()),
+                ("chain_subjects", render_string_list(&certificate.chain_subjects)),
                 (
                     "chain_diagnostics",
                     if certificate.chain_diagnostics.is_empty() {
@@ -39,6 +44,15 @@ pub(super) fn print_status_tls_certificates(
                     } else {
                         certificate.chain_diagnostics.join("|")
                     },
+                ),
+                (
+                    "selected_as_default_for_listeners",
+                    render_string_list(&certificate.selected_as_default_for_listeners),
+                ),
+                ("ocsp_staple_configured", certificate.ocsp_staple_configured.to_string()),
+                (
+                    "additional_certificate_count",
+                    certificate.additional_certificate_count.to_string(),
                 ),
             ],
         );

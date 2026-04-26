@@ -32,7 +32,8 @@ pub(super) fn print_status_listeners(listeners: &[rginx_http::RuntimeListenerSna
             print_record(
                 "status_listener_binding",
                 [
-                    ("listener", listener.listener_id.clone()),
+                    ("listener", listener.listener_name.clone()),
+                    ("listener_id", listener.listener_id.clone()),
                     ("binding", binding.binding_name.clone()),
                     ("transport", binding.transport.clone()),
                     ("listen", binding.listen_addr.to_string()),
@@ -45,77 +46,22 @@ pub(super) fn print_status_listeners(listeners: &[rginx_http::RuntimeListenerSna
                         },
                     ),
                     ("worker_count", binding.worker_count.to_string()),
-                    (
-                        "reuse_port_enabled",
-                        binding
-                            .reuse_port_enabled
-                            .map(|value| value.to_string())
-                            .unwrap_or_else(|| "-".to_string()),
-                    ),
-                    (
-                        "advertise_alt_svc",
-                        binding
-                            .advertise_alt_svc
-                            .map(|value| value.to_string())
-                            .unwrap_or_else(|| "-".to_string()),
-                    ),
-                    (
-                        "alt_svc_max_age_secs",
-                        binding
-                            .alt_svc_max_age_secs
-                            .map(|value| value.to_string())
-                            .unwrap_or_else(|| "-".to_string()),
-                    ),
+                    ("reuse_port_enabled", opt_or_dash(binding.reuse_port_enabled)),
+                    ("advertise_alt_svc", opt_or_dash(binding.advertise_alt_svc)),
+                    ("alt_svc_max_age_secs", opt_or_dash(binding.alt_svc_max_age_secs)),
                     (
                         "http3_max_concurrent_streams",
-                        binding
-                            .http3_max_concurrent_streams
-                            .map(|value| value.to_string())
-                            .unwrap_or_else(|| "-".to_string()),
+                        opt_or_dash(binding.http3_max_concurrent_streams),
                     ),
-                    (
-                        "http3_stream_buffer_size",
-                        binding
-                            .http3_stream_buffer_size
-                            .map(|value| value.to_string())
-                            .unwrap_or_else(|| "-".to_string()),
-                    ),
+                    ("http3_stream_buffer_size", opt_or_dash(binding.http3_stream_buffer_size)),
                     (
                         "http3_active_connection_id_limit",
-                        binding
-                            .http3_active_connection_id_limit
-                            .map(|value| value.to_string())
-                            .unwrap_or_else(|| "-".to_string()),
+                        opt_or_dash(binding.http3_active_connection_id_limit),
                     ),
-                    (
-                        "http3_retry",
-                        binding
-                            .http3_retry
-                            .map(|value| value.to_string())
-                            .unwrap_or_else(|| "-".to_string()),
-                    ),
-                    (
-                        "http3_host_key_path",
-                        binding
-                            .http3_host_key_path
-                            .as_ref()
-                            .map(|path| path.display().to_string())
-                            .unwrap_or_else(|| "-".to_string()),
-                    ),
-                    (
-                        "http3_gso",
-                        binding
-                            .http3_gso
-                            .map(|value| value.to_string())
-                            .unwrap_or_else(|| "-".to_string()),
-                    ),
-                    (
-                        "http3_early_data_enabled",
-                        binding
-                            .http3_early_data_enabled
-                            .map(|value| value.to_string())
-                            .unwrap_or_else(|| "-".to_string()),
-                    ),
+                    ("http3_retry", opt_or_dash(binding.http3_retry)),
+                    ("http3_host_key_path", opt_path_or_dash(binding.http3_host_key_path.as_ref())),
+                    ("http3_gso", opt_or_dash(binding.http3_gso)),
+                    ("http3_early_data_enabled", opt_or_dash(binding.http3_early_data_enabled)),
                 ],
             );
         }
@@ -179,4 +125,12 @@ pub(super) fn print_status_listeners(listeners: &[rginx_http::RuntimeListenerSna
             );
         }
     }
+}
+
+fn opt_or_dash<T: ToString>(value: Option<T>) -> String {
+    value.map(|value| value.to_string()).unwrap_or_else(|| "-".to_string())
+}
+
+fn opt_path_or_dash(value: Option<&std::path::PathBuf>) -> String {
+    value.map(|path| path.display().to_string()).unwrap_or_else(|| "-".to_string())
 }

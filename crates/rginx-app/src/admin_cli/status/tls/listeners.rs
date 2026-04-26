@@ -17,14 +17,7 @@ pub(super) fn print_status_tls_listeners(listeners: &[rginx_http::TlsListenerSta
                     "default_certificate",
                     listener.default_certificate.clone().unwrap_or_else(|| "-".to_string()),
                 ),
-                (
-                    "tcp_versions",
-                    listener
-                        .versions
-                        .as_ref()
-                        .map(|versions| render_optional_string_list(Some(versions)))
-                        .unwrap_or_else(|| "-".to_string()),
-                ),
+                ("tcp_versions", render_optional_string_list(listener.versions.as_deref())),
                 ("tcp_alpn_protocols", render_string_list(&listener.alpn_protocols)),
                 ("http3_versions", render_string_list(&listener.http3_versions)),
                 ("http3_alpn_protocols", render_string_list(&listener.http3_alpn_protocols)),
@@ -50,6 +43,16 @@ pub(super) fn print_status_tls_listeners(listeners: &[rginx_http::TlsListenerSta
                     "http3_early_data_enabled",
                     render_optional_value(listener.http3_early_data_enabled),
                 ),
+                (
+                    "session_resumption_enabled",
+                    render_optional_value(listener.session_resumption_enabled),
+                ),
+                (
+                    "session_tickets_enabled",
+                    render_optional_value(listener.session_tickets_enabled),
+                ),
+                ("session_cache_size", render_optional_value(listener.session_cache_size)),
+                ("session_ticket_count", render_optional_value(listener.session_ticket_count)),
                 ("sni_names", render_string_list(&listener.sni_names)),
                 (
                     "client_auth_mode",

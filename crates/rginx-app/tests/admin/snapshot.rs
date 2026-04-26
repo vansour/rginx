@@ -325,6 +325,14 @@ fn snapshot_includes_certificate_fingerprint_and_chain_details_for_tls_servers()
     assert!(status_stdout.contains("kind=status_tls_vhost_binding"));
     assert!(status_stdout.contains("kind=status_tls_sni_binding"));
     assert!(status_stdout.contains("sha256="));
+    assert!(status_stdout.contains("server_names=localhost"));
+    assert!(status_stdout.contains("not_before_unix_ms="));
+    assert!(status_stdout.contains("not_after_unix_ms="));
+    assert!(status_stdout.contains("expires_in_days="));
+    assert!(status_stdout.contains("chain_subjects="));
+    assert!(status_stdout.contains("selected_as_default_for_listeners=default"));
+    assert!(status_stdout.contains("ocsp_staple_configured=false"));
+    assert!(status_stdout.contains("additional_certificate_count=0"));
     assert!(status_stdout.contains("san_dns_names=localhost"));
 
     server.shutdown_and_wait(Duration::from_secs(5));
