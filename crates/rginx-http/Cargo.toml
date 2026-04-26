@@ -12,7 +12,7 @@ rust-version.workspace = true
 description = "HTTP server, routing, and proxying for rginx."
 
 [dependencies]
-aws-lc-rs = "1.16.2"
+aws-lc-rs = "1.16.3"
 base64.workspace = true
 brotli.workspace = true
 bytes.workspace = true
@@ -31,9 +31,9 @@ hyper-util.workspace = true
 pin-project-lite.workspace = true
 quinn.workspace = true
 quinn-proto = { version = "0.11.14", default-features = false }
-rasn = "0.28.11"
-rasn-ocsp = "0.28.11"
-rasn-pkix = "0.28.11"
+rasn = "0.28.13"
+rasn-ocsp = "0.28.13"
+rasn-pkix = "0.28.13"
 rginx-core = { path = "../rginx-core" }
 rustls.workspace = true
 rustls-native-certs.workspace = true

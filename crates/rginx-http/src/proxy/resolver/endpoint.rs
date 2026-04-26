@@ -1,14 +1,15 @@
 use std::net::{IpAddr, SocketAddr};
 
-use hickory_resolver::TokioAsyncResolver;
+use hickory_resolver::TokioResolver;
 use hickory_resolver::config::{
-    LookupIpStrategy, NameServerConfig, Protocol, ResolverConfig, ResolverOpts,
+    ConnectionConfig, LookupIpStrategy, NameServerConfig, ResolverConfig, ResolverOpts,
 };
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
 use rginx_core::{Error, UpstreamDnsPolicy, UpstreamPeer};
 
 use super::*;
 
-pub(super) fn build_resolver(policy: &UpstreamDnsPolicy) -> Result<TokioAsyncResolver, Error> {
+pub(super) fn build_resolver(policy: &UpstreamDnsPolicy) -> Result<TokioResolver, Error> {
     let mut options = ResolverOpts::default();
     options.ip_strategy = if policy.prefer_ipv4 {
         LookupIpStrategy::Ipv4thenIpv6
@@ -19,17 +20,32 @@ pub(super) fn build_resolver(policy: &UpstreamDnsPolicy) -> Result<TokioAsyncRes
     };
 
     if policy.resolver_addrs.is_empty() {
-        return TokioAsyncResolver::tokio_from_system_conf().map_err(|error| {
-            Error::Server(format!("failed to initialize system dns resolver: {error}"))
-        });
+        return TokioResolver::builder_tokio()
+            .map_err(|error| {
+                Error::Server(format!("failed to initialize system dns resolver: {error}"))
+            })?
+            .with_options(options)
+            .build()
+            .map_err(|error| {
+                Error::Server(format!("failed to initialize system dns resolver: {error}"))
+            });
     }
 
-    let mut config = ResolverConfig::new();
+    let mut config = ResolverConfig::default();
     for socket_addr in &policy.resolver_addrs {
-        config.add_name_server(NameServerConfig::new(*socket_addr, Protocol::Udp));
-        config.add_name_server(NameServerConfig::new(*socket_addr, Protocol::Tcp));
+        let mut udp = ConnectionConfig::udp();
+        udp.port = socket_addr.port();
+
+        let mut tcp = ConnectionConfig::tcp();
+        tcp.port = socket_addr.port();
+
+        config.add_name_server(NameServerConfig::new(socket_addr.ip(), true, vec![udp, tcp]));
     }
-    Ok(TokioAsyncResolver::tokio(config, options))
+
+    TokioResolver::builder_with_config(config, TokioRuntimeProvider::default())
+        .with_options(options)
+        .build()
+        .map_err(|error| Error::Server(format!("failed to initialize dns resolver: {error}")))
 }
 
 pub(super) fn parse_peer_addressing(peer: &UpstreamPeer) -> Result<PeerAddressing, Error> {
