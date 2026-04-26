@@ -142,6 +142,10 @@
 
 ### 阶段 3：拆分 rginx-config
 
+状态：
+
+- 已完成（2026-04-26）
+
 目标：
 
 - 把配置模型、预处理、校验、编译按领域拆开。
@@ -165,6 +169,14 @@
 
 - `load/validate/compile` 三层都不再依赖单一大文件承载主逻辑。
 - 新配置项能在清晰分层下落位。
+
+实际落地：
+
+- `model.rs` 已拆为 `model/` 下按领域组织的门面 + 子模块。
+- `load.rs` 已拆为 `load/include.rs`、`load/preprocess.rs`、`load/env_expand.rs`、`load/parse.rs`。
+- `validate/server.rs` 已拆为 listener、TLS、HTTP/3、server_name、trusted_proxies 等独立子模块。
+- `compile/server.rs` 已拆为 listener、fields、http3、tls 及其子模块。
+- `compile/upstream.rs` 已拆为 dns、peer、settings、tls 子模块。
 
 ### 阶段 4：拆分 rginx-runtime
 
