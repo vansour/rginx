@@ -15,6 +15,11 @@ use tokio::time::{Instant, Sleep};
 
 use super::{GrpcDeadlineBody, IdleTimeoutBody, MaxBytesBody, WriteTimeoutIo};
 
+mod grpc_deadline;
+mod idle;
+mod max_bytes;
+mod write_timeout;
+
 pin_project! {
     struct DelayedFrameBody {
         #[pin]
@@ -61,40 +66,6 @@ impl Body for DelayedFrameBody {
     }
 }
 
-#[tokio::test]
-async fn idle_timeout_body_times_out_when_no_frame_arrives() {
-    let mut body = Box::pin(IdleTimeoutBody::new(
-        DelayedFrameBody::new(Duration::from_millis(60)),
-        Duration::from_millis(20),
-        "upstream `backend` response body",
-    ));
-
-    let error = poll_fn(|cx| body.as_mut().poll_frame(cx))
-        .await
-        .expect("timeout should resolve as a body error")
-        .expect_err("body should time out before the frame arrives");
-
-    assert!(error.to_string().contains("stalled for 20 ms"));
-}
-
-#[tokio::test]
-async fn idle_timeout_body_allows_frames_that_arrive_in_time() {
-    let mut body = Box::pin(IdleTimeoutBody::new(
-        DelayedFrameBody::new(Duration::from_millis(10)),
-        Duration::from_millis(50),
-        "upstream `backend` response body",
-    ));
-
-    let frame = poll_fn(|cx| body.as_mut().poll_frame(cx))
-        .await
-        .expect("body should yield one frame")
-        .expect("frame should be successful");
-    let bytes = frame.into_data().expect("frame should contain data");
-
-    assert_eq!(bytes, Bytes::from_static(b"ok"));
-    assert!(poll_fn(|cx| body.as_mut().poll_frame(cx)).await.is_none());
-}
-
 struct EarlyEndTrailersBody {
     state: u8,
 }
@@ -137,36 +108,6 @@ impl Body for EarlyEndTrailersBody {
     fn size_hint(&self) -> SizeHint {
         SizeHint::default()
     }
-}
-
-#[tokio::test]
-async fn idle_timeout_body_waits_for_terminal_trailer_frame() {
-    let mut body = Box::pin(IdleTimeoutBody::new(
-        EarlyEndTrailersBody::new(),
-        Duration::from_secs(1),
-        "upstream `backend` response body",
-    ));
-
-    assert!(!body.as_ref().get_ref().is_end_stream());
-
-    let first = poll_fn(|cx| body.as_mut().poll_frame(cx))
-        .await
-        .expect("body should yield a data frame")
-        .expect("data frame should be successful");
-    assert_eq!(
-        first.into_data().expect("first frame should contain data"),
-        Bytes::from_static(b"data")
-    );
-    assert!(!body.as_ref().get_ref().is_end_stream());
-
-    let second = poll_fn(|cx| body.as_mut().poll_frame(cx))
-        .await
-        .expect("body should yield a trailers frame")
-        .expect("trailers frame should be successful");
-    let trailers = second.into_trailers().expect("second frame should contain trailers");
-    assert_eq!(trailers.get("x-trailer").and_then(|value| value.to_str().ok()), Some("present"));
-    assert!(body.as_ref().get_ref().is_end_stream());
-    assert!(poll_fn(|cx| body.as_mut().poll_frame(cx)).await.is_none());
 }
 
 pin_project! {
@@ -227,121 +168,6 @@ impl Body for TwoStageBody {
     fn size_hint(&self) -> SizeHint {
         SizeHint::default()
     }
-}
-
-#[tokio::test]
-async fn grpc_deadline_body_emits_deadline_exceeded_trailers_before_first_frame() {
-    let deadline = Instant::now() + Duration::from_millis(20);
-    let mut body = Box::pin(GrpcDeadlineBody::new(
-        DelayedFrameBody::new(Duration::from_millis(60)),
-        deadline,
-        Duration::from_millis(20),
-        "upstream `backend` response body",
-        "upstream `backend` timed out after 20 ms",
-    ));
-
-    let frame = poll_fn(|cx| body.as_mut().poll_frame(cx))
-        .await
-        .expect("deadline should emit a trailers frame")
-        .expect("deadline trailers should be successful");
-    let trailers = frame.into_trailers().expect("deadline should surface as trailers");
-
-    assert_eq!(trailers.get("grpc-status").and_then(|value| value.to_str().ok()), Some("4"));
-    assert_eq!(
-        trailers.get("grpc-message").and_then(|value| value.to_str().ok()),
-        Some("upstream `backend` timed out after 20 ms")
-    );
-    assert!(poll_fn(|cx| body.as_mut().poll_frame(cx)).await.is_none());
-}
-
-#[tokio::test]
-async fn grpc_deadline_body_keeps_absolute_deadline_after_progress() {
-    let deadline = Instant::now() + Duration::from_millis(30);
-    let mut body = Box::pin(GrpcDeadlineBody::new(
-        TwoStageBody::new(Duration::from_millis(5), Duration::from_millis(80)),
-        deadline,
-        Duration::from_millis(30),
-        "upstream `backend` response body",
-        "upstream `backend` timed out after 30 ms",
-    ));
-
-    let first = poll_fn(|cx| body.as_mut().poll_frame(cx))
-        .await
-        .expect("body should yield the first data frame")
-        .expect("first frame should be successful");
-    assert_eq!(
-        first.into_data().expect("first frame should contain data"),
-        Bytes::from_static(b"ok")
-    );
-
-    let second = poll_fn(|cx| body.as_mut().poll_frame(cx))
-        .await
-        .expect("deadline should terminate the stream with trailers")
-        .expect("deadline trailers should be successful");
-    let trailers = second.into_trailers().expect("deadline should surface as trailers");
-    assert_eq!(trailers.get("grpc-status").and_then(|value| value.to_str().ok()), Some("4"));
-}
-
-#[tokio::test]
-async fn max_bytes_body_allows_frames_within_limit() {
-    let body = StreamBody::new(futures_util::stream::iter(vec![
-        Ok::<_, io::Error>(Frame::data(Bytes::from_static(b"hello"))),
-        Ok(Frame::data(Bytes::from_static(b"!"))),
-    ]));
-    let mut body = Box::pin(MaxBytesBody::new(body, 8));
-
-    let first = poll_fn(|cx| body.as_mut().poll_frame(cx))
-        .await
-        .expect("body should yield first frame")
-        .expect("first frame should succeed");
-    assert_eq!(first.into_data().expect("frame should contain data"), Bytes::from_static(b"hello"));
-
-    let second = poll_fn(|cx| body.as_mut().poll_frame(cx))
-        .await
-        .expect("body should yield second frame")
-        .expect("second frame should succeed");
-    assert_eq!(second.into_data().expect("frame should contain data"), Bytes::from_static(b"!"));
-}
-
-#[tokio::test]
-async fn max_bytes_body_errors_when_limit_is_exceeded() {
-    let body = StreamBody::new(futures_util::stream::iter(vec![
-        Ok::<_, io::Error>(Frame::data(Bytes::from_static(b"hello"))),
-        Ok(Frame::data(Bytes::from_static(b"world"))),
-    ]));
-    let mut body = Box::pin(MaxBytesBody::new(body, 8));
-
-    let _ = poll_fn(|cx| body.as_mut().poll_frame(cx))
-        .await
-        .expect("body should yield first frame")
-        .expect("first frame should succeed");
-
-    let error = poll_fn(|cx| body.as_mut().poll_frame(cx))
-        .await
-        .expect("body should yield a terminal error")
-        .expect_err("second frame should exceed the configured limit");
-    assert!(error.to_string().contains("request body exceeded configured limit of 8 bytes"));
-}
-
-#[tokio::test]
-async fn max_bytes_body_allows_frames_exactly_at_limit() {
-    let body = StreamBody::new(futures_util::stream::iter(vec![
-        Ok::<_, io::Error>(Frame::data(Bytes::from_static(b"hello"))),
-        Ok(Frame::data(Bytes::from_static(b"!!!"))),
-    ]));
-    let mut body = Box::pin(MaxBytesBody::new(body, 8));
-
-    let first = poll_fn(|cx| body.as_mut().poll_frame(cx))
-        .await
-        .expect("body should yield first frame")
-        .expect("first frame should succeed");
-    assert_eq!(first.into_data().expect("frame should contain data"), Bytes::from_static(b"hello"));
-
-    let second = poll_fn(|cx| body.as_mut().poll_frame(cx))
-        .await
-        .expect("body should yield second frame")
-        .expect("second frame should succeed");
-    assert_eq!(second.into_data().expect("frame should contain data"), Bytes::from_static(b"!!!"));
 }
 
 pin_project! {
@@ -409,34 +235,4 @@ impl AsyncWrite for DelayedWriter {
     fn is_write_vectored(&self) -> bool {
         true
     }
-}
-
-#[tokio::test]
-async fn write_timeout_io_times_out_when_write_stalls() {
-    let mut writer = Box::pin(WriteTimeoutIo::new(
-        DelayedWriter::new(Duration::from_millis(60)),
-        Some(Duration::from_millis(20)),
-        "downstream response to 127.0.0.1:8080",
-    ));
-
-    let error = poll_fn(|cx| writer.as_mut().poll_write(cx, b"ok"))
-        .await
-        .expect_err("writer should time out before write readiness");
-
-    assert!(error.to_string().contains("stalled for 20 ms"));
-}
-
-#[tokio::test]
-async fn write_timeout_io_allows_write_when_progress_arrives_in_time() {
-    let mut writer = Box::pin(WriteTimeoutIo::new(
-        DelayedWriter::new(Duration::from_millis(10)),
-        Some(Duration::from_millis(50)),
-        "downstream response to 127.0.0.1:8080",
-    ));
-
-    let written = poll_fn(|cx| writer.as_mut().poll_write(cx, b"ok"))
-        .await
-        .expect("writer should make progress before timing out");
-
-    assert_eq!(written, 2);
 }

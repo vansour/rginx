@@ -52,3 +52,12 @@ proptest! {
         }
     }
 }
+
+#[test]
+fn inspect_certificate_rejects_non_certificate_pem_without_panicking() {
+    let mut file = NamedTempFile::new().expect("temporary certificate file should be created");
+    file.write_all(b"-----BEGIN PRIVATE KEY-----\nZm9v\n-----END PRIVATE KEY-----\n")
+        .expect("temporary PEM should be written");
+
+    assert!(inspect_certificate(file.path()).is_none());
+}

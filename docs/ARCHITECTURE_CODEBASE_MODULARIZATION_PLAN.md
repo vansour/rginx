@@ -24,27 +24,13 @@
 基于当前仓库静态分析：
 
 - 共有 6 个 crate。
-- 生产代码中有 22 个文件超过 500 行。
-- 测试代码中有 27 个文件超过 300 行。
-- 维护压力主要集中在 `rginx-http`、`rginx-app`、`rginx-config`。
+- 生产代码中有 1 个文件超过 500 行。
+- 测试代码中有 32 个文件超过 300 行。
+- 当前生产侧维护压力已明显收敛，剩余重点主要是 `rginx-http` 的 `pki/certificate.rs`，测试侧压力仍主要集中在 `rginx-app`、`rginx-config`。
 
-当前最需要拆分的生产文件包括：
+当前仍需要关注的超大生产文件包括：
 
-- `crates/rginx-http/src/tls/ocsp/mod.rs`
-- `crates/rginx-http/src/proxy/health/registry.rs`
-- `crates/rginx-http/src/server/http3.rs`
-- `crates/rginx-app/src/main.rs`
-- `crates/rginx-http/src/proxy/clients/http3.rs`
-- `crates/rginx-app/src/admin_cli/status.rs`
-- `crates/rginx-runtime/src/bootstrap/listeners.rs`
-- `crates/rginx-config/src/compile/server.rs`
-- `crates/rginx-config/src/validate/server.rs`
-- `crates/rginx-http/src/compression.rs`
-- `crates/rginx-http/src/proxy/request_body.rs`
-- `crates/rginx-http/src/state/counters.rs`
-- `crates/rginx-http/src/state/snapshots.rs`
-- `crates/rginx-http/src/proxy/forward/mod.rs`
-- `crates/rginx-http/src/handler/dispatch.rs`
+- `crates/rginx-http/src/pki/certificate.rs`
 
 ## 重构规则
 
@@ -255,6 +241,10 @@
 
 ### 阶段 6：拆分高风险协议模块
 
+状态：
+
+- 已完成（2026-04-26）
+
 目标：
 
 - 最后处理 QUIC/HTTP3、健康状态机、OCSP 这类协议密集区。
@@ -278,7 +268,19 @@
 - 协议处理、状态机、序列化辅助、I/O 桥接不再混装在单一文件。
 - 高风险模块能按子域独立 review 和回归。
 
+实际落地：
+
+- `server/http3.rs` 已拆为 `server/http3/` 目录下的 `accept_loop`、`endpoint`、`host_key`、`connection`、`request`、`response`、`body`、`close_reason` 子模块，`mod.rs` 仅保留门面导出。
+- `proxy/clients/http3.rs` 已拆为 `proxy/clients/http3/` 目录下的 `endpoint_cache`、`session`、`connect`、`request`、`response_body` 子模块，保留现有测试入口和缓存可见性。
+- `proxy/health/registry.rs` 已拆为 `proxy/health/registry/` 目录下的 `policy`、`state`、`selection`、`snapshot`、`guards` 子模块，endpoint 映射逻辑收敛到 `state.rs`。
+- `tls/ocsp/mod.rs` 已拆为 `tls/ocsp/` 目录下的 `discover`、`request`、`nonce`、`validate`、`signer`、`time`、`der_helpers` 子模块，并保留测试工厂依赖的 helper 命名面。
+- 阶段 6 完成后，生产代码的 legacy size ceiling 只剩 `crates/rginx-http/src/pki/certificate.rs`。
+
 ### 阶段 7：收口与长期治理
+
+状态：
+
+- 已完成（2026-04-26）
 
 目标：
 
@@ -295,6 +297,17 @@
 
 - 后续新增功能默认按模块目录落位。
 - 仓库不再依赖几个“核心超大文件”承载持续演化。
+
+实际落地：
+
+- 新增 [docs/ARCHITECTURE_MODULE_LAYOUT_GUIDE.md](/root/github/rginx/docs/ARCHITECTURE_MODULE_LAYOUT_GUIDE.md)，补齐阶段 7 的目录布局、命名和模块文档约定。
+- [docs/ARCHITECTURE_CODEBASE_MODULARIZATION_POLICY.md](/root/github/rginx/docs/ARCHITECTURE_CODEBASE_MODULARIZATION_POLICY.md) 已扩展为同时约束 soft/hard limit、门面文档和目录命名。
+- [scripts/run-modularization-gate.py](/root/github/rginx/scripts/run-modularization-gate.py) 已升级为阻止新增 soft-limit 债务，并约束历史 soft-limit 文件不得继续增长。
+- [scripts/modularization_baseline.json](/root/github/rginx/scripts/modularization_baseline.json) 已显式记录当前遗留 soft-limit/hard-limit 基线。
+- `.github/workflows/ci.yml` 已增加独立 `Modularization` job，`scripts/test-fast.sh` 支持在 CI 中跳过重复 gate。
+- `proxy/health.rs` 已拆薄为门面文件，并把 active probe / request construction 下沉到独立子模块。
+- `proxy/clients/mod.rs` 已继续拆为 `factory`、`http_client`、`profile` 子模块，消除历史重逻辑门面压力。
+- 高风险目录门面已补充 `//!` 模块说明，阶段 6 拆分后的入口面具备稳定文档语义。
 
 ## 建议执行顺序
 

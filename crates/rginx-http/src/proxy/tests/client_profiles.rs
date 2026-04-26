@@ -19,6 +19,17 @@ fn load_custom_ca_store_accepts_pem_files() {
 }
 
 #[test]
+fn load_custom_ca_store_rejects_non_certificate_pem_files() {
+    let temp_dir = TempDir::new().expect("temp dir should be created");
+    let path = temp_dir.path().join("custom-ca.pem");
+    std::fs::write(&path, "-----BEGIN PRIVATE KEY-----\nZm9v\n-----END PRIVATE KEY-----\n")
+        .expect("PEM file should be written");
+
+    let error = load_custom_ca_store(&path).expect_err("non-certificate PEM should be rejected");
+    assert!(error.to_string().contains("contained PEM data but no PEM certificates were found"));
+}
+
+#[test]
 fn proxy_clients_can_select_insecure_and_custom_ca_modes() {
     let insecure = Upstream::new(
         "insecure".to_string(),

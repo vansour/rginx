@@ -17,7 +17,9 @@ REQUIRED_BASELINE_KEYS = (
     "production_hard_limit",
     "test_soft_limit",
     "test_hard_limit",
+    "legacy_production_soft_size_ceilings",
     "legacy_production_size_ceilings",
+    "legacy_test_soft_size_ceilings",
     "legacy_test_size_ceilings",
     "legacy_inline_test_files",
 )
@@ -93,9 +95,17 @@ def main() -> int:
         path: int(limit)
         for path, limit in baseline["legacy_production_size_ceilings"].items()
     }
+    legacy_prod_soft = {
+        path: int(limit)
+        for path, limit in baseline["legacy_production_soft_size_ceilings"].items()
+    }
     legacy_test = {
         path: int(limit)
         for path, limit in baseline["legacy_test_size_ceilings"].items()
+    }
+    legacy_test_soft = {
+        path: int(limit)
+        for path, limit in baseline["legacy_test_soft_size_ceilings"].items()
     }
     legacy_inline_tests = set(baseline["legacy_inline_test_files"])
 
@@ -130,9 +140,21 @@ def main() -> int:
                     f"baseline is {baseline_limit}"
                 )
         elif count > prod_soft:
-            prod_soft_warnings.append(
-                f"{rel} has {count} lines; soft limit is {prod_soft}"
-            )
+            baseline_limit = legacy_prod_soft.get(rel)
+            if baseline_limit is None:
+                errors.append(
+                    f"new production soft-limit violation: {rel} has {count} lines; "
+                    f"soft limit is {prod_soft}"
+                )
+            elif count > baseline_limit:
+                errors.append(
+                    f"legacy production soft-limit file grew past baseline: {rel} has {count} lines; "
+                    f"baseline is {baseline_limit}"
+                )
+            else:
+                prod_soft_warnings.append(
+                    f"{rel} has {count} lines; soft limit is {prod_soft}"
+                )
 
         text = path.read_text(encoding="utf-8")
         if contains_inline_test_module(text):
@@ -158,9 +180,21 @@ def main() -> int:
                     f"baseline is {baseline_limit}"
                 )
         elif count > test_soft:
-            test_soft_warnings.append(
-                f"{rel} has {count} lines; soft limit is {test_soft}"
-            )
+            baseline_limit = legacy_test_soft.get(rel)
+            if baseline_limit is None:
+                errors.append(
+                    f"new test soft-limit violation: {rel} has {count} lines; "
+                    f"soft limit is {test_soft}"
+                )
+            elif count > baseline_limit:
+                errors.append(
+                    f"legacy test soft-limit file grew past baseline: {rel} has {count} lines; "
+                    f"baseline is {baseline_limit}"
+                )
+            else:
+                test_soft_warnings.append(
+                    f"{rel} has {count} lines; soft limit is {test_soft}"
+                )
 
     warnings.extend(prod_soft_warnings)
     warnings.extend(test_soft_warnings)

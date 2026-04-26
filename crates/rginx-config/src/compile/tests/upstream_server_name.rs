@@ -1,0 +1,293 @@
+use super::*;
+
+#[test]
+fn compile_normalizes_server_name_override() {
+    let config = Config {
+        runtime: RuntimeConfig {
+            shutdown_timeout_secs: 10,
+            worker_threads: None,
+            accept_workers: None,
+        },
+        listeners: Vec::new(),
+        server: ServerConfig {
+            listen: Some("127.0.0.1:8080".to_string()),
+            server_header: None,
+            proxy_protocol: None,
+            default_certificate: None,
+            server_names: Vec::new(),
+            trusted_proxies: Vec::new(),
+            keep_alive: None,
+            max_headers: None,
+            max_request_body_bytes: None,
+            max_connections: None,
+            header_read_timeout_secs: None,
+            request_body_read_timeout_secs: None,
+            response_write_timeout_secs: None,
+            access_log_format: None,
+            tls: None,
+            http3: None,
+        },
+        upstreams: vec![UpstreamConfig {
+            name: "secure-backend".to_string(),
+            peers: vec![UpstreamPeerConfig {
+                url: "https://[::1]:9443".to_string(),
+                weight: 1,
+                backup: false,
+            }],
+            tls: None,
+            dns: None,
+            protocol: UpstreamProtocolConfig::Auto,
+            load_balance: UpstreamLoadBalanceConfig::RoundRobin,
+            server_name: None,
+            server_name_override: Some("[::1]".to_string()),
+            request_timeout_secs: None,
+            connect_timeout_secs: None,
+            read_timeout_secs: None,
+            write_timeout_secs: None,
+            idle_timeout_secs: None,
+            pool_idle_timeout_secs: None,
+            pool_max_idle_per_host: None,
+            tcp_keepalive_secs: None,
+            tcp_nodelay: None,
+            http2_keep_alive_interval_secs: None,
+            http2_keep_alive_timeout_secs: None,
+            http2_keep_alive_while_idle: None,
+            max_replayable_request_body_bytes: None,
+            unhealthy_after_failures: None,
+            unhealthy_cooldown_secs: None,
+            health_check_path: None,
+            health_check_grpc_service: None,
+            health_check_interval_secs: None,
+            health_check_timeout_secs: None,
+            healthy_successes_required: None,
+        }],
+        locations: vec![LocationConfig {
+            matcher: MatcherConfig::Prefix("/".to_string()),
+            handler: HandlerConfig::Proxy {
+                upstream: "secure-backend".to_string(),
+                preserve_host: None,
+                strip_prefix: None,
+                proxy_set_headers: std::collections::HashMap::new(),
+            },
+            grpc_service: None,
+
+            grpc_method: None,
+
+            allow_cidrs: Vec::new(),
+            deny_cidrs: Vec::new(),
+            requests_per_sec: None,
+            burst: None,
+            allow_early_data: None,
+            request_buffering: None,
+            response_buffering: None,
+            compression: None,
+            compression_min_bytes: None,
+            compression_content_types: None,
+            streaming_response_idle_timeout_secs: None,
+        }],
+        servers: Vec::new(),
+    };
+
+    let snapshot = compile(config).expect("server name override should compile");
+    let proxy = match &snapshot.default_vhost.routes[0].action {
+        rginx_core::RouteAction::Proxy(proxy) => proxy,
+        _ => panic!("expected proxy route"),
+    };
+
+    assert_eq!(proxy.upstream.server_name_override.as_deref(), Some("::1"));
+}
+
+#[test]
+fn compile_preserves_upstream_server_name_toggle() {
+    let config = Config {
+        runtime: RuntimeConfig {
+            shutdown_timeout_secs: 10,
+            worker_threads: None,
+            accept_workers: None,
+        },
+        listeners: Vec::new(),
+        server: ServerConfig {
+            listen: Some("127.0.0.1:8080".to_string()),
+            server_header: None,
+            proxy_protocol: None,
+            default_certificate: None,
+            server_names: Vec::new(),
+            trusted_proxies: Vec::new(),
+            keep_alive: None,
+            max_headers: None,
+            max_request_body_bytes: None,
+            max_connections: None,
+            header_read_timeout_secs: None,
+            request_body_read_timeout_secs: None,
+            response_write_timeout_secs: None,
+            access_log_format: None,
+            tls: None,
+            http3: None,
+        },
+        upstreams: vec![UpstreamConfig {
+            name: "secure-backend".to_string(),
+            peers: vec![UpstreamPeerConfig {
+                url: "https://127.0.0.1:9443".to_string(),
+                weight: 1,
+                backup: false,
+            }],
+            tls: Some(crate::model::UpstreamTlsConfig {
+                verify: crate::model::UpstreamTlsModeConfig::Insecure,
+                versions: None,
+                verify_depth: None,
+                crl_path: None,
+                client_cert_path: None,
+                client_key_path: None,
+            }),
+            dns: None,
+            protocol: UpstreamProtocolConfig::Auto,
+            load_balance: UpstreamLoadBalanceConfig::RoundRobin,
+            server_name: Some(false),
+            server_name_override: Some("localhost".to_string()),
+            request_timeout_secs: None,
+            connect_timeout_secs: None,
+            read_timeout_secs: None,
+            write_timeout_secs: None,
+            idle_timeout_secs: None,
+            pool_idle_timeout_secs: None,
+            pool_max_idle_per_host: None,
+            tcp_keepalive_secs: None,
+            tcp_nodelay: None,
+            http2_keep_alive_interval_secs: None,
+            http2_keep_alive_timeout_secs: None,
+            http2_keep_alive_while_idle: None,
+            max_replayable_request_body_bytes: None,
+            unhealthy_after_failures: None,
+            unhealthy_cooldown_secs: None,
+            health_check_path: None,
+            health_check_grpc_service: None,
+            health_check_interval_secs: None,
+            health_check_timeout_secs: None,
+            healthy_successes_required: None,
+        }],
+        locations: vec![LocationConfig {
+            matcher: MatcherConfig::Prefix("/".to_string()),
+            handler: HandlerConfig::Proxy {
+                upstream: "secure-backend".to_string(),
+                preserve_host: None,
+                strip_prefix: None,
+                proxy_set_headers: std::collections::HashMap::new(),
+            },
+            grpc_service: None,
+            grpc_method: None,
+            allow_cidrs: Vec::new(),
+            deny_cidrs: Vec::new(),
+            requests_per_sec: None,
+            burst: None,
+            allow_early_data: None,
+            request_buffering: None,
+            response_buffering: None,
+            compression: None,
+            compression_min_bytes: None,
+            compression_content_types: None,
+            streaming_response_idle_timeout_secs: None,
+        }],
+        servers: Vec::new(),
+    };
+
+    let snapshot = compile(config).expect("upstream server_name toggle should compile");
+    let proxy = match &snapshot.default_vhost.routes[0].action {
+        rginx_core::RouteAction::Proxy(proxy) => proxy,
+        _ => panic!("expected proxy route"),
+    };
+
+    assert!(!proxy.upstream.server_name);
+    assert_eq!(proxy.upstream.server_name_override.as_deref(), Some("localhost"));
+}
+
+#[test]
+fn compile_rejects_invalid_server_name_override() {
+    let config = Config {
+        runtime: RuntimeConfig {
+            shutdown_timeout_secs: 10,
+            worker_threads: None,
+            accept_workers: None,
+        },
+        listeners: Vec::new(),
+        server: ServerConfig {
+            listen: Some("127.0.0.1:8080".to_string()),
+            server_header: None,
+            proxy_protocol: None,
+            default_certificate: None,
+            server_names: Vec::new(),
+            trusted_proxies: Vec::new(),
+            keep_alive: None,
+            max_headers: None,
+            max_request_body_bytes: None,
+            max_connections: None,
+            header_read_timeout_secs: None,
+            request_body_read_timeout_secs: None,
+            response_write_timeout_secs: None,
+            access_log_format: None,
+            tls: None,
+            http3: None,
+        },
+        upstreams: vec![UpstreamConfig {
+            name: "secure-backend".to_string(),
+            peers: vec![UpstreamPeerConfig {
+                url: "https://127.0.0.1:9443".to_string(),
+                weight: 1,
+                backup: false,
+            }],
+            tls: None,
+            dns: None,
+            protocol: UpstreamProtocolConfig::Auto,
+            load_balance: UpstreamLoadBalanceConfig::RoundRobin,
+            server_name: None,
+            server_name_override: Some("bad name".to_string()),
+            request_timeout_secs: None,
+            connect_timeout_secs: None,
+            read_timeout_secs: None,
+            write_timeout_secs: None,
+            idle_timeout_secs: None,
+            pool_idle_timeout_secs: None,
+            pool_max_idle_per_host: None,
+            tcp_keepalive_secs: None,
+            tcp_nodelay: None,
+            http2_keep_alive_interval_secs: None,
+            http2_keep_alive_timeout_secs: None,
+            http2_keep_alive_while_idle: None,
+            max_replayable_request_body_bytes: None,
+            unhealthy_after_failures: None,
+            unhealthy_cooldown_secs: None,
+            health_check_path: None,
+            health_check_grpc_service: None,
+            health_check_interval_secs: None,
+            health_check_timeout_secs: None,
+            healthy_successes_required: None,
+        }],
+        locations: vec![LocationConfig {
+            matcher: MatcherConfig::Prefix("/".to_string()),
+            handler: HandlerConfig::Proxy {
+                upstream: "secure-backend".to_string(),
+                preserve_host: None,
+                strip_prefix: None,
+                proxy_set_headers: std::collections::HashMap::new(),
+            },
+            grpc_service: None,
+
+            grpc_method: None,
+
+            allow_cidrs: Vec::new(),
+            deny_cidrs: Vec::new(),
+            requests_per_sec: None,
+            burst: None,
+            allow_early_data: None,
+            request_buffering: None,
+            response_buffering: None,
+            compression: None,
+            compression_min_bytes: None,
+            compression_content_types: None,
+            streaming_response_idle_timeout_secs: None,
+        }],
+        servers: Vec::new(),
+    };
+
+    let error = compile(config).expect_err("invalid override should be rejected");
+    assert!(error.to_string().contains("server_name_override"));
+}

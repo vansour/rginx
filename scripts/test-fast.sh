@@ -9,10 +9,16 @@ log() {
     printf '[test-fast] %s\n' "$*"
 }
 
+SKIP_MODULARIZATION_GATE="${SKIP_MODULARIZATION_GATE:-0}"
+
 cd "${ROOT_DIR}"
 
-log "running modularization gate"
-python3 ./scripts/run-modularization-gate.py
+if [[ "${SKIP_MODULARIZATION_GATE}" != "1" ]]; then
+    log "running modularization gate"
+    python3 ./scripts/run-modularization-gate.py
+else
+    log "skipping modularization gate because SKIP_MODULARIZATION_GATE=1"
+fi
 
 log "running fast unit and crate-local tests"
 
