@@ -316,6 +316,9 @@ fn wait_for_body(listen_addr: SocketAddr, expected: &str, timeout: Duration) {
 fn read_pid_file(path: &Path) -> i32 {
     fs::read_to_string(path)
         .unwrap_or_else(|error| panic!("failed to read pid file {}: {error}", path.display()))
+        .lines()
+        .next()
+        .unwrap_or_else(|| panic!("pid file {} was empty", path.display()))
         .trim()
         .parse::<i32>()
         .unwrap_or_else(|error| panic!("invalid pid file {}: {error}", path.display()))

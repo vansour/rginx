@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 pub(super) struct TlsCheckDetails {
     pub(super) listener_tls_profiles: usize,
     pub(super) vhost_tls_overrides: usize,
@@ -39,18 +41,16 @@ pub(super) fn tls_check_details(config: &rginx_config::ConfigSnapshot) -> TlsChe
         .chain(config.vhosts.iter())
         .filter(|vhost| vhost.tls.is_some())
         .count();
-    let sni_name_count = config
-        .listeners
-        .iter()
-        .filter(|listener| listener.server.tls.is_some())
-        .map(|_| config.default_vhost.server_names.len())
-        .sum::<usize>()
-        + config
-            .vhosts
-            .iter()
-            .filter(|vhost| vhost.tls.is_some())
-            .map(|vhost| vhost.server_names.len())
-            .sum::<usize>();
+    let sni_name_count = if listener_tls_profiles == 0 && vhost_tls_overrides == 0 {
+        0
+    } else {
+        let mut names = BTreeSet::new();
+        names.extend(config.default_vhost.server_names.iter().cloned());
+        for vhost in config.vhosts.iter().filter(|vhost| vhost.tls.is_some()) {
+            names.extend(vhost.server_names.iter().cloned());
+        }
+        names.len()
+    };
     let certificate_bundle_count = config
         .listeners
         .iter()
@@ -66,20 +66,22 @@ pub(super) fn tls_check_details(config: &rginx_config::ConfigSnapshot) -> TlsChe
         .listeners
         .iter()
         .filter_map(|listener| {
-            listener
-                .server
-                .default_certificate
-                .as_ref()
-                .map(|name| format!("{}={}", listener.name, name))
+            listener.server.tls.as_ref().and_then(|_| {
+                listener
+                    .server
+                    .default_certificate
+                    .as_ref()
+                    .map(|name| format!("{}={}", listener.name, name))
+            })
         })
         .collect();
     let expiring_certificates = tls
         .certificates
         .iter()
         .filter_map(|certificate| {
-            certificate
-                .expires_in_days
-                .and_then(|days| (days <= 30).then(|| format!("{}:{}d", certificate.scope, days)))
+            certificate.expires_in_days.and_then(|days| {
+                ((0..=30).contains(&days)).then(|| format!("{}:{}d", certificate.scope, days))
+            })
         })
         .collect();
     let (sni_bindings, sni_conflicts, default_certificate_bindings) = (

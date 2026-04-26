@@ -1,3 +1,4 @@
+#[derive(Default)]
 pub(super) struct RouteTransportCheckDetails {
     pub(super) request_buffering_auto_routes: usize,
     pub(super) request_buffering_on_routes: usize,
@@ -16,20 +17,7 @@ pub(super) struct RouteTransportCheckDetails {
 pub(super) fn route_transport_check_details(
     config: &rginx_config::ConfigSnapshot,
 ) -> RouteTransportCheckDetails {
-    let mut details = RouteTransportCheckDetails {
-        request_buffering_auto_routes: 0,
-        request_buffering_on_routes: 0,
-        request_buffering_off_routes: 0,
-        response_buffering_auto_routes: 0,
-        response_buffering_on_routes: 0,
-        response_buffering_off_routes: 0,
-        compression_auto_routes: 0,
-        compression_off_routes: 0,
-        compression_force_routes: 0,
-        custom_compression_min_bytes_routes: 0,
-        custom_compression_content_types_routes: 0,
-        streaming_response_idle_timeout_routes: 0,
-    };
+    let mut details = RouteTransportCheckDetails::default();
 
     for route in all_routes(config) {
         match route.request_buffering {

@@ -32,6 +32,7 @@ fn check_succeeds_without_binding_listener() {
     assert!(stdout.contains(
         "reload_tls_updates=server.tls,server.http3.advertise_alt_svc,server.http3.alt_svc_max_age_secs,listeners[].tls,listeners[].http3.advertise_alt_svc,listeners[].http3.alt_svc_max_age_secs,servers[].tls,upstreams[].tls,upstreams[].server_name,upstreams[].server_name_override"
     ));
+    assert!(stdout.contains("tls_default_certificates=-"));
     assert!(stdout.contains("tls_expiring_certificates=-"));
 
     drop(reserved);

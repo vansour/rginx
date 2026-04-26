@@ -1,5 +1,7 @@
 use crate::admin_cli::render::print_record;
 
+use super::render::print_recent_window_record;
+
 pub(super) fn print_traffic_vhosts(vhosts: &[rginx_http::VhostStatsSnapshot]) {
     for vhost in vhosts {
         let vhost_id = vhost.vhost_id.clone();
@@ -68,36 +70,11 @@ pub(super) fn print_traffic_vhosts(vhosts: &[rginx_http::VhostStatsSnapshot]) {
         );
 
         if let Some(recent_window) = &vhost.recent_window {
-            print_record(
+            print_recent_window_record(
                 "traffic_vhost_recent_window",
-                [
-                    ("vhost", vhost_id),
-                    ("recent_window_secs", recent_window.window_secs.to_string()),
-                    (
-                        "recent_window_downstream_requests_total",
-                        recent_window.downstream_requests_total.to_string(),
-                    ),
-                    (
-                        "recent_window_downstream_responses_total",
-                        recent_window.downstream_responses_total.to_string(),
-                    ),
-                    (
-                        "recent_window_downstream_responses_2xx_total",
-                        recent_window.downstream_responses_2xx_total.to_string(),
-                    ),
-                    (
-                        "recent_window_downstream_responses_4xx_total",
-                        recent_window.downstream_responses_4xx_total.to_string(),
-                    ),
-                    (
-                        "recent_window_downstream_responses_5xx_total",
-                        recent_window.downstream_responses_5xx_total.to_string(),
-                    ),
-                    (
-                        "recent_window_grpc_requests_total",
-                        recent_window.grpc_requests_total.to_string(),
-                    ),
-                ],
+                "vhost",
+                &vhost_id,
+                recent_window,
             );
         }
     }

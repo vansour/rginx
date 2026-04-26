@@ -1,5 +1,7 @@
 use crate::admin_cli::render::print_record;
 
+use super::render::print_recent_window_record;
+
 pub(super) fn print_traffic_routes(routes: &[rginx_http::RouteStatsSnapshot]) {
     for route in routes {
         let route_id = route.route_id.clone();
@@ -62,36 +64,11 @@ pub(super) fn print_traffic_routes(routes: &[rginx_http::RouteStatsSnapshot]) {
         );
 
         if let Some(recent_window) = &route.recent_window {
-            print_record(
+            print_recent_window_record(
                 "traffic_route_recent_window",
-                [
-                    ("route", route_id),
-                    ("recent_window_secs", recent_window.window_secs.to_string()),
-                    (
-                        "recent_window_downstream_requests_total",
-                        recent_window.downstream_requests_total.to_string(),
-                    ),
-                    (
-                        "recent_window_downstream_responses_total",
-                        recent_window.downstream_responses_total.to_string(),
-                    ),
-                    (
-                        "recent_window_downstream_responses_2xx_total",
-                        recent_window.downstream_responses_2xx_total.to_string(),
-                    ),
-                    (
-                        "recent_window_downstream_responses_4xx_total",
-                        recent_window.downstream_responses_4xx_total.to_string(),
-                    ),
-                    (
-                        "recent_window_downstream_responses_5xx_total",
-                        recent_window.downstream_responses_5xx_total.to_string(),
-                    ),
-                    (
-                        "recent_window_grpc_requests_total",
-                        recent_window.grpc_requests_total.to_string(),
-                    ),
-                ],
+                "route",
+                &route_id,
+                recent_window,
             );
         }
     }

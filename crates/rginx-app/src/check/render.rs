@@ -71,7 +71,7 @@ fn render_binding_addrs(summary: &CheckSummary) -> String {
         return "-".to_string();
     }
 
-    summary
+    let bindings = summary
         .listeners
         .iter()
         .flat_map(|listener| {
@@ -80,8 +80,9 @@ fn render_binding_addrs(summary: &CheckSummary) -> String {
                 .iter()
                 .map(|binding| format!("{}://{}", binding.transport, binding.listen_addr))
         })
-        .collect::<Vec<_>>()
-        .join(",")
+        .collect::<Vec<_>>();
+
+    if bindings.is_empty() { "-".to_string() } else { bindings.join(",") }
 }
 
 fn render_enabled(enabled: bool) -> &'static str {

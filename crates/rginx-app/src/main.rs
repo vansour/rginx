@@ -47,20 +47,8 @@ fn main() -> anyhow::Result<()> {
         .with_context(|| format!("failed to load {}", cli.config.display()))?;
 
     match cli.command {
-        Some(Command::Check) if !cli.test_config => {
-            rginx_http::SharedState::from_config(config.clone())
-                .context("failed to initialize runtime dependencies")?;
-
-            print_check_success(&cli.config, build_check_summary(&config));
-            Ok(())
-        }
-        _ if cli.test_config => {
-            rginx_http::SharedState::from_config(config.clone())
-                .context("failed to initialize runtime dependencies")?;
-
-            print_check_success(&cli.config, build_check_summary(&config));
-            Ok(())
-        }
+        Some(Command::Check) if !cli.test_config => run_check_only(&cli.config, &config),
+        _ if cli.test_config => run_check_only(&cli.config, &config),
         None => {
             let _pid_file = PidFileGuard::create(pid_path_for_config(&cli.config))
                 .context("failed to write pid file")?;
@@ -85,4 +73,15 @@ fn main() -> anyhow::Result<()> {
             unreachable!("admin subcommands return before runtime initialization")
         }
     }
+}
+
+fn run_check_only(
+    config_path: &std::path::Path,
+    config: &rginx_config::ConfigSnapshot,
+) -> anyhow::Result<()> {
+    rginx_http::SharedState::from_config(config.clone())
+        .context("failed to initialize runtime dependencies")?;
+
+    print_check_success(config_path, build_check_summary(config));
+    Ok(())
 }

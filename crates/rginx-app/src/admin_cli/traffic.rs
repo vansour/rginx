@@ -2,6 +2,7 @@ use super::socket::{query_admin_socket, unexpected_admin_response};
 use super::*;
 
 mod listeners;
+mod render;
 mod routes;
 mod vhosts;
 

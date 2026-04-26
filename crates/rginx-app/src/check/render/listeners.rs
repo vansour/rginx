@@ -30,45 +30,21 @@ pub(super) fn print_listener_details(summary: &CheckSummary) {
                 binding.listen_addr,
                 render_string_list(&binding.protocols),
                 binding.worker_count,
-                binding
-                    .reuse_port_enabled
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "-".to_string()),
-                binding
-                    .advertise_alt_svc
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "-".to_string()),
-                binding
-                    .alt_svc_max_age_secs
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "-".to_string()),
-                binding
-                    .http3_max_concurrent_streams
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "-".to_string()),
-                binding
-                    .http3_stream_buffer_size
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "-".to_string()),
-                binding
-                    .http3_active_connection_id_limit
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "-".to_string()),
-                binding
-                    .http3_retry
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "-".to_string()),
-                binding
-                    .http3_host_key_path
-                    .as_ref()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_else(|| "-".to_string()),
-                binding.http3_gso.map(|value| value.to_string()).unwrap_or_else(|| "-".to_string()),
-                binding
-                    .http3_early_data_enabled
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "-".to_string()),
+                render_optional(binding.reuse_port_enabled),
+                render_optional(binding.advertise_alt_svc),
+                render_optional(binding.alt_svc_max_age_secs),
+                render_optional(binding.http3_max_concurrent_streams),
+                render_optional(binding.http3_stream_buffer_size),
+                render_optional(binding.http3_active_connection_id_limit),
+                render_optional(binding.http3_retry),
+                render_optional(binding.http3_host_key_path.as_ref().map(|path| path.display())),
+                render_optional(binding.http3_gso),
+                render_optional(binding.http3_early_data_enabled),
             );
         }
     }
+}
+
+fn render_optional<T: std::fmt::Display>(value: Option<T>) -> String {
+    value.map(|value| value.to_string()).unwrap_or_else(|| "-".to_string())
 }

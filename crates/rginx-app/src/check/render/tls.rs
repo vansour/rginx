@@ -10,6 +10,7 @@ pub(super) fn print_tls_details(summary: &CheckSummary) {
 }
 
 fn print_tls_overview(summary: &CheckSummary) {
+    // Keep both keys for backward-compatible machine parsing across older check consumers.
     println!("reload_requires_restart_for={}", summary.tls.restart_required_fields.join(","));
     println!(
         "tls_details=listener_profiles={} vhost_overrides={} sni_names={} certificate_bundles={}",
@@ -20,7 +21,9 @@ fn print_tls_overview(summary: &CheckSummary) {
     );
     println!("reload_tls_updates={}", summary.tls.reloadable_fields.join(","));
 
-    if !summary.tls.default_certificates.is_empty() {
+    if summary.tls.default_certificates.is_empty() {
+        println!("tls_default_certificates=-");
+    } else {
         println!("tls_default_certificates={}", summary.tls.default_certificates.join(","));
     }
 
@@ -87,12 +90,12 @@ fn print_tls_listeners(summary: &CheckSummary) {
 fn print_tls_certificates(summary: &CheckSummary) {
     for certificate in &summary.tls.certificates {
         println!(
-            "tls_certificate scope={} sha256={} subject={:?} issuer={:?} serial={:?} chain_length={} diagnostics={} cert_path={}",
+            "tls_certificate scope={} sha256={} subject={} issuer={} serial={} chain_length={} diagnostics={} cert_path={}",
             certificate.scope,
             certificate.fingerprint_sha256.as_deref().unwrap_or("-"),
-            certificate.subject,
-            certificate.issuer,
-            certificate.serial_number,
+            certificate.subject.as_deref().unwrap_or("-"),
+            certificate.issuer.as_deref().unwrap_or("-"),
+            certificate.serial_number.as_deref().unwrap_or("-"),
             certificate.chain_length,
             if certificate.chain_diagnostics.is_empty() {
                 "-".to_string()
@@ -165,8 +168,8 @@ fn print_tls_bindings(summary: &CheckSummary) {
                 "tls_sni_conflict listener={} server_name={} fingerprints={} scopes={}",
                 binding.listener_name,
                 binding.server_name,
-                binding.fingerprints.join(","),
-                binding.scopes.join(","),
+                render_string_list(&binding.fingerprints),
+                render_string_list(&binding.scopes),
             );
         }
     }
