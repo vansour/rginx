@@ -30,6 +30,20 @@ async fn grpc_error_response_builds_trailers_only_http2_error() {
 }
 
 #[tokio::test]
+async fn grpc_error_response_percent_encodes_non_ascii_messages() {
+    let mut headers = HeaderMap::new();
+    headers.insert(http::header::CONTENT_TYPE, HeaderValue::from_static("application/grpc"));
+
+    let response = grpc_error_response(&headers, GrpcStatusCode::Unavailable, "café 100%")
+        .expect("gRPC response should be recognized");
+
+    assert_eq!(
+        response.headers().get("grpc-message").and_then(|value| value.to_str().ok()),
+        Some("caf%C3%A9 100%25")
+    );
+}
+
+#[tokio::test]
 async fn grpc_error_response_encodes_grpc_web_text_trailer_block() {
     let mut headers = HeaderMap::new();
     headers.insert(

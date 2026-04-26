@@ -87,9 +87,8 @@ async fn handle_connection(stream: UnixStream, state: SharedState) -> io::Result
     })?;
 
     let response = dispatch_request(request, &state).await?;
-    let encoded = serde_json::to_vec(&response).map_err(|error| {
-        io::Error::new(io::ErrorKind::InvalidData, format!("invalid admin response: {error}"))
-    })?;
+    let encoded = serde_json::to_vec(&response)
+        .map_err(|error| io::Error::other(format!("invalid admin response: {error}")))?;
     writer.write_all(&encoded).await?;
     writer.write_all(b"\n").await?;
     writer.flush().await

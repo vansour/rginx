@@ -51,4 +51,5 @@ webpki.workspace = true
 ctor.workspace = true
 proptest.workspace = true
 rcgen = "0.14"
+serde_json.workspace = true
 tempfile = "3.27"

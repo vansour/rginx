@@ -117,8 +117,10 @@ fn parse_accept_encoding_item(item: &str) -> Option<(&str, f32)> {
     let mut q = 1.0;
     for part in parts {
         let part = part.trim();
-        if let Some(value) = part.strip_prefix("q=") {
-            q = value.parse::<f32>().ok()?;
+        if let Some((name, value)) = part.split_once('=')
+            && name.trim().eq_ignore_ascii_case("q")
+        {
+            q = value.trim().parse::<f32>().ok()?;
         }
     }
 

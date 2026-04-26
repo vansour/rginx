@@ -63,10 +63,8 @@ fn build_grpc_error_response(
     grpc_status: GrpcStatusCode,
     message: &str,
 ) -> HttpResponse {
-    let message = sanitize_grpc_message(message);
     let grpc_status_value = HeaderValue::from_static(grpc_status.as_str());
-    let grpc_message_value = (!message.is_empty())
-        .then(|| HeaderValue::from_str(&message).expect("sanitized gRPC message should be valid"));
+    let grpc_message_value = grpc_message_value(message);
 
     match format {
         GrpcResponseFormat::Grpc { content_type } => {
@@ -103,12 +101,25 @@ fn build_grpc_error_response(
     }
 }
 
-fn sanitize_grpc_message(message: &str) -> String {
-    message
-        .trim()
-        .chars()
-        .map(|ch| if ch.is_ascii_control() { ' ' } else { ch })
-        .collect::<String>()
+fn grpc_message_value(message: &str) -> Option<HeaderValue> {
+    let message = encode_grpc_message(message);
+    (!message.is_empty()).then(|| HeaderValue::from_bytes(message.as_bytes()).ok()).flatten()
+}
+
+fn encode_grpc_message(message: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+
+    let mut encoded = String::new();
+    for byte in message.trim().as_bytes() {
+        if (b' '..=b'~').contains(byte) && *byte != b'%' {
+            encoded.push(char::from(*byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[(byte >> 4) as usize]));
+            encoded.push(char::from(HEX[(byte & 0x0f) as usize]));
+        }
+    }
+    encoded
 }
 
 fn encode_grpc_web_error_body(trailers: &HeaderMap, is_text: bool) -> Bytes {

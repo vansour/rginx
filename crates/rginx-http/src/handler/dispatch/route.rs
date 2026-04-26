@@ -1,4 +1,5 @@
 use http::Request;
+use http::header::HeaderValue;
 use rginx_core::RouteAction;
 
 use crate::state::{ActiveState, SharedState};
@@ -50,9 +51,12 @@ pub(super) async fn build_route_response(
             .await
         }
         RouteAction::Return(action) => {
-            let body = action.body.clone().unwrap_or_else(|| {
-                format!("{}\n", action.status.canonical_reason().unwrap_or("Redirect"))
-            });
+            let body =
+                action.body.clone().unwrap_or_else(|| match action.status.canonical_reason() {
+                    Some(reason) => format!("{reason}\n"),
+                    None if action.status.is_redirection() => String::from("Redirect\n"),
+                    None => format!("{}\n", action.status.as_u16()),
+                });
             let content_length = body.len();
 
             let mut builder = http::Response::builder()
@@ -60,8 +64,11 @@ pub(super) async fn build_route_response(
                 .header("content-type", "text/plain; charset=utf-8")
                 .header("content-length", content_length.to_string());
 
-            if !action.location.is_empty() {
-                builder = builder.header("location", &action.location);
+            if action.status.is_redirection()
+                && !action.location.is_empty()
+                && let Ok(location) = HeaderValue::from_str(&action.location)
+            {
+                builder = builder.header("location", location);
             }
 
             builder.body(full_body(body)).expect("return response builder should not fail")

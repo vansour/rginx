@@ -60,32 +60,30 @@ pub async fn maybe_encode_response(
                 encoding = content_coding.label(),
                 "failed to collect response body for compression"
             );
-            let mut parts = parts_without_compression_metadata(parts);
-            parts.status = StatusCode::INTERNAL_SERVER_ERROR;
-            return Response::from_parts(parts, full_body(Bytes::new()));
+            return Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(full_body(Bytes::new()))
+                .expect("static 500 response should build");
         }
     };
 
     let compressed = match compress_bytes(content_coding, &collected) {
         Ok(compressed) if compressed.len() < collected.len() => compressed,
-        Ok(_) => return Response::from_parts(parts, full_body(collected)),
+        Ok(_) => return buffered_response(parts, collected),
         Err(error) => {
             tracing::warn!(
                 %error,
                 encoding = content_coding.label(),
                 "failed to compress response body"
             );
-            return Response::from_parts(parts, full_body(collected));
+            return buffered_response(parts, collected);
         }
     };
 
+    clear_compression_headers(&mut parts.headers);
     parts.headers.insert(CONTENT_ENCODING, HeaderValue::from_static(content_coding.header_value()));
     merge_vary_header(&mut parts.headers, "Accept-Encoding");
-    parts.headers.insert(
-        CONTENT_LENGTH,
-        HeaderValue::from_str(&compressed.len().to_string())
-            .expect("compressed body length should fit in a header"),
-    );
+    set_content_length(&mut parts.headers, compressed.len());
     parts.headers.remove(ACCEPT_RANGES);
 
     Response::from_parts(parts, full_body(compressed))
@@ -111,9 +109,22 @@ fn parse_content_length(headers: &HeaderMap) -> Option<usize> {
         .and_then(|value| value.parse::<usize>().ok())
 }
 
-fn parts_without_compression_metadata(mut parts: http::response::Parts) -> http::response::Parts {
-    parts.headers.remove(CONTENT_ENCODING);
-    parts.headers.remove(CONTENT_LENGTH);
-    parts.headers.remove(ACCEPT_RANGES);
-    parts
+fn buffered_response(parts: http::response::Parts, body: Bytes) -> HttpResponse {
+    let mut parts = parts;
+    clear_compression_headers(&mut parts.headers);
+    set_content_length(&mut parts.headers, body.len());
+    Response::from_parts(parts, full_body(body))
+}
+
+fn clear_compression_headers(headers: &mut HeaderMap) {
+    headers.remove(CONTENT_ENCODING);
+    headers.remove(CONTENT_LENGTH);
+}
+
+fn set_content_length(headers: &mut HeaderMap, length: usize) {
+    headers.insert(
+        CONTENT_LENGTH,
+        HeaderValue::from_str(&length.to_string())
+            .expect("buffered body length should fit in a header"),
+    );
 }

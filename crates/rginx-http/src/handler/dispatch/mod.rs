@@ -61,10 +61,14 @@ pub async fn handle(
     super::attach_connection_metadata(&mut request, connection.as_ref());
     let active = state.snapshot().await;
     let config = active.config.clone();
-    let listener = config
-        .listener(listener_id)
-        .cloned()
-        .expect("listener id should remain available while serving requests");
+    let listener = if let Some(listener) = config.listener(listener_id).cloned() {
+        listener
+    } else {
+        state
+            .current_listener(listener_id)
+            .await
+            .expect("listener id should remain available while serving requests")
+    };
     let access_log_format = listener.server.access_log_format.clone();
     let server_header = listener.server.server_header.clone();
     let method = request.method().clone();

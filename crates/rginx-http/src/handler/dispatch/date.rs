@@ -2,6 +2,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use http::HeaderValue;
+use tracing::warn;
 
 static HTTP_DATE_CACHE: OnceLock<Mutex<CachedHttpDate>> = OnceLock::new();
 
@@ -31,5 +32,11 @@ impl CachedHttpDate {
 }
 
 fn current_unix_epoch_seconds() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|duration| duration.as_secs()).unwrap_or(0)
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_secs(),
+        Err(error) => {
+            warn!(%error, "system clock predates UNIX_EPOCH while computing Date header");
+            0
+        }
+    }
 }

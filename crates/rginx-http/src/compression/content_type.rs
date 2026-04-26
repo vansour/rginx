@@ -32,7 +32,7 @@ pub(super) fn response_is_eligible(
 fn content_type_is_eligible(content_type: &str, options: &ResponseCompressionOptions<'_>) -> bool {
     let mime = content_type.split(';').next().unwrap_or(content_type).trim();
     if options.compression_content_types.is_empty() {
-        return is_compressible_content_type(mime);
+        return is_compressible_mime(mime);
     }
 
     options
@@ -41,9 +41,7 @@ fn content_type_is_eligible(content_type: &str, options: &ResponseCompressionOpt
         .any(|candidate| candidate.trim().eq_ignore_ascii_case(mime))
 }
 
-fn is_compressible_content_type(content_type: &str) -> bool {
-    let mime = content_type.split(';').next().unwrap_or(content_type).trim();
-
+fn is_compressible_mime(mime: &str) -> bool {
     mime.starts_with("text/")
         || matches!(
             mime,

@@ -35,6 +35,9 @@ impl RollingCounter {
             Some((bucket_second, count)) if *bucket_second == second => {
                 *count += 1;
             }
+            Some((bucket_second, count)) if *bucket_second > second => {
+                *count += 1;
+            }
             _ => buckets.push_back((second, 1)),
         }
     }
@@ -124,4 +127,16 @@ fn trim_old_buckets(buckets: &mut VecDeque<(u64, u64)>, now_second: u64, window_
     while buckets.front().is_some_and(|(second, _)| *second < cutoff) {
         buckets.pop_front();
     }
+}
+
+#[cfg(test)]
+#[test]
+fn rolling_counter_keeps_bucket_order_when_clock_moves_backwards() {
+    let counter = RollingCounter::default();
+    counter.increment_at(10);
+    counter.increment_at(12);
+    counter.increment_at(11);
+
+    let buckets = counter.buckets.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert_eq!(buckets.iter().copied().collect::<Vec<_>>(), vec![(10, 1), (12, 2)]);
 }
