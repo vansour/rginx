@@ -7,7 +7,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use http::StatusCode;
 use rginx_core::{ConfigSnapshot, Listener, Result};
-use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, RwLock, watch};
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
@@ -20,6 +19,7 @@ use crate::tls::ocsp::ocsp_responder_urls_for_certificate;
 mod connections;
 mod lifecycle;
 mod snapshot_bus;
+mod snapshots;
 #[cfg(test)]
 mod tests;
 mod tls_runtime;
@@ -37,8 +37,24 @@ pub(super) struct PreparedState {
     retired_listeners: Vec<Listener>,
 }
 
-include!("snapshots.rs");
-include!("counters.rs");
+pub use snapshots::ActiveState;
+pub use snapshots::{
+    GrpcTrafficSnapshot, Http3ListenerRuntimeSnapshot, HttpCountersSnapshot, ListenerStatsSnapshot,
+    MtlsStatusSnapshot, RecentTrafficStatsSnapshot, RecentUpstreamStatsSnapshot,
+    ReloadOutcomeSnapshot, ReloadResultSnapshot, ReloadStatusSnapshot, RouteStatsSnapshot,
+    RuntimeListenerBindingSnapshot, RuntimeListenerSnapshot, RuntimeStatusSnapshot,
+    SnapshotDeltaSnapshot, SnapshotModule, TlsCertificateStatusSnapshot,
+    TlsDefaultCertificateBindingSnapshot, TlsListenerStatusSnapshot, TlsOcspRefreshSpec,
+    TlsOcspStatusSnapshot, TlsReloadBoundarySnapshot, TlsRuntimeSnapshot, TlsSniBindingSnapshot,
+    TlsVhostBindingSnapshot, TrafficStatsSnapshot, UpstreamPeerStatsSnapshot,
+    UpstreamStatsSnapshot, UpstreamTlsStatusSnapshot, VhostStatsSnapshot,
+};
+include!("counters/http.rs");
+include!("counters/rolling.rs");
+include!("counters/grpc.rs");
+include!("counters/traffic.rs");
+include!("counters/upstreams.rs");
+include!("counters/versions.rs");
 include!("helpers.rs");
 
 #[cfg(test)]

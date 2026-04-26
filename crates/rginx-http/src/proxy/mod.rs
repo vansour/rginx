@@ -31,7 +31,7 @@ use crate::handler::{
     BoxError, GrpcStatusCode, HttpBody, HttpResponse, full_body, grpc_error_response,
 };
 use crate::state::SharedState;
-use crate::timeout::{GrpcDeadlineBody, IdleTimeoutBody, MaxBytesBody, RequestBodyLimitError};
+use crate::timeout::{GrpcDeadlineBody, IdleTimeoutBody, MaxBytesBody};
 
 mod clients;
 mod common;

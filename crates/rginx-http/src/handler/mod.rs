@@ -1,24 +1,12 @@
 use std::error::Error as StdError;
-use std::time::Instant;
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD;
-use bytes::{Bytes, BytesMut};
-use http::header::{
-    CONTENT_LENGTH, CONTENT_TYPE, HOST, HeaderMap, HeaderName, HeaderValue, REFERER, USER_AGENT,
-};
-use http::{Method, StatusCode, Uri, Version};
+use bytes::Bytes;
 use http_body_util::BodyExt;
 use http_body_util::combinators::UnsyncBoxBody;
-use hyper::body::{Body, Frame, SizeHint};
+use hyper::body::Body;
 use hyper::{Request, Response};
-use rginx_core::{
-    AccessLogFormat, AccessLogValues, ConfigSnapshot, Route, RouteAction, VirtualHost,
-};
 
-use crate::client_ip::{ClientAddress, ConnectionPeerAddrs, resolve_client_address};
-use crate::router;
-use crate::state::{ActiveState, SharedState};
+use crate::client_ip::ConnectionPeerAddrs;
 
 pub(crate) type BoxError = Box<dyn StdError + Send + Sync>;
 pub(crate) type HttpBody = UnsyncBoxBody<Bytes, BoxError>;

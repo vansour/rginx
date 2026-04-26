@@ -4,17 +4,11 @@
   "test_soft_limit": 400,
   "test_hard_limit": 600,
   "legacy_production_size_ceilings": {
-    "crates/rginx-http/src/handler/dispatch.rs": 525,
-    "crates/rginx-http/src/handler/grpc.rs": 606,
     "crates/rginx-http/src/pki/certificate.rs": 547,
     "crates/rginx-http/src/proxy/clients/http3.rs": 501,
-    "crates/rginx-http/src/proxy/forward/mod.rs": 528,
     "crates/rginx-http/src/proxy/health/registry.rs": 858,
     "crates/rginx-http/src/server/http3.rs": 854,
-    "crates/rginx-http/src/state/counters.rs": 662,
-    "crates/rginx-http/src/state/snapshots.rs": 538,
-    "crates/rginx-http/src/tls/ocsp/mod.rs": 827,
-    "crates/rginx-runtime/src/bootstrap/listeners.rs": 549
+    "crates/rginx-http/src/tls/ocsp/mod.rs": 827
   },
   "legacy_test_size_ceilings": {
     "crates/rginx-app/tests/grpc_http3.rs": 647,
