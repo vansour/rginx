@@ -2,17 +2,19 @@
 
 本文档定义仓库级“单文件单职责”约束。
 
-它是 `ARCHITECTURE_CODEBASE_MODULARIZATION_PLAN.md` 的阶段 0 落地规则，配套 gate 脚本为：
+配套 gate 脚本为：
 
 - `scripts/run-modularization-gate.py`
-
-历史遗留债务基线记录在：
-
-- `scripts/modularization_baseline.json`
 
 模块布局与命名约定补充见：
 
 - `docs/ARCHITECTURE_MODULE_LAYOUT_GUIDE.md`
+
+基线文件位于：
+
+- `scripts/modularization_baseline.json`
+
+当前基线为空，只保留全局大小阈值；如果未来必须做临时豁免，也只能通过这个文件显式记录。
 
 ## 适用范围
 
@@ -104,28 +106,28 @@
 ## 测试模块规则
 
 - 生产文件中禁止新增内嵌 `mod tests { ... }`。
-- 历史遗留的内嵌测试模块仅允许出现在基线允许列表中。
-- 后续阶段会逐步迁移这些内嵌测试到独立测试文件。
+- 任何内嵌测试模块都只能出现在基线允许列表中。
+- 遇到遗留内嵌测试时，默认迁移到独立测试文件。
 
 说明：
 
-- `#[cfg(test)] mod tests;` 外置测试声明目前不在本阶段 gate 范围内。
-- 本阶段只禁止继续新增“内嵌测试实现块”。
+- `#[cfg(test)] mod tests;` 外置测试声明目前不在 gate 范围内。
+- gate 只禁止继续新增“内嵌测试实现块”。
 
-## 历史债务基线
+## 基线文件
 
-`scripts/modularization_baseline.json` 记录三类临时豁免：
+`scripts/modularization_baseline.json` 只用于记录临时豁免：
 
-- 历史生产 soft-limit 超限文件及其当前最大行数
-- 历史生产超限文件及其当前最大行数
-- 历史测试 soft-limit 超限文件及其当前最大行数
-- 历史测试超限文件及其当前最大行数
-- 历史允许存在的内嵌 `mod tests { ... }` 文件
+- 生产 soft-limit 超限文件及其当前最大行数
+- 生产 hard-limit 超限文件及其当前最大行数
+- 测试 soft-limit 超限文件及其当前最大行数
+- 测试 hard-limit 超限文件及其当前最大行数
+- 允许保留内嵌 `mod tests { ... }` 的生产文件
 
-基线用途：
+当前状态：
 
-- 防止仓库因为历史债务而无法通过 gate
-- 同时阻止这些历史问题继续恶化
+- 基线文件为空。
+- 这意味着仓库当前没有正式纳管的模块化豁免项。
 
 更新原则：
 
@@ -149,7 +151,7 @@
 
 - 超过 soft limit 的生产文件列表
 - 超过 soft limit 的测试文件列表
-- 当前仍保留内嵌测试块的历史文件列表
+- 当前仍保留内嵌测试块的基线文件列表
 
 ## 执行入口
 

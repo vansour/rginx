@@ -1,31 +1,16 @@
 # rginx Docs Index
 
-当前仓库的 HTTP/3 与发布收口文档集中在 `docs/` 目录。
+`docs/` 只保留当前生效、需要长期维护的文档；阶段计划、归档基线和单次发布说明不再放在这里。
 
-## HTTP/3 主线
+## 当前文档
 
-- `ARCHITECTURE_HTTP3_NGINX_ALIGNMENT_PLAN.md`
-  - 下游 HTTP/3 对齐目标、阶段划分、验收口径
-- `HTTP3_PHASE0_BASELINE.md`
-  - HTTP/3 主线的阶段 0 基线与起始约束
-- `HTTP3_PHASE7_RELEASE.md`
-  - HTTP/3 发布门禁和 soak 入口
-
-## 上游 HTTP/3 专项
-
-- `ARCHITECTURE_UPSTREAM_HTTP3_PRODUCTION_PLAN.md`
-  - 上游 HTTP/3 生产级传输专项计划与阶段收口
-- `ARCHITECTURE_UPSTREAM_HTTP3_PHASE0_BASELINE.md`
-  - 上游 HTTP/3 专项的阶段 0 基线
-
-## 仓库治理
-
-- `ARCHITECTURE_CODEBASE_MODULARIZATION_PLAN.md`
-  - 全仓库“大文件拆分 / 单文件单职责”分阶段重构计划
 - `ARCHITECTURE_CODEBASE_MODULARIZATION_POLICY.md`
-  - 阶段 0 生效的模块化约束、文件大小限制与 gate 规则
+  - Rust 源文件的单文件单职责规则、文件大小阈值和 modularization gate
+- `ARCHITECTURE_MODULE_LAYOUT_GUIDE.md`
+  - 目录门面、命名、测试布局和模块说明约定
 
 ## 维护约定
 
-- 如果 README、release notes 或 workflow 引用了新的架构文档，优先把文档放在 `docs/` 下并在这里登记。
-- 发布前变更了 HTTP/3 gate 或 soak 时，至少同步更新 `HTTP3_PHASE7_RELEASE.md`。
+- 只有描述当前规则或当前长期约定的文档才应放在 `docs/`。
+- 已完成阶段计划、一次性发布说明和临时收口记录应直接从主文档面移除。
+- 规则变更时，同步更新对应脚本、README 和这里的索引。

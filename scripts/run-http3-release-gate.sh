@@ -17,7 +17,7 @@ usage() {
     cat <<'EOF'
 Usage: run-http3-release-gate.sh [options]
 
-Phase 7 HTTP/3 release gate runner. By default it runs:
+HTTP/3 release gate runner. By default it runs:
   1. the dedicated HTTP/3 regression gate
   2. the focused HTTP/3 soak matrix
 
