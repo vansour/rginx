@@ -4,10 +4,6 @@
   "test_soft_limit": 400,
   "test_hard_limit": 600,
   "legacy_production_size_ceilings": {
-    "crates/rginx-config/src/compile/server.rs": 728,
-    "crates/rginx-config/src/compile/upstream.rs": 510,
-    "crates/rginx-config/src/model.rs": 673,
-    "crates/rginx-config/src/validate/server.rs": 721,
     "crates/rginx-http/src/handler/dispatch.rs": 525,
     "crates/rginx-http/src/handler/grpc.rs": 606,
     "crates/rginx-http/src/pki/certificate.rs": 547,
