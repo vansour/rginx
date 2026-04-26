@@ -26,7 +26,7 @@ rustls.workspace = true
 rustls-native-certs.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-socket2 = "0.5.10"
+socket2 = "0.6.3"
 tokio = { workspace = true, features = ["io-util", "process"] }
 tracing.workspace = true
 

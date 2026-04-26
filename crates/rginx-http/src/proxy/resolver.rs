@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Instant;
 
-use hickory_resolver::TokioAsyncResolver;
+use hickory_resolver::TokioResolver;
 use rginx_core::UpstreamDnsPolicy;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -72,7 +72,7 @@ pub(super) struct PeerAddressing {
 #[derive(Debug, Clone)]
 pub(crate) struct UpstreamResolver {
     pub(super) policy: UpstreamDnsPolicy,
-    pub(super) resolver: TokioAsyncResolver,
+    pub(super) resolver: TokioResolver,
     pub(super) cache: Arc<Mutex<HashMap<String, CacheEntry>>>,
     pub(super) resolve_requests_total: Arc<AtomicU64>,
     pub(super) cache_hits_total: Arc<AtomicU64>,
