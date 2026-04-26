@@ -91,6 +91,17 @@ pub enum SignalCommand {
     Quit,
 }
 
+impl SignalCommand {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Reload => "reload",
+            Self::Restart => "restart",
+            Self::Stop => "stop",
+            Self::Quit => "quit",
+        }
+    }
+}
+
 fn default_config_path() -> PathBuf {
     if let Some(path) = env::var_os("rginx_config") {
         return PathBuf::from(path);

@@ -117,6 +117,7 @@ fn status_command_reports_http3_listener_bindings() {
     assert!(stdout.contains("kind=status_listener"));
     assert!(stdout.contains("transport_bindings=2"));
     assert!(stdout.contains("kind=status_listener_binding"));
+    assert!(stdout.contains("kind=status_listener_binding listener=default listener_id=default"));
     assert!(stdout.contains("binding=tcp"));
     assert!(stdout.contains("binding=udp"));
     assert!(stdout.contains("transport=udp"));
@@ -147,6 +148,10 @@ fn status_command_reports_http3_listener_bindings() {
     assert!(stdout.contains("http3_host_key_path=-"));
     assert!(stdout.contains("http3_gso=false"));
     assert!(stdout.contains("http3_early_data_enabled=true"));
+    assert!(stdout.contains("session_resumption_enabled=true"));
+    assert!(stdout.contains("session_tickets_enabled=true"));
+    assert!(stdout.contains("session_cache_size=256"));
+    assert!(stdout.contains("session_ticket_count=2"));
 
     server.shutdown_and_wait(Duration::from_secs(5));
 }

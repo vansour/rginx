@@ -83,6 +83,16 @@ impl SharedState {
                             .transport_bindings()
                             .into_iter()
                             .map(|binding| crate::state::RuntimeListenerBindingSnapshot {
+                                advertise_alt_svc: (binding.kind
+                                    == rginx_core::ListenerTransportKind::Udp)
+                                    .then_some(binding.advertise_alt_svc),
+                                alt_svc_max_age_secs: if binding.kind
+                                    == rginx_core::ListenerTransportKind::Udp
+                                {
+                                    binding.alt_svc_max_age.map(|max_age| max_age.as_secs())
+                                } else {
+                                    None
+                                },
                                 binding_name: binding.name.to_string(),
                                 transport: binding.kind.as_str().to_string(),
                                 listen_addr: binding.listen_addr,
@@ -95,12 +105,6 @@ impl SharedState {
                                 reuse_port_enabled: (binding.kind
                                     == rginx_core::ListenerTransportKind::Udp)
                                     .then_some(config.runtime.accept_workers > 1),
-                                advertise_alt_svc: binding
-                                    .alt_svc_max_age
-                                    .map(|_| binding.advertise_alt_svc),
-                                alt_svc_max_age_secs: binding
-                                    .alt_svc_max_age
-                                    .map(|max_age| max_age.as_secs()),
                                 http3_max_concurrent_streams: binding.http3_max_concurrent_streams,
                                 http3_stream_buffer_size: binding.http3_stream_buffer_size,
                                 http3_active_connection_id_limit: binding
