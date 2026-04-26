@@ -10,6 +10,10 @@
 
 - `scripts/modularization_baseline.json`
 
+模块布局与命名约定补充见：
+
+- `docs/ARCHITECTURE_MODULE_LAYOUT_GUIDE.md`
+
 ## 适用范围
 
 适用于 `crates/` 下所有 Rust 源文件。
@@ -63,8 +67,15 @@
 - 子模块声明
 - 局部重导出
 - 极薄的模块门面逻辑
+- 一句 `//!` 模块说明
 
 不应继续演化成实现总装文件。
+
+## 目录与命名约定
+
+- 新增目录模块时，优先采用“门面 `mod.rs` + 职责子文件”的组织方式。
+- 文件名优先表达职责，不使用模糊命名把多种逻辑继续堆叠到 `common.rs`、`misc.rs`、`utils.rs`。
+- 如果某文件已接近 soft limit，后续功能默认继续拆子模块，而不是把 soft limit 当成新常态。
 
 ## 文件大小限制
 
@@ -75,7 +86,8 @@
 
 解释：
 
-- 超过 soft limit 进入 review 关注区。
+- 超过 soft limit 进入治理约束区。
+- 新增 soft-limit 超限文件默认视为 gate 失败；只有历史基线中已有的 soft-limit 文件可以暂时保留，且不得继续增长。
 - 超过 hard limit 需要拆分；仅允许出现在历史基线中，且不得继续增长。
 
 ### 测试文件
@@ -86,6 +98,7 @@
 解释：
 
 - 测试允许比生产代码更长，但仍应按场景拆分。
+- 新增 soft-limit 超限测试文件默认视为 gate 失败；只有历史基线中已有的 soft-limit 文件可以暂时保留，且不得继续增长。
 - 超过 hard limit 的历史测试文件可以暂时保留在基线中，但不得继续增长。
 
 ## 测试模块规则
@@ -103,7 +116,9 @@
 
 `scripts/modularization_baseline.json` 记录三类临时豁免：
 
+- 历史生产 soft-limit 超限文件及其当前最大行数
 - 历史生产超限文件及其当前最大行数
+- 历史测试 soft-limit 超限文件及其当前最大行数
 - 历史测试超限文件及其当前最大行数
 - 历史允许存在的内嵌 `mod tests { ... }` 文件
 
@@ -123,7 +138,10 @@
 `scripts/run-modularization-gate.py` 会执行以下检查：
 
 - 检查是否有新的生产文件超过 500 行
+- 检查是否有新的生产文件超过 300 行
 - 检查是否有新的测试文件超过 600 行
+- 检查是否有新的测试文件超过 400 行
+- 检查历史 soft-limit 文件是否比基线进一步增长
 - 检查历史超限文件是否比基线进一步增长
 - 检查是否有新的生产文件引入内嵌 `mod tests { ... }`
 
@@ -138,5 +156,6 @@
 当前默认入口：
 
 - `./scripts/test-fast.sh`
+- `.github/workflows/ci.yml` 中的 `Modularization` job
 
-因此现有 CI 和 release verify 路径会自动覆盖该 gate。
+因此本地快速回归和 PR CI 都会显式覆盖该 gate。
