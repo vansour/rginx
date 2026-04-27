@@ -85,17 +85,6 @@ pub(super) fn sanitize_request_headers(
 
     headers.insert("x-forwarded-for", HeaderValue::from_str(&client_address.forwarded_for)?);
 
-    for header_override in proxy_header_overrides {
-        match header_override {
-            ProxyHeaderOverride::Set(name, value) => {
-                headers.insert(name, value);
-            }
-            ProxyHeaderOverride::Remove(name) => {
-                headers.remove(name);
-            }
-        }
-    }
-
     if let Some(grpc_web_mode) = grpc_web_mode {
         headers.insert(CONTENT_TYPE, grpc_web_mode.upstream_content_type.clone());
         headers.remove(CONTENT_LENGTH);
@@ -112,6 +101,17 @@ pub(super) fn sanitize_request_headers(
     if let Some(upgrade_protocol) = upgrade_protocol {
         headers.insert(CONNECTION, HeaderValue::from_static("upgrade"));
         headers.insert(UPGRADE, upgrade_protocol);
+    }
+
+    for header_override in proxy_header_overrides {
+        match header_override {
+            ProxyHeaderOverride::Set(name, value) => {
+                headers.insert(name, value);
+            }
+            ProxyHeaderOverride::Remove(name) => {
+                headers.remove(name);
+            }
+        }
     }
 
     Ok(())
