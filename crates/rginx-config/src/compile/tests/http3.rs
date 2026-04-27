@@ -9,6 +9,7 @@ fn compile_http3_listener_defaults_to_tcp_listen_addr_and_default_alt_svc_policy
     fs::write(&key_path, "placeholder key").expect("key file should be written");
 
     let config = Config {
+        cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
             worker_threads: None,
@@ -62,6 +63,7 @@ fn compile_http3_listener_defaults_to_tcp_listen_addr_and_default_alt_svc_policy
         },
         upstreams: Vec::new(),
         locations: vec![LocationConfig {
+            cache: None,
             matcher: MatcherConfig::Exact("/".to_string()),
             handler: HandlerConfig::Return {
                 status: 200,
@@ -112,6 +114,7 @@ fn compile_http3_applies_transport_settings_and_resolves_host_key_path() {
     fs::write(&key_path, b"placeholder").expect("server key should be written");
 
     let config = Config {
+        cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 2,
             worker_threads: None,
@@ -165,6 +168,7 @@ fn compile_http3_applies_transport_settings_and_resolves_host_key_path() {
         },
         upstreams: Vec::new(),
         locations: vec![LocationConfig {
+            cache: None,
             matcher: MatcherConfig::Exact("/".to_string()),
             handler: HandlerConfig::Return {
                 status: 200,

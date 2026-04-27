@@ -7,6 +7,7 @@ fn compile_resolves_custom_ca_relative_to_config_base() {
     fs::write(&ca_path, b"placeholder").expect("temp CA file should be written");
 
     let config = Config {
+        cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
             worker_threads: None,
@@ -76,6 +77,7 @@ fn compile_resolves_custom_ca_relative_to_config_base() {
             healthy_successes_required: Some(4),
         }],
         locations: vec![LocationConfig {
+            cache: None,
             matcher: MatcherConfig::Prefix("/".to_string()),
             handler: HandlerConfig::Proxy {
                 upstream: "dev-backend".to_string(),
@@ -134,6 +136,7 @@ fn compile_resolves_custom_ca_relative_to_config_base() {
 #[test]
 fn compile_accepts_https_http3_upstreams() {
     let config = Config {
+        cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
             worker_threads: None,
@@ -194,6 +197,7 @@ fn compile_accepts_https_http3_upstreams() {
             healthy_successes_required: None,
         }],
         locations: vec![LocationConfig {
+            cache: None,
             matcher: MatcherConfig::Prefix("/".to_string()),
             handler: HandlerConfig::Proxy {
                 upstream: "h3-backend".to_string(),
@@ -238,6 +242,7 @@ fn compile_resolves_upstream_mtls_identity_and_tls_versions_relative_to_config_b
     fs::write(&client_key_path, b"placeholder").expect("temp client key file should be written");
 
     let config = Config {
+        cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
             worker_threads: None,
@@ -307,6 +312,7 @@ fn compile_resolves_upstream_mtls_identity_and_tls_versions_relative_to_config_b
             healthy_successes_required: None,
         }],
         locations: vec![LocationConfig {
+            cache: None,
             matcher: MatcherConfig::Prefix("/".to_string()),
             handler: HandlerConfig::Proxy {
                 upstream: "mtls-backend".to_string(),

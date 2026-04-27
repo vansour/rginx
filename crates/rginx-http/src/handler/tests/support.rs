@@ -30,6 +30,7 @@ pub(crate) fn test_config(default_vhost: VirtualHost, vhosts: Vec<VirtualHost>) 
         tls: None,
     };
     ConfigSnapshot {
+        cache_zones: HashMap::new(),
         runtime: RuntimeSettings {
             shutdown_timeout: Duration::from_secs(1),
             worker_threads: None,
@@ -60,6 +61,7 @@ pub(crate) fn test_vhost(id: &str, server_names: Vec<&str>, routes: Vec<Route>) 
 
 pub(crate) fn test_route(id: &str, matcher: RouteMatcher) -> Route {
     Route {
+        cache: None,
         id: id.to_string(),
         matcher,
         grpc_match: None,

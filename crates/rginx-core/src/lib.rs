@@ -5,12 +5,13 @@ pub mod service;
 pub mod types;
 
 pub use config::{
-    AccessLogFormat, AccessLogValues, ActiveHealthCheck, ClientIdentity, ConfigSnapshot,
-    DEFAULT_SERVER_HEADER, GrpcRouteMatch, Listener, ListenerApplicationProtocol, ListenerHttp3,
-    ListenerTransportBinding, ListenerTransportKind, OcspConfig, OcspNonceMode,
-    OcspResponderPolicy, ProxyHeaderRenderContext, ProxyHeaderTemplate, ProxyHeaderTemplateError,
-    ProxyHeaderValue, ProxyTarget, ReturnAction, Route, RouteAccessControl, RouteAction,
-    RouteBufferingPolicy, RouteCompressionPolicy, RouteMatcher, RouteRateLimit, RouteRegexError,
+    AccessLogFormat, AccessLogValues, ActiveHealthCheck, CacheKeyRenderContext, CacheKeyTemplate,
+    CacheKeyTemplateError, CacheZone, ClientIdentity, ConfigSnapshot, DEFAULT_SERVER_HEADER,
+    GrpcRouteMatch, Listener, ListenerApplicationProtocol, ListenerHttp3, ListenerTransportBinding,
+    ListenerTransportKind, OcspConfig, OcspNonceMode, OcspResponderPolicy,
+    ProxyHeaderRenderContext, ProxyHeaderTemplate, ProxyHeaderTemplateError, ProxyHeaderValue,
+    ProxyTarget, ReturnAction, Route, RouteAccessControl, RouteAction, RouteBufferingPolicy,
+    RouteCachePolicy, RouteCompressionPolicy, RouteMatcher, RouteRateLimit, RouteRegexError,
     RouteRegexMatcher, RuntimeSettings, Server, ServerCertificateBundle, ServerClientAuthMode,
     ServerClientAuthPolicy, ServerNameMatch, ServerTls, TlsCipherSuite, TlsKeyExchangeGroup,
     TlsVersion, Upstream, UpstreamDnsPolicy, UpstreamLoadBalance, UpstreamPeer, UpstreamProtocol,

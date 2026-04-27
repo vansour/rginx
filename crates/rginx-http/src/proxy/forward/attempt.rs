@@ -2,25 +2,40 @@ use super::*;
 
 pub async fn forward_request(
     state: SharedState,
-    clients: ProxyClients,
+    active: crate::state::ActiveState,
     request: Request<HttpBody>,
     listener_id: &str,
     target: &ProxyTarget,
     client_address: ClientAddress,
     downstream: DownstreamRequestContext<'_>,
 ) -> HttpResponse {
+    let cache_manager = active.cache.clone();
+    let clients = active.clients;
+    let cache_request = crate::cache::CacheRequest::from_request(&request);
+    let mut cache = match lookup_forward_cache(
+        &cache_manager,
+        cache_request,
+        downstream.downstream_proto,
+        downstream.options.cache.as_ref(),
+    )
+    .await
+    {
+        ForwardCacheLookup::Hit(response) => return response,
+        ForwardCacheLookup::Proceed(cache) => cache,
+    };
+
     let prepared = match prepare_forward_request(
         &state,
         &clients,
         request,
         target,
         &client_address,
-        downstream,
+        &downstream,
     )
     .await
     {
         Ok(prepared) => prepared,
-        Err(response) => return response,
+        Err(response) => return cache.mark_response(response),
     };
 
     let setup::PreparedForwardRequest {
@@ -49,21 +64,14 @@ pub async fn forward_request(
         ) {
             Ok(request) => request,
             Err(error) => {
-                tracing::warn!(
-                    request_id = %downstream.request_id,
-                    upstream = %target.upstream_name,
-                    peer = %peer.display_url,
-                    logical_peer = %peer.logical_peer_url,
-                    upstream_sni_enabled = target.upstream.server_name,
-                    upstream_server_name = target.upstream.server_name_override.as_deref().unwrap_or("-"),
-                    upstream_verify = super::upstream_tls_verify_label(&target.upstream.tls),
-                    %error,
-                    "failed to build upstream request"
-                );
-                state.record_upstream_bad_gateway_response(&target.upstream_name);
-                return bad_gateway(
+                return failed_to_build_request_response(
+                    &state,
                     &request_headers,
-                    format!("failed to build upstream request for `{}`\n", target.upstream_name),
+                    target,
+                    peer,
+                    &downstream,
+                    error,
+                    &cache,
                 );
             }
         };
@@ -87,11 +95,11 @@ pub async fn forward_request(
                     &request_headers,
                     target,
                     peer,
-                    downstream,
+                    &downstream,
                 )
                 .await
                 {
-                    return response;
+                    return cache.mark_response(response);
                 }
                 state.record_upstream_peer_success(&target.upstream_name, &peer.logical_peer_url);
                 state.record_upstream_completed_response(&target.upstream_name);
@@ -128,8 +136,12 @@ pub async fn forward_request(
                         response_idle_timeout,
                         grpc_response_deadline,
                         grpc_web_mode: grpc_web_mode.as_ref(),
+                        cache_manager: cache_manager.clone(),
+                        cache_store: cache.store.take(),
+                        cache_status: cache.status,
                     },
-                );
+                )
+                .await;
             }
             Ok(Err(error))
                 if can_retry_peer_request(&prepared_request, peers.len(), attempt_index) =>
@@ -170,12 +182,12 @@ pub async fn forward_request(
                         "rejecting streamed request body that exceeds configured server limit"
                     );
                     state.record_upstream_payload_too_large_response(&target.upstream_name);
-                    return payload_too_large(
-                        &request_headers,
-                        format!(
-                            "request body exceeds server.max_request_body_bytes ({max_request_body_bytes} bytes)\n"
-                        ),
-                    );
+                    return cache.mark_response(payload_too_large(
+                            &request_headers,
+                            format!(
+                                "request body exceeds server.max_request_body_bytes ({max_request_body_bytes} bytes)\n"
+                            ),
+                        ));
                 }
                 if invalid_downstream_request_body_error(&error) {
                     tracing::warn!(
@@ -191,10 +203,10 @@ pub async fn forward_request(
                         "downstream request body was invalid while proxying upstream request"
                     );
                     state.record_upstream_bad_request_response(&target.upstream_name);
-                    return bad_request(
+                    return cache.mark_response(bad_request(
                         &request_headers,
                         format!("invalid downstream request body: {error}\n"),
-                    );
+                    ));
                 }
                 state.record_upstream_peer_failure(&target.upstream_name, &peer.logical_peer_url);
                 let tls_failure = super::classify_upstream_tls_failure(&error);
@@ -216,10 +228,10 @@ pub async fn forward_request(
                     "upstream request failed"
                 );
                 state.record_upstream_bad_gateway_response(&target.upstream_name);
-                return bad_gateway(
+                return cache.mark_response(bad_gateway(
                     &request_headers,
                     format!("upstream `{}` is unavailable\n", target.upstream_name),
-                );
+                ));
             }
             Err(error) if can_retry_peer_request(&prepared_request, peers.len(), attempt_index) => {
                 state.record_upstream_peer_timeout(&target.upstream_name, &peer.logical_peer_url);
@@ -264,17 +276,16 @@ pub async fn forward_request(
                     "upstream request timed out"
                 );
                 state.record_upstream_gateway_timeout_response(&target.upstream_name);
-                return gateway_timeout(
+                return cache.mark_response(gateway_timeout(
                     &request_headers,
                     format!(
                         "{}\n",
                         grpc_timeout_message(&target.upstream_name, upstream_request_timeout)
                     ),
-                );
+                ));
             }
         }
     }
 
-    state.record_upstream_bad_gateway_response(&target.upstream_name);
-    bad_gateway(&request_headers, format!("upstream `{}` is unavailable\n", target.upstream_name))
+    upstream_unavailable_response(&state, &request_headers, target, &cache)
 }

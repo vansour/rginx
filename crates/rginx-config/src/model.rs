@@ -1,5 +1,6 @@
 use serde::Deserialize;
 
+mod cache;
 mod listener;
 mod route;
 mod runtime;
@@ -8,6 +9,7 @@ mod tls;
 mod upstream;
 mod vhost;
 
+pub use cache::{CacheRouteConfig, CacheZoneConfig};
 pub use listener::{Http3Config, ListenerConfig};
 pub use route::{
     HandlerConfig, LocationConfig, MatcherConfig, ProxyHeaderDynamicValueConfig,
@@ -31,6 +33,8 @@ pub struct Config {
     pub runtime: RuntimeConfig,
     #[serde(default)]
     pub listeners: Vec<ListenerConfig>,
+    #[serde(default)]
+    pub cache_zones: Vec<CacheZoneConfig>,
     pub server: ServerConfig,
     #[serde(default)]
     pub upstreams: Vec<UpstreamConfig>,

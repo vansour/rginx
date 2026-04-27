@@ -10,6 +10,7 @@ use super::{
 
 fn make_route(path: &str, body: &str) -> Route {
     Route {
+        cache: None,
         id: format!("test|prefix:{path}"),
         matcher: RouteMatcher::Prefix(path.to_string()),
         grpc_match: None,
@@ -47,6 +48,7 @@ fn make_vhost(server_names: Vec<&str>, routes: Vec<Route>) -> VirtualHost {
 fn exact_routes_beat_prefix_routes() {
     let routes = vec![
         Route {
+            cache: None,
             id: "test|exact:/api".to_string(),
             matcher: RouteMatcher::Exact("/api".to_string()),
             grpc_match: None,
@@ -66,6 +68,7 @@ fn exact_routes_beat_prefix_routes() {
             streaming_response_idle_timeout: None,
         },
         Route {
+            cache: None,
             id: "test|prefix:/".to_string(),
             matcher: RouteMatcher::Prefix("/".to_string()),
             grpc_match: None,
@@ -93,6 +96,7 @@ fn exact_routes_beat_prefix_routes() {
 #[test]
 fn prefix_routes_respect_segment_boundaries() {
     let routes = vec![Route {
+        cache: None,
         id: "test|prefix:/api".to_string(),
         matcher: RouteMatcher::Prefix("/api".to_string()),
         grpc_match: None,
@@ -176,6 +180,7 @@ fn select_route_by_host_combines_host_and_path() {
 fn grpc_specific_routes_beat_generic_routes_for_same_path() {
     let routes = vec![
         Route {
+            cache: None,
             id: "test|prefix:/|grpc:service=grpc.health.v1.Health,method=Check".to_string(),
             matcher: RouteMatcher::Prefix("/".to_string()),
             grpc_match: Some(GrpcRouteMatch {
@@ -198,6 +203,7 @@ fn grpc_specific_routes_beat_generic_routes_for_same_path() {
             streaming_response_idle_timeout: None,
         },
         Route {
+            cache: None,
             id: "test|prefix:/".to_string(),
             matcher: RouteMatcher::Prefix("/".to_string()),
             grpc_match: None,
@@ -229,6 +235,7 @@ fn grpc_specific_routes_beat_generic_routes_for_same_path() {
 #[test]
 fn grpc_specific_routes_require_grpc_request_context() {
     let routes = vec![Route {
+        cache: None,
         id: "test|prefix:/|grpc:service=grpc.health.v1.Health".to_string(),
         matcher: RouteMatcher::Prefix("/".to_string()),
         grpc_match: Some(GrpcRouteMatch {
@@ -268,6 +275,7 @@ fn select_route_by_host_with_context_respects_grpc_constraints() {
         vec!["api.example.com"],
         vec![
             Route {
+                cache: None,
                 id: "test|prefix:/|grpc:service=grpc.health.v1.Health".to_string(),
                 matcher: RouteMatcher::Prefix("/".to_string()),
                 grpc_match: Some(GrpcRouteMatch {

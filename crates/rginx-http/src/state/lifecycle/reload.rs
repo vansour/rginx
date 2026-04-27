@@ -120,6 +120,7 @@ impl SharedState {
             state.revision = next_revision;
             state.config = prepared.config.clone();
             state.clients = prepared.clients;
+            state.cache = prepared.cache;
             next_revision
         };
 

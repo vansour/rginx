@@ -5,6 +5,7 @@ use rginx_core::{ConfigSnapshot, Result, VirtualHost};
 
 use crate::validate::validate;
 
+mod cache;
 mod path;
 mod route;
 mod runtime;
@@ -46,12 +47,14 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
     let Config {
         runtime,
         listeners: raw_listeners,
+        cache_zones: raw_cache_zones,
         server,
         upstreams: raw_upstreams,
         locations,
         servers: raw_servers,
     } = raw;
     let runtime = runtime::compile_runtime_settings(runtime)?;
+    let cache_zones = cache::compile_cache_zones(raw_cache_zones, base_dir)?;
     let any_vhost_tls = raw_servers.iter().any(|vhost| vhost.tls.is_some());
     let any_vhost_listen = raw_servers.iter().any(|vhost| !vhost.listen.is_empty());
     let (listeners, default_server_names) = if any_vhost_listen {
@@ -93,7 +96,7 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
         vhosts.push(compiled.vhost);
     }
 
-    Ok(ConfigSnapshot { runtime, listeners, default_vhost, vhosts, upstreams })
+    Ok(ConfigSnapshot { runtime, listeners, default_vhost, vhosts, cache_zones, upstreams })
 }
 #[cfg(test)]
 mod tests;

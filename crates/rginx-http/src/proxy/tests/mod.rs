@@ -52,6 +52,7 @@ use super::{
 use crate::client_ip::{ClientAddress, ClientIpSource};
 use tempfile::TempDir;
 
+mod cache;
 mod client_profiles;
 mod grpc;
 mod peer_recovery;
@@ -198,6 +199,7 @@ fn snapshot_with_upstreams_map(
 ) -> rginx_core::ConfigSnapshot {
     let server = default_server();
     rginx_core::ConfigSnapshot {
+        cache_zones: HashMap::new(),
         runtime: rginx_core::RuntimeSettings {
             shutdown_timeout: Duration::from_secs(1),
             worker_threads: None,

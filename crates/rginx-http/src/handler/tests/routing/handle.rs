@@ -43,6 +43,7 @@ async fn handle_serves_requests_for_retired_listener_runtime() {
 #[tokio::test]
 async fn handle_return_route_uses_numeric_body_and_ignores_non_redirect_location() {
     let route = Route {
+        cache: None,
         id: "server/routes[0]|exact:/custom".to_string(),
         matcher: RouteMatcher::Exact("/custom".to_string()),
         grpc_match: None,

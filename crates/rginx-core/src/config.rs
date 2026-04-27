@@ -1,4 +1,5 @@
 mod access_log;
+mod cache;
 mod listener;
 mod route;
 mod server;
@@ -9,6 +10,9 @@ mod upstream;
 mod virtual_host;
 
 pub use access_log::{AccessLogFormat, AccessLogValues};
+pub use cache::{
+    CacheKeyRenderContext, CacheKeyTemplate, CacheKeyTemplateError, CacheZone, RouteCachePolicy,
+};
 pub use listener::{
     Listener, ListenerApplicationProtocol, ListenerHttp3, ListenerTransportBinding,
     ListenerTransportKind,
