@@ -1,5 +1,7 @@
 use super::*;
 
+mod regex;
+
 #[test]
 fn compile_attaches_route_access_control() {
     let config = Config {
@@ -16,6 +18,7 @@ fn compile_attaches_route_access_control() {
             default_certificate: None,
             server_names: Vec::new(),
             trusted_proxies: Vec::new(),
+            client_ip_header: None,
             keep_alive: None,
             max_headers: None,
             max_request_body_bytes: None,
@@ -75,6 +78,7 @@ fn compile_attaches_route_rate_limit() {
             default_certificate: None,
             server_names: Vec::new(),
             trusted_proxies: Vec::new(),
+            client_ip_header: None,
             keep_alive: None,
             max_headers: None,
             max_request_body_bytes: None,
@@ -136,6 +140,7 @@ fn compile_applies_route_transport_policy_defaults_and_overrides() {
             default_certificate: None,
             server_names: Vec::new(),
             trusted_proxies: Vec::new(),
+            client_ip_header: None,
             keep_alive: None,
             max_headers: None,
             max_request_body_bytes: None,
@@ -232,6 +237,7 @@ fn compile_generates_distinct_route_and_vhost_ids() {
             default_certificate: None,
             server_names: vec!["default.example.com".to_string()],
             trusted_proxies: Vec::new(),
+            client_ip_header: None,
             keep_alive: None,
             max_headers: None,
             max_request_body_bytes: None,
@@ -295,6 +301,7 @@ fn compile_prioritizes_grpc_constrained_routes_with_same_path_matcher() {
             default_certificate: None,
             server_names: Vec::new(),
             trusted_proxies: Vec::new(),
+            client_ip_header: None,
             keep_alive: None,
             max_headers: None,
             max_request_body_bytes: None,

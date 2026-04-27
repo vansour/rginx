@@ -82,6 +82,33 @@ fn validate_rejects_blank_route_compression_content_type_entry() {
 }
 
 #[test]
+fn validate_rejects_invalid_regex_route_matcher() {
+    let mut config = base_config();
+    config.locations[0].matcher =
+        MatcherConfig::Regex { pattern: "(".to_string(), case_insensitive: false };
+
+    let error = validate(&config).expect_err("invalid regex matcher should be rejected");
+    assert!(error.to_string().contains("route regex pattern `(` is invalid"));
+}
+
+#[test]
+fn validate_rejects_invalid_dynamic_proxy_header_template() {
+    let mut config = base_config();
+    let HandlerConfig::Proxy { proxy_set_headers, .. } = &mut config.locations[0].handler else {
+        panic!("base route should proxy");
+    };
+    proxy_set_headers.insert(
+        "origin".to_string(),
+        ProxyHeaderValueConfig::Dynamic(ProxyHeaderDynamicValueConfig::Template(
+            "https://{missing}".to_string(),
+        )),
+    );
+
+    let error = validate(&config).expect_err("invalid proxy header template should be rejected");
+    assert!(error.to_string().contains("proxy_set_headers Template for `origin` is invalid"));
+}
+
+#[test]
 fn validate_allows_duplicate_exact_routes_when_grpc_constraints_differ() {
     let mut config = base_config();
     config.locations[0].matcher = MatcherConfig::Exact("/grpc.health.v1.Health/Check".to_string());

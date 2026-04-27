@@ -5,14 +5,14 @@ use std::time::Duration;
 use http::StatusCode;
 use ipnet::IpNet;
 use rginx_core::{
-    Error, GrpcRouteMatch, ProxyTarget, Result, ReturnAction, Route, RouteAccessControl,
-    RouteAction, RouteBufferingPolicy, RouteCompressionPolicy, RouteMatcher, RouteRateLimit,
-    Upstream,
+    Error, GrpcRouteMatch, ProxyHeaderTemplate, ProxyHeaderValue, ProxyTarget, Result,
+    ReturnAction, Route, RouteAccessControl, RouteAction, RouteBufferingPolicy,
+    RouteCompressionPolicy, RouteMatcher, RouteRateLimit, RouteRegexMatcher, Upstream,
 };
 
 use crate::model::{
-    HandlerConfig, LocationConfig, MatcherConfig, RouteBufferingPolicyConfig,
-    RouteCompressionPolicyConfig,
+    HandlerConfig, LocationConfig, MatcherConfig, ProxyHeaderDynamicValueConfig,
+    ProxyHeaderValueConfig, RouteBufferingPolicyConfig, RouteCompressionPolicyConfig,
 };
 
 pub(super) fn compile_routes(
@@ -70,6 +70,10 @@ fn compile_route(
     let matcher = match matcher {
         MatcherConfig::Exact(path) => RouteMatcher::Exact(path),
         MatcherConfig::Prefix(path) => RouteMatcher::Prefix(path),
+        MatcherConfig::Regex { pattern, case_insensitive } => RouteMatcher::Regex(
+            RouteRegexMatcher::new(pattern, case_insensitive)
+                .map_err(|error| Error::Config(error.to_string()))?,
+        ),
     };
     let grpc_match = if grpc_service.is_some() || grpc_method.is_some() {
         Some(GrpcRouteMatch { service: grpc_service, method: grpc_method })
@@ -136,9 +140,7 @@ fn compile_route_action(
                     let header_name = name
                         .parse::<http::header::HeaderName>()
                         .map_err(|e| Error::Config(format!("invalid header name `{name}`: {e}")))?;
-                    let header_value = value.parse::<http::header::HeaderValue>().map_err(|e| {
-                        Error::Config(format!("invalid header value for `{name}`: {e}"))
-                    })?;
+                    let header_value = compile_proxy_header_value(&name, value)?;
                     Ok((header_name, header_value))
                 })
                 .collect::<Result<Vec<_>>>()?;
@@ -159,6 +161,44 @@ fn compile_route_action(
     }
 }
 
+fn compile_proxy_header_value(
+    name: &str,
+    value: ProxyHeaderValueConfig,
+) -> Result<ProxyHeaderValue> {
+    match value {
+        ProxyHeaderValueConfig::Static(value) => {
+            let value = value.parse::<http::header::HeaderValue>().map_err(|error| {
+                Error::Config(format!("invalid header value for `{name}`: {error}"))
+            })?;
+            Ok(ProxyHeaderValue::Static(value))
+        }
+        ProxyHeaderValueConfig::Dynamic(dynamic) => match dynamic {
+            ProxyHeaderDynamicValueConfig::Host => Ok(ProxyHeaderValue::Host),
+            ProxyHeaderDynamicValueConfig::Scheme => Ok(ProxyHeaderValue::Scheme),
+            ProxyHeaderDynamicValueConfig::ClientIp => Ok(ProxyHeaderValue::ClientIp),
+            ProxyHeaderDynamicValueConfig::RemoteAddr => Ok(ProxyHeaderValue::RemoteAddr),
+            ProxyHeaderDynamicValueConfig::PeerAddr => Ok(ProxyHeaderValue::PeerAddr),
+            ProxyHeaderDynamicValueConfig::ForwardedFor => Ok(ProxyHeaderValue::ForwardedFor),
+            ProxyHeaderDynamicValueConfig::RequestHeader(header_name) => {
+                let header_name =
+                    header_name.parse::<http::header::HeaderName>().map_err(|error| {
+                        Error::Config(format!(
+                            "invalid request header source `{header_name}` for proxy header `{name}`: {error}"
+                        ))
+                    })?;
+                Ok(ProxyHeaderValue::RequestHeader(header_name))
+            }
+            ProxyHeaderDynamicValueConfig::Template(template) => {
+                let template = ProxyHeaderTemplate::parse(template).map_err(|error| {
+                    Error::Config(format!("invalid template for proxy header `{name}`: {error}"))
+                })?;
+                Ok(ProxyHeaderValue::Template(template))
+            }
+            ProxyHeaderDynamicValueConfig::Remove => Ok(ProxyHeaderValue::Remove),
+        },
+    }
+}
+
 fn compile_route_access_control(
     matcher: &RouteMatcher,
     allow_cidrs: Vec<String>,
@@ -166,6 +206,7 @@ fn compile_route_access_control(
 ) -> Result<RouteAccessControl> {
     let matcher_label = match matcher {
         RouteMatcher::Exact(path) | RouteMatcher::Prefix(path) => path.as_str(),
+        RouteMatcher::Regex(regex) => regex.pattern(),
     };
 
     Ok(RouteAccessControl::new(
@@ -181,6 +222,7 @@ fn compile_route_rate_limit(
 ) -> Result<Option<RouteRateLimit>> {
     let matcher_label = match matcher {
         RouteMatcher::Exact(path) | RouteMatcher::Prefix(path) => path.as_str(),
+        RouteMatcher::Regex(regex) => regex.pattern(),
     };
 
     match requests_per_sec {

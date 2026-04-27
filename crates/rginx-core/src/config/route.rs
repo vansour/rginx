@@ -2,10 +2,18 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use http::{HeaderName, HeaderValue, StatusCode};
+use http::{HeaderName, StatusCode};
 use ipnet::IpNet;
 
 use super::upstream::Upstream;
+
+mod proxy_header;
+mod regex_matcher;
+
+pub use proxy_header::{
+    ProxyHeaderRenderContext, ProxyHeaderTemplate, ProxyHeaderTemplateError, ProxyHeaderValue,
+};
+pub use regex_matcher::{RouteRegexError, RouteRegexMatcher};
 
 #[derive(Debug, Clone)]
 pub struct Route {
@@ -104,6 +112,7 @@ impl RouteCompressionPolicy {
 pub enum RouteMatcher {
     Exact(String),
     Prefix(String),
+    Regex(RouteRegexMatcher),
 }
 
 impl RouteMatcher {
@@ -115,12 +124,16 @@ impl RouteMatcher {
                 path == prefix
                     || path.strip_prefix(prefix).is_some_and(|remainder| remainder.starts_with('/'))
             }
+            Self::Regex(regex) => regex.matches(path),
         }
     }
 
     pub fn priority(&self) -> (u8, usize) {
         match self {
-            Self::Exact(path) => (2, path.len()),
+            Self::Exact(path) => (3, path.len()),
+            // Regex routes keep declaration order among themselves. compile_routes uses a stable
+            // sort, so equal regex priorities do not reorder overlapping regex matchers.
+            Self::Regex(_) => (2, 0),
             Self::Prefix(path) => (1, path.len()),
         }
     }
@@ -129,6 +142,13 @@ impl RouteMatcher {
         match self {
             Self::Exact(path) => format!("exact:{path}"),
             Self::Prefix(path) => format!("prefix:{path}"),
+            Self::Regex(regex) => {
+                if regex.case_insensitive() {
+                    format!("regex:i:{}", regex.pattern())
+                } else {
+                    format!("regex:{}", regex.pattern())
+                }
+            }
         }
     }
 }
@@ -173,7 +193,7 @@ pub struct ProxyTarget {
     pub upstream: Arc<Upstream>,
     pub preserve_host: bool,
     pub strip_prefix: Option<String>,
-    pub proxy_set_headers: Vec<(HeaderName, HeaderValue)>,
+    pub proxy_set_headers: Vec<(HeaderName, ProxyHeaderValue)>,
 }
 
 #[derive(Debug, Clone)]

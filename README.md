@@ -12,8 +12,9 @@
 - `weight`、`backup`、幂等请求 failover
 - 下游 TLS、SNI、OCSP、mTLS、ALPN、TLS 版本控制
 - 上游 TLS、mTLS、HTTP/2、HTTP/3、`server_name_override`
+- cleartext h2c gRPC upstream、regex 路由、动态代理 header
 - gRPC、grpc-web、trailers、`grpc-timeout`
-- 压缩、限流、CIDR allow/deny、`trusted_proxies`
+- 压缩、限流、CIDR allow/deny、`trusted_proxies`、`client_ip_header`
 - 热重载、优雅重启、平滑退出
 - 本地只读运维命令：`check`、`status`、`snapshot`、`snapshot-version`、`delta`、`wait`、`counters`、`traffic`、`peers`、`upstreams`
 
@@ -58,6 +59,10 @@ cargo run -p rginx --
 配置布局与 nginx 对齐：`rginx.ron` 只保留全局 runtime/server 默认值和
 `conf.d/*.ron` include；每个 `VirtualHostConfig` 站点文件负责自己的 `listen`、
 TLS 证书、局部 `upstreams` 和 `locations`。
+
+配置兼容提示：`proxy_set_headers` 现在支持结构化动态值；旧的静态字符串
+写法如 `"X-Foo": "bar"` 仍然有效，动态值需使用 RON enum 写法如
+`"X-Real-IP": ClientIp` 或 `"Origin": Template("https://{host}")`。
 
 常用命令：
 
@@ -139,6 +144,7 @@ scripts/run-fuzz-coverage.sh --target certificate_inspect
 ## 文档
 
 - [docs/README.md](docs/README.md) 汇总当前生效的仓库治理文档
+- [docs/NEZHA_DASHBOARD.md](docs/NEZHA_DASHBOARD.md) 提供 Nezha Dashboard 反向代理完整示例
 - [fuzz/README.md](fuzz/README.md) 说明 fuzz target、seed、smoke 和 coverage 流程
 
 ## 许可证

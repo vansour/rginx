@@ -127,6 +127,7 @@ fn validate_rejects_vhost_tls_without_any_tls_listener() {
         default_certificate: None,
         listen: "127.0.0.1:8080".to_string(),
         trusted_proxies: Vec::new(),
+        client_ip_header: None,
         keep_alive: Some(true),
         max_headers: None,
         max_request_body_bytes: None,

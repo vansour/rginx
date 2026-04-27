@@ -17,6 +17,7 @@ fn listener(
             server_header: rginx_core::default_server_header(),
             default_certificate: default_certificate.map(str::to_string),
             trusted_proxies: Vec::new(),
+            client_ip_header: None,
             keep_alive: true,
             max_headers: None,
             max_request_body_bytes: None,

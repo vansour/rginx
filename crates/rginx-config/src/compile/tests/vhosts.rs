@@ -1,6 +1,7 @@
 use super::*;
 
 mod listener_conflicts;
+mod nezha;
 
 #[test]
 fn compile_generates_deduplicated_listeners_from_vhost_listen() {
@@ -242,6 +243,7 @@ fn server_defaults(listen: Option<&str>) -> ServerConfig {
         default_certificate: None,
         server_names: Vec::new(),
         trusted_proxies: Vec::new(),
+        client_ip_header: None,
         keep_alive: None,
         max_headers: None,
         max_request_body_bytes: None,

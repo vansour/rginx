@@ -14,6 +14,7 @@ fn snapshot(listen: &str) -> ConfigSnapshot {
         server_header: rginx_core::default_server_header(),
         default_certificate: None,
         trusted_proxies: Vec::new(),
+        client_ip_header: None,
         keep_alive: true,
         max_headers: None,
         max_request_body_bytes: None,

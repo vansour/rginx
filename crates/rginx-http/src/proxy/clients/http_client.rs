@@ -145,7 +145,9 @@ pub(super) fn build_hyper_client_for_endpoint(
     let connector = match profile.protocol {
         UpstreamProtocol::Auto => builder.enable_all_versions().wrap_connector(connector),
         UpstreamProtocol::Http1 => builder.enable_http1().wrap_connector(connector),
-        UpstreamProtocol::Http2 => builder.enable_http2().wrap_connector(connector),
+        UpstreamProtocol::Http2 | UpstreamProtocol::H2c => {
+            builder.enable_http2().wrap_connector(connector)
+        }
         UpstreamProtocol::Http3 => unreachable!("handled before hyper connector construction"),
     };
 
@@ -162,7 +164,7 @@ pub(super) fn build_hyper_client_for_endpoint(
         client_builder.http2_keep_alive_timeout(profile.http2_keep_alive_timeout);
         client_builder.http2_keep_alive_while_idle(profile.http2_keep_alive_while_idle);
     }
-    if profile.protocol == UpstreamProtocol::Http2 {
+    if matches!(profile.protocol, UpstreamProtocol::Http2 | UpstreamProtocol::H2c) {
         client_builder.http2_only(true);
     }
 

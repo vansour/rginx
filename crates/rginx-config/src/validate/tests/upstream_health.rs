@@ -46,7 +46,7 @@ fn validate_rejects_grpc_health_check_for_http1_upstream() {
     config.upstreams[0].health_check_grpc_service = Some("grpc.health.v1.Health".to_string());
 
     let error = validate(&config).expect_err("http1 gRPC health-check should be rejected");
-    assert!(error.to_string().contains("requires protocol `Auto` or `Http2`"));
+    assert!(error.to_string().contains("requires protocol `Auto`, `Http2`, or `H2c`"));
 }
 
 #[test]
@@ -56,6 +56,15 @@ fn validate_rejects_grpc_health_check_for_cleartext_peer() {
 
     let error = validate(&config).expect_err("cleartext gRPC health-check peer should be rejected");
     assert!(error.to_string().contains("cleartext h2c health checks are not supported"));
+}
+
+#[test]
+fn validate_allows_grpc_health_check_for_h2c_peer() {
+    let mut config = base_config();
+    config.upstreams[0].protocol = UpstreamProtocolConfig::H2c;
+    config.upstreams[0].health_check_grpc_service = Some("grpc.health.v1.Health".to_string());
+
+    validate(&config).expect("h2c gRPC health-check config should validate");
 }
 
 #[test]
@@ -123,6 +132,16 @@ fn validate_rejects_http3_upstream_protocol_for_cleartext_peers() {
             .to_string()
             .contains("protocol `Http3` currently requires all peers to use `https://`")
     );
+}
+
+#[test]
+fn validate_rejects_h2c_upstream_protocol_for_tls_peers() {
+    let mut config = base_config();
+    config.upstreams[0].protocol = UpstreamProtocolConfig::H2c;
+    config.upstreams[0].peers[0].url = "https://example.com".to_string();
+
+    let error = validate(&config).expect_err("TLS peers should be rejected for upstream h2c");
+    assert!(error.to_string().contains("protocol `H2c` requires all peers to use `http://`"));
 }
 
 #[test]

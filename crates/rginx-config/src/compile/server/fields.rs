@@ -2,7 +2,7 @@ use std::net::IpAddr;
 use std::path::Path;
 use std::time::Duration;
 
-use http::HeaderValue;
+use http::{HeaderName, HeaderValue};
 use ipnet::IpNet;
 use rginx_core::{AccessLogFormat, DEFAULT_SERVER_HEADER, Error, Result, Server, ServerTls};
 
@@ -20,6 +20,7 @@ pub(super) struct ServerFieldConfig {
     pub(super) server_header: Option<String>,
     pub(super) default_certificate: Option<String>,
     pub(super) trusted_proxies: Vec<String>,
+    pub(super) client_ip_header: Option<String>,
     pub(super) keep_alive: Option<bool>,
     pub(super) max_headers: Option<u64>,
     pub(super) max_request_body_bytes: Option<u64>,
@@ -40,6 +41,7 @@ pub(super) fn compile_server_fields(
         server_header,
         default_certificate,
         trusted_proxies,
+        client_ip_header,
         keep_alive,
         max_headers,
         max_request_body_bytes,
@@ -58,6 +60,7 @@ pub(super) fn compile_server_fields(
             server_header: compile_server_header(server_header)?,
             default_certificate: compile_default_certificate(default_certificate),
             trusted_proxies: compile_trusted_proxies(trusted_proxies)?,
+            client_ip_header: compile_client_ip_header(client_ip_header)?,
             keep_alive: keep_alive.unwrap_or(true),
             max_headers: compile_max_headers(max_headers)?,
             max_request_body_bytes: compile_max_request_body_bytes(max_request_body_bytes)?,
@@ -70,6 +73,18 @@ pub(super) fn compile_server_fields(
         },
         server_tls,
     })
+}
+
+fn compile_client_ip_header(value: Option<String>) -> Result<Option<HeaderName>> {
+    value
+        .map(|value| {
+            value.trim().parse::<HeaderName>().map_err(|error| {
+                Error::Config(format!(
+                    "validated server client_ip_header `{value}` failed to compile: {error}"
+                ))
+            })
+        })
+        .transpose()
 }
 
 fn compile_server_header(server_header: Option<String>) -> Result<HeaderValue> {

@@ -3,10 +3,10 @@ use std::time::Duration;
 
 use crate::model::{
     Config, HandlerConfig, Http3Config, ListenerConfig, LocationConfig, MatcherConfig,
-    RouteBufferingPolicyConfig, RouteCompressionPolicyConfig, RuntimeConfig, ServerConfig,
-    ServerTlsConfig, TlsCipherSuiteConfig, TlsKeyExchangeGroupConfig, UpstreamConfig,
-    UpstreamLoadBalanceConfig, UpstreamPeerConfig, UpstreamProtocolConfig, UpstreamTlsConfig,
-    VirtualHostConfig,
+    ProxyHeaderDynamicValueConfig, ProxyHeaderValueConfig, RouteBufferingPolicyConfig,
+    RouteCompressionPolicyConfig, RuntimeConfig, ServerConfig, ServerTlsConfig,
+    TlsCipherSuiteConfig, TlsKeyExchangeGroupConfig, UpstreamConfig, UpstreamLoadBalanceConfig,
+    UpstreamPeerConfig, UpstreamProtocolConfig, UpstreamTlsConfig, VirtualHostConfig,
 };
 use tempfile::TempDir;
 

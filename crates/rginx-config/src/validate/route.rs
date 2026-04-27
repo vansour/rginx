@@ -1,12 +1,14 @@
 use std::collections::HashSet;
 
 use ipnet::IpNet;
-use rginx_core::{Error, Result};
+use regex::RegexBuilder;
+use rginx_core::{Error, Result, RouteRegexMatcher};
 
 use crate::model::{
-    HandlerConfig, LocationConfig, MatcherConfig, RouteBufferingPolicyConfig,
-    RouteCompressionPolicyConfig,
+    LocationConfig, MatcherConfig, RouteBufferingPolicyConfig, RouteCompressionPolicyConfig,
 };
+
+mod handler;
 
 pub(super) fn validate_locations(
     scope_label: Option<&str>,
@@ -28,6 +30,26 @@ pub(super) fn validate_locations(
                 }
 
                 path.as_str()
+            }
+            MatcherConfig::Regex { pattern, case_insensitive } => {
+                if pattern.trim().is_empty() {
+                    return Err(Error::Config(match scope_label {
+                        Some(scope_label) => {
+                            format!("{scope_label} route regex matcher must not be empty")
+                        }
+                        None => "route regex matcher must not be empty".to_string(),
+                    }));
+                }
+                RegexBuilder::new(pattern)
+                    .case_insensitive(*case_insensitive)
+                    .size_limit(RouteRegexMatcher::SIZE_LIMIT_BYTES)
+                    .build()
+                    .map_err(|source| {
+                        Error::Config(format!(
+                            "route regex pattern `{pattern}` is invalid: {source}"
+                        ))
+                    })?;
+                pattern.as_str()
             }
         };
 
@@ -67,65 +89,9 @@ pub(super) fn validate_locations(
             location.grpc_service.as_deref(),
             location.grpc_method.as_deref(),
         )?;
-        validate_handler(scope_label, &route_scope, &location.handler, upstream_names)?;
+        handler::validate_handler(scope_label, &route_scope, &location.handler, upstream_names)?;
     }
 
-    Ok(())
-}
-
-fn validate_handler(
-    scope_label: Option<&str>,
-    route_scope: &str,
-    handler: &HandlerConfig,
-    upstream_names: &HashSet<String>,
-) -> Result<()> {
-    if let HandlerConfig::Proxy { upstream, strip_prefix, proxy_set_headers, .. } = handler {
-        if upstream.trim().is_empty() {
-            return Err(Error::Config("proxy upstream name must not be empty".to_string()));
-        }
-
-        if !upstream_names.contains(upstream) {
-            return Err(Error::Config(match scope_label {
-                Some(scope_label) => {
-                    format!("{scope_label} proxy upstream `{upstream}` is not defined")
-                }
-                None => format!("proxy upstream `{upstream}` is not defined"),
-            }));
-        }
-
-        if let Some(prefix) = strip_prefix
-            && !prefix.starts_with('/')
-        {
-            return Err(Error::Config(format!("{route_scope} strip_prefix must start with `/`")));
-        }
-
-        for name in proxy_set_headers.keys() {
-            if name.trim().is_empty() {
-                return Err(Error::Config(format!(
-                    "{route_scope} proxy_set_headers name must not be empty"
-                )));
-            }
-            if name.parse::<http::header::HeaderName>().is_err() {
-                return Err(Error::Config(format!(
-                    "{route_scope} proxy_set_headers name `{name}` is invalid"
-                )));
-            }
-        }
-    }
-
-    if let HandlerConfig::Return { status, location, .. } = handler {
-        if *status < 100 || *status > 599 {
-            return Err(Error::Config(format!(
-                "{route_scope} return status must be between 100 and 599"
-            )));
-        }
-
-        if (300..=399).contains(status) && location.trim().is_empty() {
-            return Err(Error::Config(format!(
-                "{route_scope} return location must not be empty for redirect status {status}"
-            )));
-        }
-    }
     Ok(())
 }
 

@@ -4,6 +4,15 @@ pub(crate) fn tls_proxy_config(listen_addr: SocketAddr, upstream_addr: SocketAdd
     tls_proxy_config_with_request_timeout(listen_addr, upstream_addr, None)
 }
 
+pub(crate) fn tls_proxy_h2c_config(listen_addr: SocketAddr, upstream_addr: SocketAddr) -> String {
+    format!(
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n        tls: Some(ServerTlsConfig(\n            cert_path: \"__CERT_PATH__\",\n            key_path: \"__KEY_PATH__\",\n        )),\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [\n                UpstreamPeerConfig(\n                    url: {:?},\n                ),\n            ],\n            protocol: H2c,\n        ),\n    ],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact({GRPC_METHOD_PATH:?}),\n            handler: Proxy(\n                upstream: \"backend\",\n            ),\n        ),\n    ],\n)\n",
+        listen_addr.to_string(),
+        format!("http://127.0.0.1:{}", upstream_addr.port()),
+        ready_route = READY_ROUTE_CONFIG,
+    )
+}
+
 pub(crate) fn tls_proxy_config_with_request_timeout(
     listen_addr: SocketAddr,
     upstream_addr: SocketAddr,

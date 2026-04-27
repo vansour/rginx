@@ -65,6 +65,7 @@ pub(super) fn validate_listeners(
             proxy_protocol: listener.proxy_protocol,
             default_certificate: listener.default_certificate.as_deref(),
             trusted_proxies: &listener.trusted_proxies,
+            client_ip_header: listener.client_ip_header.as_deref(),
             max_headers: listener.max_headers,
             max_request_body_bytes: listener.max_request_body_bytes,
             max_connections: listener.max_connections,

@@ -43,6 +43,15 @@ pub(super) fn compile_protocol(
 
             Ok(UpstreamProtocol::Http2)
         }
+        UpstreamProtocolConfig::H2c => {
+            if peers.iter().any(|peer| peer.scheme != "http") {
+                return Err(Error::Config(format!(
+                    "upstream `{upstream_name}` protocol `H2c` requires all peers to use `http://`"
+                )));
+            }
+
+            Ok(UpstreamProtocol::H2c)
+        }
         UpstreamProtocolConfig::Http3 => {
             if peers.iter().any(|peer| peer.scheme != "https") {
                 return Err(Error::Config(format!(

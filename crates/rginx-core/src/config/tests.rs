@@ -10,6 +10,9 @@ use super::{
     RouteMatcher, RuntimeSettings, Server, VirtualHost, default_server_header, match_server_name,
 };
 
+mod proxy_header;
+mod route_matcher;
+
 #[test]
 fn route_access_control_allows_when_lists_are_empty() {
     let access_control = RouteAccessControl::default();
@@ -46,6 +49,7 @@ fn server_matches_trusted_proxy_cidrs() {
         server_header: default_server_header(),
         default_certificate: None,
         trusted_proxies: vec!["10.0.0.0/8".parse().unwrap(), "::1/128".parse().unwrap()],
+        client_ip_header: None,
         keep_alive: true,
         max_headers: None,
         max_request_body_bytes: None,
@@ -69,6 +73,7 @@ fn config_snapshot_counts_routes_across_all_vhosts() {
         server_header: default_server_header(),
         default_certificate: None,
         trusted_proxies: Vec::new(),
+        client_ip_header: None,
         keep_alive: true,
         max_headers: None,
         max_request_body_bytes: None,
@@ -132,6 +137,7 @@ fn listener_transport_bindings_include_udp_http3_binding_when_configured() {
             server_header: default_server_header(),
             default_certificate: None,
             trusted_proxies: Vec::new(),
+            client_ip_header: None,
             keep_alive: true,
             max_headers: None,
             max_request_body_bytes: None,

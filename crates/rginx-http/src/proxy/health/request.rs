@@ -17,14 +17,17 @@ pub(in super::super) fn build_active_health_request(
     })?;
 
     let mut builder = Request::builder().uri(uri).header(HOST, peer.upstream_authority.as_str());
-    let request_protocol =
-        if check.grpc_service.is_some() { UpstreamProtocol::Http2 } else { upstream.protocol };
+    let request_protocol = match (check.grpc_service.is_some(), upstream.protocol) {
+        (true, UpstreamProtocol::H2c) => UpstreamProtocol::H2c,
+        (true, _) => UpstreamProtocol::Http2,
+        (false, _) => upstream.protocol,
+    };
 
     let mut request = if let Some(service) = check.grpc_service.as_deref() {
         let body = encode_grpc_health_check_request(service);
         builder = builder
             .method(Method::POST)
-            .version(Version::HTTP_2)
+            .version(upstream_request_version(request_protocol))
             .header(CONTENT_TYPE, HeaderValue::from_static("application/grpc"))
             .header(TE, HeaderValue::from_static("trailers"))
             .header(CONTENT_LENGTH, body.len().to_string());

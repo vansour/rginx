@@ -17,6 +17,7 @@ pub(super) fn validate_server(server: &ServerConfig) -> Result<()> {
         proxy_protocol: server.proxy_protocol,
         default_certificate: server.default_certificate.as_deref(),
         trusted_proxies: &server.trusted_proxies,
+        client_ip_header: server.client_ip_header.as_deref(),
         max_headers: server.max_headers,
         max_request_body_bytes: server.max_request_body_bytes,
         max_connections: server.max_connections,
@@ -39,6 +40,7 @@ pub(super) struct ListenerLikeRef<'a> {
     pub(super) proxy_protocol: Option<bool>,
     pub(super) default_certificate: Option<&'a str>,
     pub(super) trusted_proxies: &'a [String],
+    pub(super) client_ip_header: Option<&'a str>,
     pub(super) max_headers: Option<u64>,
     pub(super) max_request_body_bytes: Option<u64>,
     pub(super) max_connections: Option<u64>,
@@ -74,6 +76,22 @@ pub(super) fn validate_listener_like(config: ListenerLikeRef<'_>) -> Result<()> 
 
     for value in config.trusted_proxies {
         validate_trusted_proxy_with_owner(config.owner_label, value)?;
+    }
+
+    if let Some(client_ip_header) = config.client_ip_header {
+        let normalized = client_ip_header.trim();
+        if normalized.is_empty() {
+            return Err(Error::Config(format!(
+                "{} client_ip_header must not be empty",
+                config.owner_label
+            )));
+        }
+        normalized.parse::<http::header::HeaderName>().map_err(|error| {
+            Error::Config(format!(
+                "{} client_ip_header `{client_ip_header}` is invalid: {error}",
+                config.owner_label
+            ))
+        })?;
     }
 
     if config.max_headers.is_some_and(|limit| limit == 0) {
@@ -230,6 +248,7 @@ pub(super) fn validate_listener_like(config: ListenerLikeRef<'_>) -> Result<()> 
 pub(super) fn legacy_server_listener_fields(server: &ServerConfig) -> Option<()> {
     (server.listen.is_some()
         || !server.trusted_proxies.is_empty()
+        || server.client_ip_header.is_some()
         || server.keep_alive.is_some()
         || server.default_certificate.is_some()
         || server.max_headers.is_some()

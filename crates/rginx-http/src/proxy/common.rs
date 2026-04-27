@@ -52,9 +52,17 @@ pub(super) fn sanitize_request_headers(
     client_address: &ClientAddress,
     forwarded_proto: &str,
     preserve_host: bool,
-    proxy_set_headers: &[(HeaderName, HeaderValue)],
+    proxy_set_headers: &[(HeaderName, ProxyHeaderValue)],
     grpc_web_mode: Option<&GrpcWebMode>,
 ) -> Result<(), http::header::InvalidHeaderValue> {
+    let proxy_header_overrides = render_proxy_header_overrides(
+        headers,
+        authority,
+        original_host.as_ref(),
+        client_address,
+        forwarded_proto,
+        proxy_set_headers,
+    )?;
     let upgrade_protocol = extract_upgrade_protocol(headers);
     let te_trailers = preserved_te_trailers_value(headers);
     remove_hop_by_hop_headers(headers, upgrade_protocol.is_some());
@@ -71,15 +79,11 @@ pub(super) fn sanitize_request_headers(
 
     headers.insert("x-forwarded-proto", HeaderValue::from_str(forwarded_proto)?);
 
-    if let Some(host) = original_host {
-        headers.insert("x-forwarded-host", host);
+    if let Some(host) = &original_host {
+        headers.insert("x-forwarded-host", host.clone());
     }
 
     headers.insert("x-forwarded-for", HeaderValue::from_str(&client_address.forwarded_for)?);
-
-    for (name, value) in proxy_set_headers {
-        headers.insert(name.clone(), value.clone());
-    }
 
     if let Some(grpc_web_mode) = grpc_web_mode {
         headers.insert(CONTENT_TYPE, grpc_web_mode.upstream_content_type.clone());
@@ -99,7 +103,58 @@ pub(super) fn sanitize_request_headers(
         headers.insert(UPGRADE, upgrade_protocol);
     }
 
+    for header_override in proxy_header_overrides {
+        match header_override {
+            ProxyHeaderOverride::Set(name, value) => {
+                headers.insert(name, value);
+            }
+            ProxyHeaderOverride::Remove(name) => {
+                headers.remove(name);
+            }
+        }
+    }
+
     Ok(())
+}
+
+enum ProxyHeaderOverride {
+    Set(HeaderName, HeaderValue),
+    Remove(HeaderName),
+}
+
+fn render_proxy_header_overrides(
+    original_headers: &HeaderMap,
+    authority: &str,
+    original_host: Option<&HeaderValue>,
+    client_address: &ClientAddress,
+    forwarded_proto: &str,
+    proxy_set_headers: &[(HeaderName, ProxyHeaderValue)],
+) -> Result<Vec<ProxyHeaderOverride>, http::header::InvalidHeaderValue> {
+    if proxy_set_headers.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let render_context = ProxyHeaderRenderContext {
+        original_headers,
+        original_host,
+        upstream_authority: authority,
+        client_ip: client_address.client_ip,
+        peer_addr: client_address.peer_addr,
+        forwarded_for: &client_address.forwarded_for,
+        scheme: forwarded_proto,
+    };
+    let mut overrides = Vec::with_capacity(proxy_set_headers.len());
+    for (name, value) in proxy_set_headers {
+        if value.removes_header() {
+            overrides.push(ProxyHeaderOverride::Remove(name.clone()));
+            continue;
+        }
+
+        if let Some(value) = value.render(&render_context)? {
+            overrides.push(ProxyHeaderOverride::Set(name.clone(), value));
+        }
+    }
+    Ok(overrides)
 }
 
 pub(super) fn remove_redundant_host_header_for_authority_pseudo_header(
@@ -128,7 +183,7 @@ fn may_use_authority_pseudo_header(
 ) -> bool {
     // For Auto + HTTPS, ALPN may still negotiate HTTP/1.1. Hyper's high-level
     // client rebuilds a missing Host header from the URI authority for h1.
-    matches!(protocol, UpstreamProtocol::Http2 | UpstreamProtocol::Http3)
+    matches!(protocol, UpstreamProtocol::Http2 | UpstreamProtocol::H2c | UpstreamProtocol::Http3)
         || (protocol == UpstreamProtocol::Auto && peer.scheme == "https")
 }
 
@@ -226,7 +281,7 @@ pub(super) fn connection_header_contains_token(headers: &HeaderMap, token: &str)
 pub(super) fn upstream_request_version(protocol: UpstreamProtocol) -> Version {
     match protocol {
         UpstreamProtocol::Http3 => Version::HTTP_3,
-        UpstreamProtocol::Http2 => Version::HTTP_2,
+        UpstreamProtocol::Http2 | UpstreamProtocol::H2c => Version::HTTP_2,
         UpstreamProtocol::Auto | UpstreamProtocol::Http1 => Version::HTTP_11,
     }
 }
