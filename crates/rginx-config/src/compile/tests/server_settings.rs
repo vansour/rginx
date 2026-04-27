@@ -16,6 +16,7 @@ fn compile_applies_custom_server_header() {
             default_certificate: None,
             server_names: Vec::new(),
             trusted_proxies: Vec::new(),
+            client_ip_header: None,
             keep_alive: None,
             max_headers: None,
             max_request_body_bytes: None,
@@ -59,6 +60,7 @@ fn compile_normalizes_trusted_proxy_ips_and_cidrs() {
             default_certificate: None,
             server_names: Vec::new(),
             trusted_proxies: vec!["10.0.0.0/8".to_string(), "127.0.0.1".to_string()],
+            client_ip_header: Some("CF-Connecting-IP".to_string()),
             keep_alive: None,
             max_headers: None,
             max_request_body_bytes: None,
@@ -99,6 +101,10 @@ fn compile_normalizes_trusted_proxy_ips_and_cidrs() {
 
     let snapshot = compile(config).expect("trusted proxies should compile");
     assert_eq!(default_listener_server(&snapshot).trusted_proxies.len(), 2);
+    assert_eq!(
+        default_listener_server(&snapshot).client_ip_header.as_ref().map(|name| name.as_str()),
+        Some("cf-connecting-ip")
+    );
     assert!(default_listener_server(&snapshot).is_trusted_proxy("10.1.2.3".parse().unwrap()));
     assert!(default_listener_server(&snapshot).is_trusted_proxy("127.0.0.1".parse().unwrap()));
 }
@@ -119,6 +125,7 @@ fn compile_attaches_server_hardening_settings() {
             default_certificate: None,
             server_names: Vec::new(),
             trusted_proxies: Vec::new(),
+            client_ip_header: None,
             keep_alive: Some(false),
             max_headers: Some(32),
             max_request_body_bytes: Some(1024),
@@ -199,6 +206,7 @@ fn compile_rejects_invalid_server_access_log_format() {
             default_certificate: None,
             server_names: Vec::new(),
             trusted_proxies: Vec::new(),
+            client_ip_header: None,
             keep_alive: None,
             max_headers: None,
             max_request_body_bytes: None,

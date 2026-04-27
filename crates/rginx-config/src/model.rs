@@ -10,8 +10,8 @@ mod vhost;
 
 pub use listener::{Http3Config, ListenerConfig};
 pub use route::{
-    HandlerConfig, LocationConfig, MatcherConfig, RouteBufferingPolicyConfig,
-    RouteCompressionPolicyConfig,
+    HandlerConfig, LocationConfig, MatcherConfig, ProxyHeaderDynamicValueConfig,
+    ProxyHeaderValueConfig, RouteBufferingPolicyConfig, RouteCompressionPolicyConfig,
 };
 pub use runtime::RuntimeConfig;
 pub use server::ServerConfig;

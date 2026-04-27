@@ -77,6 +77,67 @@ async fn proxies_basic_grpc_over_http2_with_response_trailers() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn proxies_grpc_to_cleartext_h2c_upstream() {
+    let (upstream_addr, observed_rx, upstream_task) = spawn_h2c_grpc_upstream().await;
+
+    let listen_addr = reserve_loopback_addr();
+    let mut server =
+        TestServer::spawn(listen_addr, tls_proxy_h2c_config(listen_addr, upstream_addr));
+    server.wait_for_https_ready(listen_addr, Duration::from_secs(5));
+
+    let connector = HttpsConnectorBuilder::new()
+        .with_tls_config(
+            ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(InsecureServerCertVerifier::new()))
+                .with_no_client_auth(),
+        )
+        .https_only()
+        .enable_http2()
+        .build();
+    let client: Client<_, Empty<Bytes>> = Client::builder(TokioExecutor::new()).build(connector);
+
+    let request = Request::builder()
+        .method("POST")
+        .uri(format!("https://127.0.0.1:{}{GRPC_METHOD_PATH}", listen_addr.port()))
+        .version(Version::HTTP_2)
+        .header(CONTENT_TYPE, "application/grpc")
+        .header(TE, "trailers")
+        .body(Empty::<Bytes>::new())
+        .expect("gRPC request should build");
+    let response = tokio::time::timeout(Duration::from_secs(5), client.request(request))
+        .await
+        .expect("h2c gRPC request should not time out")
+        .expect("h2c gRPC request should succeed");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.version(), Version::HTTP_2);
+    let (body_bytes, trailers) = read_body_and_trailers(response.into_body()).await;
+    assert_eq!(body_bytes.freeze(), Bytes::from_static(GRPC_RESPONSE_FRAME));
+    assert_eq!(
+        trailers
+            .as_ref()
+            .and_then(|headers| headers.get("grpc-status"))
+            .and_then(|value| value.to_str().ok()),
+        Some("0")
+    );
+
+    let observed = tokio::time::timeout(Duration::from_secs(5), observed_rx)
+        .await
+        .expect("h2c upstream request should be observed before timeout")
+        .expect("h2c upstream observation channel should complete");
+    assert_eq!(observed.method, "POST");
+    assert_eq!(observed.version, Version::HTTP_2);
+    assert_eq!(observed.path, GRPC_METHOD_PATH);
+    assert_eq!(observed.alpn_protocol, None);
+    assert_eq!(observed.content_type.as_deref(), Some("application/grpc"));
+    assert_eq!(observed.te.as_deref(), Some("trailers"));
+
+    server.shutdown_and_wait(Duration::from_secs(5));
+    upstream_task.await.expect("h2c upstream gRPC server task should finish");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn proxies_basic_grpc_over_http2_with_request_trailers() {
     let (upstream_addr, observed_rx, upstream_task, upstream_temp_dir) =
         spawn_grpc_upstream().await;

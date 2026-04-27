@@ -10,6 +10,7 @@ pub struct ServerConfig {
     pub default_certificate: Option<String>,
     pub server_names: Vec<String>,
     pub trusted_proxies: Vec<String>,
+    pub client_ip_header: Option<String>,
     pub keep_alive: Option<bool>,
     pub max_headers: Option<u64>,
     pub max_request_body_bytes: Option<u64>,
@@ -43,6 +44,8 @@ impl<'de> Deserialize<'de> for ServerConfig {
             #[serde(default)]
             trusted_proxies: Vec<String>,
             #[serde(default)]
+            client_ip_header: Option<String>,
+            #[serde(default)]
             keep_alive: Option<bool>,
             #[serde(default)]
             max_headers: Option<u64>,
@@ -72,6 +75,7 @@ impl<'de> Deserialize<'de> for ServerConfig {
             default_certificate: server.default_certificate,
             server_names: server.server_names,
             trusted_proxies: server.trusted_proxies,
+            client_ip_header: server.client_ip_header,
             keep_alive: server.keep_alive,
             max_headers: server.max_headers,
             max_request_body_bytes: server.max_request_body_bytes,

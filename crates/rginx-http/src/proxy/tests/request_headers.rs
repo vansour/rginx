@@ -59,6 +59,50 @@ fn sanitize_request_headers_overwrites_x_forwarded_for_with_sanitized_chain() {
 }
 
 #[test]
+fn sanitize_request_headers_renders_dynamic_proxy_headers() {
+    let mut headers = HeaderMap::new();
+    headers.insert(HOST, HeaderValue::from_static("dashboard.example.com"));
+    headers.insert("cf-connecting-ip", HeaderValue::from_static("203.0.113.20"));
+
+    let client_address = ClientAddress {
+        peer_addr: "10.2.3.4:4000".parse().unwrap(),
+        client_ip: "203.0.113.20".parse().unwrap(),
+        forwarded_for: "203.0.113.20, 10.2.3.4".to_string(),
+        source: ClientIpSource::ClientIpHeader,
+    };
+    let proxy_set_headers = vec![
+        ("nz-realip".parse().unwrap(), ProxyHeaderValue::ClientIp),
+        (
+            "origin".parse().unwrap(),
+            ProxyHeaderValue::Template(
+                ProxyHeaderTemplate::parse("https://{host}".to_string()).unwrap(),
+            ),
+        ),
+        (
+            "x-cf-ip".parse().unwrap(),
+            ProxyHeaderValue::RequestHeader("cf-connecting-ip".parse().unwrap()),
+        ),
+    ];
+
+    sanitize_request_headers(
+        &mut headers,
+        "127.0.0.1:8008",
+        Some(HeaderValue::from_static("dashboard.example.com")),
+        &client_address,
+        "https",
+        true,
+        &proxy_set_headers,
+        None,
+    )
+    .expect("header sanitization should succeed");
+
+    assert_eq!(headers.get(HOST).unwrap(), "dashboard.example.com");
+    assert_eq!(headers.get("nz-realip").unwrap(), "203.0.113.20");
+    assert_eq!(headers.get("origin").unwrap(), "https://dashboard.example.com");
+    assert_eq!(headers.get("x-cf-ip").unwrap(), "203.0.113.20");
+}
+
+#[test]
 fn sanitize_request_headers_preserves_upgrade_handshake() {
     let mut headers = HeaderMap::new();
     headers.insert(HOST, HeaderValue::from_static("client.example"));

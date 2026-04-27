@@ -21,8 +21,9 @@ use http_body_util::{BodyExt, StreamBody};
 use hyper::body::Frame;
 use rcgen::{CertifiedKey, KeyPair};
 use rginx_core::{
-    ActiveHealthCheck, ClientIdentity, Error, TlsVersion, Upstream, UpstreamDnsPolicy,
-    UpstreamLoadBalance, UpstreamPeer, UpstreamProtocol, UpstreamSettings, UpstreamTls,
+    ActiveHealthCheck, ClientIdentity, Error, ProxyHeaderTemplate, ProxyHeaderValue, TlsVersion,
+    Upstream, UpstreamDnsPolicy, UpstreamLoadBalance, UpstreamPeer, UpstreamProtocol,
+    UpstreamSettings, UpstreamTls,
 };
 
 use super::clients::{ProxyClients, load_custom_ca_store};
@@ -159,6 +160,7 @@ fn default_server() -> rginx_core::Server {
         server_header: rginx_core::default_server_header(),
         default_certificate: None,
         trusted_proxies: Vec::new(),
+        client_ip_header: None,
         keep_alive: true,
         max_headers: None,
         max_request_body_bytes: None,

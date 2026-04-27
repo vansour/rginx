@@ -7,6 +7,7 @@ use rginx_core::Server;
 pub enum ClientIpSource {
     SocketPeer,
     XForwardedFor,
+    ClientIpHeader,
 }
 
 impl ClientIpSource {
@@ -14,6 +15,7 @@ impl ClientIpSource {
         match self {
             Self::SocketPeer => "socket_peer",
             Self::XForwardedFor => "x_forwarded_for",
+            Self::ClientIpHeader => "client_ip_header",
         }
     }
 }
@@ -57,6 +59,18 @@ pub fn resolve_client_address(
 
     let immediate_peer =
         connection.proxy_protocol_source_addr.unwrap_or(connection.socket_peer_addr);
+
+    if let Some(client_ip_header) = &server.client_ip_header
+        && let Some(client_ip) = parse_client_ip_header(headers, client_ip_header.as_str())
+    {
+        return ClientAddress {
+            peer_addr: connection.socket_peer_addr,
+            client_ip,
+            forwarded_for: format!("{client_ip}, {}", immediate_peer.ip()),
+            source: ClientIpSource::ClientIpHeader,
+        };
+    }
+
     let Some(chain) = parse_x_forwarded_for(headers) else {
         return proxied_peer(connection.socket_peer_addr, immediate_peer.ip());
     };
@@ -73,6 +87,14 @@ pub fn resolve_client_address(
         forwarded_for,
         source: ClientIpSource::XForwardedFor,
     }
+}
+
+fn parse_client_ip_header(headers: &HeaderMap, header_name: &str) -> Option<IpAddr> {
+    let value = headers.get(header_name)?.to_str().ok()?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    parse_forwarded_ip(value)
 }
 
 fn direct_peer(peer_addr: SocketAddr) -> ClientAddress {

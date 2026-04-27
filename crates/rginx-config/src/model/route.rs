@@ -54,6 +54,11 @@ pub struct LocationConfig {
 pub enum MatcherConfig {
     Exact(String),
     Prefix(String),
+    Regex {
+        pattern: String,
+        #[serde(default)]
+        case_insensitive: bool,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -65,7 +70,7 @@ pub enum HandlerConfig {
         #[serde(default)]
         strip_prefix: Option<String>,
         #[serde(default)]
-        proxy_set_headers: HashMap<String, String>,
+        proxy_set_headers: HashMap<String, ProxyHeaderValueConfig>,
     },
     Return {
         status: u16,
@@ -73,4 +78,23 @@ pub enum HandlerConfig {
         #[serde(default)]
         body: Option<String>,
     },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum ProxyHeaderValueConfig {
+    Dynamic(ProxyHeaderDynamicValueConfig),
+    Static(String),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub enum ProxyHeaderDynamicValueConfig {
+    Host,
+    Scheme,
+    ClientIp,
+    RemoteAddr,
+    PeerAddr,
+    ForwardedFor,
+    RequestHeader(String),
+    Template(String),
 }

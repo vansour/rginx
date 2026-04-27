@@ -5,6 +5,72 @@ pub(crate) async fn spawn_grpc_upstream()
     spawn_grpc_upstream_with_mode(UpstreamResponseMode::Immediate).await
 }
 
+pub(crate) async fn spawn_h2c_grpc_upstream()
+-> (SocketAddr, oneshot::Receiver<ObservedRequest>, JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("h2c upstream gRPC listener should bind");
+    let listen_addr = listener.local_addr().expect("h2c upstream gRPC addr should be available");
+    let (observed_tx, observed_rx) = oneshot::channel();
+    let observed_tx = Arc::new(Mutex::new(Some(observed_tx)));
+
+    let task = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("h2c upstream listener should accept");
+
+        let service = service_fn(move |request: Request<Incoming>| {
+            let observed_tx = observed_tx.clone();
+
+            async move {
+                let (parts, body) = request.into_parts();
+                let (body_bytes, trailers) = read_body_and_trailers(body).await;
+
+                if let Some(sender) =
+                    observed_tx.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take()
+                {
+                    let _ = sender.send(ObservedRequest {
+                        method: parts.method.as_str().to_string(),
+                        version: parts.version,
+                        path: parts.uri.path().to_string(),
+                        alpn_protocol: None,
+                        content_type: parts
+                            .headers
+                            .get(CONTENT_TYPE)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string),
+                        grpc_timeout: parts
+                            .headers
+                            .get("grpc-timeout")
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string),
+                        te: parts
+                            .headers
+                            .get(TE)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string),
+                        body: body_bytes.freeze(),
+                        trailers,
+                    });
+                }
+
+                Ok::<_, Infallible>(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .header(CONTENT_TYPE, "application/grpc")
+                        .body(EitherGrpcResponseBody::Immediate(GrpcResponseBody::new()))
+                        .expect("h2c upstream gRPC response should build"),
+                )
+            }
+        });
+
+        http2::Builder::new(TokioExecutor::new())
+            .serve_connection(TokioIo::new(stream), service)
+            .await
+            .expect("h2c upstream gRPC connection should complete");
+    });
+
+    (listen_addr, observed_rx, task)
+}
+
 pub(crate) async fn spawn_grpc_upstream_with_response_delay(
     response_delay: Duration,
 ) -> (SocketAddr, oneshot::Receiver<ObservedRequest>, JoinHandle<()>, PathBuf) {

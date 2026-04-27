@@ -14,8 +14,10 @@ pub use listener::{
     ListenerTransportKind,
 };
 pub use route::{
-    GrpcRouteMatch, ProxyTarget, ReturnAction, Route, RouteAccessControl, RouteAction,
-    RouteBufferingPolicy, RouteCompressionPolicy, RouteMatcher, RouteRateLimit,
+    GrpcRouteMatch, ProxyHeaderRenderContext, ProxyHeaderTemplate, ProxyHeaderTemplateError,
+    ProxyHeaderValue, ProxyTarget, ReturnAction, Route, RouteAccessControl, RouteAction,
+    RouteBufferingPolicy, RouteCompressionPolicy, RouteMatcher, RouteRateLimit, RouteRegexError,
+    RouteRegexMatcher,
 };
 pub use server::{DEFAULT_SERVER_HEADER, RuntimeSettings, Server, default_server_header};
 pub use server_name::{ServerNameMatch, best_matching_server_name_pattern, match_server_name};

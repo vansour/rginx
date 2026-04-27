@@ -1,11 +1,11 @@
 use std::collections::HashSet;
 
 use ipnet::IpNet;
-use rginx_core::{Error, Result};
+use rginx_core::{Error, ProxyHeaderTemplate, Result, RouteRegexMatcher};
 
 use crate::model::{
-    HandlerConfig, LocationConfig, MatcherConfig, RouteBufferingPolicyConfig,
-    RouteCompressionPolicyConfig,
+    HandlerConfig, LocationConfig, MatcherConfig, ProxyHeaderDynamicValueConfig,
+    ProxyHeaderValueConfig, RouteBufferingPolicyConfig, RouteCompressionPolicyConfig,
 };
 
 pub(super) fn validate_locations(
@@ -28,6 +28,19 @@ pub(super) fn validate_locations(
                 }
 
                 path.as_str()
+            }
+            MatcherConfig::Regex { pattern, case_insensitive } => {
+                if pattern.trim().is_empty() {
+                    return Err(Error::Config(match scope_label {
+                        Some(scope_label) => {
+                            format!("{scope_label} route regex matcher must not be empty")
+                        }
+                        None => "route regex matcher must not be empty".to_string(),
+                    }));
+                }
+                RouteRegexMatcher::new(pattern.clone(), *case_insensitive)
+                    .map_err(|error| Error::Config(error.to_string()))?;
+                pattern.as_str()
             }
         };
 
@@ -99,7 +112,7 @@ fn validate_handler(
             return Err(Error::Config(format!("{route_scope} strip_prefix must start with `/`")));
         }
 
-        for name in proxy_set_headers.keys() {
+        for (name, value) in proxy_set_headers {
             if name.trim().is_empty() {
                 return Err(Error::Config(format!(
                     "{route_scope} proxy_set_headers name must not be empty"
@@ -110,6 +123,7 @@ fn validate_handler(
                     "{route_scope} proxy_set_headers name `{name}` is invalid"
                 )));
             }
+            validate_proxy_header_value(route_scope, name, value)?;
         }
     }
 
@@ -126,6 +140,51 @@ fn validate_handler(
             )));
         }
     }
+    Ok(())
+}
+
+fn validate_proxy_header_value(
+    route_scope: &str,
+    name: &str,
+    value: &ProxyHeaderValueConfig,
+) -> Result<()> {
+    match value {
+        ProxyHeaderValueConfig::Static(value) => {
+            value.parse::<http::header::HeaderValue>().map_err(|error| {
+                Error::Config(format!(
+                    "{route_scope} proxy_set_headers value for `{name}` is invalid: {error}"
+                ))
+            })?;
+        }
+        ProxyHeaderValueConfig::Dynamic(dynamic) => match dynamic {
+            ProxyHeaderDynamicValueConfig::Host
+            | ProxyHeaderDynamicValueConfig::Scheme
+            | ProxyHeaderDynamicValueConfig::ClientIp
+            | ProxyHeaderDynamicValueConfig::RemoteAddr
+            | ProxyHeaderDynamicValueConfig::PeerAddr
+            | ProxyHeaderDynamicValueConfig::ForwardedFor => {}
+            ProxyHeaderDynamicValueConfig::RequestHeader(header_name) => {
+                if header_name.trim().is_empty() {
+                    return Err(Error::Config(format!(
+                        "{route_scope} proxy_set_headers RequestHeader source for `{name}` must not be empty"
+                    )));
+                }
+                header_name.parse::<http::header::HeaderName>().map_err(|error| {
+                    Error::Config(format!(
+                        "{route_scope} proxy_set_headers RequestHeader source `{header_name}` for `{name}` is invalid: {error}"
+                    ))
+                })?;
+            }
+            ProxyHeaderDynamicValueConfig::Template(template) => {
+                ProxyHeaderTemplate::parse(template.clone()).map_err(|error| {
+                    Error::Config(format!(
+                        "{route_scope} proxy_set_headers Template for `{name}` is invalid: {error}"
+                    ))
+                })?;
+            }
+        },
+    }
+
     Ok(())
 }
 

@@ -19,8 +19,8 @@ pub(super) use hyper_util::client::legacy::connect::HttpConnector;
 pub(super) use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 pub(super) use pin_project_lite::pin_project;
 pub(super) use rginx_core::{
-    ActiveHealthCheck, ConfigSnapshot, Error, ProxyTarget, RouteBufferingPolicy, Upstream,
-    UpstreamPeer, UpstreamProtocol, UpstreamTls,
+    ActiveHealthCheck, ConfigSnapshot, Error, ProxyHeaderRenderContext, ProxyHeaderValue,
+    ProxyTarget, RouteBufferingPolicy, Upstream, UpstreamPeer, UpstreamProtocol, UpstreamTls,
 };
 pub(super) use rustls::pki_types::ServerName;
 pub(super) use tokio::io::copy_bidirectional;

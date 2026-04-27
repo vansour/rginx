@@ -5,6 +5,7 @@ fn upstream_request_version_follows_upstream_protocol() {
     assert_eq!(upstream_request_version(UpstreamProtocol::Auto), Version::HTTP_11);
     assert_eq!(upstream_request_version(UpstreamProtocol::Http1), Version::HTTP_11);
     assert_eq!(upstream_request_version(UpstreamProtocol::Http2), Version::HTTP_2);
+    assert_eq!(upstream_request_version(UpstreamProtocol::H2c), Version::HTTP_2);
     assert_eq!(upstream_request_version(UpstreamProtocol::Http3), Version::HTTP_3);
 }
 
@@ -196,16 +197,29 @@ fn proxy_clients_cache_distinguishes_upstream_protocol() {
         UpstreamTls::NativeRoots,
         upstream_settings(UpstreamProtocol::Http3),
     );
+    let h2c = Upstream::new(
+        "h2c".to_string(),
+        vec![UpstreamPeer {
+            url: "http://127.0.0.1:9080".to_string(),
+            scheme: "http".to_string(),
+            authority: "127.0.0.1:9080".to_string(),
+            weight: 1,
+            backup: false,
+        }],
+        UpstreamTls::NativeRoots,
+        upstream_settings(UpstreamProtocol::H2c),
+    );
 
     let snapshot = snapshot_with_upstreams([
         ("auto".to_string(), Arc::new(auto)),
         ("http1".to_string(), Arc::new(http1)),
         ("http2".to_string(), Arc::new(http2)),
         ("http3".to_string(), Arc::new(http3)),
+        ("h2c".to_string(), Arc::new(h2c)),
     ]);
 
     let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
-    assert_eq!(clients.cached_client_count(), 4);
+    assert_eq!(clients.cached_client_count(), 5);
 }
 
 #[test]

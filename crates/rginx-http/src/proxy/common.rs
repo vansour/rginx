@@ -52,9 +52,10 @@ pub(super) fn sanitize_request_headers(
     client_address: &ClientAddress,
     forwarded_proto: &str,
     preserve_host: bool,
-    proxy_set_headers: &[(HeaderName, HeaderValue)],
+    proxy_set_headers: &[(HeaderName, ProxyHeaderValue)],
     grpc_web_mode: Option<&GrpcWebMode>,
 ) -> Result<(), http::header::InvalidHeaderValue> {
+    let original_headers = headers.clone();
     let upgrade_protocol = extract_upgrade_protocol(headers);
     let te_trailers = preserved_te_trailers_value(headers);
     remove_hop_by_hop_headers(headers, upgrade_protocol.is_some());
@@ -71,14 +72,27 @@ pub(super) fn sanitize_request_headers(
 
     headers.insert("x-forwarded-proto", HeaderValue::from_str(forwarded_proto)?);
 
-    if let Some(host) = original_host {
-        headers.insert("x-forwarded-host", host);
+    if let Some(host) = &original_host {
+        headers.insert("x-forwarded-host", host.clone());
     }
 
     headers.insert("x-forwarded-for", HeaderValue::from_str(&client_address.forwarded_for)?);
 
+    let render_context = ProxyHeaderRenderContext {
+        original_headers: &original_headers,
+        original_host: original_host.as_ref(),
+        upstream_authority: authority,
+        client_ip: client_address.client_ip,
+        peer_addr: client_address.peer_addr,
+        forwarded_for: &client_address.forwarded_for,
+        scheme: forwarded_proto,
+    };
     for (name, value) in proxy_set_headers {
-        headers.insert(name.clone(), value.clone());
+        if let Some(value) = value.render(&render_context)? {
+            headers.insert(name.clone(), value);
+        } else {
+            headers.remove(name);
+        }
     }
 
     if let Some(grpc_web_mode) = grpc_web_mode {
@@ -128,7 +142,7 @@ fn may_use_authority_pseudo_header(
 ) -> bool {
     // For Auto + HTTPS, ALPN may still negotiate HTTP/1.1. Hyper's high-level
     // client rebuilds a missing Host header from the URI authority for h1.
-    matches!(protocol, UpstreamProtocol::Http2 | UpstreamProtocol::Http3)
+    matches!(protocol, UpstreamProtocol::Http2 | UpstreamProtocol::H2c | UpstreamProtocol::Http3)
         || (protocol == UpstreamProtocol::Auto && peer.scheme == "https")
 }
 
@@ -226,7 +240,7 @@ pub(super) fn connection_header_contains_token(headers: &HeaderMap, token: &str)
 pub(super) fn upstream_request_version(protocol: UpstreamProtocol) -> Version {
     match protocol {
         UpstreamProtocol::Http3 => Version::HTTP_3,
-        UpstreamProtocol::Http2 => Version::HTTP_2,
+        UpstreamProtocol::Http2 | UpstreamProtocol::H2c => Version::HTTP_2,
         UpstreamProtocol::Auto | UpstreamProtocol::Http1 => Version::HTTP_11,
     }
 }

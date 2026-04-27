@@ -1,9 +1,10 @@
 use crate::model::{
     Config, HandlerConfig, Http3Config, ListenerConfig, LocationConfig, MatcherConfig,
-    RouteBufferingPolicyConfig, RouteCompressionPolicyConfig, RuntimeConfig, ServerConfig,
-    ServerTlsConfig, TlsCipherSuiteConfig, TlsKeyExchangeGroupConfig, TlsVersionConfig,
-    UpstreamConfig, UpstreamLoadBalanceConfig, UpstreamPeerConfig, UpstreamProtocolConfig,
-    VirtualHostConfig, VirtualHostTlsConfig,
+    ProxyHeaderDynamicValueConfig, ProxyHeaderValueConfig, RouteBufferingPolicyConfig,
+    RouteCompressionPolicyConfig, RuntimeConfig, ServerConfig, ServerTlsConfig,
+    TlsCipherSuiteConfig, TlsKeyExchangeGroupConfig, TlsVersionConfig, UpstreamConfig,
+    UpstreamLoadBalanceConfig, UpstreamPeerConfig, UpstreamProtocolConfig, VirtualHostConfig,
+    VirtualHostTlsConfig,
 };
 
 use super::{DEFAULT_GRPC_HEALTH_CHECK_PATH, validate};
@@ -34,6 +35,7 @@ fn base_config() -> Config {
             default_certificate: None,
             server_names: Vec::new(),
             trusted_proxies: Vec::new(),
+            client_ip_header: None,
             keep_alive: None,
             max_headers: None,
             max_request_body_bytes: None,

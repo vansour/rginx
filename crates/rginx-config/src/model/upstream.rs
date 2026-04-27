@@ -118,6 +118,7 @@ pub enum UpstreamProtocolConfig {
     Auto,
     Http1,
     Http2,
+    H2c,
     Http3,
 }
 

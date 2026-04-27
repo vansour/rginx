@@ -1,7 +1,7 @@
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
-use http::HeaderValue;
+use http::{HeaderName, HeaderValue};
 use ipnet::IpNet;
 
 use super::{AccessLogFormat, ServerTls};
@@ -19,6 +19,7 @@ pub struct Server {
     pub server_header: HeaderValue,
     pub default_certificate: Option<String>,
     pub trusted_proxies: Vec<IpNet>,
+    pub client_ip_header: Option<HeaderName>,
     pub keep_alive: bool,
     pub max_headers: Option<usize>,
     pub max_request_body_bytes: Option<usize>,

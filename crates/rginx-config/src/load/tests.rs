@@ -80,6 +80,44 @@ fn load_from_str_supports_legacy_and_structured_upstream_tls_config() {
 }
 
 #[test]
+fn load_from_str_supports_nezha_dashboard_native_config_shape() {
+    let config = load_from_str(
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 10,\n    ),\n    server: ServerConfig(\n        trusted_proxies: [\"0.0.0.0/0\", \"::/0\"],\n        client_ip_header: Some(\"CF-Connecting-IP\"),\n    ),\n    upstreams: [],\n    locations: [],\n    servers: [\n        VirtualHostConfig(\n            listen: [\"0.0.0.0:443 ssl http2\", \"[::]:443 ssl http2\"],\n            server_names: [\"dashboard.example.com\"],\n            tls: Some(VirtualHostTlsConfig(\n                cert_path: \"/data/letsencrypt/fullchain.pem\",\n                key_path: \"/data/letsencrypt/key.pem\",\n            )),\n            upstreams: [\n                UpstreamConfig(\n                    name: \"dashboard_http\",\n                    peers: [UpstreamPeerConfig(url: \"http://127.0.0.1:8008\")],\n                    pool_max_idle_per_host: Some(512),\n                    read_timeout_secs: Some(3600),\n                    write_timeout_secs: Some(3600),\n                ),\n                UpstreamConfig(\n                    name: \"dashboard_grpc\",\n                    peers: [UpstreamPeerConfig(url: \"http://127.0.0.1:8008\")],\n                    protocol: H2c,\n                    pool_max_idle_per_host: Some(512),\n                    read_timeout_secs: Some(600),\n                    write_timeout_secs: Some(600),\n                ),\n            ],\n            locations: [\n                LocationConfig(\n                    matcher: Prefix(\"/proto.NezhaService/\"),\n                    handler: Proxy(\n                        upstream: \"dashboard_grpc\",\n                        preserve_host: Some(true),\n                        proxy_set_headers: {\n                            \"nz-realip\": ClientIp,\n                        },\n                    ),\n                ),\n                LocationConfig(\n                    matcher: Regex(\n                        pattern: \"^/api/v1/ws/(server|terminal|file)(/.*)?$\",\n                        case_insensitive: true,\n                    ),\n                    handler: Proxy(\n                        upstream: \"dashboard_http\",\n                        preserve_host: Some(true),\n                        proxy_set_headers: {\n                            \"nz-realip\": ClientIp,\n                            \"origin\": Template(\"https://{host}\"),\n                        },\n                    ),\n                    response_buffering: Some(Off),\n                    compression: Some(Off),\n                ),\n                LocationConfig(\n                    matcher: Prefix(\"/\"),\n                    handler: Proxy(\n                        upstream: \"dashboard_http\",\n                        preserve_host: Some(true),\n                        proxy_set_headers: {\n                            \"nz-realip\": ClientIp,\n                        },\n                    ),\n                ),\n            ],\n        ),\n    ],\n)\n",
+        Path::new("inline.ron"),
+    )
+    .expect("Nezha dashboard native config should deserialize");
+
+    assert_eq!(config.server.client_ip_header.as_deref(), Some("CF-Connecting-IP"));
+    assert_eq!(config.servers.len(), 1);
+    assert_eq!(config.servers[0].listen.len(), 2);
+    assert!(matches!(
+        config.servers[0].upstreams[1].protocol,
+        crate::model::UpstreamProtocolConfig::H2c
+    ));
+    assert!(matches!(
+        config.servers[0].locations[1].matcher,
+        crate::model::MatcherConfig::Regex { case_insensitive: true, .. }
+    ));
+    let crate::model::HandlerConfig::Proxy { proxy_set_headers, .. } =
+        &config.servers[0].locations[1].handler
+    else {
+        panic!("WebSocket route should proxy");
+    };
+    assert!(matches!(
+        proxy_set_headers.get("nz-realip"),
+        Some(crate::model::ProxyHeaderValueConfig::Dynamic(
+            crate::model::ProxyHeaderDynamicValueConfig::ClientIp
+        ))
+    ));
+    assert!(matches!(
+        proxy_set_headers.get("origin"),
+        Some(crate::model::ProxyHeaderValueConfig::Dynamic(
+            crate::model::ProxyHeaderDynamicValueConfig::Template(template)
+        )) if template == "https://{host}"
+    ));
+}
+
+#[test]
 fn load_from_str_rejects_missing_environment_placeholders() {
     let _guard = env_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     unsafe {

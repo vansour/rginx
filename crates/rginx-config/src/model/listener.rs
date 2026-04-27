@@ -39,6 +39,8 @@ pub struct ListenerConfig {
     #[serde(default)]
     pub trusted_proxies: Vec<String>,
     #[serde(default)]
+    pub client_ip_header: Option<String>,
+    #[serde(default)]
     pub keep_alive: Option<bool>,
     #[serde(default)]
     pub max_headers: Option<u64>,
