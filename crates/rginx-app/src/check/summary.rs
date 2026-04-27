@@ -59,6 +59,7 @@ pub(crate) fn build_check_summary(config: &rginx_config::ConfigSnapshot) -> Chec
             config.total_listener_count(),
             config.listeners.first().map(|listener| listener.id.as_str()),
             config.listeners.first().map(|listener| listener.name.as_str()),
+            config.listeners.iter().map(|listener| listener.id.as_str()),
         ),
         listener_count: config.total_listener_count(),
         listener_binding_count: config.total_listener_binding_count(),
@@ -82,20 +83,33 @@ pub(crate) fn build_check_summary(config: &rginx_config::ConfigSnapshot) -> Chec
     }
 }
 
-fn listener_model(
+fn listener_model<'a>(
     listener_count: usize,
     first_listener_id: Option<&str>,
     first_listener_name: Option<&str>,
+    listener_ids: impl IntoIterator<Item = &'a str>,
 ) -> &'static str {
     if listener_count == 1
         && first_listener_id == Some("default")
         && first_listener_name == Some("default")
     {
         "legacy"
-    } else if first_listener_id.is_some_and(|id| id.starts_with("vhost-listen:")) {
-        "vhost"
     } else {
-        "explicit"
+        let mut any_vhost = false;
+        let mut any_explicit = false;
+        for id in listener_ids {
+            if id.starts_with("vhost-listen:") {
+                any_vhost = true;
+            } else {
+                any_explicit = true;
+            }
+        }
+
+        match (any_vhost, any_explicit) {
+            (true, false) => "vhost",
+            (true, true) => "mixed",
+            _ => "explicit",
+        }
     }
 }
 

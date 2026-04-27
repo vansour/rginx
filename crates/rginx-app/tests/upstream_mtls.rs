@@ -72,6 +72,7 @@ async fn proxies_to_https_upstreams_with_client_certificate_and_tls13() {
         .expect("upstream observation channel should complete");
     assert!(observed.peer_certificates_present);
     assert_eq!(observed.protocol_version, Some(ProtocolVersion::TLSv1_3));
+    // The upstream is h1, so Hyper must rebuild Host from URI authority if Auto+HTTPS stripped it.
     let expected_host = format!("127.0.0.1:{}", upstream_addr.port());
     assert_eq!(observed.host.as_deref(), Some(expected_host.as_str()));
 

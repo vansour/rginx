@@ -58,6 +58,10 @@ fn compile_generates_deduplicated_listeners_from_vhost_listen() {
     assert!(!snapshot.listeners[0].tls_enabled());
     assert_eq!(snapshot.listeners[1].id, "vhost-listen:127.0.0.1:8443");
     assert!(snapshot.listeners[1].tls_enabled());
+    assert_eq!(
+        snapshot.listeners[1].server.default_certificate.as_deref(),
+        Some("api.example.com")
+    );
     let http3 = snapshot.listeners[1].http3.as_ref().expect("http3 should compile");
     assert_eq!(http3.alt_svc_max_age, Duration::from_secs(7200));
     assert_eq!(snapshot.total_listener_binding_count(), 3);
@@ -163,6 +167,42 @@ fn compile_applies_server_tls_defaults_only_to_vhost_ssl_listeners() {
 }
 
 #[test]
+fn compile_uses_first_tls_vhost_as_implicit_default_certificate() {
+    let base_dir = temp_base_dir("rginx-vhost-listen-implicit-default-");
+    for name in ["api", "www"] {
+        fs::write(base_dir.path().join(format!("{name}.crt")), b"placeholder")
+            .expect("cert should be written");
+        fs::write(base_dir.path().join(format!("{name}.key")), b"placeholder")
+            .expect("key should be written");
+    }
+
+    let config = Config {
+        runtime: RuntimeConfig {
+            shutdown_timeout_secs: 10,
+            worker_threads: None,
+            accept_workers: None,
+        },
+        listeners: Vec::new(),
+        server: server_defaults(None),
+        upstreams: Vec::new(),
+        locations: Vec::new(),
+        servers: vec![
+            tls_vhost("api.example.com", "api.crt", "api.key"),
+            tls_vhost("www.example.com", "www.crt", "www.key"),
+        ],
+    };
+
+    let snapshot =
+        compile_with_base(config, base_dir.path()).expect("vhost listen config should compile");
+
+    assert_eq!(snapshot.listeners.len(), 1);
+    assert_eq!(
+        snapshot.listeners[0].server.default_certificate.as_deref(),
+        Some("api.example.com")
+    );
+}
+
+#[test]
 fn compile_preserves_ipv6_vhost_listener_ids() {
     let config = Config {
         runtime: RuntimeConfig {
@@ -229,6 +269,23 @@ fn server_tls(cert_path: &str, key_path: &str) -> ServerTlsConfig {
         session_cache_size: None,
         session_ticket_count: None,
         client_auth: None,
+    }
+}
+
+fn tls_vhost(server_name: &str, cert_path: &str, key_path: &str) -> VirtualHostConfig {
+    VirtualHostConfig {
+        listen: vec!["127.0.0.1:8443 ssl http2".to_string()],
+        server_names: vec![server_name.to_string()],
+        upstreams: Vec::new(),
+        locations: vec![return_location("ok\n")],
+        tls: Some(crate::model::VirtualHostTlsConfig {
+            cert_path: cert_path.to_string(),
+            key_path: key_path.to_string(),
+            additional_certificates: None,
+            ocsp_staple_path: None,
+            ocsp: None,
+        }),
+        http3: None,
     }
 }
 

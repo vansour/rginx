@@ -154,3 +154,40 @@ fn sample_vhost(server_names: Vec<&str>) -> VirtualHostConfig {
         http3: None,
     }
 }
+
+fn local_upstream(name: &str) -> UpstreamConfig {
+    UpstreamConfig {
+        name: name.to_string(),
+        peers: vec![UpstreamPeerConfig {
+            url: "http://127.0.0.1:9000".to_string(),
+            weight: 1,
+            backup: false,
+        }],
+        tls: None,
+        dns: None,
+        protocol: UpstreamProtocolConfig::Auto,
+        load_balance: UpstreamLoadBalanceConfig::RoundRobin,
+        server_name: None,
+        server_name_override: None,
+        request_timeout_secs: None,
+        connect_timeout_secs: None,
+        read_timeout_secs: None,
+        write_timeout_secs: None,
+        idle_timeout_secs: None,
+        pool_idle_timeout_secs: None,
+        pool_max_idle_per_host: None,
+        tcp_keepalive_secs: None,
+        tcp_nodelay: None,
+        http2_keep_alive_interval_secs: None,
+        http2_keep_alive_timeout_secs: None,
+        http2_keep_alive_while_idle: None,
+        max_replayable_request_body_bytes: None,
+        unhealthy_after_failures: None,
+        unhealthy_cooldown_secs: None,
+        health_check_path: None,
+        health_check_grpc_service: None,
+        health_check_interval_secs: None,
+        health_check_timeout_secs: None,
+        healthy_successes_required: None,
+    }
+}

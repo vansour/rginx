@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rginx_core::{Result, Upstream, UpstreamSettings};
+use rginx_core::{Error, Result, Upstream, UpstreamSettings};
 
 use crate::model::UpstreamConfig;
 
@@ -36,7 +36,7 @@ fn compile_upstreams_with_names(
     base_dir: &Path,
     name_mapper: impl Fn(&str) -> String,
 ) -> Result<HashMap<String, Arc<Upstream>>> {
-    raw_upstreams
+    let compiled = raw_upstreams
         .into_iter()
         .map(|upstream| {
             let UpstreamConfig {
@@ -189,5 +189,14 @@ fn compile_upstreams_with_names(
             ));
             Ok((name, compiled))
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut upstreams = HashMap::with_capacity(compiled.len());
+    for (name, upstream) in compiled {
+        if upstreams.insert(name.clone(), upstream).is_some() {
+            return Err(Error::Config(format!("duplicate compiled upstream `{name}`")));
+        }
+    }
+
+    Ok(upstreams)
 }

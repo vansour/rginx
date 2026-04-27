@@ -79,3 +79,6 @@ fn parse_port(owner_label: &str, value: &str) -> Result<u16> {
         Error::Config(format!("{owner_label} listen port `{value}` is invalid: {error}"))
     })
 }
+
+#[cfg(test)]
+mod tests;
