@@ -1,5 +1,7 @@
 use super::*;
 
+mod listener_conflicts;
+
 #[test]
 fn compile_generates_deduplicated_listeners_from_vhost_listen() {
     let base_dir = temp_base_dir("rginx-vhost-listen-test-");
