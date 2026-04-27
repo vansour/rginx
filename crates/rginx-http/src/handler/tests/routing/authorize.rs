@@ -3,6 +3,7 @@ use super::super::*;
 #[test]
 fn authorize_route_rejects_disallowed_remote_addr() {
     let route = Route {
+        cache: None,
         id: "server/routes[0]|exact:/protected".to_string(),
         matcher: RouteMatcher::Exact("/protected".to_string()),
         grpc_match: None,
@@ -44,6 +45,7 @@ fn authorize_route_rejects_disallowed_remote_addr() {
 #[test]
 fn authorize_route_returns_grpc_permission_denied_for_grpc_requests() {
     let route = Route {
+        cache: None,
         id: "server/routes[0]|exact:/protected".to_string(),
         matcher: RouteMatcher::Exact("/protected".to_string()),
         grpc_match: None,

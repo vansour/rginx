@@ -4,6 +4,7 @@ use rginx_core::{Error, Result};
 
 use crate::model::{Config, LocationConfig, RouteBufferingPolicyConfig};
 
+mod cache;
 mod route;
 mod runtime;
 mod server;
@@ -22,8 +23,9 @@ pub fn validate(config: &Config) -> Result<()> {
     }
     server::validate_server(&config.server)?;
     server::validate_listeners(&config.listeners, &config.server, &config.servers)?;
+    let cache_zone_names = cache::validate_cache_zones(&config.cache_zones)?;
     let upstream_names = upstream::validate_upstreams(&config.upstreams)?;
-    route::validate_locations(None, &config.locations, &upstream_names)?;
+    route::validate_locations(None, &config.locations, &upstream_names, &cache_zone_names)?;
 
     let mut all_server_names = HashSet::new();
     server::validate_server_names("server", &config.server.server_names, &mut all_server_names)?;
@@ -33,6 +35,7 @@ pub fn validate(config: &Config) -> Result<()> {
         &mut all_server_names,
         config.servers.iter().any(|vhost| !vhost.listen.is_empty()),
         config.server.tls.as_ref(),
+        &cache_zone_names,
     )?;
     validate_request_buffering_limits(config)?;
 

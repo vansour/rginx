@@ -10,6 +10,7 @@ fn compile_generates_deduplicated_listeners_from_vhost_listen() {
     fs::write(base_dir.path().join("api.key"), b"placeholder").expect("key should be written");
 
     let config = Config {
+        cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
             worker_threads: None,
@@ -75,6 +76,7 @@ fn compile_generates_deduplicated_listeners_from_vhost_listen() {
 #[test]
 fn compile_uses_vhost_local_upstream_before_global_upstream() {
     let config = Config {
+        cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
             worker_threads: None,
@@ -129,6 +131,7 @@ fn compile_applies_server_tls_defaults_only_to_vhost_ssl_listeners() {
     server.tls = Some(server_tls("default.crt", "default.key"));
 
     let config = Config {
+        cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
             worker_threads: None,
@@ -180,6 +183,7 @@ fn compile_uses_first_tls_vhost_as_implicit_default_certificate() {
     }
 
     let config = Config {
+        cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
             worker_threads: None,
@@ -208,6 +212,7 @@ fn compile_uses_first_tls_vhost_as_implicit_default_certificate() {
 #[test]
 fn compile_preserves_ipv6_vhost_listener_ids() {
     let config = Config {
+        cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
             worker_threads: None,

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::{Listener, RuntimeSettings, Upstream, VirtualHost};
+use super::{CacheZone, Listener, RuntimeSettings, Upstream, VirtualHost};
 
 #[derive(Debug, Clone)]
 pub struct ConfigSnapshot {
@@ -9,6 +9,7 @@ pub struct ConfigSnapshot {
     pub listeners: Vec<Listener>,
     pub default_vhost: VirtualHost,
     pub vhosts: Vec<VirtualHost>,
+    pub cache_zones: HashMap<String, Arc<CacheZone>>,
     pub upstreams: HashMap<String, Arc<Upstream>>,
 }
 

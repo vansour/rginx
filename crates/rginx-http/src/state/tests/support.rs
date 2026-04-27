@@ -18,6 +18,7 @@ pub(crate) fn snapshot(listen: &str) -> ConfigSnapshot {
         tls: None,
     };
     ConfigSnapshot {
+        cache_zones: std::collections::HashMap::new(),
         runtime: RuntimeSettings {
             shutdown_timeout: Duration::from_secs(10),
             worker_threads: None,
@@ -90,6 +91,7 @@ pub(crate) fn snapshot_with_upstream(listen: &str) -> ConfigSnapshot {
 pub(crate) fn snapshot_with_routes(listen: &str) -> ConfigSnapshot {
     let mut snapshot = snapshot(listen);
     snapshot.default_vhost.routes = vec![Route {
+        cache: None,
         id: "server/routes[0]|exact:/".to_string(),
         matcher: RouteMatcher::Exact("/".to_string()),
         grpc_match: None,
@@ -114,6 +116,7 @@ pub(crate) fn snapshot_with_routes(listen: &str) -> ConfigSnapshot {
 pub(crate) fn snapshot_with_routes_and_upstream(listen: &str) -> ConfigSnapshot {
     let mut snapshot = snapshot_with_upstream(listen);
     snapshot.default_vhost.routes = vec![Route {
+        cache: None,
         id: "server/routes[0]|exact:/".to_string(),
         matcher: RouteMatcher::Exact("/".to_string()),
         grpc_match: None,

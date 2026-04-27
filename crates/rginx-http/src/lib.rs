@@ -1,5 +1,6 @@
 use std::path::Path;
 
+mod cache;
 mod client_ip;
 mod compression;
 pub mod handler;

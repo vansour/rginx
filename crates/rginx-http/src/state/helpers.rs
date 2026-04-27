@@ -5,11 +5,13 @@ pub(super) fn prepare_state(
     let config = Arc::new(config);
     let clients =
         ProxyClients::from_config_with_health_notifier(config.as_ref(), peer_health_notifier)?;
+    let cache = CacheManager::from_config(config.as_ref())?;
     let listener_tls_acceptors = prepare_listener_tls_acceptors(config.as_ref())?;
 
     Ok(PreparedState {
         config,
         clients,
+        cache,
         listener_tls_acceptors,
         retired_listeners: Vec::new(),
     })

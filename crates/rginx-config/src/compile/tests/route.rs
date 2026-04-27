@@ -5,6 +5,7 @@ mod regex;
 #[test]
 fn compile_attaches_route_access_control() {
     let config = Config {
+        cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
             worker_threads: None,
@@ -32,6 +33,7 @@ fn compile_attaches_route_access_control() {
         },
         upstreams: Vec::new(),
         locations: vec![LocationConfig {
+            cache: None,
             matcher: MatcherConfig::Exact("/".to_string()),
             handler: HandlerConfig::Return {
                 status: 200,
@@ -65,6 +67,7 @@ fn compile_attaches_route_access_control() {
 #[test]
 fn compile_attaches_route_rate_limit() {
     let config = Config {
+        cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
             worker_threads: None,
@@ -92,6 +95,7 @@ fn compile_attaches_route_rate_limit() {
         },
         upstreams: Vec::new(),
         locations: vec![LocationConfig {
+            cache: None,
             matcher: MatcherConfig::Prefix("/api".to_string()),
             handler: HandlerConfig::Return {
                 status: 200,
@@ -127,6 +131,7 @@ fn compile_attaches_route_rate_limit() {
 #[test]
 fn compile_applies_route_transport_policy_defaults_and_overrides() {
     let config = Config {
+        cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
             worker_threads: None,
@@ -163,6 +168,7 @@ fn compile_applies_route_transport_policy_defaults_and_overrides() {
                 },
             ),
             LocationConfig {
+                cache: None,
                 matcher: MatcherConfig::Exact("/custom".to_string()),
                 handler: HandlerConfig::Return {
                     status: 200,
@@ -224,6 +230,7 @@ fn compile_applies_route_transport_policy_defaults_and_overrides() {
 #[test]
 fn compile_generates_distinct_route_and_vhost_ids() {
     let config = Config {
+        cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
             worker_threads: None,
@@ -288,6 +295,7 @@ fn compile_generates_distinct_route_and_vhost_ids() {
 #[test]
 fn compile_prioritizes_grpc_constrained_routes_with_same_path_matcher() {
     let config = Config {
+        cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
             worker_threads: None,
@@ -324,6 +332,7 @@ fn compile_prioritizes_grpc_constrained_routes_with_same_path_matcher() {
                 },
             ),
             LocationConfig {
+                cache: None,
                 grpc_service: Some("grpc.health.v1.Health".to_string()),
                 grpc_method: Some("Check".to_string()),
                 ..test_location(

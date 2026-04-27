@@ -10,9 +10,11 @@ pub(super) struct UpstreamSuccessContext<'a> {
     pub(super) response_idle_timeout: Duration,
     pub(super) grpc_response_deadline: Option<super::response::GrpcResponseDeadline>,
     pub(super) grpc_web_mode: Option<&'a GrpcWebMode>,
+    pub(super) cache_store: Option<crate::cache::CacheStoreContext>,
+    pub(super) cache_status: Option<crate::cache::CacheStatus>,
 }
 
-pub(super) fn finalize_upstream_success(
+pub(super) async fn finalize_upstream_success(
     mut response: Response<HttpBody>,
     context: UpstreamSuccessContext<'_>,
 ) -> HttpResponse {
@@ -36,7 +38,7 @@ pub(super) fn finalize_upstream_success(
             context.active_peer,
             connection_guard,
         ));
-        return build_downstream_response(
+        let response = build_downstream_response(
             response,
             &context.target.upstream_name,
             &context.peer.display_url,
@@ -45,9 +47,16 @@ pub(super) fn finalize_upstream_success(
             context.grpc_web_mode,
             None,
         );
+        return apply_cache_store(
+            context.state,
+            context.cache_store,
+            context.cache_status,
+            response,
+        )
+        .await;
     }
 
-    build_downstream_response(
+    let response = build_downstream_response(
         response,
         &context.target.upstream_name,
         &context.peer.display_url,
@@ -55,5 +64,21 @@ pub(super) fn finalize_upstream_success(
         context.grpc_response_deadline,
         context.grpc_web_mode,
         Some(context.active_peer),
-    )
+    );
+    apply_cache_store(context.state, context.cache_store, context.cache_status, response).await
+}
+
+async fn apply_cache_store(
+    state: &SharedState,
+    cache_store: Option<crate::cache::CacheStoreContext>,
+    cache_status: Option<crate::cache::CacheStatus>,
+    response: HttpResponse,
+) -> HttpResponse {
+    if let Some(cache_store) = cache_store {
+        state.store_cached_response(cache_store, response).await
+    } else if let Some(cache_status) = cache_status {
+        state.mark_cache_status(response, cache_status)
+    } else {
+        response
+    }
 }

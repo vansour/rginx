@@ -123,6 +123,7 @@ impl SharedState {
             next_revision
         };
 
+        *self.cache.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = prepared.cache;
         *self.listener_tls_acceptors.write().await = merged_acceptors;
         let _ = self.revisions.send(next_revision);
         self.mark_snapshot_changed_components(true, false, true, true, true);

@@ -113,6 +113,7 @@ fn validate_allows_duplicate_exact_routes_when_grpc_constraints_differ() {
     let mut config = base_config();
     config.locations[0].matcher = MatcherConfig::Exact("/grpc.health.v1.Health/Check".to_string());
     config.locations.push(LocationConfig {
+        cache: None,
         matcher: MatcherConfig::Exact("/grpc.health.v1.Health/Check".to_string()),
         handler: HandlerConfig::Proxy {
             upstream: "backend".to_string(),

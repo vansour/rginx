@@ -118,6 +118,7 @@ fn config_snapshot_counts_routes_across_all_vhosts() {
                 tls: None,
             },
         ],
+        cache_zones: HashMap::new(),
         upstreams: HashMap::new(),
     };
 
@@ -375,5 +376,6 @@ fn route(path: &str) -> Route {
         compression_min_bytes: None,
         compression_content_types: Vec::new(),
         streaming_response_idle_timeout: None,
+        cache: None,
     }
 }

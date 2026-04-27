@@ -1,14 +1,15 @@
 use crate::model::{
-    Config, HandlerConfig, Http3Config, ListenerConfig, LocationConfig, MatcherConfig,
-    ProxyHeaderDynamicValueConfig, ProxyHeaderValueConfig, RouteBufferingPolicyConfig,
-    RouteCompressionPolicyConfig, RuntimeConfig, ServerConfig, ServerTlsConfig,
-    TlsCipherSuiteConfig, TlsKeyExchangeGroupConfig, TlsVersionConfig, UpstreamConfig,
-    UpstreamLoadBalanceConfig, UpstreamPeerConfig, UpstreamProtocolConfig, VirtualHostConfig,
-    VirtualHostTlsConfig,
+    CacheRouteConfig, CacheZoneConfig, Config, HandlerConfig, Http3Config, ListenerConfig,
+    LocationConfig, MatcherConfig, ProxyHeaderDynamicValueConfig, ProxyHeaderValueConfig,
+    RouteBufferingPolicyConfig, RouteCompressionPolicyConfig, RuntimeConfig, ServerConfig,
+    ServerTlsConfig, TlsCipherSuiteConfig, TlsKeyExchangeGroupConfig, TlsVersionConfig,
+    UpstreamConfig, UpstreamLoadBalanceConfig, UpstreamPeerConfig, UpstreamProtocolConfig,
+    VirtualHostConfig, VirtualHostTlsConfig,
 };
 
 use super::{DEFAULT_GRPC_HEALTH_CHECK_PATH, validate};
 
+mod cache;
 mod listeners;
 mod route;
 mod runtime;
@@ -23,6 +24,7 @@ mod vhosts;
 
 fn base_config() -> Config {
     Config {
+        cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
             worker_threads: None,
@@ -83,6 +85,7 @@ fn base_config() -> Config {
             healthy_successes_required: None,
         }],
         locations: vec![LocationConfig {
+            cache: None,
             matcher: MatcherConfig::Prefix("/".to_string()),
             handler: HandlerConfig::Proxy {
                 upstream: "backend".to_string(),
@@ -133,6 +136,7 @@ fn sample_vhost(server_names: Vec<&str>) -> VirtualHostConfig {
         server_names: server_names.into_iter().map(str::to_string).collect(),
         upstreams: Vec::new(),
         locations: vec![LocationConfig {
+            cache: None,
             matcher: MatcherConfig::Exact("/".to_string()),
             handler: HandlerConfig::Return {
                 status: 200,
