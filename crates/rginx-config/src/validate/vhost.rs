@@ -9,11 +9,12 @@ pub(super) fn validate_virtual_hosts(
     global_upstream_names: &HashSet<String>,
     all_server_names: &mut HashSet<String>,
     require_vhost_listen: bool,
+    server_tls_defaults: Option<&ServerTlsConfig>,
 ) -> Result<()> {
     for (idx, vhost) in vhosts.iter().enumerate() {
         let vhost_label = format!("servers[{idx}]");
 
-        validate_vhost_listens(&vhost_label, vhost, require_vhost_listen)?;
+        validate_vhost_listens(&vhost_label, vhost, require_vhost_listen, server_tls_defaults)?;
 
         if vhost.server_names.is_empty() {
             if vhost.tls.is_some() {
@@ -60,10 +61,11 @@ fn validate_vhost_listens(
     vhost_label: &str,
     vhost: &VirtualHostConfig,
     require_vhost_listen: bool,
+    server_tls_defaults: Option<&ServerTlsConfig>,
 ) -> Result<()> {
     if require_vhost_listen && vhost.listen.is_empty() {
         return Err(Error::Config(format!(
-            "{vhost_label} must define at least one listen when servers[].listen is used"
+            "{vhost_label} must define at least one listen when servers[].listen is used; once any vhost uses servers[].listen, every vhost must declare listen explicitly"
         )));
     }
 
@@ -76,7 +78,7 @@ fn validate_vhost_listens(
         has_http3_listen |= parsed.http3;
     }
 
-    if require_vhost_listen && has_ssl_listen && vhost.tls.is_none() {
+    if has_ssl_listen && vhost.tls.is_none() {
         return Err(Error::Config(format!("{vhost_label} ssl listen requires tls")));
     }
 
@@ -89,12 +91,9 @@ fn validate_vhost_listens(
     }
 
     if let Some(http3) = vhost.http3.as_ref() {
-        let tls_policy = vhost.tls.as_ref().map(server_tls_policy_from_vhost_tls);
-        super::server::validate_http3_config(
-            &format!("{vhost_label}.http3"),
-            http3,
-            tls_policy.as_ref(),
-        )?;
+        let vhost_tls_policy = vhost.tls.as_ref().map(server_tls_policy_from_vhost_tls);
+        let tls_policy = server_tls_defaults.or(vhost_tls_policy.as_ref());
+        super::server::validate_http3_config(&format!("{vhost_label}.http3"), http3, tls_policy)?;
     }
 
     Ok(())

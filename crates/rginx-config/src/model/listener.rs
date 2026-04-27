@@ -2,7 +2,7 @@ use serde::Deserialize;
 
 use super::ServerTlsConfig;
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
 pub struct Http3Config {
     #[serde(default)]
     pub listen: Option<String>,

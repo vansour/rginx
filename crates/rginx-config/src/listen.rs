@@ -38,7 +38,11 @@ pub(crate) fn parse_vhost_listen(owner_label: &str, raw: &str) -> Result<ParsedV
                 parsed.ssl = true;
             }
             "proxy_protocol" => parsed.proxy_protocol = true,
-            "default_server" | "reuseport" => {}
+            "default_server" | "reuseport" => {
+                return Err(Error::Config(format!(
+                    "{owner_label} listen option `{token}` is not supported yet"
+                )));
+            }
             _ => {
                 return Err(Error::Config(format!(
                     "{owner_label} listen option `{token}` is not supported"

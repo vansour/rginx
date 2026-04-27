@@ -109,6 +109,89 @@ fn compile_uses_vhost_local_upstream_before_global_upstream() {
     }
 }
 
+#[test]
+fn compile_applies_server_tls_defaults_only_to_vhost_ssl_listeners() {
+    let base_dir = temp_base_dir("rginx-vhost-listen-tls-defaults-");
+    fs::write(base_dir.path().join("default.crt"), b"placeholder").expect("cert should be written");
+    fs::write(base_dir.path().join("default.key"), b"placeholder").expect("key should be written");
+    fs::write(base_dir.path().join("api.crt"), b"placeholder").expect("cert should be written");
+    fs::write(base_dir.path().join("api.key"), b"placeholder").expect("key should be written");
+
+    let mut server = server_defaults(None);
+    server.default_certificate = Some("api.example.com".to_string());
+    server.tls = Some(server_tls("default.crt", "default.key"));
+
+    let config = Config {
+        runtime: RuntimeConfig {
+            shutdown_timeout_secs: 10,
+            worker_threads: None,
+            accept_workers: None,
+        },
+        listeners: Vec::new(),
+        server,
+        upstreams: Vec::new(),
+        locations: Vec::new(),
+        servers: vec![VirtualHostConfig {
+            listen: vec!["127.0.0.1:8080".to_string(), "127.0.0.1:8443 ssl http2".to_string()],
+            server_names: vec!["api.example.com".to_string()],
+            upstreams: Vec::new(),
+            locations: vec![return_location("api\n")],
+            tls: Some(crate::model::VirtualHostTlsConfig {
+                cert_path: "api.crt".to_string(),
+                key_path: "api.key".to_string(),
+                additional_certificates: None,
+                ocsp_staple_path: None,
+                ocsp: None,
+            }),
+            http3: None,
+        }],
+    };
+
+    let snapshot =
+        compile_with_base(config, base_dir.path()).expect("vhost listen config should compile");
+
+    assert_eq!(snapshot.listeners.len(), 2);
+    assert!(!snapshot.listeners[0].tls_enabled());
+    assert!(snapshot.listeners[0].server.tls.is_none());
+    assert!(snapshot.listeners[0].server.default_certificate.is_none());
+    assert!(snapshot.listeners[1].tls_enabled());
+    assert!(snapshot.listeners[1].server.tls.is_some());
+    assert_eq!(
+        snapshot.listeners[1].server.default_certificate.as_deref(),
+        Some("api.example.com")
+    );
+}
+
+#[test]
+fn compile_preserves_ipv6_vhost_listener_ids() {
+    let config = Config {
+        runtime: RuntimeConfig {
+            shutdown_timeout_secs: 10,
+            worker_threads: None,
+            accept_workers: None,
+        },
+        listeners: Vec::new(),
+        server: server_defaults(None),
+        upstreams: Vec::new(),
+        locations: Vec::new(),
+        servers: vec![VirtualHostConfig {
+            listen: vec!["[::1]:8080".to_string()],
+            server_names: vec!["ipv6.example.com".to_string()],
+            upstreams: Vec::new(),
+            locations: vec![return_location("ipv6\n")],
+            tls: None,
+            http3: None,
+        }],
+    };
+
+    let snapshot = compile(config).expect("IPv6 vhost listen config should compile");
+
+    assert_eq!(snapshot.listeners.len(), 1);
+    assert_eq!(snapshot.listeners[0].id, "vhost-listen:[::1]:8080");
+    assert_eq!(snapshot.listeners[0].name, "vhost:[::1]:8080");
+    assert_eq!(snapshot.listeners[0].server.listen_addr, "[::1]:8080".parse().unwrap());
+}
+
 fn server_defaults(listen: Option<&str>) -> ServerConfig {
     ServerConfig {
         listen: listen.map(str::to_string),
@@ -127,6 +210,25 @@ fn server_defaults(listen: Option<&str>) -> ServerConfig {
         access_log_format: None,
         tls: None,
         http3: None,
+    }
+}
+
+fn server_tls(cert_path: &str, key_path: &str) -> ServerTlsConfig {
+    ServerTlsConfig {
+        cert_path: cert_path.to_string(),
+        key_path: key_path.to_string(),
+        additional_certificates: None,
+        versions: Some(vec![crate::model::TlsVersionConfig::Tls12]),
+        cipher_suites: None,
+        key_exchange_groups: None,
+        alpn_protocols: None,
+        ocsp_staple_path: None,
+        ocsp: None,
+        session_resumption: None,
+        session_tickets: None,
+        session_cache_size: None,
+        session_ticket_count: None,
+        client_auth: None,
     }
 }
 

@@ -1,9 +1,9 @@
 use crate::model::{
     Config, HandlerConfig, Http3Config, ListenerConfig, LocationConfig, MatcherConfig,
     RouteBufferingPolicyConfig, RouteCompressionPolicyConfig, RuntimeConfig, ServerConfig,
-    ServerTlsConfig, TlsCipherSuiteConfig, TlsKeyExchangeGroupConfig, UpstreamConfig,
-    UpstreamLoadBalanceConfig, UpstreamPeerConfig, UpstreamProtocolConfig, VirtualHostConfig,
-    VirtualHostTlsConfig,
+    ServerTlsConfig, TlsCipherSuiteConfig, TlsKeyExchangeGroupConfig, TlsVersionConfig,
+    UpstreamConfig, UpstreamLoadBalanceConfig, UpstreamPeerConfig, UpstreamProtocolConfig,
+    VirtualHostConfig, VirtualHostTlsConfig,
 };
 
 use super::{DEFAULT_GRPC_HEALTH_CHECK_PATH, validate};

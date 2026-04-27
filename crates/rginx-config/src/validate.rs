@@ -32,6 +32,7 @@ pub fn validate(config: &Config) -> Result<()> {
         &upstream_names,
         &mut all_server_names,
         config.servers.iter().any(|vhost| !vhost.listen.is_empty()),
+        config.server.tls.as_ref(),
     )?;
     validate_request_buffering_limits(config)?;
 

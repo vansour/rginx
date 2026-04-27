@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 
 use rginx_core::{Error, Result};
 
-use crate::model::{ListenerConfig, ServerConfig, VirtualHostConfig};
+use crate::model::{Http3Config, ListenerConfig, ServerConfig, VirtualHostConfig};
 
 use super::base::{ListenerLikeRef, legacy_server_listener_fields, validate_listener_like};
 
@@ -116,14 +116,9 @@ pub(super) fn validate_listeners(
 }
 
 fn validate_server_fields_for_vhost_listen(server: &ServerConfig) -> Result<()> {
-    if server.listen.is_some()
-        || server.proxy_protocol.is_some()
-        || server.default_certificate.is_some()
-        || server.tls.is_some()
-        || server.http3.is_some()
-    {
+    if server.listen.is_some() || server.proxy_protocol.is_some() || server.http3.is_some() {
         return Err(Error::Config(
-            "server listen, proxy_protocol, default_certificate, tls, and http3 cannot be used together with servers[].listen"
+            "server listen, proxy_protocol, and http3 cannot be used together with servers[].listen; use servers[].listen for bindings and keep server.tls/default_certificate only as global TLS defaults"
                 .to_string(),
         ));
     }
@@ -131,10 +126,11 @@ fn validate_server_fields_for_vhost_listen(server: &ServerConfig) -> Result<()> 
     Ok(())
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct VhostListenerBinding {
     ssl: bool,
     proxy_protocol: bool,
+    http3: Option<Http3Config>,
 }
 
 fn validate_vhost_listener_bindings(vhosts: &[VirtualHostConfig]) -> Result<()> {
@@ -144,6 +140,7 @@ fn validate_vhost_listener_bindings(vhosts: &[VirtualHostConfig]) -> Result<()> 
         for (listen_index, listen) in vhost.listen.iter().enumerate() {
             let owner = format!("servers[{vhost_index}].listen[{listen_index}]");
             let parsed = crate::listen::parse_vhost_listen(&owner, listen)?;
+            let http3 = parsed.http3.then(|| vhost.http3.clone().unwrap_or_default());
 
             if let Some(existing) = tcp_bindings.get(&parsed.addr) {
                 if existing.ssl != parsed.ssl {
@@ -158,10 +155,20 @@ fn validate_vhost_listener_bindings(vhosts: &[VirtualHostConfig]) -> Result<()> 
                         parsed.addr
                     )));
                 }
+                if existing.http3 != http3 {
+                    return Err(Error::Config(format!(
+                        "servers[].listen `{}` must use consistent http3 settings across vhosts",
+                        parsed.addr
+                    )));
+                }
             } else {
                 tcp_bindings.insert(
                     parsed.addr,
-                    VhostListenerBinding { ssl: parsed.ssl, proxy_protocol: parsed.proxy_protocol },
+                    VhostListenerBinding {
+                        ssl: parsed.ssl,
+                        proxy_protocol: parsed.proxy_protocol,
+                        http3,
+                    },
                 );
             }
         }

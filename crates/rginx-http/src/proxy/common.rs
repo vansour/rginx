@@ -126,6 +126,8 @@ fn may_use_authority_pseudo_header(
     peer: &ResolvedUpstreamPeer,
     protocol: UpstreamProtocol,
 ) -> bool {
+    // For Auto + HTTPS, ALPN may still negotiate HTTP/1.1. Hyper's high-level
+    // client rebuilds a missing Host header from the URI authority for h1.
     matches!(protocol, UpstreamProtocol::Http2 | UpstreamProtocol::Http3)
         || (protocol == UpstreamProtocol::Auto && peer.scheme == "https")
 }

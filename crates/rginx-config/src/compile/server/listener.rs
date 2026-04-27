@@ -166,11 +166,14 @@ pub(super) fn compile_vhost_listeners(
     bindings
         .into_iter()
         .map(|(listen_addr, binding)| {
+            let tls = binding.ssl.then(|| server_defaults.tls.clone()).flatten();
+            let default_certificate =
+                binding.ssl.then(|| server_defaults.default_certificate.clone()).flatten();
             let compiled = compile_server_fields(
                 ServerFieldConfig {
                     listen: listen_addr.to_string(),
                     server_header: server_defaults.server_header.clone(),
-                    default_certificate: None,
+                    default_certificate,
                     trusted_proxies: server_defaults.trusted_proxies.clone(),
                     keep_alive: server_defaults.keep_alive,
                     max_headers: server_defaults.max_headers,
@@ -180,7 +183,7 @@ pub(super) fn compile_vhost_listeners(
                     request_body_read_timeout_secs: server_defaults.request_body_read_timeout_secs,
                     response_write_timeout_secs: server_defaults.response_write_timeout_secs,
                     access_log_format: server_defaults.access_log_format.clone(),
-                    tls: None,
+                    tls,
                 },
                 base_dir,
             )?;
