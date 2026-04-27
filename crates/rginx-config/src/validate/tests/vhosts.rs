@@ -144,6 +144,7 @@ fn validate_rejects_vhost_tls_without_any_tls_listener() {
         server_names: vec!["api.example.com".to_string()],
         upstreams: Vec::new(),
         locations: vec![LocationConfig {
+            cache: None,
             matcher: MatcherConfig::Exact("/".to_string()),
             handler: HandlerConfig::Return {
                 status: 200,

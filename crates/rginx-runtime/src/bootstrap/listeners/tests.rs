@@ -36,6 +36,7 @@ fn listener(id: &str, name: &str, listen_addr: SocketAddr) -> Listener {
 
 fn config_with_listeners(listeners: Vec<Listener>) -> ConfigSnapshot {
     ConfigSnapshot {
+        cache_zones: std::collections::HashMap::new(),
         runtime: rginx_core::RuntimeSettings {
             shutdown_timeout: std::time::Duration::from_secs(1),
             worker_threads: None,

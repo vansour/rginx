@@ -1,5 +1,6 @@
 use serde::Deserialize;
 
+mod cache;
 mod listener;
 mod route;
 mod runtime;
@@ -31,6 +32,8 @@ pub struct Config {
     pub runtime: RuntimeConfig,
     #[serde(default)]
     pub listeners: Vec<ListenerConfig>,
+    #[serde(default)]
+    pub cache_zones: Vec<CacheZoneConfig>,
     pub server: ServerConfig,
     #[serde(default)]
     pub upstreams: Vec<UpstreamConfig>,
@@ -39,3 +42,4 @@ pub struct Config {
     #[serde(default)]
     pub servers: Vec<VirtualHostConfig>,
 }
+pub use cache::{CacheRouteConfig, CacheZoneConfig};

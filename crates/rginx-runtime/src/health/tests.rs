@@ -52,6 +52,7 @@ async fn collect_probe_targets_only_includes_enabled_upstreams() {
         tls: None,
     };
     let snapshot = ConfigSnapshot {
+        cache_zones: std::collections::HashMap::new(),
         runtime: RuntimeSettings {
             shutdown_timeout: Duration::from_secs(1),
             worker_threads: None,

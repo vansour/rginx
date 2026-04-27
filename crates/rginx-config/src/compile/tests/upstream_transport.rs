@@ -3,6 +3,7 @@ use super::*;
 #[test]
 fn compile_applies_granular_upstream_transport_settings() {
     let config = Config {
+        cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
             worker_threads: None,
@@ -97,6 +98,7 @@ fn compile_applies_granular_upstream_transport_settings() {
 #[test]
 fn compile_accepts_least_conn_load_balance() {
     let config = Config {
+        cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
             worker_threads: None,
@@ -164,6 +166,7 @@ fn compile_accepts_least_conn_load_balance() {
             healthy_successes_required: None,
         }],
         locations: vec![LocationConfig {
+            cache: None,
             matcher: MatcherConfig::Prefix("/".to_string()),
             handler: HandlerConfig::Proxy {
                 upstream: "backend".to_string(),
@@ -202,6 +205,7 @@ fn compile_accepts_least_conn_load_balance() {
 #[test]
 fn compile_applies_peer_weights() {
     let config = Config {
+        cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
             worker_threads: None,
@@ -269,6 +273,7 @@ fn compile_applies_peer_weights() {
             healthy_successes_required: None,
         }],
         locations: vec![LocationConfig {
+            cache: None,
             matcher: MatcherConfig::Prefix("/".to_string()),
             handler: HandlerConfig::Proxy {
                 upstream: "backend".to_string(),

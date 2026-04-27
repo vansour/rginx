@@ -3,6 +3,7 @@ use super::*;
 #[test]
 fn compile_applies_custom_server_header() {
     let config = Config {
+        cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
             worker_threads: None,
@@ -47,6 +48,7 @@ fn compile_applies_custom_server_header() {
 #[test]
 fn compile_normalizes_trusted_proxy_ips_and_cidrs() {
     let config = Config {
+        cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
             worker_threads: None,
@@ -74,6 +76,7 @@ fn compile_normalizes_trusted_proxy_ips_and_cidrs() {
         },
         upstreams: Vec::new(),
         locations: vec![LocationConfig {
+            cache: None,
             matcher: MatcherConfig::Exact("/".to_string()),
             handler: HandlerConfig::Return {
                 status: 200,
@@ -112,6 +115,7 @@ fn compile_normalizes_trusted_proxy_ips_and_cidrs() {
 #[test]
 fn compile_attaches_server_hardening_settings() {
     let config = Config {
+        cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
             worker_threads: Some(3),
@@ -139,6 +143,7 @@ fn compile_attaches_server_hardening_settings() {
         },
         upstreams: Vec::new(),
         locations: vec![LocationConfig {
+            cache: None,
             matcher: MatcherConfig::Exact("/".to_string()),
             handler: HandlerConfig::Return {
                 status: 200,
@@ -193,6 +198,7 @@ fn compile_attaches_server_hardening_settings() {
 #[test]
 fn compile_rejects_invalid_server_access_log_format() {
     let config = Config {
+        cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
             worker_threads: None,
@@ -220,6 +226,7 @@ fn compile_rejects_invalid_server_access_log_format() {
         },
         upstreams: Vec::new(),
         locations: vec![LocationConfig {
+            cache: None,
             matcher: MatcherConfig::Exact("/".to_string()),
             handler: HandlerConfig::Return {
                 status: 200,

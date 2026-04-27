@@ -26,6 +26,7 @@ fn snapshot(listen: &str) -> ConfigSnapshot {
         tls: None,
     };
     ConfigSnapshot {
+        cache_zones: std::collections::HashMap::new(),
         runtime: RuntimeSettings {
             shutdown_timeout: Duration::from_secs(10),
             worker_threads: None,

@@ -44,6 +44,7 @@ fn compile_rejects_conflicting_shared_vhost_listener_flags() {
 
     for (servers, expected) in cases {
         let config = Config {
+            cache_zones: Vec::new(),
             runtime: RuntimeConfig {
                 shutdown_timeout_secs: 10,
                 worker_threads: None,

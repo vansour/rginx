@@ -11,11 +11,13 @@ use tokio::sync::{Notify, RwLock, watch};
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 
+use crate::cache::{CacheLookup, CacheManager, CacheStatus, CacheStoreContext};
 use crate::proxy::{HealthChangeNotifier, ProxyClients, UpstreamHealthSnapshot};
 use crate::rate_limit::RateLimiters;
 use crate::tls::build_tls_acceptor;
 use crate::tls::ocsp::ocsp_responder_urls_for_certificate;
 
+mod cache;
 mod connections;
 mod lifecycle;
 mod snapshot_bus;
@@ -33,6 +35,7 @@ const TLS_EXPIRY_WARNING_DAYS: i64 = 30;
 pub(super) struct PreparedState {
     config: Arc<ConfigSnapshot>,
     clients: ProxyClients,
+    cache: CacheManager,
     listener_tls_acceptors: HashMap<String, Option<TlsAcceptor>>,
     retired_listeners: Vec<Listener>,
 }
@@ -76,6 +79,7 @@ pub struct SharedState {
     snapshot_notify: Arc<Notify>,
     snapshot_components: Arc<SnapshotComponentVersions>,
     listener_tls_acceptors: Arc<RwLock<HashMap<String, Option<TlsAcceptor>>>>,
+    cache: Arc<StdRwLock<CacheManager>>,
     listener_active_connections: Arc<StdRwLock<HashMap<String, Arc<AtomicUsize>>>>,
     retired_listeners: Arc<StdRwLock<HashMap<String, Listener>>>,
     background_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
@@ -157,6 +161,7 @@ impl SharedState {
             snapshot_notify,
             snapshot_components,
             listener_tls_acceptors: Arc::new(RwLock::new(prepared.listener_tls_acceptors)),
+            cache: Arc::new(StdRwLock::new(prepared.cache)),
             listener_active_connections: Arc::new(StdRwLock::new(listener_active_connections)),
             retired_listeners: Arc::new(StdRwLock::new(HashMap::new())),
             background_tasks: Arc::new(Mutex::new(Vec::new())),

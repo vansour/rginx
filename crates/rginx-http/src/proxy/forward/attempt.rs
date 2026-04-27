@@ -9,18 +9,39 @@ pub async fn forward_request(
     client_address: ClientAddress,
     downstream: DownstreamRequestContext<'_>,
 ) -> HttpResponse {
+    let cache_lookup = match downstream.options.cache.as_ref() {
+        Some(cache) => {
+            let cache_request = crate::cache::CacheRequest::from_request(&request);
+            Some(
+                state
+                    .lookup_cached_response(cache_request, downstream.downstream_proto, cache)
+                    .await,
+            )
+        }
+        None => None,
+    };
+    let (mut cache_store, cache_status) = match cache_lookup {
+        Some(crate::cache::CacheLookup::Hit(response)) => return response,
+        Some(crate::cache::CacheLookup::Miss(context)) => {
+            let status = context.cache_status();
+            (Some(context), Some(status))
+        }
+        Some(crate::cache::CacheLookup::Bypass(status)) => (None, Some(status)),
+        None => (None, None),
+    };
+
     let prepared = match prepare_forward_request(
         &state,
         &clients,
         request,
         target,
         &client_address,
-        downstream,
+        &downstream,
     )
     .await
     {
         Ok(prepared) => prepared,
-        Err(response) => return response,
+        Err(response) => return mark_cache_status_if_needed(&state, response, cache_status),
     };
 
     let setup::PreparedForwardRequest {
@@ -61,9 +82,16 @@ pub async fn forward_request(
                     "failed to build upstream request"
                 );
                 state.record_upstream_bad_gateway_response(&target.upstream_name);
-                return bad_gateway(
-                    &request_headers,
-                    format!("failed to build upstream request for `{}`\n", target.upstream_name),
+                return mark_cache_status_if_needed(
+                    &state,
+                    bad_gateway(
+                        &request_headers,
+                        format!(
+                            "failed to build upstream request for `{}`\n",
+                            target.upstream_name
+                        ),
+                    ),
+                    cache_status,
                 );
             }
         };
@@ -87,11 +115,11 @@ pub async fn forward_request(
                     &request_headers,
                     target,
                     peer,
-                    downstream,
+                    &downstream,
                 )
                 .await
                 {
-                    return response;
+                    return mark_cache_status_if_needed(&state, response, cache_status);
                 }
                 state.record_upstream_peer_success(&target.upstream_name, &peer.logical_peer_url);
                 state.record_upstream_completed_response(&target.upstream_name);
@@ -128,8 +156,11 @@ pub async fn forward_request(
                         response_idle_timeout,
                         grpc_response_deadline,
                         grpc_web_mode: grpc_web_mode.as_ref(),
+                        cache_store: cache_store.take(),
+                        cache_status,
                     },
-                );
+                )
+                .await;
             }
             Ok(Err(error))
                 if can_retry_peer_request(&prepared_request, peers.len(), attempt_index) =>
@@ -170,11 +201,15 @@ pub async fn forward_request(
                         "rejecting streamed request body that exceeds configured server limit"
                     );
                     state.record_upstream_payload_too_large_response(&target.upstream_name);
-                    return payload_too_large(
-                        &request_headers,
-                        format!(
-                            "request body exceeds server.max_request_body_bytes ({max_request_body_bytes} bytes)\n"
+                    return mark_cache_status_if_needed(
+                        &state,
+                        payload_too_large(
+                            &request_headers,
+                            format!(
+                                "request body exceeds server.max_request_body_bytes ({max_request_body_bytes} bytes)\n"
+                            ),
                         ),
+                        cache_status,
                     );
                 }
                 if invalid_downstream_request_body_error(&error) {
@@ -191,9 +226,13 @@ pub async fn forward_request(
                         "downstream request body was invalid while proxying upstream request"
                     );
                     state.record_upstream_bad_request_response(&target.upstream_name);
-                    return bad_request(
-                        &request_headers,
-                        format!("invalid downstream request body: {error}\n"),
+                    return mark_cache_status_if_needed(
+                        &state,
+                        bad_request(
+                            &request_headers,
+                            format!("invalid downstream request body: {error}\n"),
+                        ),
+                        cache_status,
                     );
                 }
                 state.record_upstream_peer_failure(&target.upstream_name, &peer.logical_peer_url);
@@ -216,9 +255,13 @@ pub async fn forward_request(
                     "upstream request failed"
                 );
                 state.record_upstream_bad_gateway_response(&target.upstream_name);
-                return bad_gateway(
-                    &request_headers,
-                    format!("upstream `{}` is unavailable\n", target.upstream_name),
+                return mark_cache_status_if_needed(
+                    &state,
+                    bad_gateway(
+                        &request_headers,
+                        format!("upstream `{}` is unavailable\n", target.upstream_name),
+                    ),
+                    cache_status,
                 );
             }
             Err(error) if can_retry_peer_request(&prepared_request, peers.len(), attempt_index) => {
@@ -264,17 +307,40 @@ pub async fn forward_request(
                     "upstream request timed out"
                 );
                 state.record_upstream_gateway_timeout_response(&target.upstream_name);
-                return gateway_timeout(
-                    &request_headers,
-                    format!(
-                        "{}\n",
-                        grpc_timeout_message(&target.upstream_name, upstream_request_timeout)
+                return mark_cache_status_if_needed(
+                    &state,
+                    gateway_timeout(
+                        &request_headers,
+                        format!(
+                            "{}\n",
+                            grpc_timeout_message(&target.upstream_name, upstream_request_timeout)
+                        ),
                     ),
+                    cache_status,
                 );
             }
         }
     }
 
     state.record_upstream_bad_gateway_response(&target.upstream_name);
-    bad_gateway(&request_headers, format!("upstream `{}` is unavailable\n", target.upstream_name))
+    mark_cache_status_if_needed(
+        &state,
+        bad_gateway(
+            &request_headers,
+            format!("upstream `{}` is unavailable\n", target.upstream_name),
+        ),
+        cache_status,
+    )
+}
+
+fn mark_cache_status_if_needed(
+    state: &SharedState,
+    response: HttpResponse,
+    cache_status: Option<crate::cache::CacheStatus>,
+) -> HttpResponse {
+    if let Some(cache_status) = cache_status {
+        state.mark_cache_status(response, cache_status)
+    } else {
+        response
+    }
 }

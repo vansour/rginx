@@ -38,6 +38,7 @@ rginx-core = { path = "../rginx-core" }
 rustls.workspace = true
 rustls-native-certs.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 sha1.workspace = true
 sha2.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util"] }
