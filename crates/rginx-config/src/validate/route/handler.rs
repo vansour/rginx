@@ -31,7 +31,7 @@ pub(super) fn validate_handler(
         }
 
         let mut proxy_headers = proxy_set_headers.iter().collect::<Vec<_>>();
-        proxy_headers.sort_by(|(left, _), (right, _)| left.cmp(right));
+        proxy_headers.sort_by_key(|(name, _)| *name);
         for (name, value) in proxy_headers {
             if name.trim().is_empty() {
                 return Err(Error::Config(format!(
