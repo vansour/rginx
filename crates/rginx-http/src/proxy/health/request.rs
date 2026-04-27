@@ -17,8 +17,10 @@ pub(in super::super) fn build_active_health_request(
     })?;
 
     let mut builder = Request::builder().uri(uri).header(HOST, peer.upstream_authority.as_str());
+    let request_protocol =
+        if check.grpc_service.is_some() { UpstreamProtocol::Http2 } else { upstream.protocol };
 
-    if let Some(service) = check.grpc_service.as_deref() {
+    let mut request = if let Some(service) = check.grpc_service.as_deref() {
         let body = encode_grpc_health_check_request(service);
         builder = builder
             .method(Method::POST)
@@ -32,10 +34,16 @@ pub(in super::super) fn build_active_health_request(
     } else {
         builder
             .method(Method::GET)
-            .version(upstream_request_version(upstream.protocol))
+            .version(upstream_request_version(request_protocol))
             .body(full_body(Bytes::new()))
             .map_err(|error| {
                 Error::Server(format!("failed to build active health-check request: {error}"))
             })
-    }
+    }?;
+    remove_redundant_host_header_for_authority_pseudo_header(
+        request.headers_mut(),
+        peer,
+        request_protocol,
+    );
+    Ok(request)
 }

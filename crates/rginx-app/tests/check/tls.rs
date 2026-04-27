@@ -41,7 +41,7 @@ fn check_reports_tls_diagnostics_for_listener_and_vhost_certificates() {
         "tls_details=listener_profiles=1 vhost_overrides=1 sni_names=2 certificate_bundles=2"
     ));
     assert!(stdout.contains(
-        "reload_tls_updates=server.tls,server.http3.advertise_alt_svc,server.http3.alt_svc_max_age_secs,listeners[].tls,listeners[].http3.advertise_alt_svc,listeners[].http3.alt_svc_max_age_secs,servers[].tls,upstreams[].tls,upstreams[].server_name,upstreams[].server_name_override"
+        "reload_tls_updates=server.tls,server.http3.advertise_alt_svc,server.http3.alt_svc_max_age_secs,listeners[].tls,listeners[].http3.advertise_alt_svc,listeners[].http3.alt_svc_max_age_secs,servers[].tls,upstreams[].tls,upstreams[].server_name,upstreams[].server_name_override,servers[].upstreams[].tls,servers[].upstreams[].server_name,servers[].upstreams[].server_name_override"
     ));
     assert!(stdout.contains("tls_default_certificates=default=api.example.com"));
     assert!(stdout.contains("tls_expiring_certificates=-"));

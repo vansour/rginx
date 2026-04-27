@@ -15,8 +15,10 @@ const DEFAULT_GRPC_HEALTH_CHECK_PATH: &str = "/grpc.health.v1.Health/Check";
 pub fn validate(config: &Config) -> Result<()> {
     runtime::validate_runtime(&config.runtime)?;
 
-    if config.locations.is_empty() {
-        return Err(Error::Config("at least one location must be configured".to_string()));
+    if config.locations.is_empty() && config.servers.is_empty() {
+        return Err(Error::Config(
+            "at least one location or virtual host must be configured".to_string(),
+        ));
     }
     server::validate_server(&config.server)?;
     server::validate_listeners(&config.listeners, &config.server, &config.servers)?;
@@ -25,7 +27,13 @@ pub fn validate(config: &Config) -> Result<()> {
 
     let mut all_server_names = HashSet::new();
     server::validate_server_names("server", &config.server.server_names, &mut all_server_names)?;
-    vhost::validate_virtual_hosts(&config.servers, &upstream_names, &mut all_server_names)?;
+    vhost::validate_virtual_hosts(
+        &config.servers,
+        &upstream_names,
+        &mut all_server_names,
+        config.servers.iter().any(|vhost| !vhost.listen.is_empty()),
+        config.server.tls.as_ref(),
+    )?;
     validate_request_buffering_limits(config)?;
 
     Ok(())
@@ -45,7 +53,7 @@ fn validate_request_buffering_limits(config: &Config) -> Result<()> {
     if config.listeners.is_empty() {
         if config.server.max_request_body_bytes.is_none() {
             return Err(Error::Config(
-                "request_buffering=On requires server.max_request_body_bytes in the legacy listener model"
+                "request_buffering=On requires server.max_request_body_bytes when listeners are generated from server.listen or servers[].listen"
                     .to_string(),
             ));
         }

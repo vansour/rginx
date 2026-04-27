@@ -2,40 +2,11 @@ Config(
     runtime: RuntimeConfig(
         shutdown_timeout_secs: 10,
     ),
-    server: ServerConfig(
-        listen: "0.0.0.0:80",
-        // Add TLS here when you want HTTPS on the default listener.
-        // Validate with `rginx -t` or `rginx check` before deploying.
-        // Example:
-        // tls: Some(ServerTlsConfig(
-        //     cert_path: "/etc/rginx/certs/default.crt",
-        //     key_path: "/etc/rginx/certs/default.key",
-        //     versions: Some([Tls12, Tls13]),
-        //     ocsp_staple_path: Some("/var/cache/rginx/default.ocsp"),
-        //     session_tickets: Some(false),
-        // )),
-        // Fresh installs should work without any upstream dependencies.
-        // Add virtual hosts in `configs/conf.d/*.ron` when you need host-based routing.
-    ),
+    // Main config owns global defaults only. Site bindings, certificates,
+    // upstreams and routes live in `conf.d/*.ron`, matching nginx layout.
+    server: ServerConfig(),
     upstreams: [],
-    locations: [
-        LocationConfig(
-            matcher: Exact("/"),
-            handler: Return(
-                status: 200,
-                location: "",
-                body: Some("Welcome to rginx!\nIf you see this page, the rginx web server is successfully installed and working.\n"),
-            ),
-        ),
-        LocationConfig(
-            matcher: Exact("/healthz"),
-            handler: Return(
-                status: 200,
-                location: "",
-                body: Some("ok\n"),
-            ),
-        ),
-    ],
+    locations: [],
     servers: [
         // @include "conf.d/*.ron"
     ],

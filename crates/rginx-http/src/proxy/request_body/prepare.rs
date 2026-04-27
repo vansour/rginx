@@ -84,6 +84,11 @@ impl PreparedProxyRequest {
             &target.proxy_set_headers,
             grpc_web_mode,
         )?;
+        remove_redundant_host_header_for_authority_pseudo_header(
+            &mut headers,
+            peer,
+            target.upstream.protocol,
+        );
 
         tracing::debug!(
             upstream = %target.upstream.name,

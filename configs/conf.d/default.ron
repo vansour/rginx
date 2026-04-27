@@ -1,28 +1,22 @@
 VirtualHostConfig(
-    server_names: ["app.example.com"],
-    // Add per-vhost TLS here when this hostname should use its own certificate.
-    // Replace the sample `Return` handlers below with proxy routes for real traffic.
-    // Example:
-    // tls: Some(VirtualHostTlsConfig(
-    //     cert_path: "/etc/rginx/certs/app.example.com.crt",
-    //     key_path: "/etc/rginx/certs/app.example.com.key",
-    // )),
+    listen: ["0.0.0.0:80"],
+    server_names: ["localhost", "127.0.0.1"],
     locations: [
         LocationConfig(
             matcher: Exact("/"),
             handler: Return(
                 status: 200,
                 location: "",
-                body: Some("app.example.com root\n"),
+                body: Some("Welcome to rginx!\nIf you see this page, the rginx web server is successfully installed and working.\n"),
             ),
         ),
         LocationConfig(
-            matcher: Prefix("/v1"),
+            matcher: Exact("/healthz"),
             handler: Return(
                 status: 200,
                 location: "",
-                body: Some("app.example.com v1\n"),
+                body: Some("ok\n"),
             ),
         ),
     ],
-),
+)

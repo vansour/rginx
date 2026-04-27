@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rginx_core::{Result, Upstream, UpstreamSettings};
+use rginx_core::{Error, Result, Upstream, UpstreamSettings};
 
 use crate::model::UpstreamConfig;
 
@@ -16,7 +16,27 @@ pub(super) fn compile_upstreams(
     raw_upstreams: Vec<UpstreamConfig>,
     base_dir: &Path,
 ) -> Result<HashMap<String, Arc<Upstream>>> {
-    raw_upstreams
+    compile_upstreams_with_names(raw_upstreams, base_dir, |name| name.to_string())
+}
+
+pub(super) fn compile_scoped_upstreams(
+    raw_upstreams: Vec<UpstreamConfig>,
+    base_dir: &Path,
+    scope: &str,
+) -> Result<HashMap<String, Arc<Upstream>>> {
+    compile_upstreams_with_names(raw_upstreams, base_dir, |name| scoped_upstream_name(scope, name))
+}
+
+pub(super) fn scoped_upstream_name(scope: &str, name: &str) -> String {
+    format!("{scope}::{name}")
+}
+
+fn compile_upstreams_with_names(
+    raw_upstreams: Vec<UpstreamConfig>,
+    base_dir: &Path,
+    name_mapper: impl Fn(&str) -> String,
+) -> Result<HashMap<String, Arc<Upstream>>> {
+    let compiled = raw_upstreams
         .into_iter()
         .map(|upstream| {
             let UpstreamConfig {
@@ -49,6 +69,7 @@ pub(super) fn compile_upstreams(
                 health_check_timeout_secs,
                 healthy_successes_required,
             } = upstream;
+            let name = name_mapper(&name);
 
             let peers = peers
                 .into_iter()
@@ -168,5 +189,14 @@ pub(super) fn compile_upstreams(
             ));
             Ok((name, compiled))
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut upstreams = HashMap::with_capacity(compiled.len());
+    for (name, upstream) in compiled {
+        if upstreams.insert(name.clone(), upstream).is_some() {
+            return Err(Error::Config(format!("duplicate compiled upstream `{name}`")));
+        }
+    }
+
+    Ok(upstreams)
 }

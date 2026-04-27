@@ -102,6 +102,36 @@ pub(super) fn sanitize_request_headers(
     Ok(())
 }
 
+pub(super) fn remove_redundant_host_header_for_authority_pseudo_header(
+    headers: &mut HeaderMap,
+    peer: &ResolvedUpstreamPeer,
+    protocol: UpstreamProtocol,
+) {
+    // Some h2 origins reject equivalent Host + :authority pairs. Keep explicit
+    // Host overrides intact because they represent existing proxy semantics.
+    if !may_use_authority_pseudo_header(peer, protocol) {
+        return;
+    }
+
+    let Some(host) = headers.get(HOST) else {
+        return;
+    };
+
+    if host.as_bytes().eq_ignore_ascii_case(peer.upstream_authority.as_bytes()) {
+        headers.remove(HOST);
+    }
+}
+
+fn may_use_authority_pseudo_header(
+    peer: &ResolvedUpstreamPeer,
+    protocol: UpstreamProtocol,
+) -> bool {
+    // For Auto + HTTPS, ALPN may still negotiate HTTP/1.1. Hyper's high-level
+    // client rebuilds a missing Host header from the URI authority for h1.
+    matches!(protocol, UpstreamProtocol::Http2 | UpstreamProtocol::Http3)
+        || (protocol == UpstreamProtocol::Auto && peer.scheme == "https")
+}
+
 pub(super) fn preserved_te_trailers_value(headers: &HeaderMap) -> Option<HeaderValue> {
     let mut saw_te = false;
 

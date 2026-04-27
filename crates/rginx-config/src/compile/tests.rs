@@ -61,3 +61,4 @@ mod upstream_fallbacks;
 mod upstream_server_name;
 mod upstream_tls;
 mod upstream_transport;
+mod vhosts;

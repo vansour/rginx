@@ -44,7 +44,8 @@ use super::request_body::{
     PreparedProxyRequest, PreparedRequestBody, can_retry_peer_request, is_idempotent_method,
 };
 use super::{
-    ResolvedUpstreamPeer, build_proxy_uri, probe_upstream_peer, sanitize_request_headers,
+    ResolvedUpstreamPeer, build_proxy_uri, probe_upstream_peer,
+    remove_redundant_host_header_for_authority_pseudo_header, sanitize_request_headers,
     upstream_request_version,
 };
 use crate::client_ip::{ClientAddress, ClientIpSource};

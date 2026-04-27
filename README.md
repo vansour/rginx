@@ -55,6 +55,10 @@ cargo run -p rginx --
 - [configs/rginx.ron](configs/rginx.ron)
 - [configs/conf.d/default.ron](configs/conf.d/default.ron)
 
+配置布局与 nginx 对齐：`rginx.ron` 只保留全局 runtime/server 默认值和
+`conf.d/*.ron` include；每个 `VirtualHostConfig` 站点文件负责自己的 `listen`、
+TLS 证书、局部 `upstreams` 和 `locations`。
+
 常用命令：
 
 ```bash

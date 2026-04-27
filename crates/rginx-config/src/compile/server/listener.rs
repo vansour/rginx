@@ -1,8 +1,10 @@
+use std::collections::{BTreeMap, btree_map::Entry};
+use std::net::SocketAddr;
 use std::path::Path;
 
-use rginx_core::{Listener, Result};
+use rginx_core::{Error, Listener, Result};
 
-use crate::model::{ListenerConfig, ServerConfig};
+use crate::model::{Http3Config, ListenerConfig, ServerConfig, VirtualHostConfig};
 
 use super::CompiledServer;
 use super::fields::{ServerFieldConfig, compile_server_fields};
@@ -135,6 +137,136 @@ pub(super) fn compile_listeners(
         .collect()
 }
 
+pub(super) fn compile_vhost_listeners(
+    vhosts: &[VirtualHostConfig],
+    server_defaults: &ServerConfig,
+    base_dir: &Path,
+) -> Result<Vec<Listener>> {
+    let mut bindings = BTreeMap::<SocketAddr, VhostListenerBinding>::new();
+
+    for (vhost_index, vhost) in vhosts.iter().enumerate() {
+        for (listen_index, listen) in vhost.listen.iter().enumerate() {
+            let owner = format!("servers[{vhost_index}].listen[{listen_index}]");
+            let parsed = crate::listen::parse_vhost_listen(&owner, listen)?;
+            let http3 = parsed.http3.then(|| vhost.http3.clone().unwrap_or_default());
+            let default_certificate =
+                parsed.ssl.then(|| vhost.server_names.first().cloned()).flatten();
+
+            match bindings.entry(parsed.addr) {
+                Entry::Vacant(entry) => {
+                    entry.insert(VhostListenerBinding {
+                        ssl: parsed.ssl,
+                        http3,
+                        proxy_protocol: parsed.proxy_protocol,
+                        default_certificate,
+                    });
+                }
+                Entry::Occupied(mut entry) => {
+                    let binding = entry.get_mut();
+                    validate_vhost_listener_merge(
+                        parsed.addr,
+                        binding,
+                        parsed.ssl,
+                        parsed.proxy_protocol,
+                        &http3,
+                    )?;
+                    if binding.default_certificate.is_none() {
+                        binding.default_certificate = default_certificate;
+                    }
+                }
+            }
+        }
+    }
+
+    bindings
+        .into_iter()
+        .map(|(listen_addr, binding)| {
+            let tls = binding.ssl.then(|| server_defaults.tls.clone()).flatten();
+            let default_certificate = if binding.ssl {
+                server_defaults.default_certificate.clone().or_else(|| {
+                    server_defaults
+                        .tls
+                        .is_none()
+                        .then(|| binding.default_certificate.clone())
+                        .flatten()
+                })
+            } else {
+                None
+            };
+            let compiled = compile_server_fields(
+                ServerFieldConfig {
+                    listen: listen_addr.to_string(),
+                    server_header: server_defaults.server_header.clone(),
+                    default_certificate,
+                    trusted_proxies: server_defaults.trusted_proxies.clone(),
+                    keep_alive: server_defaults.keep_alive,
+                    max_headers: server_defaults.max_headers,
+                    max_request_body_bytes: server_defaults.max_request_body_bytes,
+                    max_connections: server_defaults.max_connections,
+                    header_read_timeout_secs: server_defaults.header_read_timeout_secs,
+                    request_body_read_timeout_secs: server_defaults.request_body_read_timeout_secs,
+                    response_write_timeout_secs: server_defaults.response_write_timeout_secs,
+                    access_log_format: server_defaults.access_log_format.clone(),
+                    tls,
+                },
+                base_dir,
+            )?;
+            let http3 =
+                compile_http3(binding.http3, compiled.server.listen_addr, binding.ssl, base_dir)?;
+
+            Ok(Listener {
+                id: vhost_listener_id(listen_addr),
+                name: vhost_listener_name(listen_addr),
+                server: compiled.server,
+                tls_termination_enabled: binding.ssl,
+                proxy_protocol_enabled: binding.proxy_protocol,
+                http3,
+            })
+        })
+        .collect()
+}
+
+fn validate_vhost_listener_merge(
+    listen_addr: SocketAddr,
+    binding: &VhostListenerBinding,
+    ssl: bool,
+    proxy_protocol: bool,
+    http3: &Option<Http3Config>,
+) -> Result<()> {
+    if binding.ssl != ssl {
+        return Err(Error::Config(format!(
+            "servers[].listen `{listen_addr}` mixes ssl and non-ssl bindings"
+        )));
+    }
+    if binding.proxy_protocol != proxy_protocol {
+        return Err(Error::Config(format!(
+            "servers[].listen `{listen_addr}` mixes proxy_protocol and non-proxy_protocol bindings"
+        )));
+    }
+    if &binding.http3 != http3 {
+        return Err(Error::Config(format!(
+            "servers[].listen `{listen_addr}` must use consistent http3 settings across vhosts"
+        )));
+    }
+
+    Ok(())
+}
+
 fn explicit_listener_id(name: &str) -> String {
     format!("listener:{}", name.trim().to_ascii_lowercase())
+}
+
+struct VhostListenerBinding {
+    ssl: bool,
+    http3: Option<Http3Config>,
+    proxy_protocol: bool,
+    default_certificate: Option<String>,
+}
+
+fn vhost_listener_id(listen_addr: SocketAddr) -> String {
+    format!("vhost-listen:{listen_addr}")
+}
+
+fn vhost_listener_name(listen_addr: SocketAddr) -> String {
+    format!("vhost:{listen_addr}")
 }

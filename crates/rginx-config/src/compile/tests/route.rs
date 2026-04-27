@@ -253,7 +253,9 @@ fn compile_generates_distinct_route_and_vhost_ids() {
             },
         )],
         servers: vec![VirtualHostConfig {
+            listen: Vec::new(),
             server_names: vec!["api.example.com".to_string()],
+            upstreams: Vec::new(),
             locations: vec![test_location(
                 MatcherConfig::Exact("/".to_string()),
                 HandlerConfig::Return {
@@ -263,6 +265,7 @@ fn compile_generates_distinct_route_and_vhost_ids() {
                 },
             )],
             tls: None,
+            http3: None,
         }],
     };
 

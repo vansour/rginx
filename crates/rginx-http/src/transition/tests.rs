@@ -65,6 +65,9 @@ fn boundary_lists_are_stable() {
             "upstreams[].tls".to_string(),
             "upstreams[].server_name".to_string(),
             "upstreams[].server_name_override".to_string(),
+            "servers[].upstreams[].tls".to_string(),
+            "servers[].upstreams[].server_name".to_string(),
+            "servers[].upstreams[].server_name_override".to_string(),
         ]
     );
     assert_eq!(
@@ -74,6 +77,7 @@ fn boundary_lists_are_stable() {
             "server.http3.listen".to_string(),
             "listeners[].listen".to_string(),
             "listeners[].http3.listen".to_string(),
+            "servers[].listen".to_string(),
             "runtime.worker_threads".to_string(),
             "runtime.accept_workers".to_string(),
         ]

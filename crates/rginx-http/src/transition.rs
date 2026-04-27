@@ -1,6 +1,6 @@
 use rginx_core::{ConfigSnapshot, Error, Result};
 
-const RELOADABLE_FIELDS: [&str; 10] = [
+const RELOADABLE_FIELDS: [&str; 13] = [
     "server.tls",
     "server.http3.advertise_alt_svc",
     "server.http3.alt_svc_max_age_secs",
@@ -11,13 +11,17 @@ const RELOADABLE_FIELDS: [&str; 10] = [
     "upstreams[].tls",
     "upstreams[].server_name",
     "upstreams[].server_name_override",
+    "servers[].upstreams[].tls",
+    "servers[].upstreams[].server_name",
+    "servers[].upstreams[].server_name_override",
 ];
 
-const RESTART_REQUIRED_FIELDS: [&str; 6] = [
+const RESTART_REQUIRED_FIELDS: [&str; 7] = [
     "listen",
     "server.http3.listen",
     "listeners[].listen",
     "listeners[].http3.listen",
+    "servers[].listen",
     "runtime.worker_threads",
     "runtime.accept_workers",
 ];

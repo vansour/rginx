@@ -20,10 +20,21 @@ pub(super) fn compile_routes(
     upstreams: &HashMap<String, Arc<Upstream>>,
     vhost_id: &str,
 ) -> Result<Vec<Route>> {
+    compile_routes_with_local(locations, upstreams, &HashMap::new(), vhost_id)
+}
+
+pub(super) fn compile_routes_with_local(
+    locations: Vec<LocationConfig>,
+    upstreams: &HashMap<String, Arc<Upstream>>,
+    local_upstream_names: &HashMap<String, String>,
+    vhost_id: &str,
+) -> Result<Vec<Route>> {
     let mut routes = locations
         .into_iter()
         .enumerate()
-        .map(|(route_index, location)| compile_route(location, route_index, upstreams, vhost_id))
+        .map(|(route_index, location)| {
+            compile_route(location, route_index, upstreams, local_upstream_names, vhost_id)
+        })
         .collect::<Result<Vec<_>>>()?;
 
     routes.sort_by_key(|route| std::cmp::Reverse(route.priority()));
@@ -35,6 +46,7 @@ fn compile_route(
     location: LocationConfig,
     route_index: usize,
     upstreams: &HashMap<String, Arc<Upstream>>,
+    local_upstream_names: &HashMap<String, String>,
     vhost_id: &str,
 ) -> Result<Route> {
     let LocationConfig {
@@ -75,7 +87,7 @@ fn compile_route(
     };
     let access_control = compile_route_access_control(&matcher, allow_cidrs, deny_cidrs)?;
     let rate_limit = compile_route_rate_limit(&matcher, requests_per_sec, burst)?;
-    let action = compile_route_action(handler, upstreams)?;
+    let action = compile_route_action(handler, upstreams, local_upstream_names)?;
 
     let compression_min_bytes = compression_min_bytes
         .map(|value| {
@@ -108,10 +120,13 @@ fn compile_route(
 fn compile_route_action(
     handler: HandlerConfig,
     upstreams: &HashMap<String, Arc<Upstream>>,
+    local_upstream_names: &HashMap<String, String>,
 ) -> Result<RouteAction> {
     match handler {
         HandlerConfig::Proxy { upstream, preserve_host, strip_prefix, proxy_set_headers } => {
-            let compiled = upstreams.get(&upstream).cloned().ok_or_else(|| {
+            let resolved_upstream =
+                local_upstream_names.get(&upstream).cloned().unwrap_or_else(|| upstream.clone());
+            let compiled = upstreams.get(&resolved_upstream).cloned().ok_or_else(|| {
                 Error::Config(format!("proxy upstream `{upstream}` is not defined"))
             })?;
 
@@ -129,7 +144,7 @@ fn compile_route_action(
                 .collect::<Result<Vec<_>>>()?;
 
             Ok(RouteAction::Proxy(ProxyTarget {
-                upstream_name: upstream,
+                upstream_name: resolved_upstream,
                 upstream: compiled,
                 preserve_host: preserve_host.unwrap_or(false),
                 strip_prefix: strip_prefix.and_then(|s| if s.is_empty() { None } else { Some(s) }),
