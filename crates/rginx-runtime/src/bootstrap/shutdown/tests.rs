@@ -16,6 +16,7 @@ use super::*;
 
 fn snapshot() -> ConfigSnapshot {
     ConfigSnapshot {
+        cache_zones: HashMap::new(),
         runtime: RuntimeSettings {
             shutdown_timeout: Duration::from_secs(1),
             worker_threads: None,
@@ -48,6 +49,7 @@ fn snapshot() -> ConfigSnapshot {
             id: "server".to_string(),
             server_names: Vec::new(),
             routes: vec![Route {
+                cache: None,
                 id: "server/routes[0]|exact:/".to_string(),
                 matcher: RouteMatcher::Exact("/".to_string()),
                 grpc_match: None,

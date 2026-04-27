@@ -65,6 +65,7 @@ fn compile_route(
         compression_min_bytes,
         compression_content_types,
         streaming_response_idle_timeout_secs,
+        cache,
     } = location;
 
     let matcher = match matcher {
@@ -118,6 +119,7 @@ fn compile_route(
         compression_content_types: compile_compression_content_types(compression_content_types),
         streaming_response_idle_timeout: streaming_response_idle_timeout_secs
             .map(Duration::from_secs),
+        cache: super::cache::compile_route_cache(cache)?,
     })
 }
 

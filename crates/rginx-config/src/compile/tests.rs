@@ -2,11 +2,12 @@ use std::fs;
 use std::time::Duration;
 
 use crate::model::{
-    Config, HandlerConfig, Http3Config, ListenerConfig, LocationConfig, MatcherConfig,
-    ProxyHeaderDynamicValueConfig, ProxyHeaderValueConfig, RouteBufferingPolicyConfig,
-    RouteCompressionPolicyConfig, RuntimeConfig, ServerConfig, ServerTlsConfig,
-    TlsCipherSuiteConfig, TlsKeyExchangeGroupConfig, UpstreamConfig, UpstreamLoadBalanceConfig,
-    UpstreamPeerConfig, UpstreamProtocolConfig, UpstreamTlsConfig, VirtualHostConfig,
+    CacheRouteConfig, CacheZoneConfig, Config, HandlerConfig, Http3Config, ListenerConfig,
+    LocationConfig, MatcherConfig, ProxyHeaderDynamicValueConfig, ProxyHeaderValueConfig,
+    RouteBufferingPolicyConfig, RouteCompressionPolicyConfig, RuntimeConfig, ServerConfig,
+    ServerTlsConfig, TlsCipherSuiteConfig, TlsKeyExchangeGroupConfig, UpstreamConfig,
+    UpstreamLoadBalanceConfig, UpstreamPeerConfig, UpstreamProtocolConfig, UpstreamTlsConfig,
+    VirtualHostConfig,
 };
 use tempfile::TempDir;
 
@@ -33,6 +34,7 @@ fn temp_base_dir(prefix: &str) -> TempDir {
 
 fn test_location(matcher: MatcherConfig, handler: HandlerConfig) -> LocationConfig {
     LocationConfig {
+        cache: None,
         matcher,
         handler,
         grpc_service: None,
@@ -51,6 +53,7 @@ fn test_location(matcher: MatcherConfig, handler: HandlerConfig) -> LocationConf
     }
 }
 
+mod cache;
 mod http3;
 mod listeners;
 mod route;

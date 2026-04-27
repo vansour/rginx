@@ -11,6 +11,7 @@ use tokio::sync::{Notify, RwLock, watch};
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 
+use crate::cache::CacheManager;
 use crate::proxy::{HealthChangeNotifier, ProxyClients, UpstreamHealthSnapshot};
 use crate::rate_limit::RateLimiters;
 use crate::tls::build_tls_acceptor;
@@ -33,6 +34,7 @@ const TLS_EXPIRY_WARNING_DAYS: i64 = 30;
 pub(super) struct PreparedState {
     config: Arc<ConfigSnapshot>,
     clients: ProxyClients,
+    cache: CacheManager,
     listener_tls_acceptors: HashMap<String, Option<TlsAcceptor>>,
     retired_listeners: Vec<Listener>,
 }
@@ -150,6 +152,7 @@ impl SharedState {
                 revision,
                 config: prepared.config,
                 clients: prepared.clients,
+                cache: prepared.cache,
             })),
             revisions,
             rate_limiters,

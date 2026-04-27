@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
+use super::CacheRouteConfig;
+
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
 pub enum RouteBufferingPolicyConfig {
     #[default]
@@ -48,6 +50,8 @@ pub struct LocationConfig {
     pub compression_content_types: Option<Vec<String>>,
     #[serde(default)]
     pub streaming_response_idle_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub cache: Option<CacheRouteConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

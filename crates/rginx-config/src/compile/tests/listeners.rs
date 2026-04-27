@@ -3,6 +3,7 @@ use super::*;
 #[test]
 fn compile_supports_explicit_multi_listener_configs() {
     let config = Config {
+        cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
             worker_threads: None,
@@ -69,6 +70,7 @@ fn compile_supports_explicit_multi_listener_configs() {
         },
         upstreams: Vec::new(),
         locations: vec![LocationConfig {
+            cache: None,
             matcher: MatcherConfig::Exact("/".to_string()),
             handler: HandlerConfig::Return {
                 status: 200,

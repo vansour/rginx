@@ -14,6 +14,7 @@ pub(super) fn validate_locations(
     scope_label: Option<&str>,
     locations: &[LocationConfig],
     upstream_names: &HashSet<String>,
+    cache_zone_names: &HashSet<String>,
 ) -> Result<()> {
     let mut exact_routes = HashSet::new();
 
@@ -90,8 +91,29 @@ pub(super) fn validate_locations(
             location.grpc_method.as_deref(),
         )?;
         handler::validate_handler(scope_label, &route_scope, &location.handler, upstream_names)?;
+        validate_cache_handler_compatibility(
+            &route_scope,
+            &location.handler,
+            location.cache.as_ref(),
+        )?;
+        super::cache::validate_route_cache(
+            &route_scope,
+            location.cache.as_ref(),
+            cache_zone_names,
+        )?;
     }
 
+    Ok(())
+}
+
+fn validate_cache_handler_compatibility(
+    route_scope: &str,
+    handler: &crate::model::HandlerConfig,
+    cache: Option<&crate::model::CacheRouteConfig>,
+) -> Result<()> {
+    if cache.is_some() && !matches!(handler, crate::model::HandlerConfig::Proxy { .. }) {
+        return Err(Error::Config(format!("{route_scope} cache requires a Proxy handler")));
+    }
     Ok(())
 }
 

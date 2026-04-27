@@ -3,6 +3,7 @@ use super::*;
 #[test]
 fn compile_normalizes_server_name_override() {
     let config = Config {
+        cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
             worker_threads: None,
@@ -63,6 +64,7 @@ fn compile_normalizes_server_name_override() {
             healthy_successes_required: None,
         }],
         locations: vec![LocationConfig {
+            cache: None,
             matcher: MatcherConfig::Prefix("/".to_string()),
             handler: HandlerConfig::Proxy {
                 upstream: "secure-backend".to_string(),
@@ -101,6 +103,7 @@ fn compile_normalizes_server_name_override() {
 #[test]
 fn compile_preserves_upstream_server_name_toggle() {
     let config = Config {
+        cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
             worker_threads: None,
@@ -168,6 +171,7 @@ fn compile_preserves_upstream_server_name_toggle() {
             healthy_successes_required: None,
         }],
         locations: vec![LocationConfig {
+            cache: None,
             matcher: MatcherConfig::Prefix("/".to_string()),
             handler: HandlerConfig::Proxy {
                 upstream: "secure-backend".to_string(),
@@ -205,6 +209,7 @@ fn compile_preserves_upstream_server_name_toggle() {
 #[test]
 fn compile_rejects_invalid_server_name_override() {
     let config = Config {
+        cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
             worker_threads: None,
@@ -265,6 +270,7 @@ fn compile_rejects_invalid_server_name_override() {
             healthy_successes_required: None,
         }],
         locations: vec![LocationConfig {
+            cache: None,
             matcher: MatcherConfig::Prefix("/".to_string()),
             handler: HandlerConfig::Proxy {
                 upstream: "secure-backend".to_string(),

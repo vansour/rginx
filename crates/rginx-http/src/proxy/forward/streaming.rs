@@ -6,7 +6,7 @@ pub(super) async fn finalize_streaming_request_body(
     request_headers: &HeaderMap,
     target: &ProxyTarget,
     peer: &ResolvedUpstreamPeer,
-    downstream: DownstreamRequestContext<'_>,
+    downstream: &DownstreamRequestContext<'_>,
 ) -> Result<(), HttpResponse> {
     let Some(body_completion) = body_completion else {
         return Ok(());

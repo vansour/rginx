@@ -31,7 +31,7 @@ pub(super) async fn build_route_response(
             let downstream_proto = if listener.listener_tls_enabled { "https" } else { "http" };
             crate::proxy::forward_request(
                 state,
-                active.clients,
+                active,
                 request,
                 listener.listener_id,
                 proxy,
@@ -45,6 +45,7 @@ pub(super) async fn build_route_response(
                         max_request_body_bytes: listener.max_request_body_bytes,
                         request_buffering: route.request_buffering,
                         streaming_response_idle_timeout: route.streaming_response_idle_timeout,
+                        cache: route.cache,
                     },
                 },
             )

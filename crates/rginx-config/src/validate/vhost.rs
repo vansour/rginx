@@ -10,6 +10,7 @@ pub(super) fn validate_virtual_hosts(
     all_server_names: &mut HashSet<String>,
     require_vhost_listen: bool,
     server_tls_defaults: Option<&ServerTlsConfig>,
+    cache_zone_names: &HashSet<String>,
 ) -> Result<()> {
     for (idx, vhost) in vhosts.iter().enumerate() {
         let vhost_label = format!("servers[{idx}]");
@@ -51,6 +52,7 @@ pub(super) fn validate_virtual_hosts(
             Some(&vhost_label),
             &vhost.locations,
             &visible_upstream_names,
+            cache_zone_names,
         )?;
     }
 

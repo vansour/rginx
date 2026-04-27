@@ -3,6 +3,7 @@ use super::*;
 #[test]
 fn compile_accepts_https_upstreams() {
     let config = Config {
+        cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
             worker_threads: None,
@@ -115,6 +116,7 @@ fn compile_accepts_https_upstreams() {
 #[test]
 fn compile_defaults_grpc_health_check_path_when_service_is_set() {
     let config = Config {
+        cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
             worker_threads: None,

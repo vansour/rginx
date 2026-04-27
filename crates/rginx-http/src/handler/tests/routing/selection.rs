@@ -137,6 +137,7 @@ fn select_route_for_request_prefers_grpc_specific_route() {
             vec![
                 test_route("server/routes[0]|prefix:/", RouteMatcher::Prefix("/".to_string())),
                 Route {
+                    cache: None,
                     id: "server/routes[1]|prefix:/|grpc:service=grpc.health.v1.Health,method=Check"
                         .to_string(),
                     matcher: RouteMatcher::Prefix("/".to_string()),
@@ -182,6 +183,7 @@ fn select_route_for_request_does_not_match_grpc_specific_route_for_plain_http_re
             "server",
             Vec::new(),
             vec![Route {
+                cache: None,
                 id: "server/routes[0]|prefix:/|grpc:service=grpc.health.v1.Health".to_string(),
                 matcher: RouteMatcher::Prefix("/".to_string()),
                 grpc_match: Some(GrpcRouteMatch {

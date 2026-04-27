@@ -5,6 +5,7 @@ use std::time::Duration;
 use http::{HeaderName, StatusCode};
 use ipnet::IpNet;
 
+use super::cache::RouteCachePolicy;
 use super::upstream::Upstream;
 
 mod proxy_header;
@@ -30,6 +31,7 @@ pub struct Route {
     pub compression_min_bytes: Option<usize>,
     pub compression_content_types: Vec<String>,
     pub streaming_response_idle_timeout: Option<Duration>,
+    pub cache: Option<RouteCachePolicy>,
 }
 
 impl Route {

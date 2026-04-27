@@ -3,6 +3,7 @@ use super::*;
 #[test]
 fn compile_accepts_backup_peers() {
     let config = Config {
+        cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
             worker_threads: None,
@@ -70,6 +71,7 @@ fn compile_accepts_backup_peers() {
             healthy_successes_required: None,
         }],
         locations: vec![LocationConfig {
+            cache: None,
             matcher: MatcherConfig::Prefix("/".to_string()),
             handler: HandlerConfig::Proxy {
                 upstream: "backend".to_string(),
@@ -123,6 +125,7 @@ fn compile_accepts_backup_peers() {
 #[test]
 fn compile_uses_legacy_request_timeout_fallbacks_and_disables_pool_idle_timeout() {
     let config = Config {
+        cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
             worker_threads: None,
@@ -183,6 +186,7 @@ fn compile_uses_legacy_request_timeout_fallbacks_and_disables_pool_idle_timeout(
             healthy_successes_required: None,
         }],
         locations: vec![LocationConfig {
+            cache: None,
             matcher: MatcherConfig::Prefix("/".to_string()),
             handler: HandlerConfig::Proxy {
                 upstream: "backend".to_string(),
@@ -230,6 +234,7 @@ fn compile_uses_legacy_request_timeout_fallbacks_and_disables_pool_idle_timeout(
 #[test]
 fn compile_uses_default_pool_idle_timeout() {
     let config = Config {
+        cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
             worker_threads: None,
@@ -290,6 +295,7 @@ fn compile_uses_default_pool_idle_timeout() {
             healthy_successes_required: None,
         }],
         locations: vec![LocationConfig {
+            cache: None,
             matcher: MatcherConfig::Prefix("/".to_string()),
             handler: HandlerConfig::Proxy {
                 upstream: "backend".to_string(),

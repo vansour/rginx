@@ -18,7 +18,7 @@ pub(super) async fn prepare_forward_request(
     mut request: Request<HttpBody>,
     target: &ProxyTarget,
     client_address: &ClientAddress,
-    downstream: DownstreamRequestContext<'_>,
+    downstream: &DownstreamRequestContext<'_>,
 ) -> Result<PreparedForwardRequest, HttpResponse> {
     let request_headers = request.headers().clone();
     let response_idle_timeout =

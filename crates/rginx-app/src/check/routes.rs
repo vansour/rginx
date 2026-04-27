@@ -12,6 +12,7 @@ pub(super) struct RouteTransportCheckDetails {
     pub(super) custom_compression_min_bytes_routes: usize,
     pub(super) custom_compression_content_types_routes: usize,
     pub(super) streaming_response_idle_timeout_routes: usize,
+    pub(super) cache_enabled_routes: usize,
 }
 
 pub(super) fn route_transport_check_details(
@@ -46,6 +47,9 @@ pub(super) fn route_transport_check_details(
         }
         if route.streaming_response_idle_timeout.is_some() {
             details.streaming_response_idle_timeout_routes += 1;
+        }
+        if route.cache.is_some() {
+            details.cache_enabled_routes += 1;
         }
     }
 

@@ -25,6 +25,7 @@ fn compile_supports_nezha_dashboard_native_vhost_shape() {
     dashboard_http.write_timeout_secs = Some(3600);
 
     let config = Config {
+        cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
             worker_threads: None,
@@ -57,6 +58,7 @@ fn compile_supports_nezha_dashboard_native_vhost_shape() {
                     },
                 ),
                 LocationConfig {
+                    cache: None,
                     matcher: MatcherConfig::Regex {
                         pattern: "^/api/v1/ws/(server|terminal|file)(/.*)?$".to_string(),
                         case_insensitive: true,

@@ -14,10 +14,22 @@ pub(crate) struct CheckSummary {
     pub(super) total_vhost_count: usize,
     pub(super) total_route_count: usize,
     pub(super) upstream_count: usize,
+    pub(super) cache_zone_count: usize,
+    pub(super) cache_enabled_route_count: usize,
+    pub(super) cache_zones: Vec<CheckCacheZoneSummary>,
     pub(super) worker_threads: Option<usize>,
     pub(super) accept_workers: usize,
     pub(super) route_transport: RouteTransportCheckDetails,
     pub(super) tls: TlsCheckDetails,
+}
+
+pub(super) struct CheckCacheZoneSummary {
+    pub(super) name: String,
+    pub(super) path: PathBuf,
+    pub(super) max_size_bytes: Option<usize>,
+    pub(super) inactive_secs: u64,
+    pub(super) default_ttl_secs: u64,
+    pub(super) max_entry_bytes: usize,
 }
 
 pub(super) struct CheckListenerSummary {
@@ -54,6 +66,8 @@ pub(super) struct CheckListenerBindingSummary {
 }
 
 pub(crate) fn build_check_summary(config: &rginx_config::ConfigSnapshot) -> CheckSummary {
+    let route_transport = route_transport_check_details(config);
+
     CheckSummary {
         listener_model: listener_model(
             config.total_listener_count(),
@@ -76,11 +90,31 @@ pub(crate) fn build_check_summary(config: &rginx_config::ConfigSnapshot) -> Chec
         total_vhost_count: config.total_vhost_count(),
         total_route_count: config.total_route_count(),
         upstream_count: config.upstreams.len(),
+        cache_zone_count: config.cache_zones.len(),
+        cache_enabled_route_count: route_transport.cache_enabled_routes,
+        cache_zones: check_cache_zone_summaries(config),
         worker_threads: config.runtime.worker_threads,
         accept_workers: config.runtime.accept_workers,
-        route_transport: route_transport_check_details(config),
+        route_transport,
         tls: tls_check_details(config),
     }
+}
+
+fn check_cache_zone_summaries(config: &rginx_config::ConfigSnapshot) -> Vec<CheckCacheZoneSummary> {
+    let mut zones = config
+        .cache_zones
+        .values()
+        .map(|zone| CheckCacheZoneSummary {
+            name: zone.name.clone(),
+            path: zone.path.clone(),
+            max_size_bytes: zone.max_size_bytes,
+            inactive_secs: zone.inactive.as_secs(),
+            default_ttl_secs: zone.default_ttl.as_secs(),
+            max_entry_bytes: zone.max_entry_bytes,
+        })
+        .collect::<Vec<_>>();
+    zones.sort_by(|left, right| left.name.cmp(&right.name));
+    zones
 }
 
 fn listener_model<'a>(

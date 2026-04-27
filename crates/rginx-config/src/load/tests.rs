@@ -8,6 +8,28 @@ use proptest::prelude::*;
 use super::{expand_env_placeholders_in_ron_strings, load_from_path, load_from_str};
 
 #[test]
+fn load_from_str_deserializes_cache_zones_and_route_cache_policy() {
+    let config = load_from_str(
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    cache_zones: [\n        CacheZoneConfig(\n            name: \"default\",\n            path: \"/var/cache/rginx/default\",\n            max_size_bytes: Some(1048576),\n            inactive_secs: Some(600),\n            default_ttl_secs: Some(60),\n            max_entry_bytes: Some(65536),\n        ),\n    ],\n    server: ServerConfig(\n        listen: \"127.0.0.1:18080\",\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [UpstreamPeerConfig(url: \"http://127.0.0.1:9000\")],\n        ),\n    ],\n    locations: [\n        LocationConfig(\n            matcher: Prefix(\"/assets/\"),\n            handler: Proxy(upstream: \"backend\"),\n            cache: Some(CacheRouteConfig(\n                zone: \"default\",\n                methods: Some([\"GET\", \"HEAD\"]),\n                statuses: Some([200, 404]),\n                key: Some(\"{scheme}:{host}:{uri}\"),\n                stale_if_error_secs: Some(30),\n            )),\n        ),\n    ],\n)\n",
+        Path::new("inline.ron"),
+    )
+    .expect("cache config should deserialize");
+
+    assert_eq!(config.cache_zones.len(), 1);
+    assert_eq!(config.cache_zones[0].name, "default");
+    assert_eq!(config.cache_zones[0].inactive_secs, Some(600));
+    assert_eq!(config.cache_zones[0].default_ttl_secs, Some(60));
+    assert_eq!(config.cache_zones[0].max_entry_bytes, Some(65536));
+
+    let cache = config.locations[0].cache.as_ref().expect("route cache should deserialize");
+    assert_eq!(cache.zone, "default");
+    assert_eq!(cache.methods.as_deref(), Some(&["GET".to_string(), "HEAD".to_string()][..]));
+    assert_eq!(cache.statuses.as_deref(), Some(&[200, 404][..]));
+    assert_eq!(cache.key.as_deref(), Some("{scheme}:{host}:{uri}"));
+    assert_eq!(cache.stale_if_error_secs, Some(30));
+}
+
+#[test]
 fn load_from_str_expands_environment_placeholders_inside_strings() {
     let _guard = env_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     unsafe {

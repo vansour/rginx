@@ -5,7 +5,9 @@ use super::upgrade::proxy_upgraded_connection;
 use super::*;
 
 mod attempt;
+mod cache;
 mod error;
+mod failure;
 mod grpc;
 mod response;
 mod setup;
@@ -13,10 +15,12 @@ mod streaming;
 mod success;
 mod types;
 
+use cache::{ForwardCacheContext, ForwardCacheLookup, lookup_forward_cache};
 use error::{
     bad_gateway, bad_request, downstream_request_body_limit, gateway_timeout, grpc_timeout_message,
     invalid_downstream_request_body_error, payload_too_large, unsupported_media_type,
 };
+use failure::{failed_to_build_request_response, upstream_unavailable_response};
 use grpc::grpc_response_deadline;
 use response::build_downstream_response;
 use setup::prepare_forward_request;
