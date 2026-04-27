@@ -110,10 +110,10 @@ fn check_reports_explicit_listener_summary_and_reload_boundary() {
     assert!(stdout.contains("worker_threads=3"));
     assert!(stdout.contains("accept_workers=2"));
     assert!(stdout.contains(
-        "reload_requires_restart_for=listen,server.http3.listen,listeners[].listen,listeners[].http3.listen,runtime.worker_threads,runtime.accept_workers"
+        "reload_requires_restart_for=listen,server.http3.listen,listeners[].listen,listeners[].http3.listen,servers[].listen,runtime.worker_threads,runtime.accept_workers"
     ));
     assert!(stdout.contains(
-        "tls_restart_required_fields=listen,server.http3.listen,listeners[].listen,listeners[].http3.listen,runtime.worker_threads,runtime.accept_workers"
+        "tls_restart_required_fields=listen,server.http3.listen,listeners[].listen,listeners[].http3.listen,servers[].listen,runtime.worker_threads,runtime.accept_workers"
     ));
 
     let _ = fs::remove_dir_all(temp_dir);

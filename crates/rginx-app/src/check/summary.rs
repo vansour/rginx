@@ -92,6 +92,8 @@ fn listener_model(
         && first_listener_name == Some("default")
     {
         "legacy"
+    } else if first_listener_id.is_some_and(|id| id.starts_with("vhost-listen:")) {
+        "vhost"
     } else {
         "explicit"
     }

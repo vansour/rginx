@@ -146,3 +146,48 @@ fn sanitize_request_headers_drops_non_trailers_te_tokens() {
     assert_eq!(headers.get(HOST).unwrap(), "127.0.0.1:9000");
     assert!(headers.get(http::header::TE).is_none());
 }
+
+#[test]
+fn removes_redundant_host_for_auto_https_authority_pseudo_header() {
+    let peer = resolved_peer_from_url("https://mirrors.ocf.berkeley.edu");
+    let mut headers = HeaderMap::new();
+    headers.insert(HOST, HeaderValue::from_static("mirrors.ocf.berkeley.edu"));
+
+    remove_redundant_host_header_for_authority_pseudo_header(
+        &mut headers,
+        &peer,
+        UpstreamProtocol::Auto,
+    );
+
+    assert!(headers.get(HOST).is_none());
+}
+
+#[test]
+fn keeps_host_for_http1_only_upstream_requests() {
+    let peer = resolved_peer_from_url("https://mirrors.ocf.berkeley.edu");
+    let mut headers = HeaderMap::new();
+    headers.insert(HOST, HeaderValue::from_static("mirrors.ocf.berkeley.edu"));
+
+    remove_redundant_host_header_for_authority_pseudo_header(
+        &mut headers,
+        &peer,
+        UpstreamProtocol::Http1,
+    );
+
+    assert_eq!(headers.get(HOST).unwrap(), "mirrors.ocf.berkeley.edu");
+}
+
+#[test]
+fn keeps_non_authority_host_overrides_for_proxy_compatibility() {
+    let peer = resolved_peer_from_url("https://mirrors.ocf.berkeley.edu");
+    let mut headers = HeaderMap::new();
+    headers.insert(HOST, HeaderValue::from_static("download.example"));
+
+    remove_redundant_host_header_for_authority_pseudo_header(
+        &mut headers,
+        &peer,
+        UpstreamProtocol::Auto,
+    );
+
+    assert_eq!(headers.get(HOST).unwrap(), "download.example");
+}

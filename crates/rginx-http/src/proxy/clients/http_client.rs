@@ -152,7 +152,9 @@ pub(super) fn build_hyper_client_for_endpoint(
     let mut client_builder = Client::builder(TokioExecutor::new());
     client_builder.timer(TokioTimer::new());
     client_builder.pool_timer(TokioTimer::new());
-    client_builder.set_host(false);
+    // Host may be intentionally absent for h2/h3-compatible requests; Hyper
+    // must still synthesize it when the negotiated upstream connection is h1.
+    client_builder.set_host(true);
     client_builder.pool_idle_timeout(profile.pool_idle_timeout);
     client_builder.pool_max_idle_per_host(profile.pool_max_idle_per_host);
     if let Some(interval) = profile.http2_keep_alive_interval {

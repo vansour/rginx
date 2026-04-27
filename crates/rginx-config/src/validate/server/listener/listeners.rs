@@ -1,4 +1,5 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::net::SocketAddr;
 
 use rginx_core::{Error, Result};
 
@@ -11,10 +12,25 @@ pub(super) fn validate_listeners(
     server: &ServerConfig,
     vhosts: &[VirtualHostConfig],
 ) -> Result<()> {
+    let any_vhost_listen = vhosts.iter().any(|vhost| !vhost.listen.is_empty());
+
+    if any_vhost_listen {
+        if !listeners.is_empty() {
+            return Err(Error::Config(
+                "servers[].listen cannot be used together with top-level listeners".to_string(),
+            ));
+        }
+
+        validate_server_fields_for_vhost_listen(server)?;
+        validate_vhost_listener_bindings(vhosts)?;
+        return Ok(());
+    }
+
     if listeners.is_empty() {
         if server.listen.as_deref().is_none_or(str::is_empty) {
             return Err(Error::Config(
-                "server listen must be set when listeners is empty".to_string(),
+                "at least one listen must be configured in server.listen, listeners, or servers[].listen"
+                    .to_string(),
             ));
         }
 
@@ -94,6 +110,61 @@ pub(super) fn validate_listeners(
         return Err(Error::Config(
             "vhost TLS requires at least one listener with tls to be configured".to_string(),
         ));
+    }
+
+    Ok(())
+}
+
+fn validate_server_fields_for_vhost_listen(server: &ServerConfig) -> Result<()> {
+    if server.listen.is_some()
+        || server.proxy_protocol.is_some()
+        || server.default_certificate.is_some()
+        || server.tls.is_some()
+        || server.http3.is_some()
+    {
+        return Err(Error::Config(
+            "server listen, proxy_protocol, default_certificate, tls, and http3 cannot be used together with servers[].listen"
+                .to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct VhostListenerBinding {
+    ssl: bool,
+    proxy_protocol: bool,
+}
+
+fn validate_vhost_listener_bindings(vhosts: &[VirtualHostConfig]) -> Result<()> {
+    let mut tcp_bindings = HashMap::<SocketAddr, VhostListenerBinding>::new();
+
+    for (vhost_index, vhost) in vhosts.iter().enumerate() {
+        for (listen_index, listen) in vhost.listen.iter().enumerate() {
+            let owner = format!("servers[{vhost_index}].listen[{listen_index}]");
+            let parsed = crate::listen::parse_vhost_listen(&owner, listen)?;
+
+            if let Some(existing) = tcp_bindings.get(&parsed.addr) {
+                if existing.ssl != parsed.ssl {
+                    return Err(Error::Config(format!(
+                        "servers[].listen `{}` mixes ssl and non-ssl bindings",
+                        parsed.addr
+                    )));
+                }
+                if existing.proxy_protocol != parsed.proxy_protocol {
+                    return Err(Error::Config(format!(
+                        "servers[].listen `{}` mixes proxy_protocol and non-proxy_protocol bindings",
+                        parsed.addr
+                    )));
+                }
+            } else {
+                tcp_bindings.insert(
+                    parsed.addr,
+                    VhostListenerBinding { ssl: parsed.ssl, proxy_protocol: parsed.proxy_protocol },
+                );
+            }
+        }
     }
 
     Ok(())

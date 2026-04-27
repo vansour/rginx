@@ -10,6 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
+use hyper::header::HOST;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
@@ -33,6 +34,7 @@ const TEST_SERVER_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkq
 struct ObservedMtlsRequest {
     peer_certificates_present: bool,
     protocol_version: Option<ProtocolVersion>,
+    host: Option<String>,
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -70,6 +72,8 @@ async fn proxies_to_https_upstreams_with_client_certificate_and_tls13() {
         .expect("upstream observation channel should complete");
     assert!(observed.peer_certificates_present);
     assert_eq!(observed.protocol_version, Some(ProtocolVersion::TLSv1_3));
+    let expected_host = format!("127.0.0.1:{}", upstream_addr.port());
+    assert_eq!(observed.host.as_deref(), Some(expected_host.as_str()));
 
     server.shutdown_and_wait(Duration::from_secs(5));
     upstream_task.await.expect("upstream mTLS server task should finish");
@@ -113,15 +117,23 @@ async fn spawn_mtls_upstream(
             tls_stream.get_ref().1.peer_certificates().is_some_and(|certs| !certs.is_empty());
         let protocol_version = tls_stream.get_ref().1.protocol_version();
 
-        let service = service_fn(move |_request: Request<Incoming>| {
+        let service = service_fn(move |request: Request<Incoming>| {
             let observed_tx = observed_tx.clone();
 
             async move {
+                let host = request
+                    .headers()
+                    .get(HOST)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string);
                 if let Some(sender) =
                     observed_tx.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take()
                 {
-                    let _ = sender
-                        .send(ObservedMtlsRequest { peer_certificates_present, protocol_version });
+                    let _ = sender.send(ObservedMtlsRequest {
+                        peer_certificates_present,
+                        protocol_version,
+                        host,
+                    });
                 }
 
                 Ok::<_, Infallible>(

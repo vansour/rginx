@@ -227,7 +227,7 @@ async fn build_active_health_request_builds_grpc_probe_request() {
         request.uri(),
         &"https://example.com/grpc.health.v1.Health/Check".parse::<Uri>().unwrap()
     );
-    assert_eq!(request.headers().get(HOST).unwrap(), "example.com");
+    assert!(request.headers().get(HOST).is_none());
     assert_eq!(request.headers().get(CONTENT_TYPE).unwrap(), "application/grpc");
     assert_eq!(request.headers().get(TE).unwrap(), "trailers");
     let content_length = request

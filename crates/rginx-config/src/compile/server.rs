@@ -2,7 +2,7 @@ use std::path::Path;
 
 use rginx_core::{Listener, Result, VirtualHostTls};
 
-use crate::model::{ListenerConfig, ServerConfig, VirtualHostTlsConfig};
+use crate::model::{ListenerConfig, ServerConfig, VirtualHostConfig, VirtualHostTlsConfig};
 
 mod fields;
 mod http3;
@@ -44,6 +44,15 @@ pub(super) fn compile_listeners(
     base_dir: &Path,
 ) -> Result<Vec<Listener>> {
     listener::compile_listeners(listeners, default_server_header, base_dir)
+}
+
+/// Compiles nginx-style `servers[].listen` entries into deduplicated runtime listeners.
+pub(super) fn compile_vhost_listeners(
+    vhosts: &[VirtualHostConfig],
+    server_defaults: &ServerConfig,
+    base_dir: &Path,
+) -> Result<Vec<Listener>> {
+    listener::compile_vhost_listeners(vhosts, server_defaults, base_dir)
 }
 
 /// Compiles per-vhost TLS overrides into the runtime vhost TLS structure.

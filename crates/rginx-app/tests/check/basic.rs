@@ -27,10 +27,10 @@ fn check_succeeds_without_binding_listener() {
     assert!(stdout.contains("worker_threads=auto"));
     assert!(stdout.contains("accept_workers=1"));
     assert!(stdout.contains(
-        "reload_requires_restart_for=listen,server.http3.listen,listeners[].listen,listeners[].http3.listen,runtime.worker_threads,runtime.accept_workers"
+        "reload_requires_restart_for=listen,server.http3.listen,listeners[].listen,listeners[].http3.listen,servers[].listen,runtime.worker_threads,runtime.accept_workers"
     ));
     assert!(stdout.contains(
-        "reload_tls_updates=server.tls,server.http3.advertise_alt_svc,server.http3.alt_svc_max_age_secs,listeners[].tls,listeners[].http3.advertise_alt_svc,listeners[].http3.alt_svc_max_age_secs,servers[].tls,upstreams[].tls,upstreams[].server_name,upstreams[].server_name_override"
+        "reload_tls_updates=server.tls,server.http3.advertise_alt_svc,server.http3.alt_svc_max_age_secs,listeners[].tls,listeners[].http3.advertise_alt_svc,listeners[].http3.alt_svc_max_age_secs,servers[].tls,upstreams[].tls,upstreams[].server_name,upstreams[].server_name_override,servers[].upstreams[].tls,servers[].upstreams[].server_name,servers[].upstreams[].server_name_override"
     ));
     assert!(stdout.contains("tls_default_certificates=-"));
     assert!(stdout.contains("tls_expiring_certificates=-"));
@@ -130,8 +130,9 @@ fn check_succeeds_for_repository_default_config() {
         render_output(&output)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("listener_model=vhost"));
     assert!(stdout.contains("listen=0.0.0.0:80"));
-    assert!(stdout.contains("routes=4"));
+    assert!(stdout.contains("routes=2"));
     assert!(stdout.contains("vhosts=2"));
     assert!(stdout.contains("upstreams=0"));
 }

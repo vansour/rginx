@@ -1,6 +1,6 @@
 use rginx_core::Result;
 
-use crate::model::{ListenerConfig, ServerConfig, VirtualHostConfig};
+use crate::model::{Http3Config, ListenerConfig, ServerConfig, ServerTlsConfig, VirtualHostConfig};
 
 mod http3;
 mod listener;
@@ -44,4 +44,12 @@ pub(super) fn validate_tls_identity_fields(
         additional_certificates,
         ocsp_staple_path,
     )
+}
+
+pub(super) fn validate_http3_config(
+    owner_label: &str,
+    http3: &Http3Config,
+    tls: Option<&ServerTlsConfig>,
+) -> Result<()> {
+    self::http3::validate_http3(owner_label, http3, tls)
 }

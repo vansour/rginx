@@ -3,6 +3,8 @@ pub mod load;
 pub mod model;
 pub mod validate;
 
+mod listen;
+
 use std::path::Path;
 
 use rginx_core::Result;

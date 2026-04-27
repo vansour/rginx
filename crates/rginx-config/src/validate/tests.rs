@@ -126,7 +126,9 @@ fn valid_server_tls() -> ServerTlsConfig {
 
 fn sample_vhost(server_names: Vec<&str>) -> VirtualHostConfig {
     VirtualHostConfig {
+        listen: Vec::new(),
         server_names: server_names.into_iter().map(str::to_string).collect(),
+        upstreams: Vec::new(),
         locations: vec![LocationConfig {
             matcher: MatcherConfig::Exact("/".to_string()),
             handler: HandlerConfig::Return {
@@ -149,5 +151,6 @@ fn sample_vhost(server_names: Vec<&str>) -> VirtualHostConfig {
             streaming_response_idle_timeout_secs: None,
         }],
         tls: None,
+        http3: None,
     }
 }

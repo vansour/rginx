@@ -139,7 +139,9 @@ fn validate_rejects_vhost_tls_without_any_tls_listener() {
         http3: None,
     }];
     config.servers = vec![VirtualHostConfig {
+        listen: Vec::new(),
         server_names: vec!["api.example.com".to_string()],
+        upstreams: Vec::new(),
         locations: vec![LocationConfig {
             matcher: MatcherConfig::Exact("/".to_string()),
             handler: HandlerConfig::Return {
@@ -168,8 +170,116 @@ fn validate_rejects_vhost_tls_without_any_tls_listener() {
             ocsp_staple_path: None,
             ocsp: None,
         }),
+        http3: None,
     }];
 
     let error = validate(&config).expect_err("vhost tls should require a tls listener");
     assert!(error.to_string().contains("requires at least one listener with tls"));
+}
+
+#[test]
+fn validate_accepts_vhost_listen_without_main_server_listen() {
+    let mut config = base_config();
+    config.server.listen = None;
+    config.locations.clear();
+    let mut vhost = sample_vhost(vec!["api.example.com"]);
+    vhost.listen = vec!["127.0.0.1:8080".to_string()];
+    config.servers = vec![vhost];
+
+    validate(&config).expect("servers[].listen should provide the listener binding");
+}
+
+#[test]
+fn validate_rejects_mixing_main_server_listen_with_vhost_listen() {
+    let mut config = base_config();
+    let mut vhost = sample_vhost(vec!["api.example.com"]);
+    vhost.listen = vec!["127.0.0.1:8080".to_string()];
+    config.servers = vec![vhost];
+
+    let error = validate(&config).expect_err("mixed listener architecture should fail");
+    assert!(error.to_string().contains("cannot be used together with servers[].listen"));
+}
+
+#[test]
+fn validate_rejects_vhost_ssl_listen_without_vhost_tls() {
+    let mut config = base_config();
+    config.server.listen = None;
+    config.locations.clear();
+    let mut vhost = sample_vhost(vec!["api.example.com"]);
+    vhost.listen = vec!["127.0.0.1:8443 ssl http2".to_string()];
+    config.servers = vec![vhost];
+
+    let error = validate(&config).expect_err("ssl listen without vhost tls should fail");
+    assert!(error.to_string().contains("servers[0] ssl listen requires tls"));
+}
+
+#[test]
+fn validate_accepts_vhost_local_upstream_scope() {
+    let mut config = base_config();
+    config.server.listen = None;
+    config.upstreams.clear();
+    config.locations.clear();
+    let mut vhost = sample_vhost(vec!["api.example.com"]);
+    vhost.listen = vec!["127.0.0.1:8080".to_string()];
+    vhost.upstreams = vec![local_upstream("backend")];
+    vhost.locations[0].handler = HandlerConfig::Proxy {
+        upstream: "backend".to_string(),
+        preserve_host: None,
+        strip_prefix: None,
+        proxy_set_headers: std::collections::HashMap::new(),
+    };
+    config.servers = vec![vhost];
+
+    validate(&config).expect("vhost route should see vhost-local upstream");
+}
+
+#[test]
+fn validate_keeps_vhost_local_upstream_hidden_from_default_routes() {
+    let mut config = base_config();
+    config.upstreams.clear();
+    config.servers = vec![{
+        let mut vhost = sample_vhost(vec!["api.example.com"]);
+        vhost.upstreams = vec![local_upstream("backend")];
+        vhost
+    }];
+
+    let error = validate(&config).expect_err("default route must not see vhost-local upstream");
+    assert!(error.to_string().contains("proxy upstream `backend` is not defined"));
+}
+
+fn local_upstream(name: &str) -> UpstreamConfig {
+    UpstreamConfig {
+        name: name.to_string(),
+        peers: vec![UpstreamPeerConfig {
+            url: "http://127.0.0.1:9000".to_string(),
+            weight: 1,
+            backup: false,
+        }],
+        tls: None,
+        dns: None,
+        protocol: UpstreamProtocolConfig::Auto,
+        load_balance: UpstreamLoadBalanceConfig::RoundRobin,
+        server_name: None,
+        server_name_override: None,
+        request_timeout_secs: None,
+        connect_timeout_secs: None,
+        read_timeout_secs: None,
+        write_timeout_secs: None,
+        idle_timeout_secs: None,
+        pool_idle_timeout_secs: None,
+        pool_max_idle_per_host: None,
+        tcp_keepalive_secs: None,
+        tcp_nodelay: None,
+        http2_keep_alive_interval_secs: None,
+        http2_keep_alive_timeout_secs: None,
+        http2_keep_alive_while_idle: None,
+        max_replayable_request_body_bytes: None,
+        unhealthy_after_failures: None,
+        unhealthy_cooldown_secs: None,
+        health_check_path: None,
+        health_check_grpc_service: None,
+        health_check_interval_secs: None,
+        health_check_timeout_secs: None,
+        healthy_successes_required: None,
+    }
 }

@@ -11,6 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
 use http_body_util::Full;
 use hyper::body::Incoming;
+use hyper::header::HOST;
 use hyper::server::conn::http2;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode, Version};
@@ -33,6 +34,7 @@ struct ObservedRequest {
     version: Version,
     path: String,
     authority: Option<String>,
+    host: Option<String>,
     alpn_protocol: Option<String>,
 }
 
@@ -57,6 +59,7 @@ async fn proxies_to_https_upstreams_over_http2_when_alpn_negotiates_h2() {
         .expect("upstream observation channel should complete");
     assert_eq!(observed.version, Version::HTTP_2);
     assert_eq!(observed.path, "/");
+    assert!(observed.host.is_none());
     assert_eq!(observed.alpn_protocol.as_deref(), Some("h2"));
 
     server.shutdown_and_wait(Duration::from_secs(5));
@@ -86,6 +89,7 @@ async fn preserves_hostname_authority_when_h2_upstream_dials_resolved_ip() {
         .expect("upstream observation channel should complete");
     assert_eq!(observed.version, Version::HTTP_2);
     assert_eq!(observed.path, "/");
+    assert!(observed.host.is_none());
     assert_eq!(observed.alpn_protocol.as_deref(), Some("h2"));
     let expected_authority = upstream_url.strip_prefix("https://").unwrap();
     assert_eq!(observed.authority.as_deref(), Some(expected_authority));
@@ -135,6 +139,11 @@ async fn spawn_h2_upstream()
             let alpn_protocol = alpn_protocol.clone();
 
             async move {
+                let host = request
+                    .headers()
+                    .get(HOST)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_string);
                 if let Some(sender) =
                     observed_tx.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take()
                 {
@@ -142,15 +151,23 @@ async fn spawn_h2_upstream()
                         version: request.version(),
                         path: request.uri().path().to_string(),
                         authority: request.uri().authority().map(|value| value.to_string()),
+                        host: host.clone(),
                         alpn_protocol,
                     });
                 }
 
+                let status = if host.is_some() { StatusCode::BAD_REQUEST } else { StatusCode::OK };
+                let body = if host.is_some() {
+                    Bytes::from_static(b"unexpected h2 host header\n")
+                } else {
+                    Bytes::from_static(b"upstream h2 ok\n")
+                };
+
                 Ok::<_, Infallible>(
                     Response::builder()
-                        .status(StatusCode::OK)
+                        .status(status)
                         .header("content-type", "text/plain; charset=utf-8")
-                        .body(Full::new(Bytes::from_static(b"upstream h2 ok\n")))
+                        .body(Full::new(body))
                         .expect("upstream response should build"),
                 )
             }

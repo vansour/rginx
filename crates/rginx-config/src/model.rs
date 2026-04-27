@@ -34,6 +34,7 @@ pub struct Config {
     pub server: ServerConfig,
     #[serde(default)]
     pub upstreams: Vec<UpstreamConfig>,
+    #[serde(default)]
     pub locations: Vec<LocationConfig>,
     #[serde(default)]
     pub servers: Vec<VirtualHostConfig>,

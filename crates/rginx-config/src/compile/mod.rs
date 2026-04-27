@@ -53,7 +53,11 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
     } = raw;
     let runtime = runtime::compile_runtime_settings(runtime)?;
     let any_vhost_tls = raw_servers.iter().any(|vhost| vhost.tls.is_some());
-    let (listeners, default_server_names) = if raw_listeners.is_empty() {
+    let any_vhost_listen = raw_servers.iter().any(|vhost| !vhost.listen.is_empty());
+    let (listeners, default_server_names) = if any_vhost_listen {
+        let listeners = server::compile_vhost_listeners(&raw_servers, &server, base_dir)?;
+        (listeners, server.server_names.clone())
+    } else if raw_listeners.is_empty() {
         let compiled_server = server::compile_legacy_server(server, base_dir, any_vhost_tls)?;
         (vec![compiled_server.listener.clone()], compiled_server.server_names)
     } else {
@@ -62,7 +66,7 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
         let listeners = server::compile_listeners(raw_listeners, default_server_header, base_dir)?;
         (listeners, default_server_names)
     };
-    let upstreams = upstream::compile_upstreams(raw_upstreams, base_dir)?;
+    let mut upstreams = upstream::compile_upstreams(raw_upstreams, base_dir)?;
 
     let default_vhost = VirtualHost {
         id: DEFAULT_VHOST_ID.to_string(),
@@ -71,7 +75,7 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
         tls: None,
     };
 
-    let vhosts = raw_servers
+    let compiled_vhosts = raw_servers
         .into_iter()
         .enumerate()
         .map(|(index, vhost_config)| {
@@ -83,6 +87,11 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
             )
         })
         .collect::<Result<Vec<_>>>()?;
+    let mut vhosts = Vec::with_capacity(compiled_vhosts.len());
+    for compiled in compiled_vhosts {
+        upstreams.extend(compiled.upstreams);
+        vhosts.push(compiled.vhost);
+    }
 
     Ok(ConfigSnapshot { runtime, listeners, default_vhost, vhosts, upstreams })
 }
