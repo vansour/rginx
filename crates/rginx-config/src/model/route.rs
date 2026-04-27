@@ -82,6 +82,11 @@ pub enum HandlerConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
+/// `ProxyHeaderValueConfig` is intentionally untagged and order-sensitive.
+/// Serde tries `Dynamic(ProxyHeaderDynamicValueConfig)` first, so values like
+/// `ClientIp` or `Template("https://{host}")` are parsed as dynamic sources.
+/// Plain quoted strings fall through to `Static(String)`. Do not tag or reorder
+/// these variants without treating it as a config format change.
 pub enum ProxyHeaderValueConfig {
     Dynamic(ProxyHeaderDynamicValueConfig),
     Static(String),
@@ -97,4 +102,5 @@ pub enum ProxyHeaderDynamicValueConfig {
     ForwardedFor,
     RequestHeader(String),
     Template(String),
+    Remove,
 }

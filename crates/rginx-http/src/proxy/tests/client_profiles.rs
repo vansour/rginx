@@ -206,7 +206,7 @@ fn proxy_clients_cache_distinguishes_upstream_protocol() {
             weight: 1,
             backup: false,
         }],
-        UpstreamTls::NativeRoots,
+        UpstreamTls::Insecure,
         upstream_settings(UpstreamProtocol::H2c),
     );
 

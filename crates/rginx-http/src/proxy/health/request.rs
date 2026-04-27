@@ -17,14 +17,10 @@ pub(in super::super) fn build_active_health_request(
     })?;
 
     let mut builder = Request::builder().uri(uri).header(HOST, peer.upstream_authority.as_str());
-    let request_protocol = if check.grpc_service.is_some() {
-        if upstream.protocol == UpstreamProtocol::H2c {
-            UpstreamProtocol::H2c
-        } else {
-            UpstreamProtocol::Http2
-        }
-    } else {
-        upstream.protocol
+    let request_protocol = match (check.grpc_service.is_some(), upstream.protocol) {
+        (true, UpstreamProtocol::H2c) => UpstreamProtocol::H2c,
+        (true, _) => UpstreamProtocol::Http2,
+        (false, _) => upstream.protocol,
     };
 
     let mut request = if let Some(service) = check.grpc_service.as_deref() {

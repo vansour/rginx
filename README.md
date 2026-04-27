@@ -60,6 +60,10 @@ cargo run -p rginx --
 `conf.d/*.ron` include；每个 `VirtualHostConfig` 站点文件负责自己的 `listen`、
 TLS 证书、局部 `upstreams` 和 `locations`。
 
+配置兼容提示：`proxy_set_headers` 现在支持结构化动态值；旧的静态字符串
+写法如 `"X-Foo": "bar"` 仍然有效，动态值需使用 RON enum 写法如
+`"X-Real-IP": ClientIp` 或 `"Origin": Template("https://{host}")`。
+
 常用命令：
 
 ```bash

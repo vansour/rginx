@@ -58,14 +58,19 @@ pub(super) fn validate_active_health_settings(upstream: &UpstreamConfig) -> Resu
             )));
         }
 
-        if matches!(upstream.protocol, UpstreamProtocolConfig::H2c) {
-            if upstream.peers.iter().any(|peer| !peer.url.starts_with("http://")) {
+        let required_scheme =
+            if matches!(upstream.protocol, UpstreamProtocolConfig::H2c) { "http" } else { "https" };
+        if upstream.peers.iter().any(|peer| {
+            peer.url
+                .parse::<http::Uri>()
+                .map_or(true, |uri| uri.scheme_str() != Some(required_scheme))
+        }) {
+            if matches!(upstream.protocol, UpstreamProtocolConfig::H2c) {
                 return Err(Error::Config(format!(
                     "upstream `{}` health_check_grpc_service with protocol `H2c` requires all peers to use `http://`",
                     upstream.name
                 )));
             }
-        } else if upstream.peers.iter().any(|peer| !peer.url.starts_with("https://")) {
             return Err(Error::Config(format!(
                 "upstream `{}` health_check_grpc_service currently requires all peers to use `https://`; cleartext h2c health checks are not supported",
                 upstream.name

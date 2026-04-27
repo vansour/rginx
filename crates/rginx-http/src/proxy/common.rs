@@ -55,7 +55,14 @@ pub(super) fn sanitize_request_headers(
     proxy_set_headers: &[(HeaderName, ProxyHeaderValue)],
     grpc_web_mode: Option<&GrpcWebMode>,
 ) -> Result<(), http::header::InvalidHeaderValue> {
-    let original_headers = headers.clone();
+    let proxy_header_overrides = render_proxy_header_overrides(
+        headers,
+        authority,
+        original_host.as_ref(),
+        client_address,
+        forwarded_proto,
+        proxy_set_headers,
+    )?;
     let upgrade_protocol = extract_upgrade_protocol(headers);
     let te_trailers = preserved_te_trailers_value(headers);
     remove_hop_by_hop_headers(headers, upgrade_protocol.is_some());
@@ -78,20 +85,14 @@ pub(super) fn sanitize_request_headers(
 
     headers.insert("x-forwarded-for", HeaderValue::from_str(&client_address.forwarded_for)?);
 
-    let render_context = ProxyHeaderRenderContext {
-        original_headers: &original_headers,
-        original_host: original_host.as_ref(),
-        upstream_authority: authority,
-        client_ip: client_address.client_ip,
-        peer_addr: client_address.peer_addr,
-        forwarded_for: &client_address.forwarded_for,
-        scheme: forwarded_proto,
-    };
-    for (name, value) in proxy_set_headers {
-        if let Some(value) = value.render(&render_context)? {
-            headers.insert(name.clone(), value);
-        } else {
-            headers.remove(name);
+    for header_override in proxy_header_overrides {
+        match header_override {
+            ProxyHeaderOverride::Set(name, value) => {
+                headers.insert(name, value);
+            }
+            ProxyHeaderOverride::Remove(name) => {
+                headers.remove(name);
+            }
         }
     }
 
@@ -114,6 +115,46 @@ pub(super) fn sanitize_request_headers(
     }
 
     Ok(())
+}
+
+enum ProxyHeaderOverride {
+    Set(HeaderName, HeaderValue),
+    Remove(HeaderName),
+}
+
+fn render_proxy_header_overrides(
+    original_headers: &HeaderMap,
+    authority: &str,
+    original_host: Option<&HeaderValue>,
+    client_address: &ClientAddress,
+    forwarded_proto: &str,
+    proxy_set_headers: &[(HeaderName, ProxyHeaderValue)],
+) -> Result<Vec<ProxyHeaderOverride>, http::header::InvalidHeaderValue> {
+    if proxy_set_headers.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let render_context = ProxyHeaderRenderContext {
+        original_headers,
+        original_host,
+        upstream_authority: authority,
+        client_ip: client_address.client_ip,
+        peer_addr: client_address.peer_addr,
+        forwarded_for: &client_address.forwarded_for,
+        scheme: forwarded_proto,
+    };
+    let mut overrides = Vec::with_capacity(proxy_set_headers.len());
+    for (name, value) in proxy_set_headers {
+        if value.removes_header() {
+            overrides.push(ProxyHeaderOverride::Remove(name.clone()));
+            continue;
+        }
+
+        if let Some(value) = value.render(&render_context)? {
+            overrides.push(ProxyHeaderOverride::Set(name.clone(), value));
+        }
+    }
+    Ok(overrides)
 }
 
 pub(super) fn remove_redundant_host_header_for_authority_pseudo_header(

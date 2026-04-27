@@ -78,12 +78,10 @@ pub(super) fn compile_server_fields(
 fn compile_client_ip_header(value: Option<String>) -> Result<Option<HeaderName>> {
     value
         .map(|value| {
-            let normalized = value.trim();
-            if normalized.is_empty() {
-                return Err(Error::Config("server client_ip_header must not be empty".to_string()));
-            }
-            normalized.parse::<HeaderName>().map_err(|error| {
-                Error::Config(format!("server client_ip_header `{value}` is invalid: {error}"))
+            value.trim().parse::<HeaderName>().map_err(|error| {
+                Error::Config(format!(
+                    "validated server client_ip_header `{value}` failed to compile: {error}"
+                ))
             })
         })
         .transpose()

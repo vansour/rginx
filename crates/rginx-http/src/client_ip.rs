@@ -91,10 +91,8 @@ pub fn resolve_client_address(
 
 fn parse_client_ip_header(headers: &HeaderMap, header_name: &str) -> Option<IpAddr> {
     let value = headers.get(header_name)?.to_str().ok()?.trim();
-    if value.is_empty() {
-        return None;
-    }
-    parse_forwarded_ip(value)
+    let token = value.split(',').map(str::trim).find(|token| !token.is_empty())?;
+    parse_forwarded_ip(token)
 }
 
 fn direct_peer(peer_addr: SocketAddr) -> ClientAddress {

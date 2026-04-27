@@ -2,15 +2,16 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::time::Duration;
 
-use http::{HeaderMap, HeaderValue, StatusCode};
+use http::StatusCode;
 
 use super::{
     AccessLogFormat, AccessLogValues, ConfigSnapshot, Listener, ListenerApplicationProtocol,
-    ListenerHttp3, ListenerTransportKind, ProxyHeaderRenderContext, ProxyHeaderTemplate,
-    ProxyHeaderValue, ReturnAction, Route, RouteAccessControl, RouteAction, RouteMatcher,
-    RouteRegexMatcher, RuntimeSettings, Server, VirtualHost, default_server_header,
-    match_server_name,
+    ListenerHttp3, ListenerTransportKind, ReturnAction, Route, RouteAccessControl, RouteAction,
+    RouteMatcher, RuntimeSettings, Server, VirtualHost, default_server_header, match_server_name,
 };
+
+mod proxy_header;
+mod route_matcher;
 
 #[test]
 fn route_access_control_allows_when_lists_are_empty() {
@@ -39,48 +40,6 @@ fn route_access_control_denies_before_allowing() {
 
     assert!(access_control.allows("10.1.2.3".parse::<IpAddr>().unwrap()));
     assert!(!access_control.allows("10.0.0.5".parse::<IpAddr>().unwrap()));
-}
-
-#[test]
-fn regex_route_matcher_supports_case_insensitive_path_patterns() {
-    let matcher = RouteMatcher::Regex(
-        RouteRegexMatcher::new("^/api/v1/ws/(server|terminal|file)(/.*)?$".to_string(), true)
-            .expect("regex matcher should compile"),
-    );
-
-    assert!(matcher.matches("/api/v1/ws/server"));
-    assert!(matcher.matches("/API/V1/WS/terminal/session"));
-    assert!(!matcher.matches("/api/v1/ws/metrics"));
-    assert!(matcher.priority() > RouteMatcher::Prefix("/".to_string()).priority());
-}
-
-#[test]
-fn proxy_header_template_renders_request_context_values() {
-    let mut headers = HeaderMap::new();
-    headers.insert("cf-connecting-ip", HeaderValue::from_static("198.51.100.9"));
-    let template = ProxyHeaderTemplate::parse(
-        "https://{host}/{scheme}/{client_ip}/{header:cf-connecting-ip}".to_string(),
-    )
-    .expect("template should parse");
-    let context = ProxyHeaderRenderContext {
-        original_headers: &headers,
-        original_host: Some(&HeaderValue::from_static("dashboard.example.com")),
-        upstream_authority: "127.0.0.1:8008",
-        client_ip: "203.0.113.10".parse().unwrap(),
-        peer_addr: "10.0.0.2:443".parse().unwrap(),
-        forwarded_for: "203.0.113.10, 10.0.0.2",
-        scheme: "https",
-    };
-
-    let value = ProxyHeaderValue::Template(template)
-        .render(&context)
-        .expect("template should render")
-        .expect("template should produce a value");
-
-    assert_eq!(
-        value,
-        HeaderValue::from_static("https://dashboard.example.com/https/203.0.113.10/198.51.100.9")
-    );
 }
 
 #[test]

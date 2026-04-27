@@ -103,6 +103,67 @@ fn sanitize_request_headers_renders_dynamic_proxy_headers() {
 }
 
 #[test]
+fn sanitize_request_headers_keeps_target_when_dynamic_source_is_missing() {
+    let mut headers = HeaderMap::new();
+    headers.insert(HOST, HeaderValue::from_static("client.example"));
+    headers.insert("authorization", HeaderValue::from_static("Bearer client"));
+
+    let client_address = ClientAddress {
+        peer_addr: "10.2.3.4:4000".parse().unwrap(),
+        client_ip: "198.51.100.9".parse().unwrap(),
+        forwarded_for: "198.51.100.9".to_string(),
+        source: ClientIpSource::SocketPeer,
+    };
+    let proxy_set_headers = vec![(
+        "authorization".parse().unwrap(),
+        ProxyHeaderValue::RequestHeader("x-forward-auth".parse().unwrap()),
+    )];
+
+    sanitize_request_headers(
+        &mut headers,
+        "127.0.0.1:9000",
+        Some(HeaderValue::from_static("client.example")),
+        &client_address,
+        "https",
+        false,
+        &proxy_set_headers,
+        None,
+    )
+    .expect("header sanitization should succeed");
+
+    assert_eq!(headers.get("authorization").unwrap(), "Bearer client");
+}
+
+#[test]
+fn sanitize_request_headers_removes_explicit_remove_headers() {
+    let mut headers = HeaderMap::new();
+    headers.insert(HOST, HeaderValue::from_static("client.example"));
+    headers.insert("authorization", HeaderValue::from_static("Bearer client"));
+
+    let client_address = ClientAddress {
+        peer_addr: "10.2.3.4:4000".parse().unwrap(),
+        client_ip: "198.51.100.9".parse().unwrap(),
+        forwarded_for: "198.51.100.9".to_string(),
+        source: ClientIpSource::SocketPeer,
+    };
+    let proxy_set_headers = vec![("authorization".parse().unwrap(), ProxyHeaderValue::Remove)];
+
+    sanitize_request_headers(
+        &mut headers,
+        "127.0.0.1:9000",
+        Some(HeaderValue::from_static("client.example")),
+        &client_address,
+        "https",
+        false,
+        &proxy_set_headers,
+        None,
+    )
+    .expect("header sanitization should succeed");
+
+    assert!(!headers.contains_key("authorization"));
+}
+
+#[test]
 fn sanitize_request_headers_preserves_upgrade_handshake() {
     let mut headers = HeaderMap::new();
     headers.insert(HOST, HeaderValue::from_static("client.example"));

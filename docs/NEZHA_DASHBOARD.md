@@ -14,7 +14,8 @@ Config(
         shutdown_timeout_secs: 10,
     ),
     server: ServerConfig(
-        trusted_proxies: ["0.0.0.0/0", "::/0"], // Prefer concrete CDN CIDRs in production.
+        // Replace these documentation CIDRs with your CDN or outer proxy source ranges.
+        trusted_proxies: ["203.0.113.0/24", "2001:db8:1234::/48"],
         client_ip_header: Some("CF-Connecting-IP"),
     ),
     upstreams: [],
@@ -25,9 +26,18 @@ Config(
 )
 ```
 
+> Warning: `0.0.0.0/0` and `::/0` are for local development only. Do not use
+> them in production with `client_ip_header`, because any direct client could
+> spoof `CF-Connecting-IP` and therefore downstream `nz-realip`.
+
 `client_ip_header` is only trusted when the socket peer is covered by
 `trusted_proxies`. The resolved client IP is then available to proxy headers
-through `ClientIp`.
+through `ClientIp`. This header is expected to carry one client IP, such as
+`CF-Connecting-IP`, `True-Client-IP`, or `X-Real-IP`; if a comma-separated value
+is received, rginx uses the first non-empty entry. When `client_ip_header`
+matches, the generated `forwarded_for` chain is rebuilt from that resolved
+client IP plus the immediate trusted peer instead of preserving the incoming
+`X-Forwarded-For` chain.
 
 ## Site Config
 
@@ -107,6 +117,9 @@ VirtualHostConfig(
 
 - `H2c` is the rginx upstream protocol for cleartext HTTP/2 gRPC backends, matching nginx `grpc://` behavior.
 - `Regex(...)` is a native rginx matcher, not nginx `location ~*` syntax.
-- `proxy_set_headers` supports dynamic values such as `ClientIp`, `Host`, `Scheme`, `RequestHeader("name")`, and `Template("https://{host}")`.
+- `proxy_set_headers` supports dynamic values such as `ClientIp`, `Host`, `Scheme`, `RemoteAddr`, `PeerAddr`, `ForwardedFor`, `RequestHeader("name")`, `Template("https://{host}")`, and `Remove`.
+- Template variables are `{host}`, `{scheme}`, `{client_ip}`, `{remote_addr}`, `{peer_addr}`, `{forwarded_for}`, and `{header:NAME}`. Example: `Template("{header:cf-connecting-ip}")`.
+- Use `{{` and `}}` for literal braces in templates. Missing `RequestHeader(...)` sources do not overwrite or remove an existing target header; use `Remove` for explicit deletion.
+- Legacy static header values remain valid as quoted strings, for example `"X-App": "dashboard"`. Dynamic values use RON enum syntax, for example `"X-Real-IP": ClientIp`.
 - WebSocket Upgrade headers are preserved automatically; they do not need to be configured manually.
 - nginx buffer directives such as `proxy_buffers` and `grpc_buffer_size` are not copied 1:1. Use rginx buffering, streaming, timeout, and request-size controls instead.

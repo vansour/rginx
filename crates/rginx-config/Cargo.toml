@@ -14,6 +14,7 @@ description = "Configuration loading, validation, and compilation for rginx."
 [dependencies]
 http.workspace = true
 ipnet.workspace = true
+regex.workspace = true
 ron.workspace = true
 rginx-core = { path = "../rginx-core" }
 rustls.workspace = true

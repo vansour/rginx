@@ -194,6 +194,7 @@ fn compile_proxy_header_value(
                 })?;
                 Ok(ProxyHeaderValue::Template(template))
             }
+            ProxyHeaderDynamicValueConfig::Remove => Ok(ProxyHeaderValue::Remove),
         },
     }
 }
@@ -205,7 +206,7 @@ fn compile_route_access_control(
 ) -> Result<RouteAccessControl> {
     let matcher_label = match matcher {
         RouteMatcher::Exact(path) | RouteMatcher::Prefix(path) => path.as_str(),
-        RouteMatcher::Regex(regex) => regex.pattern.as_str(),
+        RouteMatcher::Regex(regex) => regex.pattern(),
     };
 
     Ok(RouteAccessControl::new(
@@ -221,7 +222,7 @@ fn compile_route_rate_limit(
 ) -> Result<Option<RouteRateLimit>> {
     let matcher_label = match matcher {
         RouteMatcher::Exact(path) | RouteMatcher::Prefix(path) => path.as_str(),
-        RouteMatcher::Regex(regex) => regex.pattern.as_str(),
+        RouteMatcher::Regex(regex) => regex.pattern(),
     };
 
     match requests_per_sec {

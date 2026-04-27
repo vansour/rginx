@@ -1924,6 +1924,7 @@ dependencies = [
  "http",
  "ipnet",
  "proptest",
+ "regex",
  "rginx-core",
  "ron",
  "rustls",

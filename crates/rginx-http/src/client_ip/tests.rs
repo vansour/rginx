@@ -122,6 +122,45 @@ fn trusted_peer_uses_configured_client_ip_header_before_x_forwarded_for() {
 }
 
 #[test]
+fn client_ip_header_uses_first_comma_separated_ip() {
+    let server = Server {
+        listen_addr: "127.0.0.1:8080".parse().unwrap(),
+        server_header: rginx_core::default_server_header(),
+        default_certificate: None,
+        trusted_proxies: vec!["10.0.0.0/8".parse().unwrap()],
+        client_ip_header: Some("true-client-ip".parse().unwrap()),
+        keep_alive: true,
+        max_headers: None,
+        max_request_body_bytes: None,
+        max_connections: None,
+        header_read_timeout: None,
+        request_body_read_timeout: None,
+        response_write_timeout: None,
+        access_log_format: None,
+        tls: None,
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert("true-client-ip", HeaderValue::from_static("203.0.113.20, 10.1.2.3"));
+
+    let client = resolve_client_address(
+        &headers,
+        &server,
+        &ConnectionPeerAddrs {
+            socket_peer_addr: "10.2.3.4:4000".parse().unwrap(),
+            proxy_protocol_source_addr: None,
+            tls_client_identity: None,
+            tls_version: None,
+            tls_alpn: None,
+            early_data: false,
+        },
+    );
+
+    assert_eq!(client.client_ip.to_string(), "203.0.113.20");
+    assert_eq!(client.forwarded_for, "203.0.113.20, 10.2.3.4");
+    assert_eq!(client.source, ClientIpSource::ClientIpHeader);
+}
+
+#[test]
 fn trusted_peer_keeps_leftmost_entry_when_chain_is_all_trusted() {
     let server = Server {
         listen_addr: "127.0.0.1:8080".parse().unwrap(),
