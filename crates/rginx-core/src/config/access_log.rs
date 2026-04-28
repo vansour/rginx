@@ -2,6 +2,10 @@ use std::fmt::Write as _;
 
 use crate::{Error, Result};
 
+mod helpers;
+
+use helpers::{fallback_access_log_option, fallback_access_log_value, is_access_log_variable_char};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccessLogFormat {
     template: String,
@@ -288,16 +292,4 @@ fn parse_access_log_variable(name: &str) -> Result<AccessLogVariable> {
         "cache_status" | "upstream_cache_status" => Ok(AccessLogVariable::CacheStatus),
         _ => Err(Error::Config(format!("access_log_format variable `${name}` is not supported"))),
     }
-}
-
-fn is_access_log_variable_char(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'_'
-}
-
-fn fallback_access_log_value(value: &str) -> &str {
-    if value.is_empty() { "-" } else { value }
-}
-
-fn fallback_access_log_option(value: Option<&str>) -> &str {
-    value.filter(|value| !value.is_empty()).unwrap_or("-")
 }

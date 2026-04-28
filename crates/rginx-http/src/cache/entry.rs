@@ -1,6 +1,4 @@
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
@@ -17,7 +15,9 @@ use crate::handler::{HttpResponse, full_body};
 
 use super::{CACHE_STATUS_HEADER, CacheIndexEntry, CacheZoneRuntime};
 
-static CACHE_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+mod temp;
+
+use temp::{cleanup_failed_write, next_temp_suffix, sibling_temp_path};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct CacheMetadata {
@@ -272,30 +272,4 @@ fn remove_cache_hop_by_hop_headers(headers: &mut HeaderMap) {
     }
     headers.remove("keep-alive");
     headers.remove("proxy-connection");
-}
-
-fn next_temp_suffix() -> String {
-    let counter = CACHE_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!(".tmp-{}-{counter}", std::process::id())
-}
-
-fn sibling_temp_path(path: &Path, suffix: &str) -> PathBuf {
-    let mut file_name =
-        path.file_name().map_or_else(|| OsString::from("cache-entry"), |name| name.to_os_string());
-    file_name.push(suffix);
-    path.with_file_name(file_name)
-}
-
-async fn cleanup_failed_write(
-    paths: &CachePaths,
-    body_tmp: &Path,
-    metadata_tmp: &Path,
-    remove_final: bool,
-) {
-    let _ = fs::remove_file(body_tmp).await;
-    let _ = fs::remove_file(metadata_tmp).await;
-    if remove_final {
-        let _ = fs::remove_file(&paths.body).await;
-        let _ = fs::remove_file(&paths.metadata).await;
-    }
 }
