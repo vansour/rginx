@@ -20,6 +20,8 @@ fn cache_key_template_renders_request_parts() {
         min_uses: 1,
         ignore_headers: Vec::new(),
         range_requests: rginx_core::CacheRangeRequestPolicy::Bypass,
+        slice_size_bytes: None,
+        convert_head: true,
     };
     let request = Request::builder()
         .method(Method::GET)
@@ -53,6 +55,8 @@ fn cache_key_includes_all_accept_encoding_header_values() {
         min_uses: 1,
         ignore_headers: Vec::new(),
         range_requests: rginx_core::CacheRangeRequestPolicy::Bypass,
+        slice_size_bytes: None,
+        convert_head: true,
     };
     let request = Request::builder()
         .method(Method::GET)
@@ -90,6 +94,8 @@ fn cache_key_template_renders_header_query_and_cookie_variables() {
         min_uses: 1,
         ignore_headers: Vec::new(),
         range_requests: rginx_core::CacheRangeRequestPolicy::Bypass,
+        slice_size_bytes: None,
+        convert_head: true,
     };
     let request = Request::builder()
         .method(Method::GET)
@@ -123,6 +129,8 @@ fn authorization_request_bypasses_cache() {
         min_uses: 1,
         ignore_headers: Vec::new(),
         range_requests: rginx_core::CacheRangeRequestPolicy::Bypass,
+        slice_size_bytes: None,
+        convert_head: true,
     };
     let request = Request::builder()
         .method(Method::GET)
@@ -155,6 +163,8 @@ fn configured_header_bypasses_cache() {
         min_uses: 1,
         ignore_headers: Vec::new(),
         range_requests: rginx_core::CacheRangeRequestPolicy::Bypass,
+        slice_size_bytes: None,
+        convert_head: true,
     };
     let request = Request::builder()
         .method(Method::GET)
@@ -185,6 +195,8 @@ fn range_request_bypasses_cache_by_default() {
         min_uses: 1,
         ignore_headers: Vec::new(),
         range_requests: rginx_core::CacheRangeRequestPolicy::Bypass,
+        slice_size_bytes: None,
+        convert_head: true,
     };
     let request = Request::builder()
         .method(Method::GET)
@@ -216,6 +228,8 @@ fn cache_key_includes_range_when_enabled() {
         min_uses: 1,
         ignore_headers: Vec::new(),
         range_requests: rginx_core::CacheRangeRequestPolicy::Cache,
+        slice_size_bytes: None,
+        convert_head: true,
     };
     let request = Request::builder()
         .method(Method::GET)
@@ -249,6 +263,8 @@ fn multiple_range_headers_bypass_cache_when_range_caching_is_enabled() {
         min_uses: 1,
         ignore_headers: Vec::new(),
         range_requests: rginx_core::CacheRangeRequestPolicy::Cache,
+        slice_size_bytes: None,
+        convert_head: true,
     };
     let request = Request::builder()
         .method(Method::GET)

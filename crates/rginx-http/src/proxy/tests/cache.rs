@@ -18,6 +18,8 @@ fn cache_policy() -> rginx_core::RouteCachePolicy {
         min_uses: 1,
         ignore_headers: Vec::new(),
         range_requests: rginx_core::CacheRangeRequestPolicy::Bypass,
+        slice_size_bytes: None,
+        convert_head: true,
     }
 }
 
@@ -34,6 +36,18 @@ fn downstream_context<'a>(
     request_id: &'a str,
     cache: Option<rginx_core::RouteCachePolicy>,
 ) -> crate::proxy::DownstreamRequestContext<'a> {
+    downstream_context_with_response_buffering(
+        request_id,
+        cache,
+        rginx_core::RouteBufferingPolicy::Auto,
+    )
+}
+
+fn downstream_context_with_response_buffering<'a>(
+    request_id: &'a str,
+    cache: Option<rginx_core::RouteCachePolicy>,
+    response_buffering: rginx_core::RouteBufferingPolicy,
+) -> crate::proxy::DownstreamRequestContext<'a> {
     crate::proxy::DownstreamRequestContext {
         listener_id: "default",
         downstream_proto: "http",
@@ -42,6 +56,7 @@ fn downstream_context<'a>(
             request_body_read_timeout: None,
             max_request_body_bytes: None,
             request_buffering: rginx_core::RouteBufferingPolicy::Auto,
+            response_buffering,
             streaming_response_idle_timeout: None,
             cache,
         },
@@ -63,6 +78,16 @@ fn get_request(path: &str) -> http::Request<crate::handler::HttpBody> {
         .method(Method::GET)
         .uri(path)
         .header(HOST, HeaderValue::from_static("example.com"))
+        .body(crate::handler::full_body(Bytes::new()))
+        .expect("request should build")
+}
+
+fn get_range_request(path: &str, range: &str) -> http::Request<crate::handler::HttpBody> {
+    http::Request::builder()
+        .method(Method::GET)
+        .uri(path)
+        .header(HOST, HeaderValue::from_static("example.com"))
+        .header(http::header::RANGE, range)
         .body(crate::handler::full_body(Bytes::new()))
         .expect("request should build")
 }
@@ -95,6 +120,7 @@ async fn forward_request_uses_route_cache_for_miss_then_hit() {
             manager_batch_entries: 100,
             manager_sleep: Duration::ZERO,
             inactive_cleanup_interval: Duration::from_secs(60),
+            shared_index: true,
         }),
     );
     let state = crate::state::SharedState::from_config(snapshot).expect("state should build");
@@ -159,6 +185,7 @@ async fn forward_request_marks_authorization_request_as_cache_bypass() {
             manager_batch_entries: 100,
             manager_sleep: Duration::ZERO,
             inactive_cleanup_interval: Duration::from_secs(60),
+            shared_index: true,
         }),
     );
     let state = crate::state::SharedState::from_config(snapshot).expect("state should build");
@@ -184,4 +211,148 @@ async fn forward_request_marks_authorization_request_as_cache_bypass() {
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers().get("x-cache").unwrap(), "BYPASS");
+}
+
+#[tokio::test]
+async fn forward_request_bypasses_cache_when_response_buffering_is_off() {
+    let statuses =
+        Arc::new(Mutex::new(VecDeque::from([StatusCode::OK, StatusCode::INTERNAL_SERVER_ERROR])));
+    let _server = spawn_status_server(statuses).await;
+    let upstream = Arc::new(Upstream::new(
+        "backend".to_string(),
+        vec![peer(&format!("http://{}", _server.listen_addr))],
+        rginx_core::UpstreamTls::NativeRoots,
+        upstream_settings(UpstreamProtocol::Auto),
+    ));
+    let mut snapshot = snapshot_with_upstream("backend", upstream.clone());
+    let temp = TempDir::new().expect("cache temp dir should exist");
+    snapshot.cache_zones.insert(
+        "default".to_string(),
+        Arc::new(rginx_core::CacheZone {
+            name: "default".to_string(),
+            path: temp.path().to_path_buf(),
+            max_size_bytes: Some(1024 * 1024),
+            inactive: Duration::from_secs(60),
+            default_ttl: Duration::from_secs(60),
+            max_entry_bytes: 1024,
+            path_levels: vec![2],
+            loader_batch_entries: 100,
+            loader_sleep: Duration::ZERO,
+            manager_batch_entries: 100,
+            manager_sleep: Duration::ZERO,
+            inactive_cleanup_interval: Duration::from_secs(60),
+            shared_index: true,
+        }),
+    );
+    let state = crate::state::SharedState::from_config(snapshot).expect("state should build");
+    let active = state.snapshot().await;
+    let target = proxy_target(upstream);
+
+    let first = crate::proxy::forward_request(
+        state.clone(),
+        active.clone(),
+        get_request("/streaming"),
+        "default",
+        &target,
+        client_address(),
+        downstream_context_with_response_buffering(
+            "cache-bypass-buffering-off-1",
+            Some(cache_policy()),
+            rginx_core::RouteBufferingPolicy::Off,
+        ),
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(first.headers().get("x-cache").unwrap(), "BYPASS");
+
+    let second = crate::proxy::forward_request(
+        state,
+        active,
+        get_request("/streaming"),
+        "default",
+        &target,
+        client_address(),
+        downstream_context_with_response_buffering(
+            "cache-bypass-buffering-off-2",
+            Some(cache_policy()),
+            rginx_core::RouteBufferingPolicy::Off,
+        ),
+    )
+    .await;
+    assert_eq!(second.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(second.headers().get("x-cache").unwrap(), "BYPASS");
+}
+
+#[tokio::test]
+async fn forward_request_reuses_cached_slice_for_subranges() {
+    let seen_ranges = Arc::new(Mutex::new(Vec::new()));
+    let server = spawn_range_server(seen_ranges.clone()).await;
+    let upstream = Arc::new(Upstream::new(
+        "backend".to_string(),
+        vec![peer(&format!("http://{}", server.listen_addr))],
+        rginx_core::UpstreamTls::NativeRoots,
+        upstream_settings(UpstreamProtocol::Auto),
+    ));
+    let mut snapshot = snapshot_with_upstream("backend", upstream.clone());
+    let temp = TempDir::new().expect("cache temp dir should exist");
+    snapshot.cache_zones.insert(
+        "default".to_string(),
+        Arc::new(rginx_core::CacheZone {
+            name: "default".to_string(),
+            path: temp.path().to_path_buf(),
+            max_size_bytes: Some(1024 * 1024),
+            inactive: Duration::from_secs(60),
+            default_ttl: Duration::from_secs(60),
+            max_entry_bytes: 1024,
+            path_levels: vec![2],
+            loader_batch_entries: 100,
+            loader_sleep: Duration::ZERO,
+            manager_batch_entries: 100,
+            manager_sleep: Duration::ZERO,
+            inactive_cleanup_interval: Duration::from_secs(60),
+            shared_index: true,
+        }),
+    );
+    let state = crate::state::SharedState::from_config(snapshot).expect("state should build");
+    let active = state.snapshot().await;
+    let target = proxy_target(upstream);
+    let mut policy = cache_policy();
+    policy.range_requests = rginx_core::CacheRangeRequestPolicy::Cache;
+    policy.slice_size_bytes = Some(8);
+    policy.statuses = vec![StatusCode::PARTIAL_CONTENT];
+
+    let first = crate::proxy::forward_request(
+        state.clone(),
+        active.clone(),
+        get_range_request("/slice", "bytes=2-4"),
+        "default",
+        &target,
+        client_address(),
+        downstream_context("slice-miss", Some(policy.clone())),
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(first.headers().get("x-cache").unwrap(), "MISS");
+    assert_eq!(first.headers().get("content-range").unwrap(), "bytes 2-4/26");
+    let first_body = first.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(first_body.as_ref(), b"cde");
+
+    let second = crate::proxy::forward_request(
+        state,
+        active,
+        get_range_request("/slice", "bytes=5-6"),
+        "default",
+        &target,
+        client_address(),
+        downstream_context("slice-hit", Some(policy)),
+    )
+    .await;
+    assert_eq!(second.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(second.headers().get("x-cache").unwrap(), "HIT");
+    assert_eq!(second.headers().get("content-range").unwrap(), "bytes 5-6/26");
+    let second_body = second.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(second_body.as_ref(), b"fg");
+
+    let seen_ranges = seen_ranges.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert_eq!(seen_ranges.as_slice(), ["bytes=0-7"]);
 }

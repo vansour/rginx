@@ -26,6 +26,8 @@ pub async fn forward_request(
         Ok(cache) => cache,
         Err(response) => return response,
     };
+    cache.apply_upstream_request_method(&mut request);
+    cache.apply_upstream_request_headers(request.headers_mut());
     cache.apply_conditional_request_headers(request.headers_mut());
 
     let prepared = match prepare_forward_request(

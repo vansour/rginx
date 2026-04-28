@@ -22,15 +22,17 @@ mod manager;
 mod policy;
 mod request;
 mod runtime;
+mod shared;
 mod store;
 mod vary;
 
 use entry::{
-    CacheMetadata, build_cached_response, cache_paths_for_zone, read_cache_metadata,
-    read_cached_response, unix_time_ms,
+    CacheMetadata, build_cached_response_for_request, cache_paths_for_zone, read_cache_metadata,
+    read_cached_response_for_request, unix_time_ms,
 };
 #[cfg(test)]
 use entry::{cache_key_hash, cache_metadata, cache_paths, cache_variant_key, write_cache_entry};
+#[cfg(test)]
 use load::load_index_from_disk;
 use policy::{header_value, request_requires_revalidation};
 #[cfg(test)]
@@ -39,6 +41,7 @@ use request::{cache_request_bypass, render_cache_key};
 use runtime::PurgeSelector;
 pub(crate) use runtime::with_cache_status;
 use runtime::{build_conditional_headers, remove_cache_files_if_unindexed};
+use shared::{bootstrap_shared_index, persist_zone_shared_index, sync_zone_shared_index_if_needed};
 use store::{
     CacheStoreError, cleanup_inactive_entries_in_zone, lock_index, purge_zone_entries,
     refresh_not_modified_response, remove_index_entry, store_response,
@@ -116,6 +119,8 @@ pub struct CacheZoneRuntimeSnapshot {
     pub eviction_total: u64,
     pub purge_total: u64,
     pub inactive_cleanup_total: u64,
+    pub shared_index_enabled: bool,
+    pub shared_index_generation: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,14 +149,17 @@ struct CacheZoneRuntime {
     config: Arc<CacheZone>,
     index: Mutex<CacheIndex>,
     io_lock: AsyncMutex<()>,
+    shared_index_sync_lock: AsyncMutex<()>,
     fill_locks: Arc<Mutex<HashMap<String, CacheFillLockState>>>,
     fill_lock_generation: AtomicU64,
     last_inactive_cleanup_unix_ms: AtomicU64,
+    shared_index_generation: AtomicU64,
+    shared_index_last_modified_unix_ms: AtomicU64,
     stats: CacheZoneStats,
     change_notifier: Option<CacheChangeNotifier>,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct CacheIndex {
     entries: HashMap<String, CacheIndexEntry>,
     variants: HashMap<String, Vec<String>>,
@@ -193,6 +201,7 @@ struct CacheFillGuard {
     generation: u64,
     fill_locks: Weak<Mutex<HashMap<String, CacheFillLockState>>>,
     notify: Arc<Notify>,
+    external_lock_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -237,13 +246,19 @@ enum LookupDecision {
         cache_status: CacheStatus,
     },
     Wait {
-        waiter: OwnedNotified,
+        strategy: LookupWait,
     },
+}
+
+enum LookupWait {
+    Local { waiter: OwnedNotified },
+    External { key: String },
 }
 
 enum FillLockDecision {
     Acquired(CacheFillGuard),
-    Wait { waiter: OwnedNotified },
+    WaitLocal { waiter: OwnedNotified },
+    WaitExternal { key: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

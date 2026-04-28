@@ -14,6 +14,7 @@ fn cache_zone(name: &str) -> CacheZoneConfig {
         manager_batch_entries: None,
         manager_sleep_millis: None,
         inactive_cleanup_interval_secs: None,
+        shared_index: None,
     }
 }
 
@@ -34,6 +35,8 @@ fn route_cache(zone: &str) -> CacheRouteConfig {
         min_uses: None,
         ignore_headers: None,
         range_requests: None,
+        slice_size_bytes: None,
+        convert_head: None,
     }
 }
 
@@ -153,6 +156,35 @@ fn validate_rejects_empty_ignore_headers() {
 
     let error = validate(&config).expect_err("empty ignore_headers should fail validation");
     assert!(error.to_string().contains("cache.ignore_headers must not be empty"), "{error}");
+}
+
+#[test]
+fn validate_rejects_zero_slice_size_bytes() {
+    let mut config = base_config();
+    config.cache_zones = vec![cache_zone("default")];
+    let mut policy = route_cache("default");
+    policy.range_requests = Some(crate::model::CacheRangeRequestPolicyConfig::Cache);
+    policy.slice_size_bytes = Some(0);
+    config.locations[0].cache = Some(policy);
+
+    let error = validate(&config).expect_err("zero slice size should fail validation");
+    assert!(error.to_string().contains("cache.slice_size_bytes must be greater than 0"), "{error}");
+}
+
+#[test]
+fn validate_rejects_slice_size_without_range_cache() {
+    let mut config = base_config();
+    config.cache_zones = vec![cache_zone("default")];
+    let mut policy = route_cache("default");
+    policy.slice_size_bytes = Some(128);
+    config.locations[0].cache = Some(policy);
+
+    let error =
+        validate(&config).expect_err("slice size without range cache should fail validation");
+    assert!(
+        error.to_string().contains("cache.slice_size_bytes requires cache.range_requests = Cache"),
+        "{error}"
+    );
 }
 
 #[test]

@@ -97,6 +97,12 @@ impl CacheKeyTemplate {
         }
         rendered
     }
+
+    pub fn references_method(&self) -> bool {
+        self.parts
+            .iter()
+            .any(|part| matches!(part, CacheKeyTemplatePart::Variable(CacheKeyVariable::Method)))
+    }
 }
 
 #[derive(Debug, Error)]

@@ -58,6 +58,9 @@ mod grpc;
 mod peer_recovery;
 mod peer_selection;
 mod request_headers;
+mod support;
+
+use support::spawn_range_server;
 
 fn upstream_settings(protocol: UpstreamProtocol) -> UpstreamSettings {
     UpstreamSettings {

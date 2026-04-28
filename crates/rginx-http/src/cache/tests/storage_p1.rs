@@ -196,6 +196,7 @@ fn load_index_from_disk_supports_nested_path_levels() {
         manager_batch_entries: 100,
         manager_sleep: Duration::ZERO,
         inactive_cleanup_interval: Duration::from_secs(60),
+        shared_index: true,
     };
     let key = "https:example.com:/nested";
     let hash = cache_key_hash(key);
@@ -240,12 +241,16 @@ async fn cleanup_inactive_entries_honors_manager_batch_entries() {
             manager_batch_entries: 1,
             manager_sleep,
             inactive_cleanup_interval: Duration::ZERO,
+            shared_index: true,
         }),
         index: Mutex::new(CacheIndex::default()),
         io_lock: AsyncMutex::new(()),
+        shared_index_sync_lock: AsyncMutex::new(()),
         fill_locks: Arc::new(Mutex::new(HashMap::new())),
         fill_lock_generation: AtomicU64::new(0),
         last_inactive_cleanup_unix_ms: AtomicU64::new(0),
+        shared_index_generation: AtomicU64::new(1),
+        shared_index_last_modified_unix_ms: AtomicU64::new(0),
         stats: CacheZoneStats::default(),
         change_notifier: None,
     });

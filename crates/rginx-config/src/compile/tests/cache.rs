@@ -17,6 +17,7 @@ fn compile_attaches_cache_zones_and_route_policy() {
             manager_batch_entries: None,
             manager_sleep_millis: None,
             inactive_cleanup_interval_secs: None,
+            shared_index: None,
         }],
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
@@ -94,6 +95,8 @@ fn compile_attaches_cache_zones_and_route_policy() {
                 min_uses: None,
                 ignore_headers: None,
                 range_requests: None,
+                slice_size_bytes: None,
+                convert_head: None,
             }),
             matcher: MatcherConfig::Prefix("/assets".to_string()),
             handler: HandlerConfig::Proxy {
@@ -127,6 +130,7 @@ fn compile_attaches_cache_zones_and_route_policy() {
     assert_eq!(zone.inactive, Duration::from_secs(120));
     assert_eq!(zone.default_ttl, Duration::from_secs(30));
     assert_eq!(zone.max_entry_bytes, 1024);
+    assert!(zone.shared_index);
 
     let policy =
         snapshot.default_vhost.routes[0].cache.as_ref().expect("route cache policy should compile");
@@ -136,6 +140,7 @@ fn compile_attaches_cache_zones_and_route_policy() {
     assert_eq!(policy.stale_if_error, Some(Duration::from_secs(15)));
     assert!(policy.ttl_by_status.is_empty());
     assert!(!policy.background_update);
+    assert!(policy.convert_head);
     assert_eq!(policy.lock_timeout, Duration::from_secs(5));
     assert_eq!(policy.lock_age, Duration::from_secs(5));
 
@@ -155,6 +160,8 @@ fn compile_attaches_cache_zones_and_route_policy() {
         min_uses: None,
         ignore_headers: None,
         range_requests: None,
+        slice_size_bytes: None,
+        convert_head: None,
     });
     let snapshot = compile_with_base(config.clone(), base_dir.path())
         .expect("default cache policy should compile");
@@ -165,6 +172,7 @@ fn compile_attaches_cache_zones_and_route_policy() {
     assert_eq!(policy.stale_if_error, None);
     assert!(policy.cache_bypass.is_none());
     assert!(policy.no_cache.is_none());
+    assert!(policy.convert_head);
     assert_eq!(
         policy.statuses,
         vec![
@@ -199,6 +207,7 @@ fn compile_cache_policy_supports_p0_controls() {
             manager_batch_entries: None,
             manager_sleep_millis: None,
             inactive_cleanup_interval_secs: None,
+            shared_index: None,
         }],
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
@@ -286,6 +295,8 @@ fn compile_cache_policy_supports_p0_controls() {
                 min_uses: None,
                 ignore_headers: None,
                 range_requests: None,
+                slice_size_bytes: None,
+                convert_head: None,
             }),
             matcher: MatcherConfig::Prefix("/assets".to_string()),
             handler: HandlerConfig::Proxy {

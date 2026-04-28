@@ -1,3 +1,4 @@
+use http::HeaderValue;
 use http::header::{AUTHORIZATION, CONTENT_RANGE, CONTENT_TYPE, HeaderMap, RANGE};
 use http::{Method, Uri};
 use rginx_core::{
@@ -9,12 +10,15 @@ use super::vary::normalized_accept_encoding;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct CacheableRangeRequest {
-    pub(super) start: u64,
-    pub(super) end: u64,
+    pub(super) request_start: u64,
+    pub(super) request_end: u64,
+    pub(super) cache_start: u64,
+    pub(super) cache_end: u64,
 }
 
 pub(super) fn cache_request_bypass(request: &CacheRequest, policy: &RouteCachePolicy) -> bool {
-    if !policy.methods.contains(&request.method) {
+    let effective_method = cache_key_method(&request.method, policy);
+    if !policy.methods.contains(effective_method) {
         return true;
     }
 
@@ -54,6 +58,7 @@ pub(super) fn render_cache_key(
     scheme: &str,
     policy: &RouteCachePolicy,
 ) -> String {
+    let cache_method = cache_key_method(method, policy);
     let request_uri = uri.path_and_query().map(|value| value.as_str()).unwrap_or("/");
     let host = headers
         .get(http::header::HOST)
@@ -65,18 +70,22 @@ pub(super) fn render_cache_key(
         scheme,
         host,
         uri: request_uri,
-        method: method.as_str(),
+        method: cache_method.as_str(),
         headers,
     });
+    if !policy.convert_head && !policy.key.references_method() {
+        rendered.push_str("|cache-method:");
+        rendered.push_str(cache_method.as_str());
+    }
     if let Some(accept_encoding) = normalized_accept_encoding(headers) {
         rendered.push_str("|ae:");
         rendered.push_str(&accept_encoding);
     }
-    if let Some(range) = cacheable_range_request_from_parts(method, headers, policy) {
+    if let Some(range) = cacheable_range_request_from_parts(cache_method, headers, policy) {
         rendered.push_str("|range:");
-        rendered.push_str(&range.start.to_string());
+        rendered.push_str(&range.cache_start.to_string());
         rendered.push('-');
-        rendered.push_str(&range.end.to_string());
+        rendered.push_str(&range.cache_end.to_string());
     }
     rendered
 }
@@ -85,7 +94,33 @@ pub(super) fn cacheable_range_request(
     request: &CacheRequest,
     policy: &RouteCachePolicy,
 ) -> Option<CacheableRangeRequest> {
-    cacheable_range_request_from_parts(&request.method, &request.headers, policy)
+    cacheable_range_request_from_parts(
+        cache_key_method(&request.method, policy),
+        &request.headers,
+        policy,
+    )
+}
+
+pub(super) fn upstream_cache_request_method(method: &Method, policy: &RouteCachePolicy) -> Method {
+    cache_key_method(method, policy).clone()
+}
+
+pub(super) fn apply_upstream_range_headers(
+    method: &Method,
+    headers: &mut HeaderMap,
+    policy: &RouteCachePolicy,
+) {
+    let Some(range) =
+        cacheable_range_request_from_parts(cache_key_method(method, policy), headers, policy)
+    else {
+        return;
+    };
+    headers.remove(RANGE);
+    headers.insert(
+        RANGE,
+        HeaderValue::from_str(&range.upstream_header_value())
+            .expect("normalized cache range header should be valid"),
+    );
 }
 
 pub(super) fn response_content_range_matches_request(
@@ -117,7 +152,7 @@ pub(super) fn response_content_range_matches_request(
     let Ok(end) = end.trim().parse::<u64>() else {
         return false;
     };
-    start == expected.start && end == expected.end
+    start == expected.cache_start && end >= expected.request_end && end <= expected.cache_end
 }
 
 fn cacheable_range_request_from_parts(
@@ -135,7 +170,11 @@ fn cacheable_range_request_from_parts(
     if values.next().is_some() {
         return None;
     }
-    parse_single_bounded_byte_range(value)
+    cacheable_range_request_for_policy(parse_single_bounded_byte_range(value)?, policy)
+}
+
+fn cache_key_method<'a>(method: &'a Method, policy: &RouteCachePolicy) -> &'a Method {
+    if *method == Method::HEAD && policy.convert_head { &Method::GET } else { method }
 }
 
 fn parse_single_bounded_byte_range(value: &str) -> Option<CacheableRangeRequest> {
@@ -149,5 +188,36 @@ fn parse_single_bounded_byte_range(value: &str) -> Option<CacheableRangeRequest>
     }
     let start = start.trim().parse::<u64>().ok()?;
     let end = end.trim().parse::<u64>().ok()?;
-    (start <= end).then_some(CacheableRangeRequest { start, end })
+    (start <= end).then_some(CacheableRangeRequest {
+        request_start: start,
+        request_end: end,
+        cache_start: start,
+        cache_end: end,
+    })
+}
+
+fn cacheable_range_request_for_policy(
+    request: CacheableRangeRequest,
+    policy: &RouteCachePolicy,
+) -> Option<CacheableRangeRequest> {
+    let Some(slice_size) = policy.slice_size_bytes else {
+        return Some(request);
+    };
+    let slice_start = request.request_start / slice_size * slice_size;
+    let slice_end = slice_start.saturating_add(slice_size.saturating_sub(1));
+    (request.request_end <= slice_end).then_some(CacheableRangeRequest {
+        cache_start: slice_start,
+        cache_end: slice_end,
+        ..request
+    })
+}
+
+impl CacheableRangeRequest {
+    pub(super) fn upstream_header_value(self) -> String {
+        format!("bytes={}-{}", self.cache_start, self.cache_end)
+    }
+
+    pub(super) fn needs_downstream_trimming(self) -> bool {
+        self.request_start != self.cache_start || self.request_end != self.cache_end
+    }
 }

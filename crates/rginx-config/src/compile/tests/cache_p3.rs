@@ -1,8 +1,8 @@
 use super::*;
 
 #[test]
-fn compile_cache_policy_supports_p1_controls() {
-    let base_dir = temp_base_dir("rginx-cache-compile-p1");
+fn compile_cache_policy_supports_p3_slice_controls() {
+    let base_dir = temp_base_dir("rginx-cache-compile-p3");
     let config = Config {
         cache_zones: vec![CacheZoneConfig {
             name: "default".to_string(),
@@ -11,12 +11,12 @@ fn compile_cache_policy_supports_p1_controls() {
             inactive_secs: Some(120),
             default_ttl_secs: Some(30),
             max_entry_bytes: Some(1024),
-            path_levels: Some(vec![1, 2]),
-            loader_batch_entries: Some(25),
-            loader_sleep_millis: Some(5),
-            manager_batch_entries: Some(50),
-            manager_sleep_millis: Some(7),
-            inactive_cleanup_interval_secs: Some(11),
+            path_levels: None,
+            loader_batch_entries: None,
+            loader_sleep_millis: None,
+            manager_batch_entries: None,
+            manager_sleep_millis: None,
+            inactive_cleanup_interval_secs: None,
             shared_index: None,
         }],
         runtime: RuntimeConfig {
@@ -81,7 +81,7 @@ fn compile_cache_policy_supports_p1_controls() {
         locations: vec![LocationConfig {
             cache: Some(CacheRouteConfig {
                 zone: "default".to_string(),
-                methods: Some(vec!["GET".to_string(), "HEAD".to_string()]),
+                methods: Some(vec!["GET".to_string()]),
                 statuses: Some(vec![200]),
                 ttl_secs_by_status: None,
                 key: Some("{scheme}:{host}:{uri}".to_string()),
@@ -92,13 +92,10 @@ fn compile_cache_policy_supports_p1_controls() {
                 background_update: None,
                 lock_timeout_secs: None,
                 lock_age_secs: None,
-                min_uses: Some(3),
-                ignore_headers: Some(vec![
-                    crate::model::CacheIgnoreHeaderConfig::SetCookie,
-                    crate::model::CacheIgnoreHeaderConfig::Vary,
-                ]),
+                min_uses: None,
+                ignore_headers: None,
                 range_requests: Some(crate::model::CacheRangeRequestPolicyConfig::Cache),
-                slice_size_bytes: None,
+                slice_size_bytes: Some(128),
                 convert_head: None,
             }),
             matcher: MatcherConfig::Prefix("/assets".to_string()),
@@ -126,21 +123,13 @@ fn compile_cache_policy_supports_p1_controls() {
     };
 
     let snapshot =
-        compile_with_base(config, base_dir.path()).expect("p1 cache policy should compile");
-    let zone = snapshot.cache_zones.get("default").expect("cache zone should compile");
-    assert_eq!(zone.path_levels, vec![1, 2]);
-    assert_eq!(zone.loader_batch_entries, 25);
-    assert_eq!(zone.loader_sleep, Duration::from_millis(5));
-    assert_eq!(zone.manager_batch_entries, 50);
-    assert_eq!(zone.manager_sleep, Duration::from_millis(7));
-    assert_eq!(zone.inactive_cleanup_interval, Duration::from_secs(11));
-
-    let policy =
-        snapshot.default_vhost.routes[0].cache.as_ref().expect("route cache policy should compile");
-    assert_eq!(policy.min_uses, 3);
+        compile_with_base(config, base_dir.path()).expect("p3 cache policy should compile");
     assert_eq!(
-        policy.ignore_headers,
-        vec![rginx_core::CacheIgnoreHeader::SetCookie, rginx_core::CacheIgnoreHeader::Vary]
+        snapshot.default_vhost.routes[0]
+            .cache
+            .as_ref()
+            .expect("route cache policy should compile")
+            .slice_size_bytes,
+        Some(128)
     );
-    assert_eq!(policy.range_requests, rginx_core::CacheRangeRequestPolicy::Cache);
 }

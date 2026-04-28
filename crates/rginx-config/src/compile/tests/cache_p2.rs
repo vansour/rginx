@@ -1,8 +1,8 @@
 use super::*;
 
 #[test]
-fn compile_cache_policy_supports_p1_controls() {
-    let base_dir = temp_base_dir("rginx-cache-compile-p1");
+fn compile_cache_policy_supports_disabling_p2_defaults() {
+    let base_dir = temp_base_dir("rginx-cache-compile-p2-disable");
     let config = Config {
         cache_zones: vec![CacheZoneConfig {
             name: "default".to_string(),
@@ -11,13 +11,13 @@ fn compile_cache_policy_supports_p1_controls() {
             inactive_secs: Some(120),
             default_ttl_secs: Some(30),
             max_entry_bytes: Some(1024),
-            path_levels: Some(vec![1, 2]),
-            loader_batch_entries: Some(25),
-            loader_sleep_millis: Some(5),
-            manager_batch_entries: Some(50),
-            manager_sleep_millis: Some(7),
-            inactive_cleanup_interval_secs: Some(11),
-            shared_index: None,
+            path_levels: None,
+            loader_batch_entries: None,
+            loader_sleep_millis: None,
+            manager_batch_entries: None,
+            manager_sleep_millis: None,
+            inactive_cleanup_interval_secs: None,
+            shared_index: Some(false),
         }],
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
@@ -92,14 +92,11 @@ fn compile_cache_policy_supports_p1_controls() {
                 background_update: None,
                 lock_timeout_secs: None,
                 lock_age_secs: None,
-                min_uses: Some(3),
-                ignore_headers: Some(vec![
-                    crate::model::CacheIgnoreHeaderConfig::SetCookie,
-                    crate::model::CacheIgnoreHeaderConfig::Vary,
-                ]),
-                range_requests: Some(crate::model::CacheRangeRequestPolicyConfig::Cache),
+                min_uses: None,
+                ignore_headers: None,
+                range_requests: None,
                 slice_size_bytes: None,
-                convert_head: None,
+                convert_head: Some(false),
             }),
             matcher: MatcherConfig::Prefix("/assets".to_string()),
             handler: HandlerConfig::Proxy {
@@ -126,21 +123,13 @@ fn compile_cache_policy_supports_p1_controls() {
     };
 
     let snapshot =
-        compile_with_base(config, base_dir.path()).expect("p1 cache policy should compile");
-    let zone = snapshot.cache_zones.get("default").expect("cache zone should compile");
-    assert_eq!(zone.path_levels, vec![1, 2]);
-    assert_eq!(zone.loader_batch_entries, 25);
-    assert_eq!(zone.loader_sleep, Duration::from_millis(5));
-    assert_eq!(zone.manager_batch_entries, 50);
-    assert_eq!(zone.manager_sleep, Duration::from_millis(7));
-    assert_eq!(zone.inactive_cleanup_interval, Duration::from_secs(11));
-
-    let policy =
-        snapshot.default_vhost.routes[0].cache.as_ref().expect("route cache policy should compile");
-    assert_eq!(policy.min_uses, 3);
-    assert_eq!(
-        policy.ignore_headers,
-        vec![rginx_core::CacheIgnoreHeader::SetCookie, rginx_core::CacheIgnoreHeader::Vary]
+        compile_with_base(config, base_dir.path()).expect("p2 cache policy should compile");
+    assert!(!snapshot.cache_zones["default"].shared_index);
+    assert!(
+        !snapshot.default_vhost.routes[0]
+            .cache
+            .as_ref()
+            .expect("route cache policy should compile")
+            .convert_head
     );
-    assert_eq!(policy.range_requests, rginx_core::CacheRangeRequestPolicy::Cache);
 }

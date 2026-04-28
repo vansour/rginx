@@ -35,9 +35,16 @@ HTTP/3 session、TLS session 和 OCSP staple cache，继续作为运行时实现
   `lock_age` / `UPDATING` 已完成并已落地。
 - `P1` 中的 `cache_min_uses`、可配置的精确单段 `Range`/`206` 缓存、
   `proxy_ignore_headers` 和 loader / manager / path tunables 已完成并已落地。
+- `P2` 中的磁盘 sidecar 共享索引、跨实例 fill lock 协调、
+  `proxy_cache_convert_head` 等价语义，以及
+  `response_buffering = off` 的显式 cache bypass 已完成并已落地。
+- `P3` 中的 route 级 `slice_size_bytes`、单 slice `Range` 归一回源、
+  slice cache 命中/首个 miss/stale/revalidate 的子区间裁切已完成并已落地。
 - 下文保留这些条目，是为了把“已交付能力”和“下一轮继续补齐的剩余差距”放在同一张
   对标清单里，避免后续阶段重复整理。
-- `P2` 仍是后续规划项，当前文档的主用途已经切换为记录“已交付边界 + 剩余架构级差距”。
+- 当前文档的主用途已经切换为记录“已交付边界 + 剩余架构级差距”，其中完整
+  多 slice 组装、更通用 partial-body / 流式响应缓存，以及更严格的多进程共享状态
+  一致性仍保留为后续项。
 
 对标范围：
 
@@ -152,7 +159,7 @@ HTTP/3 session、TLS session 和 OCSP staple cache，继续作为运行时实现
 - `manager_batch_entries` / `manager_sleep` 对后台 inactive cleanup 生效，
   `loader_batch_entries` / `loader_sleep` 对冷启动扫描生效，`path_levels` 可调整磁盘目录布局。
 
-### P2：架构级追平项（当前状态：规划中）
+### P2：架构级追平项（当前状态：本轮已完成既定交付边界）
 
 目标：追平 NGINX 在架构层、共享索引和极端场景下的能力，而不是只补语义缺口。
 
@@ -161,12 +168,19 @@ HTTP/3 session、TLS session 和 OCSP staple cache，继续作为运行时实现
 - `keys_zone` 等价的共享索引 / 多进程协调
   - 目标：让 active cache index 不再仅依赖单进程内存结构。
   - 价值：为未来多 worker、多进程或共享本地磁盘目录打基础。
+  - 本轮交付边界：已引入磁盘 sidecar 共享索引 `.rginx-index.json`，
+    支持跨 runtime 的 index / admission count 同步、reload 后保留，以及共享
+    fill lock 文件协调；当前仍不是 NGINX `keys_zone` 那种共享内存级原子状态。
 - `proxy_cache_convert_head` 和更完整的方法语义
   - 目标：进一步细化 `GET`/`HEAD` 的互通规则和 admission policy。
+  - 本轮交付边界：已支持 route 级 `convert_head` 配置，默认开启；开启时 `HEAD`
+    以 `GET` 语义参与 cache key、admission 和 upstream 请求方法决策，关闭时若 key
+    未显式包含 `{method}`，运行时会追加方法分桶，避免 `GET`/`HEAD` 冲突。
 - 未知大小流式响应和 partial-body caching
   - 目标：评估是否在不破坏流式代理行为的前提下支持更复杂的缓存写入模型。
-  - 当前差距：当前无法安全确认 body size 的响应不会写入缓存，也未实现完整 slice
-    或更通用的 partial-body caching 模型。
+  - 本轮交付边界：不对 `response_buffering = off`、未知大小流式响应或 partial-body
+    场景做隐式缓存；这些请求现在显式 bypass，并保留完整 slice / 更通用 partial-body
+    caching 作为后续设计项。
 - 更广协议族缓存
   - 目标：仅在产品边界明确扩展时，再考虑是否引入 `fastcgi_cache`、
     `uwsgi_cache`、`scgi_cache` 这类能力。
@@ -180,11 +194,41 @@ HTTP/3 session、TLS session 和 OCSP staple cache，继续作为运行时实现
 - `crates/rginx-http/src/state/mod.rs`
 - `crates/rginx-runtime/src/cache.rs`
 
-验收标准：
+已交付验收结果：
 
-- cache index 的生命周期和可见性不再完全绑定当前单进程内存模型。
-- `HEAD` 和 `GET` 的复用规则更接近 NGINX，可通过配置控制。
-- 若支持流式/分段写入，其失败恢复、purge、reload 和一致性语义必须先被定义清楚。
+- cache index 的生命周期和可见性已不再完全绑定当前单进程内存模型，reload 和多
+  manager 同目录场景可通过共享 sidecar 同步。
+- `HEAD` 和 `GET` 的复用规则已可通过 `convert_head` 控制，并覆盖 cache key、
+  upstream 方法与 store eligibility。
+- 流式/分段写入仍未启用；`response_buffering = off` 现在会显式 bypass，避免静默
+  进入不完整的缓存语义。
+
+### P3：slice / partial-body / 流式响应缓存（当前状态：本轮已完成既定交付边界）
+
+目标：把 `P1` 的“精确单段 bounded range 独立 key”推进到可复用 slice 的层级，
+缩小与 NGINX `slice` 协作模式在大对象缓存上的差距，同时保持现有缓存语义可控。
+
+功能：
+
+- route 级 `slice_size_bytes`
+  - 目标：允许将单段 `Range` 请求归一到固定大小的 slice。
+  - 本轮交付边界：当 route 开启 `range_requests = Cache` 且配置
+    `slice_size_bytes` 后，若请求是单段 bounded range，且完整落在一个 slice 内，
+    cache key 与回源 `Range` 都会归一到对应 slice。
+- slice cache 的首个 miss / hit / stale / revalidate 子区间裁切
+  - 目标：避免客户端拿到“整个 slice”，而是始终拿到原始请求区间。
+  - 本轮交付边界：首个 miss 回源、后续命中、stale serve、304 revalidate
+    刷新后的返回路径，都会按原始请求区间重写 `Content-Range` / `Content-Length`
+    并裁切 body。
+- 暂不启用的更复杂 partial-body / 流式缓存
+  - 本轮交付边界：multi-range、跨 slice 的 range、suffix range、open-ended range、
+    未知大小流式响应，以及更通用的 partial-body 组装，当前仍不进入缓存。
+
+已交付验收结果：
+
+- 同一 slice 内的不同子区间现在会共用一个 cache key 和一次 slice 回源。
+- 客户端不会在首个 miss 或后续命中时意外收到整个 slice；响应会回落到原始子区间。
+- 对当前模型不安全或未定义的范围请求仍保持 bypass，而不是静默落入不完整语义。
 
 ### 暂不优先追的能力
 
@@ -199,21 +243,21 @@ HTTP/3 session、TLS session 和 OCSP staple cache，继续作为运行时实现
   - DNS、upstream client、HTTP/3 session、TLS session、OCSP staple cache
     目前仍更适合作为各自子系统能力独立演进。
 
-## 下一轮推荐交付顺序
+## 后续剩余差距建议顺序
 
-建议下一轮按以下顺序推进：
+建议后续按以下顺序推进：
 
-1. `P2-1`：`keys_zone` 等价的共享索引 / 多进程协调
-2. `P2-2`：`proxy_cache_convert_head` 和更完整的方法语义
-3. `P2-3`：完整 slice / partial-body / 未知大小流式响应缓存模型
-4. `P2-4`：仅在产品边界明确后，再评估更广协议族缓存
+1. 多 slice 组装、open-ended / suffix / multi-range，以及更通用 partial-body / 未知大小流式响应缓存模型
+2. 若产品确认要支撑多进程共享同一本地 cache 目录，再补更严格的共享索引原子协调
+3. 仅在产品边界明确后，再评估更广协议族缓存
 
 交付原则：
 
 - 每个子项都应先补配置模型、再补运行时、最后补 admin/status 和测试。
-- `P0-3` 与 `P0-4` 变更较大，建议分别拆成独立设计文档和多阶段 PR。
-- 已交付的 `P1-2` 采用“精确单段 bounded range 独立 key”模型；若继续向完整
-  slice 演进，必须同时定义 purge、reload、一致性和 partial-body 失败恢复语义。
+- 已交付的 `P3` 采用“单 slice 内归一 + 子区间裁切”模型；若继续向完整
+  多 slice / partial-body 演进，必须同时定义 purge、reload、一致性和失败恢复语义。
+- 当前 `P2-1` 交付的是“磁盘 sidecar 共享索引 + 跨实例同步基础”，若继续追平
+  NGINX `keys_zone`，需要单独定义更强的一致性和并发写入模型。
 
 ## 阶段 0：范围与边界
 

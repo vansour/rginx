@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use http::header::{
-    CONNECTION, CONTENT_LENGTH, HeaderMap, HeaderName, HeaderValue, PROXY_AUTHENTICATE,
-    PROXY_AUTHORIZATION, TE, TRAILER, TRANSFER_ENCODING, UPGRADE,
+    CONNECTION, CONTENT_LENGTH, CONTENT_RANGE, HeaderMap, HeaderName, HeaderValue,
+    PROXY_AUTHENTICATE, PROXY_AUTHORIZATION, TE, TRAILER, TRANSFER_ENCODING, UPGRADE,
 };
 use http::{Response, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -10,11 +10,16 @@ use tokio::fs;
 
 use crate::handler::{HttpResponse, full_body};
 
-use super::{CACHE_STATUS_HEADER, CacheIndexEntry, CacheZoneRuntime, CachedVaryHeaderValue};
+use super::{
+    CACHE_STATUS_HEADER, CacheIndexEntry, CacheRequest, CacheZoneRuntime, CachedVaryHeaderValue,
+};
 
+mod response;
 mod signature;
 mod temp;
 
+use response::cached_headers;
+pub(in crate::cache) use response::finalize_response_for_request;
 pub(in crate::cache) use signature::{cache_key_hash, cache_variant_key, unix_time_ms};
 use temp::{cleanup_failed_write, next_temp_suffix, sibling_temp_path};
 
@@ -98,10 +103,12 @@ pub(super) fn cache_metadata(
     }
 }
 
-pub(super) async fn read_cached_response(
+pub(super) async fn read_cached_response_for_request(
     zone: &CacheZoneRuntime,
     key: &str,
     entry: &CacheIndexEntry,
+    request: &CacheRequest,
+    policy: &rginx_core::RouteCachePolicy,
     read_body: bool,
 ) -> std::io::Result<HttpResponse> {
     let paths = cache_paths_for_zone(zone.config.as_ref(), &entry.hash);
@@ -112,12 +119,14 @@ pub(super) async fn read_cached_response(
             format!("cached metadata key mismatch: expected `{key}`, found `{}`", metadata.key),
         ));
     }
-    build_cached_response(&paths.body, &metadata, read_body).await
+    build_cached_response_for_request(&paths.body, &metadata, request, policy, read_body).await
 }
 
-pub(super) async fn build_cached_response(
+pub(super) async fn build_cached_response_for_request(
     body_path: &Path,
     metadata: &CacheMetadata,
+    request: &CacheRequest,
+    policy: &rginx_core::RouteCachePolicy,
     read_body: bool,
 ) -> std::io::Result<HttpResponse> {
     let body = if read_body {
@@ -132,16 +141,9 @@ pub(super) async fn build_cached_response(
     } else {
         Vec::new()
     };
-
     let status = StatusCode::from_u16(metadata.status)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-    let mut response = Response::builder().status(status);
-    let headers = response.headers_mut().expect("response builder should expose headers");
-    *headers = metadata.headers_map()?;
-
-    response
-        .body(full_body(Bytes::from(body)))
-        .map_err(|error| std::io::Error::other(error.to_string()))
+    finalize_response_for_request(status, &metadata.headers_map()?, &body, request, policy)
 }
 
 pub(super) async fn read_cache_metadata(path: &Path) -> std::io::Result<CacheMetadata> {
@@ -242,58 +244,4 @@ impl CacheMetadata {
         }
         Ok(headers)
     }
-}
-
-fn cached_headers(headers: &HeaderMap, body_size_bytes: usize) -> Vec<CachedHeader> {
-    let mut headers = headers.clone();
-    let had_content_length = headers.contains_key(CONTENT_LENGTH);
-    remove_cache_hop_by_hop_headers(&mut headers);
-    headers.remove(CACHE_STATUS_HEADER);
-    headers.remove(CONTENT_LENGTH);
-    if had_content_length || body_size_bytes > 0 {
-        headers.insert(
-            CONTENT_LENGTH,
-            HeaderValue::from_str(&body_size_bytes.to_string())
-                .expect("cache body length should fit in a header"),
-        );
-    }
-
-    headers
-        .iter()
-        .map(|(name, value)| CachedHeader {
-            name: name.as_str().to_string(),
-            value: value.as_bytes().to_vec(),
-        })
-        .collect()
-}
-
-fn remove_cache_hop_by_hop_headers(headers: &mut HeaderMap) {
-    let mut extra_headers = Vec::new();
-    for value in headers.get_all(CONNECTION) {
-        let Ok(value) = value.to_str() else {
-            continue;
-        };
-        for token in value.split(',').map(str::trim).filter(|token| !token.is_empty()) {
-            if let Ok(name) = HeaderName::from_bytes(token.as_bytes()) {
-                extra_headers.push(name);
-            }
-        }
-    }
-
-    for name in extra_headers {
-        headers.remove(name);
-    }
-    for name in [
-        CONNECTION,
-        PROXY_AUTHENTICATE,
-        PROXY_AUTHORIZATION,
-        TE,
-        TRAILER,
-        TRANSFER_ENCODING,
-        UPGRADE,
-    ] {
-        headers.remove(name);
-    }
-    headers.remove("keep-alive");
-    headers.remove("proxy-connection");
 }

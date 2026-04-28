@@ -13,14 +13,11 @@ impl SharedState {
     }
 
     pub async fn status_snapshot(&self) -> RuntimeStatusSnapshot {
-        let (revision, config, cache) = {
+        let (revision, config, cache_manager) = {
             let state = self.inner.read().await;
-            (
-                state.revision,
-                state.config.clone(),
-                CacheStatsSnapshot { zones: state.cache.snapshot() },
-            )
+            (state.revision, state.config.clone(), state.cache.clone())
         };
+        let cache = CacheStatsSnapshot { zones: cache_manager.snapshot_with_shared_sync().await };
         let ocsp_statuses =
             self.ocsp_statuses.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
         let mtls = self.mtls_status_snapshot(config.as_ref());

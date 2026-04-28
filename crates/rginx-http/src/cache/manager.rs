@@ -1,6 +1,7 @@
 use super::*;
 
 mod control;
+mod response;
 
 impl CacheManager {
     pub(crate) fn from_config_with_notifier(
@@ -17,21 +18,27 @@ impl CacheManager {
                         zone.path.display()
                     ))
                 })?;
-                let index = load_index_from_disk(zone.as_ref()).map_err(|error| {
-                    Error::Server(format!(
-                        "failed to load cache zone `{name}` index from `{}`: {error}",
-                        zone.path.display()
-                    ))
-                })?;
+                let (index, shared_index_generation, shared_index_last_modified_unix_ms) =
+                    bootstrap_shared_index(zone.as_ref()).map_err(|error| {
+                        Error::Server(format!(
+                            "failed to load cache zone `{name}` index from `{}`: {error}",
+                            zone.path.display()
+                        ))
+                    })?;
                 Ok((
                     name.clone(),
                     Arc::new(CacheZoneRuntime {
                         config: zone.clone(),
                         index: Mutex::new(index),
                         io_lock: AsyncMutex::new(()),
+                        shared_index_sync_lock: AsyncMutex::new(()),
                         fill_locks: Arc::new(Mutex::new(HashMap::new())),
                         fill_lock_generation: AtomicU64::new(0),
                         last_inactive_cleanup_unix_ms: AtomicU64::new(0),
+                        shared_index_generation: AtomicU64::new(shared_index_generation),
+                        shared_index_last_modified_unix_ms: AtomicU64::new(
+                            shared_index_last_modified_unix_ms,
+                        ),
                         stats: CacheZoneStats::default(),
                         change_notifier: change_notifier.clone(),
                     }),
@@ -61,6 +68,8 @@ impl CacheManager {
             return CacheLookup::Bypass(CacheStatus::Bypass);
         }
 
+        sync_zone_shared_index_if_needed(&zone).await;
+
         let base_key = render_cache_key(
             &request.method,
             &request.uri,
@@ -84,7 +93,15 @@ impl CacheManager {
                 LookupDecision::FreshHit { key, entry } => {
                     let cached_response = {
                         let _io_guard = zone.io_lock.lock().await;
-                        read_cached_response(&zone, &key, &entry, read_cached_body).await
+                        read_cached_response_for_request(
+                            &zone,
+                            &key,
+                            &entry,
+                            &request,
+                            policy,
+                            read_cached_body,
+                        )
+                        .await
                     };
                     match cached_response {
                         Ok(mut response) => {
@@ -103,20 +120,43 @@ impl CacheManager {
                             );
                             remove_index_entry(&zone, &key);
                             remove_cache_files_if_unindexed(&zone, &key, &entry.hash).await;
+                            persist_zone_shared_index(&zone).await;
                         }
                     }
                 }
                 LookupDecision::Stale { key, entry, status } => {
                     match self
-                        .stale_response_from_entry(&zone, &key, &entry, read_cached_body, status)
+                        .stale_response_from_entry(
+                            &zone,
+                            &key,
+                            &entry,
+                            &request,
+                            policy,
+                            read_cached_body,
+                            status,
+                        )
                         .await
                     {
                         Some(response) => return CacheLookup::Hit(response),
                         None => continue,
                     }
                 }
-                LookupDecision::Wait { waiter } => {
-                    if tokio::time::timeout(policy.lock_timeout, waiter).await.is_ok() {
+                LookupDecision::Wait { strategy } => {
+                    let released = match strategy {
+                        LookupWait::Local { waiter } => {
+                            tokio::time::timeout(policy.lock_timeout, waiter).await.is_ok()
+                        }
+                        LookupWait::External { key } => {
+                            zone.wait_for_external_fill_lock(
+                                &key,
+                                policy.lock_timeout,
+                                policy.lock_age,
+                            )
+                            .await
+                        }
+                    };
+                    if released {
+                        sync_zone_shared_index_if_needed(&zone).await;
                         continue;
                     }
                     zone.record_bypass();
@@ -168,6 +208,8 @@ impl CacheManager {
                             &zone,
                             &key,
                             &cached_entry,
+                            &request,
+                            policy,
                             read_cached_body,
                             CacheStatus::Updating,
                         )
@@ -211,7 +253,8 @@ impl CacheManager {
                         base_key: context_base_key,
                         key,
                         cache_status,
-                        store_response: request.method == Method::GET,
+                        store_response: request.method == Method::GET
+                            || (request.method == Method::HEAD && policy.convert_head),
                         _fill_guard: fill_guard,
                         cached_entry,
                         cached_metadata,
@@ -222,38 +265,5 @@ impl CacheManager {
                 }
             }
         }
-    }
-
-    pub(crate) async fn store_response(
-        &self,
-        context: CacheStoreContext,
-        response: HttpResponse,
-    ) -> HttpResponse {
-        let status = context.cache_status;
-        let response = if context.store_response {
-            match store_response(context, response).await {
-                Ok(response) => response,
-                Err(error) => {
-                    tracing::warn!(%error, "failed to store cached response");
-                    crate::handler::text_response(
-                        StatusCode::BAD_GATEWAY,
-                        "text/plain; charset=utf-8",
-                        format!("failed to read upstream response while caching: {error}\n"),
-                    )
-                }
-            }
-        } else {
-            response
-        };
-
-        with_cache_status(response, status)
-    }
-
-    pub(crate) async fn complete_not_modified(
-        &self,
-        context: CacheStoreContext,
-        response: HttpResponse,
-    ) -> std::result::Result<HttpResponse, CacheStoreError> {
-        refresh_not_modified_response(context, response).await
     }
 }

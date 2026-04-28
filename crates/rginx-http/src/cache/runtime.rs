@@ -1,5 +1,6 @@
 use super::*;
 
+mod fill_lock;
 mod support;
 
 pub(in crate::cache) use support::PurgeSelector;
@@ -29,19 +30,28 @@ impl CacheStoreContext {
         self.cache_status
     }
 
+    pub(crate) fn prepares_cacheable_upstream_request(&self) -> bool {
+        self.store_response
+    }
+
+    pub(crate) fn upstream_request_method(&self) -> Method {
+        request::upstream_cache_request_method(&self.request.method, &self.policy)
+    }
+
     pub(crate) fn build_background_request(&self) -> Request<HttpBody> {
-        let method = if self.request.method == Method::HEAD {
-            Method::GET
-        } else {
-            self.request.method.clone()
-        };
+        let method = request::upstream_cache_request_method(&self.request.method, &self.policy);
         let mut request = Request::builder()
             .method(method)
             .uri(self.request.uri.clone())
             .body(crate::handler::full_body(bytes::Bytes::new()))
             .expect("background cache refresh request should build");
         *request.headers_mut() = self.request.headers.clone();
+        self.apply_upstream_request_headers(request.headers_mut());
         request
+    }
+
+    pub(crate) fn apply_upstream_request_headers(&self, headers: &mut HeaderMap) {
+        request::apply_upstream_range_headers(&self.request.method, headers, &self.policy);
     }
 
     pub(crate) fn apply_conditional_request_headers(&self, headers: &mut HeaderMap) {
@@ -95,7 +105,14 @@ impl CacheStoreContext {
         let response = {
             let _io_guard = self.zone.io_lock.lock().await;
             let paths = cache_paths_for_zone(self.zone.config.as_ref(), &entry.hash);
-            build_cached_response(&paths.body, metadata, self.read_cached_body).await
+            build_cached_response_for_request(
+                &paths.body,
+                metadata,
+                &self.request,
+                &self.policy,
+                self.read_cached_body,
+            )
+            .await
         };
         match response {
             Ok(response) => {
@@ -115,6 +132,7 @@ impl CacheStoreContext {
                 );
                 remove_index_entry(&self.zone, &self.key);
                 remove_cache_files_if_unindexed(&self.zone, &self.key, &entry.hash).await;
+                persist_zone_shared_index(&self.zone).await;
                 None
             }
         }
@@ -145,34 +163,9 @@ impl CacheZoneRuntime {
             eviction_total: self.stats.eviction_total.load(Ordering::Relaxed),
             purge_total: self.stats.purge_total.load(Ordering::Relaxed),
             inactive_cleanup_total: self.stats.inactive_cleanup_total.load(Ordering::Relaxed),
+            shared_index_enabled: self.config.shared_index,
+            shared_index_generation: self.shared_index_generation.load(Ordering::Relaxed),
         }
-    }
-
-    pub(super) fn fill_lock_decision(
-        self: &Arc<Self>,
-        key: &str,
-        now: u64,
-        lock_age: std::time::Duration,
-    ) -> FillLockDecision {
-        let mut fill_locks =
-            self.fill_locks.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(lock) = fill_locks.get(key).cloned()
-            && now.saturating_sub(lock.acquired_at_unix_ms) <= lock_age.as_millis() as u64
-        {
-            return FillLockDecision::Wait { waiter: lock.notify.notified_owned() };
-        }
-        let notify = Arc::new(Notify::new());
-        let generation = self.fill_lock_generation.fetch_add(1, Ordering::Relaxed) + 1;
-        fill_locks.insert(
-            key.to_string(),
-            CacheFillLockState { notify: notify.clone(), acquired_at_unix_ms: now, generation },
-        );
-        FillLockDecision::Acquired(CacheFillGuard {
-            key: key.to_string(),
-            generation,
-            fill_locks: Arc::downgrade(&self.fill_locks),
-            notify,
-        })
     }
 
     pub(super) fn record_hit(&self) {
@@ -237,18 +230,6 @@ impl CacheZoneRuntime {
         if let Some(notifier) = &self.change_notifier {
             notifier(&self.config.name);
         }
-    }
-}
-
-impl Drop for CacheFillGuard {
-    fn drop(&mut self) {
-        if let Some(fill_locks) = self.fill_locks.upgrade() {
-            let mut fill_locks = fill_locks.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            if fill_locks.get(&self.key).is_some_and(|lock| lock.generation == self.generation) {
-                fill_locks.remove(&self.key);
-            }
-        }
-        self.notify.notify_waiters();
     }
 }
 

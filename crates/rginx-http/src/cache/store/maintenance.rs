@@ -67,6 +67,7 @@ pub(in crate::cache) async fn cleanup_inactive_entries_in_zone(zone: &Arc<CacheZ
     }
 
     if changed {
+        persist_zone_shared_index(zone).await;
         zone.record_inactive_cleanup(total_removed);
         zone.notify_changed();
     }
@@ -105,6 +106,7 @@ pub(in crate::cache) async fn purge_zone_entries(
             let _ = fs::remove_file(paths.metadata).await;
             let _ = fs::remove_file(paths.body).await;
         }
+        persist_zone_shared_index(&zone).await;
         zone.notify_changed();
     }
     CachePurgeResult {
@@ -181,6 +183,7 @@ pub(in crate::cache) async fn update_index_after_store(
         let _ = fs::remove_file(paths.metadata).await;
         let _ = fs::remove_file(paths.body).await;
     }
+    persist_zone_shared_index(zone).await;
     zone.notify_changed();
 }
 
