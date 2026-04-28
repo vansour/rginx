@@ -6,7 +6,8 @@ pub mod types;
 
 pub use config::{
     AccessLogFormat, AccessLogValues, ActiveHealthCheck, CacheKeyRenderContext, CacheKeyTemplate,
-    CacheKeyTemplateError, CacheZone, ClientIdentity, ConfigSnapshot, DEFAULT_SERVER_HEADER,
+    CacheKeyTemplateError, CachePredicate, CachePredicateRequestContext, CacheStatusTtlRule,
+    CacheUseStaleCondition, CacheZone, ClientIdentity, ConfigSnapshot, DEFAULT_SERVER_HEADER,
     GrpcRouteMatch, Listener, ListenerApplicationProtocol, ListenerHttp3, ListenerTransportBinding,
     ListenerTransportKind, OcspConfig, OcspNonceMode, OcspResponderPolicy,
     ProxyHeaderRenderContext, ProxyHeaderTemplate, ProxyHeaderTemplateError, ProxyHeaderValue,

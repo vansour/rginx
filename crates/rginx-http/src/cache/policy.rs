@@ -6,6 +6,7 @@ use http::header::{
     PRAGMA, SET_COOKIE, VARY,
 };
 use hyper::body::Body as _;
+use rginx_core::CachePredicateRequestContext;
 
 use crate::handler::HttpResponse;
 
@@ -77,10 +78,11 @@ pub(super) fn response_is_storable_with_size(
 
 pub(super) fn response_freshness(
     context: &CacheStoreContext,
+    status: StatusCode,
     headers: &HeaderMap,
 ) -> ResponseFreshness {
     ResponseFreshness {
-        ttl: response_ttl(headers, context.zone.config.default_ttl),
+        ttl: response_ttl(context, status, headers),
         stale_if_error: cache_control_duration(headers, "stale-if-error")
             .or(context.policy.stale_if_error),
         stale_while_revalidate: cache_control_duration(headers, "stale-while-revalidate"),
@@ -98,6 +100,19 @@ pub(super) fn header_value(headers: &HeaderMap, name: HeaderName) -> Option<Stri
     headers.get(name).and_then(|value| value.to_str().ok()).map(str::to_string)
 }
 
+pub(super) fn response_no_cache(context: &CacheStoreContext, status: StatusCode) -> bool {
+    context.policy.no_cache.as_ref().is_some_and(|predicate| {
+        predicate.matches_response(
+            &CachePredicateRequestContext {
+                method: &context.request.method,
+                uri: context.request.request_uri(),
+                headers: &context.request.headers,
+            },
+            status,
+        )
+    })
+}
+
 fn response_is_grpc(headers: &HeaderMap) -> bool {
     headers.get(CONTENT_TYPE).and_then(|value| value.to_str().ok()).is_some_and(|content_type| {
         let mime = content_type.split(';').next().unwrap_or_default().trim().to_ascii_lowercase();
@@ -107,8 +122,22 @@ fn response_is_grpc(headers: &HeaderMap) -> bool {
     })
 }
 
-pub(super) fn response_ttl(headers: &HeaderMap, default_ttl: Duration) -> Duration {
-    cache_control_max_age(headers).or_else(|| expires_ttl(headers)).unwrap_or(default_ttl)
+pub(super) fn response_ttl(
+    context: &CacheStoreContext,
+    status: StatusCode,
+    headers: &HeaderMap,
+) -> Duration {
+    x_accel_expires_ttl(headers)
+        .or_else(|| cache_control_max_age(headers))
+        .or_else(|| expires_ttl(headers))
+        .or_else(|| {
+            context
+                .policy
+                .ttl_by_status
+                .iter()
+                .find_map(|rule| rule.statuses.contains(&status).then_some(rule.ttl))
+        })
+        .unwrap_or(context.zone.config.default_ttl)
 }
 
 fn cache_control_max_age(headers: &HeaderMap) -> Option<Duration> {
@@ -190,19 +219,24 @@ pub(super) fn cache_control_duration(
 }
 
 pub(super) fn vary_is_supported(headers: &HeaderMap) -> bool {
-    if headers.get(VARY).is_none() {
-        return true;
-    }
+    vary_headers(headers).is_some()
+}
 
-    headers.get_all(VARY).iter().all(|value| {
-        value.to_str().ok().is_some_and(|value| {
-            value
-                .split(',')
-                .map(str::trim)
-                .filter(|token| !token.is_empty())
-                .all(|token| !token.eq("*") && token.eq_ignore_ascii_case("accept-encoding"))
-        })
-    })
+pub(super) fn vary_headers(headers: &HeaderMap) -> Option<Vec<HeaderName>> {
+    let mut names = Vec::new();
+    for value in headers.get_all(VARY) {
+        let value = value.to_str().ok()?;
+        for token in value.split(',').map(str::trim).filter(|token| !token.is_empty()) {
+            if token == "*" {
+                return None;
+            }
+            let name = token.parse::<HeaderName>().ok()?;
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    Some(names)
 }
 
 fn parse_content_length(headers: &HeaderMap) -> Option<usize> {
@@ -210,6 +244,19 @@ fn parse_content_length(headers: &HeaderMap) -> Option<usize> {
         .get(CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<usize>().ok())
+}
+
+fn x_accel_expires_ttl(headers: &HeaderMap) -> Option<Duration> {
+    let value = headers.get("x-accel-expires")?.to_str().ok()?.trim();
+    if value == "0" {
+        return Some(Duration::ZERO);
+    }
+    if let Some(value) = value.strip_prefix('@') {
+        let seconds = value.parse::<u64>().ok()?;
+        let expires_at = std::time::UNIX_EPOCH.checked_add(Duration::from_secs(seconds))?;
+        return Some(expires_at.duration_since(SystemTime::now()).unwrap_or(Duration::ZERO));
+    }
+    value.parse::<u64>().ok().map(Duration::from_secs)
 }
 
 impl ResponseBodySize {

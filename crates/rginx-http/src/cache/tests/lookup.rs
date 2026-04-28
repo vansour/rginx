@@ -1,8 +1,9 @@
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
 use http::header::{ACCEPT_ENCODING, AUTHORIZATION, CACHE_CONTROL};
 use http::{Method, Request, StatusCode};
+use tokio::sync::Notify;
 
 use crate::handler::full_body;
 
@@ -16,8 +17,15 @@ fn cache_key_template_renders_request_parts() {
         zone: "default".to_string(),
         methods: vec![Method::GET],
         statuses: vec![StatusCode::OK],
+        ttl_by_status: Vec::new(),
         key: template,
+        cache_bypass: None,
+        no_cache: None,
         stale_if_error: None,
+        use_stale: Vec::new(),
+        background_update: false,
+        lock_timeout: Duration::from_secs(5),
+        lock_age: Duration::from_secs(5),
     };
     let request = Request::builder()
         .method(Method::GET)
@@ -38,9 +46,16 @@ fn cache_key_includes_all_accept_encoding_header_values() {
         zone: "default".to_string(),
         methods: vec![Method::GET],
         statuses: vec![StatusCode::OK],
+        ttl_by_status: Vec::new(),
         key: rginx_core::CacheKeyTemplate::parse("{scheme}:{host}:{uri}")
             .expect("key should parse"),
+        cache_bypass: None,
+        no_cache: None,
         stale_if_error: None,
+        use_stale: Vec::new(),
+        background_update: false,
+        lock_timeout: Duration::from_secs(5),
+        lock_age: Duration::from_secs(5),
     };
     let request = Request::builder()
         .method(Method::GET)
@@ -58,18 +73,87 @@ fn cache_key_includes_all_accept_encoding_header_values() {
 }
 
 #[test]
+fn cache_key_template_renders_header_query_and_cookie_variables() {
+    let policy = RouteCachePolicy {
+        zone: "default".to_string(),
+        methods: vec![Method::GET],
+        statuses: vec![StatusCode::OK],
+        ttl_by_status: Vec::new(),
+        key: rginx_core::CacheKeyTemplate::parse(
+            "{header:accept-language}:{query:lang}:{cookie:session}",
+        )
+        .expect("key should parse"),
+        cache_bypass: None,
+        no_cache: None,
+        stale_if_error: None,
+        use_stale: Vec::new(),
+        background_update: false,
+        lock_timeout: Duration::from_secs(5),
+        lock_age: Duration::from_secs(5),
+    };
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/assets/app.js?lang=zh-CN")
+        .header("accept-language", "zh-CN")
+        .header("cookie", "session=abc123; theme=light")
+        .body(full_body(Bytes::new()))
+        .expect("request should build");
+
+    assert_eq!(
+        render_cache_key(request.method(), request.uri(), request.headers(), "https", &policy),
+        "zh-CN:zh-CN:abc123"
+    );
+}
+
+#[test]
 fn authorization_request_bypasses_cache() {
     let policy = RouteCachePolicy {
         zone: "default".to_string(),
         methods: vec![Method::GET],
         statuses: vec![StatusCode::OK],
+        ttl_by_status: Vec::new(),
         key: rginx_core::CacheKeyTemplate::parse("{uri}").expect("key should parse"),
+        cache_bypass: None,
+        no_cache: None,
         stale_if_error: None,
+        use_stale: Vec::new(),
+        background_update: false,
+        lock_timeout: Duration::from_secs(5),
+        lock_age: Duration::from_secs(5),
     };
     let request = Request::builder()
         .method(Method::GET)
         .uri("/")
         .header(AUTHORIZATION, "Bearer token")
+        .body(full_body(Bytes::new()))
+        .expect("request should build");
+    let request = CacheRequest::from_request(&request);
+
+    assert!(cache_request_bypass(&request, &policy));
+}
+
+#[test]
+fn configured_header_bypasses_cache() {
+    let policy = RouteCachePolicy {
+        zone: "default".to_string(),
+        methods: vec![Method::GET],
+        statuses: vec![StatusCode::OK],
+        ttl_by_status: Vec::new(),
+        key: rginx_core::CacheKeyTemplate::parse("{uri}").expect("key should parse"),
+        cache_bypass: Some(rginx_core::CachePredicate::HeaderExists(
+            http::header::HeaderName::from_static("x-cache-bypass"),
+        )),
+        no_cache: None,
+        stale_if_error: None,
+        use_stale: Vec::new(),
+        background_update: false,
+        lock_timeout: Duration::from_secs(5),
+        lock_age: Duration::from_secs(5),
+    };
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/")
+        .header("x-cache-bypass", "1")
         .body(full_body(Bytes::new()))
         .expect("request should build");
     let request = CacheRequest::from_request(&request);
@@ -114,6 +198,9 @@ async fn cache_manager_treats_corrupt_metadata_as_miss() {
     match manager.lookup(CacheRequest::from_request(&request), "https", &policy).await {
         CacheLookup::Miss(_) => {}
         CacheLookup::Hit(_) => panic!("corrupt metadata must not be served"),
+        CacheLookup::Updating(_, _) => {
+            panic!("corrupt metadata must not trigger background update")
+        }
         CacheLookup::Bypass(status) => panic!("cacheable request should not bypass: {status:?}"),
     }
 
@@ -157,6 +244,9 @@ async fn cache_manager_treats_metadata_key_mismatch_as_miss() {
     match manager.lookup(CacheRequest::from_request(&request), "https", &policy).await {
         CacheLookup::Miss(_) => {}
         CacheLookup::Hit(_) => panic!("mismatched metadata key must not be served"),
+        CacheLookup::Updating(_, _) => {
+            panic!("mismatched metadata key must not trigger background update")
+        }
         CacheLookup::Bypass(status) => panic!("cacheable request should not bypass: {status:?}"),
     }
 
@@ -199,6 +289,7 @@ async fn cache_manager_retains_expired_entries_for_revalidation_on_lookup() {
     match manager.lookup(CacheRequest::from_request(&request), "https", &policy).await {
         CacheLookup::Miss(context) => assert_eq!(context.cache_status(), CacheStatus::Expired),
         CacheLookup::Hit(_) => panic!("expired response must not be served"),
+        CacheLookup::Updating(_, _) => panic!("expired response should not update without policy"),
         CacheLookup::Bypass(status) => panic!("cacheable request should not bypass: {status:?}"),
     }
 
@@ -226,6 +317,7 @@ async fn cache_manager_serves_head_hit_without_reading_body_file() {
     {
         CacheLookup::Miss(context) => *context,
         CacheLookup::Hit(_) => panic!("empty cache should miss"),
+        CacheLookup::Updating(_, _) => panic!("empty cache should not update"),
         CacheLookup::Bypass(status) => panic!("cacheable request should not bypass: {status:?}"),
     };
     let response = http::Response::builder()
@@ -253,6 +345,7 @@ async fn cache_manager_serves_head_hit_without_reading_body_file() {
             assert!(body.is_empty());
         }
         CacheLookup::Miss(_) => panic!("HEAD should not need the cached body file"),
+        CacheLookup::Updating(_, _) => panic!("HEAD hit should not trigger background update"),
         CacheLookup::Bypass(status) => panic!("cacheable request should not bypass: {status:?}"),
     }
 }
@@ -282,4 +375,111 @@ fn no_store_headers_remain_non_storable_during_revalidation() {
         .expect("response should build");
 
     assert!(!response_is_storable(&context, &response));
+}
+
+#[tokio::test]
+async fn cache_manager_returns_updating_for_background_refresh() {
+    let temp = tempfile::tempdir().expect("cache temp dir should exist");
+    let manager = test_manager(temp.path().to_path_buf(), 1024);
+    let mut policy = test_policy();
+    policy.background_update = true;
+    policy.use_stale = vec![rginx_core::CacheUseStaleCondition::Updating];
+
+    let key = "https:example.com:/background";
+    let hash = cache_key_hash(key);
+    let paths = cache_paths(temp.path(), &hash);
+    let now = unix_time_ms(SystemTime::now());
+    let metadata = cache_metadata(
+        key.to_string(),
+        StatusCode::OK,
+        &http::HeaderMap::new(),
+        test_metadata_input(now.saturating_sub(2_000), now.saturating_sub(1_000), 7),
+    );
+    write_cache_entry(&paths, &metadata, b"cached!").await.expect("entry should be written");
+    let zone = manager.zones.get("default").expect("zone should exist");
+    {
+        let mut index = lock_index(&zone.index);
+        index.entries.insert(
+            key.to_string(),
+            test_index_entry(hash.clone(), 7, now.saturating_sub(1_000), now.saturating_sub(2_000)),
+        );
+        index.current_size_bytes = 7;
+    }
+
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/background")
+        .header("host", "example.com")
+        .body(full_body(Bytes::new()))
+        .expect("request should build");
+
+    match manager.lookup(CacheRequest::from_request(&request), "https", &policy).await {
+        CacheLookup::Updating(response, context) => {
+            assert_eq!(response.headers().get(CACHE_STATUS_HEADER).unwrap(), "UPDATING");
+            assert_eq!(context.cache_status(), CacheStatus::Updating);
+        }
+        _ => panic!("expected background update"),
+    }
+}
+
+#[tokio::test]
+async fn cache_manager_lock_timeout_falls_back_to_bypass() {
+    let temp = tempfile::tempdir().expect("cache temp dir should exist");
+    let manager = test_manager(temp.path().to_path_buf(), 1024);
+    let mut policy = test_policy();
+    policy.lock_timeout = Duration::from_millis(1);
+    let key = "https:example.com:/locked";
+    let zone = manager.zones.get("default").expect("zone should exist");
+    zone.fill_locks.lock().unwrap().insert(
+        key.to_string(),
+        CacheFillLockState {
+            notify: Arc::new(Notify::new()),
+            acquired_at_unix_ms: unix_time_ms(SystemTime::now()),
+            generation: 1,
+        },
+    );
+
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/locked")
+        .header("host", "example.com")
+        .body(full_body(Bytes::new()))
+        .expect("request should build");
+
+    match manager.lookup(CacheRequest::from_request(&request), "https", &policy).await {
+        CacheLookup::Miss(context) => {
+            assert_eq!(context.cache_status(), CacheStatus::Bypass);
+        }
+        _ => panic!("expected timeout bypass miss"),
+    }
+}
+
+#[tokio::test]
+async fn cache_manager_lock_age_allows_second_fill() {
+    let temp = tempfile::tempdir().expect("cache temp dir should exist");
+    let manager = test_manager(temp.path().to_path_buf(), 1024);
+    let mut policy = test_policy();
+    policy.lock_age = Duration::from_millis(1);
+    let key = "https:example.com:/aged";
+    let zone = manager.zones.get("default").expect("zone should exist");
+    zone.fill_locks.lock().unwrap().insert(
+        key.to_string(),
+        CacheFillLockState {
+            notify: Arc::new(Notify::new()),
+            acquired_at_unix_ms: unix_time_ms(SystemTime::now()).saturating_sub(5_000),
+            generation: 1,
+        },
+    );
+
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/aged")
+        .header("host", "example.com")
+        .body(full_body(Bytes::new()))
+        .expect("request should build");
+
+    match manager.lookup(CacheRequest::from_request(&request), "https", &policy).await {
+        CacheLookup::Miss(context) => assert_eq!(context.cache_status(), CacheStatus::Miss),
+        _ => panic!("expected fresh fill acquisition"),
+    }
 }

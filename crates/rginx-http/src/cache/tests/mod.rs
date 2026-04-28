@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -35,6 +36,7 @@ fn test_zone_with_notifier(
         index: Mutex::new(CacheIndex::default()),
         io_lock: AsyncMutex::new(()),
         fill_locks: Arc::new(Mutex::new(HashMap::new())),
+        fill_lock_generation: AtomicU64::new(0),
         stats: CacheZoneStats::default(),
         change_notifier,
     })
@@ -48,6 +50,8 @@ fn test_index_entry(
 ) -> CacheIndexEntry {
     CacheIndexEntry {
         hash,
+        base_key: "https:example.com:/".to_string(),
+        vary: Vec::new(),
         body_size_bytes,
         expires_at_unix_ms,
         stale_if_error_until_unix_ms: None,
@@ -64,16 +68,28 @@ fn test_store_context(zone: Arc<CacheZoneRuntime>, key: &str) -> CacheStoreConte
             zone: "default".to_string(),
             methods: vec![Method::GET],
             statuses: vec![StatusCode::OK],
+            ttl_by_status: Vec::new(),
             key: rginx_core::CacheKeyTemplate::parse("{uri}").expect("key should parse"),
+            cache_bypass: None,
+            no_cache: None,
             stale_if_error: None,
+            use_stale: Vec::new(),
+            background_update: false,
+            lock_timeout: Duration::from_secs(5),
+            lock_age: Duration::from_secs(5),
         },
+        request: CacheRequest {
+            method: Method::GET,
+            uri: http::Uri::from_static("/"),
+            headers: http::HeaderMap::new(),
+        },
+        base_key: key.to_string(),
         key: key.to_string(),
         cache_status: CacheStatus::Miss,
         store_response: true,
         _fill_guard: None,
         cached_entry: None,
         cached_metadata: None,
-        allow_stale_on_error: false,
         revalidating: false,
         conditional_headers: None,
         read_cached_body: true,
@@ -91,9 +107,16 @@ fn test_policy() -> RouteCachePolicy {
         zone: "default".to_string(),
         methods: vec![Method::GET, Method::HEAD],
         statuses: vec![StatusCode::OK],
+        ttl_by_status: Vec::new(),
         key: rginx_core::CacheKeyTemplate::parse("{scheme}:{host}:{uri}")
             .expect("key should parse"),
+        cache_bypass: None,
+        no_cache: None,
         stale_if_error: None,
+        use_stale: Vec::new(),
+        background_update: false,
+        lock_timeout: Duration::from_secs(5),
+        lock_age: Duration::from_secs(5),
     }
 }
 
@@ -103,6 +126,8 @@ fn test_metadata_input(
     body_size_bytes: usize,
 ) -> CacheMetadataInput {
     CacheMetadataInput {
+        base_key: "https:example.com:/".to_string(),
+        vary: Vec::new(),
         stored_at_unix_ms,
         expires_at_unix_ms,
         stale_if_error_until_unix_ms: None,

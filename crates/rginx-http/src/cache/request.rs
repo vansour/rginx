@@ -1,6 +1,6 @@
 use http::header::{ACCEPT_ENCODING, AUTHORIZATION, CONTENT_TYPE, HeaderMap, RANGE};
 use http::{Method, Uri};
-use rginx_core::{CacheKeyRenderContext, RouteCachePolicy};
+use rginx_core::{CacheKeyRenderContext, CachePredicateRequestContext, RouteCachePolicy};
 
 use super::CacheRequest;
 
@@ -25,7 +25,13 @@ pub(super) fn cache_request_bypass(request: &CacheRequest, policy: &RouteCachePo
                 || mime.starts_with("application/grpc+")
                 || mime.starts_with("application/grpc-web")
         },
-    )
+    ) || policy.cache_bypass.as_ref().is_some_and(|predicate| {
+        predicate.matches_request(&CachePredicateRequestContext {
+            method: &request.method,
+            uri: request.request_uri(),
+            headers: &request.headers,
+        })
+    })
 }
 
 pub(super) fn render_cache_key(
@@ -47,6 +53,7 @@ pub(super) fn render_cache_key(
         host,
         uri: request_uri,
         method: method.as_str(),
+        headers,
     });
     if let Some(accept_encoding) = normalized_accept_encoding(headers) {
         rendered.push_str("|ae:");

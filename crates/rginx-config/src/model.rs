@@ -9,7 +9,10 @@ mod tls;
 mod upstream;
 mod vhost;
 
-pub use cache::{CacheRouteConfig, CacheZoneConfig};
+pub use cache::{
+    CachePredicateConfig, CacheRouteConfig, CacheStatusTtlConfig, CacheUseStaleConditionConfig,
+    CacheZoneConfig,
+};
 pub use listener::{Http3Config, ListenerConfig};
 pub use route::{
     HandlerConfig, LocationConfig, MatcherConfig, ProxyHeaderDynamicValueConfig,

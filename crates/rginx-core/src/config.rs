@@ -11,7 +11,9 @@ mod virtual_host;
 
 pub use access_log::{AccessLogFormat, AccessLogValues};
 pub use cache::{
-    CacheKeyRenderContext, CacheKeyTemplate, CacheKeyTemplateError, CacheZone, RouteCachePolicy,
+    CacheKeyRenderContext, CacheKeyTemplate, CacheKeyTemplateError, CachePredicate,
+    CachePredicateRequestContext, CacheStatusTtlRule, CacheUseStaleCondition, CacheZone,
+    RouteCachePolicy,
 };
 pub use listener::{
     Listener, ListenerApplicationProtocol, ListenerHttp3, ListenerTransportBinding,

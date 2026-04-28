@@ -13,7 +13,7 @@ use tokio::fs;
 
 use crate::handler::{HttpResponse, full_body};
 
-use super::{CACHE_STATUS_HEADER, CacheIndexEntry, CacheZoneRuntime};
+use super::{CACHE_STATUS_HEADER, CacheIndexEntry, CacheZoneRuntime, CachedVaryHeaderValue};
 
 mod temp;
 
@@ -23,6 +23,10 @@ use temp::{cleanup_failed_write, next_temp_suffix, sibling_temp_path};
 pub(super) struct CacheMetadata {
     #[serde(default)]
     pub(super) key: String,
+    #[serde(default)]
+    pub(super) base_key: String,
+    #[serde(default)]
+    pub(super) vary: Vec<CachedVaryHeader>,
     pub(super) status: u16,
     pub(super) headers: Vec<CachedHeader>,
     pub(super) stored_at_unix_ms: u64,
@@ -42,14 +46,23 @@ pub(super) struct CachedHeader {
     value: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct CachedVaryHeader {
+    name: String,
+    #[serde(default)]
+    value: Option<String>,
+}
+
 pub(super) struct CachePaths {
     pub(super) dir: PathBuf,
     pub(super) metadata: PathBuf,
     pub(super) body: PathBuf,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(super) struct CacheMetadataInput {
+    pub(super) base_key: String,
+    pub(super) vary: Vec<CachedVaryHeaderValue>,
     pub(super) stored_at_unix_ms: u64,
     pub(super) expires_at_unix_ms: u64,
     pub(super) stale_if_error_until_unix_ms: Option<u64>,
@@ -66,6 +79,15 @@ pub(super) fn cache_metadata(
 ) -> CacheMetadata {
     CacheMetadata {
         key,
+        base_key: input.base_key,
+        vary: input
+            .vary
+            .into_iter()
+            .map(|header| CachedVaryHeader {
+                name: header.name.as_str().to_string(),
+                value: header.value,
+            })
+            .collect(),
         status: status.as_u16(),
         headers: cached_headers(headers, input.body_size_bytes),
         stored_at_unix_ms: input.stored_at_unix_ms,
@@ -191,13 +213,24 @@ pub(super) fn cache_paths(base: &Path, hash: &str) -> CachePaths {
 }
 
 pub(super) fn cache_key_hash(key: &str) -> String {
-    let digest = Sha256::digest(key.as_bytes());
-    let mut encoded = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(encoded, "{byte:02x}");
+    cache_bytes_hash(key.as_bytes())
+}
+
+pub(super) fn cache_variant_key(base_key: &str, vary: &[CachedVaryHeaderValue]) -> String {
+    if vary.is_empty() {
+        return base_key.to_string();
     }
-    encoded
+
+    let mut signature = Vec::new();
+    for header in vary {
+        signature.extend_from_slice(header.name.as_str().as_bytes());
+        signature.push(0);
+        if let Some(value) = &header.value {
+            signature.extend_from_slice(value.as_bytes());
+        }
+        signature.push(0xff);
+    }
+    format!("{base_key}|vary:{}", cache_bytes_hash(&signature))
 }
 
 pub(super) fn unix_time_ms(time: SystemTime) -> u64 {
@@ -241,6 +274,16 @@ fn cached_headers(headers: &HeaderMap, body_size_bytes: usize) -> Vec<CachedHead
             value: value.as_bytes().to_vec(),
         })
         .collect()
+}
+
+fn cache_bytes_hash(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded
 }
 
 fn remove_cache_hop_by_hop_headers(headers: &mut HeaderMap) {
