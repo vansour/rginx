@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use http::header::{CACHE_CONTROL, EXPIRES, HeaderMap, HeaderValue};
+use http::header::{CACHE_CONTROL, EXPIRES, HeaderMap, HeaderValue, PRAGMA};
 
 use super::*;
 
@@ -21,4 +21,12 @@ fn response_ttl_respects_explicit_zero_or_expired_freshness() {
     let mut headers = HeaderMap::new();
     headers.insert(EXPIRES, HeaderValue::from_static("Wed, 21 Oct 2015 07:28:00 GMT"));
     assert_eq!(response_ttl(&headers, Duration::from_secs(60)), Duration::ZERO);
+}
+
+#[test]
+fn request_requires_revalidation_honors_pragma_no_cache() {
+    let mut headers = HeaderMap::new();
+    headers.insert(PRAGMA, HeaderValue::from_static("no-cache"));
+
+    assert!(request_requires_revalidation(&headers));
 }

@@ -56,17 +56,13 @@ pub(super) fn render_cache_key(
 }
 
 fn normalized_accept_encoding(headers: &HeaderMap) -> Option<String> {
-    let value = headers.get(ACCEPT_ENCODING)?.to_str().ok()?.trim();
-    if value.is_empty() {
+    let mut tokens = Vec::new();
+    for value in headers.get_all(ACCEPT_ENCODING) {
+        let value = value.to_str().ok()?;
+        tokens.extend(value.split(',').map(str::trim).filter(|token| !token.is_empty()));
+    }
+    if tokens.is_empty() {
         return None;
     }
-    Some(
-        value
-            .split(',')
-            .map(str::trim)
-            .filter(|token| !token.is_empty())
-            .collect::<Vec<_>>()
-            .join(",")
-            .to_ascii_lowercase(),
-    )
+    Some(tokens.join(",").to_ascii_lowercase())
 }

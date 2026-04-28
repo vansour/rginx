@@ -133,25 +133,26 @@ impl SharedState {
 
         *self.listener_tls_acceptors.write().await = merged_acceptors;
         let _ = self.revisions.send(next_revision);
-        self.mark_snapshot_changed_components_with_cache(true, false, true, true, true, true);
+        let snapshot_version =
+            self.mark_snapshot_changed_components_with_cache(true, false, true, true, true, true);
         if traffic_topology_changed(previous_config.as_ref(), prepared.config.as_ref()) {
             self.mark_all_traffic_targets_changed(
                 previous_config.as_ref(),
                 prepared.config.as_ref(),
-                next_revision,
+                snapshot_version,
             );
         }
         if upstream_topology_changed(previous_config.as_ref(), prepared.config.as_ref()) {
             self.mark_all_upstream_targets_changed(
                 previous_config.as_ref(),
                 prepared.config.as_ref(),
-                next_revision,
+                snapshot_version,
             );
         }
         self.mark_all_cache_zones_changed(
             previous_config.as_ref(),
             prepared.config.as_ref(),
-            next_revision,
+            snapshot_version,
         );
         self.notify_snapshot_waiters();
 

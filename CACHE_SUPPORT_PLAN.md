@@ -8,11 +8,11 @@
 - 阶段 2：已完成。已实现内存 index + 磁盘 metadata/body 的缓存模块，
   覆盖 key、TTL、存储策略、启动扫描、损坏 metadata 和对象大小限制。
 - 阶段 3：已完成。代理路径已接入 lookup/store，并输出 `X-Cache:
-  HIT`、`MISS`、`BYPASS`、`EXPIRED`、`STALE`、`REVALIDATED`。
+  HIT`、`MISS`、`BYPASS`、`EXPIRED`、`STALE`。
 - 阶段 4：已完成。缓存已接入 runtime snapshot/status、admin socket、
   CLI 和 access log `$cache_status`。
 - 阶段 5：已完成。已支持 `ETag`/`Last-Modified` revalidation、`304`
-  刷新、`stale-if-error`、`stale-while-revalidate`、`Vary:
+  刷新、`REVALIDATED`、`stale-if-error`、`stale-while-revalidate`、`Vary:
   Accept-Encoding` 和 cache lock。
 - 阶段 6：已完成。已接入后台 inactive cleanup、admin/CLI purge、reload
   保留 cache data 和安装脚本 cache 根目录准备。

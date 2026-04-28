@@ -213,3 +213,19 @@ fn cli_accepts_purge_cache_prefix_subcommand() {
             if zone == "default" && prefix == "http:example.com:/assets/"
     ));
 }
+
+#[test]
+fn cli_rejects_purge_cache_with_both_key_and_prefix() {
+    let parsed = Cli::try_parse_from([
+        "rginx",
+        "purge-cache",
+        "--zone",
+        "default",
+        "--key",
+        "http:example.com:/demo",
+        "--prefix",
+        "http:example.com:/assets/",
+    ]);
+
+    assert!(parsed.is_err(), "cli should reject --key with --prefix");
+}

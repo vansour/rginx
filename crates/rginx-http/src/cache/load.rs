@@ -119,11 +119,13 @@ fn load_cache_index_entry(
         remove_cache_files(zone, hash);
         return None;
     }
-    let beyond_stale_windows = metadata
-        .stale_if_error_until_unix_ms
-        .into_iter()
-        .chain(metadata.stale_while_revalidate_until_unix_ms)
-        .all(|value| now > value);
+    let mut stale_windows =
+        [metadata.stale_if_error_until_unix_ms, metadata.stale_while_revalidate_until_unix_ms]
+            .into_iter()
+            .flatten();
+    let beyond_stale_windows = stale_windows
+        .next()
+        .is_some_and(|first| now > first && stale_windows.all(|value| now > value));
     if now > metadata.expires_at_unix_ms && beyond_stale_windows && !metadata.must_revalidate {
         remove_cache_files(zone, hash);
         return None;

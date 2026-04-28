@@ -3,7 +3,7 @@ use std::time::{Duration, SystemTime};
 use http::StatusCode;
 use http::header::{
     CACHE_CONTROL, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, EXPIRES, HeaderMap, HeaderName,
-    SET_COOKIE, VARY,
+    PRAGMA, SET_COOKIE, VARY,
 };
 use hyper::body::Body as _;
 
@@ -91,6 +91,7 @@ pub(super) fn response_freshness(
 pub(super) fn request_requires_revalidation(headers: &HeaderMap) -> bool {
     cache_control_contains(headers, &["no-cache"])
         || cache_control_duration(headers, "max-age") == Some(Duration::ZERO)
+        || pragma_contains(headers, "no-cache")
 }
 
 pub(super) fn header_value(headers: &HeaderMap, name: HeaderName) -> Option<String> {
@@ -152,6 +153,14 @@ fn cache_control_contains(headers: &HeaderMap, directives: &[&str]) -> bool {
                 let name = directive.split_once('=').map_or(directive, |(name, _)| name).trim();
                 directives.iter().any(|expected| name.eq_ignore_ascii_case(expected))
             })
+        })
+    })
+}
+
+fn pragma_contains(headers: &HeaderMap, directive: &str) -> bool {
+    headers.get_all(PRAGMA).iter().any(|value| {
+        value.to_str().ok().is_some_and(|value| {
+            value.split(',').map(str::trim).any(|token| token.eq_ignore_ascii_case(directive))
         })
     })
 }

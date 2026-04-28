@@ -1,7 +1,7 @@
 use std::time::SystemTime;
 
 use bytes::Bytes;
-use http::header::{AUTHORIZATION, CACHE_CONTROL};
+use http::header::{ACCEPT_ENCODING, AUTHORIZATION, CACHE_CONTROL};
 use http::{Method, Request, StatusCode};
 
 use crate::handler::full_body;
@@ -29,6 +29,31 @@ fn cache_key_template_renders_request_parts() {
     assert_eq!(
         render_cache_key(request.method(), request.uri(), request.headers(), "https", &policy),
         "https:example.com:/assets/app.js?v=1"
+    );
+}
+
+#[test]
+fn cache_key_includes_all_accept_encoding_header_values() {
+    let policy = RouteCachePolicy {
+        zone: "default".to_string(),
+        methods: vec![Method::GET],
+        statuses: vec![StatusCode::OK],
+        key: rginx_core::CacheKeyTemplate::parse("{scheme}:{host}:{uri}")
+            .expect("key should parse"),
+        stale_if_error: None,
+    };
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/assets/app.js?v=1")
+        .header("host", "example.com")
+        .header(ACCEPT_ENCODING, "gzip")
+        .header(ACCEPT_ENCODING, "br;q=1")
+        .body(full_body(Bytes::new()))
+        .expect("request should build");
+
+    assert_eq!(
+        render_cache_key(request.method(), request.uri(), request.headers(), "https", &policy),
+        "https:example.com:/assets/app.js?v=1|ae:gzip,br;q=1"
     );
 }
 
@@ -139,7 +164,7 @@ async fn cache_manager_treats_metadata_key_mismatch_as_miss() {
 }
 
 #[tokio::test]
-async fn cache_manager_removes_expired_entries_on_lookup() {
+async fn cache_manager_retains_expired_entries_for_revalidation_on_lookup() {
     let temp = tempfile::tempdir().expect("cache temp dir should exist");
     let manager = test_manager(temp.path().to_path_buf(), 1024);
     let policy = test_policy();

@@ -165,3 +165,36 @@ async fn refresh_not_modified_response_serves_body_and_evicts_uncacheable_entry(
     assert_eq!(zone.stats.revalidated_total.load(std::sync::atomic::Ordering::Relaxed), 1);
     assert_eq!(zone.stats.write_success_total.load(std::sync::atomic::Ordering::Relaxed), 0);
 }
+
+#[test]
+fn load_index_from_disk_keeps_legacy_expired_entries_without_stale_windows() {
+    let temp = tempfile::tempdir().expect("cache temp dir should exist");
+    let zone = test_zone(temp.path().to_path_buf(), 1024);
+    let key = "https:example.com:/legacy";
+    let hash = cache_key_hash(key);
+    let paths = cache_paths(temp.path(), &hash);
+    let now = unix_time_ms(SystemTime::now());
+    std::fs::create_dir_all(&paths.dir).expect("cache dir should be created");
+    std::fs::write(
+        &paths.metadata,
+        serde_json::to_vec(&serde_json::json!({
+            "key": key,
+            "stored_at_unix_ms": now.saturating_sub(2_000),
+            "expires_at_unix_ms": now.saturating_sub(1_000),
+            "must_revalidate": false,
+            "body_size_bytes": 6
+        }))
+        .expect("legacy metadata should serialize"),
+    )
+    .expect("legacy metadata should be written");
+    std::fs::write(&paths.body, b"cached").expect("legacy body should be written");
+
+    let index = load_index_from_disk(zone.config.as_ref()).expect("index should load");
+    let entry = index.entries.get(key).expect("legacy entry should be retained");
+
+    assert_eq!(entry.hash, hash);
+    assert_eq!(entry.body_size_bytes, 6);
+    assert_eq!(index.current_size_bytes, 6);
+    assert!(paths.metadata.exists());
+    assert!(paths.body.exists());
+}
