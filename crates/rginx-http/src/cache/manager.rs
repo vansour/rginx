@@ -150,7 +150,7 @@ impl CacheManager {
                     let context = Box::new(CacheStoreContext {
                         zone: zone.clone(),
                         policy: policy.clone(),
-                        request: request.clone(),
+                        request: request.with_method(Method::GET),
                         base_key: cached_entry.base_key.clone(),
                         key: key.clone(),
                         cache_status: CacheStatus::Updating,

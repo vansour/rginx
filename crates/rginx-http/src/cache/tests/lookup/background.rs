@@ -99,6 +99,8 @@ async fn head_background_refresh_stores_revalidated_body() {
             }
         ),
     };
+    assert_eq!(context.request.method, Method::GET);
+    assert!(context.store_response);
 
     let response = http::Response::builder()
         .status(StatusCode::OK)

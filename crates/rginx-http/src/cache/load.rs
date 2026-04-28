@@ -67,8 +67,8 @@ pub(super) fn load_index_from_disk(zone: &CacheZone) -> io::Result<CacheIndex> {
         scan_prefix_dir(zone, prefix_dir.path().as_path(), &mut index)?;
     }
 
-    for (_key, entry) in eviction_candidates(&mut index, zone.max_size_bytes) {
-        remove_variant_key(&mut index.variants, &entry.base_key, &_key);
+    for (key, entry) in eviction_candidates(&mut index, zone.max_size_bytes) {
+        remove_variant_key(&mut index.variants, &entry.base_key, &key);
         remove_cache_files(zone, &entry.hash);
     }
 

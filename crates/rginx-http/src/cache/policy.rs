@@ -236,6 +236,7 @@ pub(super) fn vary_headers(headers: &HeaderMap) -> Option<Vec<HeaderName>> {
             }
         }
     }
+    names.sort_by(|left, right| left.as_str().cmp(right.as_str()));
     Some(names)
 }
 

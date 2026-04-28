@@ -110,3 +110,14 @@ fn validate_rejects_status_match_in_cache_bypass() {
     let error = validate(&config).expect_err("status-based bypass should fail validation");
     assert!(error.to_string().contains("cache.cache_bypass cannot match response status"));
 }
+
+#[test]
+fn validate_accepts_status_match_in_no_cache() {
+    let mut config = base_config();
+    config.cache_zones = vec![cache_zone("default")];
+    let mut policy = route_cache("default");
+    policy.no_cache = Some(crate::model::CachePredicateConfig::Status(200));
+    config.locations[0].cache = Some(policy);
+
+    validate(&config).expect("status-based no_cache should pass validation");
+}

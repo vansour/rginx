@@ -15,6 +15,10 @@ impl CacheRequest {
         }
     }
 
+    pub(crate) fn with_method(&self, method: Method) -> Self {
+        Self { method, uri: self.uri.clone(), headers: self.headers.clone() }
+    }
+
     pub(crate) fn request_uri(&self) -> &str {
         self.uri.path_and_query().map(|value| value.as_str()).unwrap_or("/")
     }

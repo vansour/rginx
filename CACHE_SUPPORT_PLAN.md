@@ -28,6 +28,15 @@ HTTP/3 session、TLS session 和 OCSP staple cache，继续作为运行时实现
 但如果对标开源 NGINX 的 `proxy_cache` 能力，当前实现更接近“基础可用”而不是
 “生产级全面替代”。下面的优先级清单用于指导下一轮补齐。
 
+本 PR 交付说明：
+
+- `P0` 中的 `cache_bypass` / `no_cache`、按状态 TTL + `X-Accel-Expires`、
+  通用 `Vary`、`background_update` / `use_stale` / `lock_timeout` /
+  `lock_age` / `UPDATING` 已完成并已落地。
+- 下文保留这些条目，是为了把“已交付能力”和“下一轮继续补齐的剩余差距”放在同一张
+  对标清单里，避免后续阶段重复整理。
+- `P1` / `P2` 仍是后续规划项，当前 PR 不覆盖。
+
 对标范围：
 
 - 以开源 NGINX 的 `proxy_cache`、`proxy_cache_path`、`proxy_cache_revalidate`、
@@ -43,7 +52,7 @@ HTTP/3 session、TLS session 和 OCSP staple cache，继续作为运行时实现
 - `P1`：补齐大流量和复杂场景下的控制面、范围请求和后台维护细节。
 - `P2`：补齐架构级能力与长周期追平项。
 
-### P0：先补齐现网迁移阻塞项
+### P0：先补齐现网迁移阻塞项（当前状态：本 PR 已完成）
 
 目标：让常见 NGINX `proxy_cache` 配置可以较低成本迁移到 rginx，并明显缩小
 缓存正确性和控制面的差距。
@@ -93,7 +102,7 @@ HTTP/3 session、TLS session 和 OCSP staple cache，继续作为运行时实现
 - 热点 key 过期时可选择前台返回 stale、后台刷新，并暴露 `UPDATING` 或等价状态。
 - 并发同 key 过期测试中，不会出现无界等待，也不会放大 upstream 压力。
 
-### P1：补齐大对象场景和维护控制面
+### P1：补齐大对象场景和维护控制面（当前状态：规划中）
 
 目标：支持更接近 NGINX 中大型生产缓存部署的行为，特别是长尾控制、大对象和后台维护。
 
@@ -136,7 +145,7 @@ HTTP/3 session、TLS session 和 OCSP staple cache，继续作为运行时实现
   等缓存相关头。
 - 大目录冷启动时，扫描和加载行为可通过配置调优，而不是单一固定策略。
 
-### P2：架构级追平项
+### P2：架构级追平项（当前状态：规划中）
 
 目标：追平 NGINX 在架构层、共享索引和极端场景下的能力，而不是只补语义缺口。
 
