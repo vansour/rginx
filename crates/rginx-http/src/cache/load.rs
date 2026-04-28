@@ -138,27 +138,45 @@ fn load_cache_index_entry(zone: &CacheZone, hash: &str) -> Option<(String, Cache
         return None;
     }
 
+    let ScannedCacheMetadata {
+        key,
+        base_key,
+        vary,
+        stored_at_unix_ms,
+        expires_at_unix_ms,
+        stale_if_error_until_unix_ms,
+        stale_while_revalidate_until_unix_ms,
+        must_revalidate,
+        body_size_bytes,
+    } = metadata;
+    let Some(vary) = parse_vary_headers(vary) else {
+        remove_cache_files(zone, hash);
+        return None;
+    };
+
     Some((
-        metadata.key.clone(),
+        key.clone(),
         CacheIndexEntry {
             hash: hash.to_string(),
-            base_key: if metadata.base_key.is_empty() { metadata.key } else { metadata.base_key },
-            vary: metadata
-                .vary
-                .into_iter()
-                .filter_map(|header| {
-                    let name = header.name.parse::<http::header::HeaderName>().ok()?;
-                    Some(CachedVaryHeaderValue { name, value: header.value })
-                })
-                .collect(),
-            body_size_bytes: metadata.body_size_bytes,
-            expires_at_unix_ms: metadata.expires_at_unix_ms,
-            stale_if_error_until_unix_ms: metadata.stale_if_error_until_unix_ms,
-            stale_while_revalidate_until_unix_ms: metadata.stale_while_revalidate_until_unix_ms,
-            must_revalidate: metadata.must_revalidate,
-            last_access_unix_ms: metadata.stored_at_unix_ms,
+            base_key: if base_key.is_empty() { key } else { base_key },
+            vary,
+            body_size_bytes,
+            expires_at_unix_ms,
+            stale_if_error_until_unix_ms,
+            stale_while_revalidate_until_unix_ms,
+            must_revalidate,
+            last_access_unix_ms: stored_at_unix_ms,
         },
     ))
+}
+
+fn parse_vary_headers(vary: Vec<ScannedVaryHeader>) -> Option<Vec<CachedVaryHeaderValue>> {
+    let mut parsed = Vec::with_capacity(vary.len());
+    for header in vary {
+        let name = header.name.parse::<http::header::HeaderName>().ok()?;
+        parsed.push(CachedVaryHeaderValue { name, value: header.value });
+    }
+    Some(parsed)
 }
 
 fn read_cache_metadata(path: &Path) -> io::Result<ScannedCacheMetadata> {

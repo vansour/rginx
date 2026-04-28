@@ -312,3 +312,39 @@ fn load_index_from_disk_keeps_legacy_expired_entries_without_stale_windows() {
     assert!(paths.metadata.exists());
     assert!(paths.body.exists());
 }
+
+#[test]
+fn load_index_from_disk_removes_entries_with_invalid_vary_metadata() {
+    let temp = tempfile::tempdir().expect("cache temp dir should exist");
+    let zone = test_zone(temp.path().to_path_buf(), 1024);
+    let key = "https:example.com:/invalid-vary";
+    let hash = cache_key_hash(key);
+    let paths = cache_paths(temp.path(), &hash);
+    let now = unix_time_ms(SystemTime::now());
+    std::fs::create_dir_all(&paths.dir).expect("cache dir should be created");
+    std::fs::write(
+        &paths.metadata,
+        serde_json::to_vec(&serde_json::json!({
+            "key": key,
+            "base_key": key,
+            "vary": [
+                { "name": "accept-language", "value": "zh-CN" },
+                { "name": "bad header", "value": "broken" }
+            ],
+            "stored_at_unix_ms": now.saturating_sub(2_000),
+            "expires_at_unix_ms": now.saturating_add(60_000),
+            "must_revalidate": false,
+            "body_size_bytes": 6
+        }))
+        .expect("invalid vary metadata should serialize"),
+    )
+    .expect("invalid vary metadata should be written");
+    std::fs::write(&paths.body, b"cached").expect("body should be written");
+
+    let index = load_index_from_disk(zone.config.as_ref()).expect("index should load");
+
+    assert!(!index.entries.contains_key(key));
+    assert_eq!(index.current_size_bytes, 0);
+    assert!(!paths.metadata.exists());
+    assert!(!paths.body.exists());
+}
