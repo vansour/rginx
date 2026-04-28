@@ -149,7 +149,34 @@ pub(crate) fn snapshot_with_cache_zone(listen: &str, path: PathBuf) -> ConfigSna
             inactive: Duration::from_secs(60),
             default_ttl: Duration::from_secs(60),
             max_entry_bytes: 1024,
+            path_levels: vec![2],
+            loader_batch_entries: 100,
+            loader_sleep: Duration::ZERO,
+            manager_batch_entries: 100,
+            manager_sleep: Duration::ZERO,
+            inactive_cleanup_interval: Duration::from_secs(60),
         }),
     );
     snapshot
+}
+
+pub(crate) fn default_route_cache_policy() -> rginx_core::RouteCachePolicy {
+    rginx_core::RouteCachePolicy {
+        zone: "default".to_string(),
+        methods: vec![http::Method::GET, http::Method::HEAD],
+        statuses: vec![StatusCode::OK],
+        ttl_by_status: Vec::new(),
+        key: rginx_core::CacheKeyTemplate::parse("{scheme}:{host}:{uri}")
+            .expect("cache key should parse"),
+        cache_bypass: None,
+        no_cache: None,
+        stale_if_error: None,
+        use_stale: Vec::new(),
+        background_update: false,
+        lock_timeout: Duration::from_secs(5),
+        lock_age: Duration::from_secs(5),
+        min_uses: 1,
+        ignore_headers: Vec::new(),
+        range_requests: rginx_core::CacheRangeRequestPolicy::Bypass,
+    }
 }

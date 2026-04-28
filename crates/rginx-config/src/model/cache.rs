@@ -12,6 +12,18 @@ pub struct CacheZoneConfig {
     pub default_ttl_secs: Option<u64>,
     #[serde(default)]
     pub max_entry_bytes: Option<u64>,
+    #[serde(default)]
+    pub path_levels: Option<Vec<u8>>,
+    #[serde(default)]
+    pub loader_batch_entries: Option<u64>,
+    #[serde(default)]
+    pub loader_sleep_millis: Option<u64>,
+    #[serde(default)]
+    pub manager_batch_entries: Option<u64>,
+    #[serde(default)]
+    pub manager_sleep_millis: Option<u64>,
+    #[serde(default)]
+    pub inactive_cleanup_interval_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -39,6 +51,12 @@ pub struct CacheRouteConfig {
     pub lock_timeout_secs: Option<u64>,
     #[serde(default)]
     pub lock_age_secs: Option<u64>,
+    #[serde(default)]
+    pub min_uses: Option<u64>,
+    #[serde(default)]
+    pub ignore_headers: Option<Vec<CacheIgnoreHeaderConfig>>,
+    #[serde(default)]
+    pub range_requests: Option<CacheRangeRequestPolicyConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -72,4 +90,19 @@ pub enum CacheUseStaleConditionConfig {
     Http502,
     Http503,
     Http504,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+pub enum CacheIgnoreHeaderConfig {
+    XAccelExpires,
+    Expires,
+    CacheControl,
+    SetCookie,
+    Vary,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+pub enum CacheRangeRequestPolicyConfig {
+    Bypass,
+    Cache,
 }

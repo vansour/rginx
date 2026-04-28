@@ -8,8 +8,8 @@ use tokio::fs;
 use crate::handler::{HttpResponse, full_body};
 
 use super::entry::{
-    CacheMetadataInput, build_cached_response, cache_key_hash, cache_metadata, cache_paths,
-    cache_variant_key, unix_time_ms, write_cache_entry, write_cache_metadata,
+    CacheMetadataInput, build_cached_response, cache_key_hash, cache_metadata,
+    cache_paths_for_zone, cache_variant_key, unix_time_ms, write_cache_entry, write_cache_metadata,
 };
 use super::policy::{
     ResponseBodySize, response_freshness, response_is_storable, response_is_storable_with_size,
@@ -29,7 +29,7 @@ use helpers::{
 pub(in crate::cache) use helpers::{purge_scope, purge_selector_matches};
 pub(super) use maintenance::{
     cleanup_inactive_entries_in_zone, eviction_candidates, lock_index, purge_zone_entries,
-    remove_index_entry,
+    record_cache_admission_attempt, remove_index_entry,
 };
 
 pub(crate) struct CacheStoreError {
@@ -84,8 +84,11 @@ pub(super) async fn store_response(
         return Ok(Response::from_parts(parts, full_body(collected)));
     }
 
-    let vary = cache_vary_values(&context.request, &parts.headers);
+    let vary = cache_vary_values(&context, &context.request, &parts.headers);
     let final_key = cache_variant_key(&context.base_key, &vary);
+    if !record_cache_admission_attempt(context.zone.as_ref(), &final_key, context.policy.min_uses) {
+        return Ok(Response::from_parts(parts, full_body(collected)));
+    }
     let metadata = cache_metadata(
         final_key.clone(),
         parts.status,
@@ -98,7 +101,7 @@ pub(super) async fn store_response(
         .filter(|_| context.key == final_key)
         .map(|entry| entry.hash.clone())
         .unwrap_or_else(|| cache_key_hash(&final_key));
-    let paths = cache_paths(&context.zone.config.path, &hash);
+    let paths = cache_paths_for_zone(context.zone.config.as_ref(), &hash);
     let _io_guard = context.zone.io_lock.lock().await;
 
     if let Err(error) = write_cache_entry(&paths, &metadata, &collected).await {
@@ -163,7 +166,7 @@ pub(super) async fn refresh_not_modified_response(
     let merged_headers = merge_not_modified_headers(&cached_headers, response.headers());
     let now = unix_time_ms(SystemTime::now());
     let cached_status = StatusCode::from_u16(cached_metadata.status).unwrap_or(StatusCode::OK);
-    let paths = cache_paths(&context.zone.config.path, &cached_entry.hash);
+    let paths = cache_paths_for_zone(context.zone.config.as_ref(), &cached_entry.hash);
     if response_no_cache(&context, cached_status) {
         let response_metadata = cache_metadata(
             cached_metadata.key.clone(),
@@ -191,7 +194,7 @@ pub(super) async fn refresh_not_modified_response(
     }
 
     let freshness = response_freshness(&context, cached_status, &merged_headers);
-    let vary = cache_vary_values(&context.request, &merged_headers);
+    let vary = cache_vary_values(&context, &context.request, &merged_headers);
     let final_key = cache_variant_key(&context.base_key, &vary);
     let metadata = cache_metadata(
         final_key.clone(),

@@ -4,10 +4,10 @@ use rginx_http::SharedState;
 use tokio::sync::watch;
 use tokio::time::MissedTickBehavior;
 
-const CACHE_INACTIVE_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
+const CACHE_INACTIVE_CLEANUP_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 pub async fn run(state: SharedState, mut shutdown: watch::Receiver<bool>) {
-    let mut interval = tokio::time::interval(CACHE_INACTIVE_CLEANUP_INTERVAL);
+    let mut interval = tokio::time::interval(CACHE_INACTIVE_CLEANUP_POLL_INTERVAL);
     interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
     interval.tick().await;
 

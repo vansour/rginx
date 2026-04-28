@@ -13,7 +13,7 @@ pub(in crate::cache) async fn remove_cache_files_if_unindexed(
     if lock_index(&zone.index).entries.contains_key(key) {
         return;
     }
-    let paths = cache_paths(&zone.config.path, hash);
+    let paths = cache_paths_for_zone(zone.config.as_ref(), hash);
     let _ = fs::remove_file(paths.metadata).await;
     let _ = fs::remove_file(paths.body).await;
 }

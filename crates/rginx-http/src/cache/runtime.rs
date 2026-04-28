@@ -94,7 +94,7 @@ impl CacheStoreContext {
         };
         let response = {
             let _io_guard = self.zone.io_lock.lock().await;
-            let paths = cache_paths(&self.zone.config.path, &entry.hash);
+            let paths = cache_paths_for_zone(self.zone.config.as_ref(), &entry.hash);
             build_cached_response(&paths.body, metadata, self.read_cached_body).await
         };
         match response {

@@ -1,11 +1,12 @@
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::thread;
 
 use rginx_core::CacheZone;
 use serde::Deserialize;
 
-use super::entry::{cache_key_hash, cache_paths};
+use super::entry::{cache_key_hash, cache_paths_for_zone};
 use super::store::eviction_candidates;
 use super::{CacheIndex, CacheIndexEntry, CachedVaryHeaderValue};
 
@@ -42,30 +43,8 @@ pub(super) fn load_index_from_disk(zone: &CacheZone) -> io::Result<CacheIndex> {
         return Ok(index);
     }
 
-    for prefix_dir in fs::read_dir(&zone.path)? {
-        let prefix_dir = match prefix_dir {
-            Ok(prefix_dir) => prefix_dir,
-            Err(error) => {
-                tracing::warn!(
-                    path = %zone.path.display(),
-                    %error,
-                    "failed to read cache zone directory entry; skipping"
-                );
-                continue;
-            }
-        };
-        let Ok(file_type) = prefix_dir.file_type() else {
-            tracing::warn!(
-                path = %prefix_dir.path().display(),
-                "failed to read cache directory entry type; skipping"
-            );
-            continue;
-        };
-        if !file_type.is_dir() {
-            continue;
-        }
-        scan_prefix_dir(zone, prefix_dir.path().as_path(), &mut index)?;
-    }
+    let mut loader = LoaderState::default();
+    scan_cache_dir(zone, zone.path.as_path(), &mut index, &mut loader)?;
 
     for (key, entry) in eviction_candidates(&mut index, zone.max_size_bytes) {
         remove_variant_key(&mut index.variants, &entry.base_key, &key);
@@ -75,8 +54,20 @@ pub(super) fn load_index_from_disk(zone: &CacheZone) -> io::Result<CacheIndex> {
     Ok(index)
 }
 
-fn scan_prefix_dir(zone: &CacheZone, dir: &Path, index: &mut CacheIndex) -> io::Result<()> {
-    for entry in fs::read_dir(dir)? {
+fn scan_cache_dir(
+    zone: &CacheZone,
+    dir: &Path,
+    index: &mut CacheIndex,
+    loader: &mut LoaderState,
+) -> io::Result<()> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(path = %dir.display(), %error, "failed to read cache directory; skipping");
+            return Ok(());
+        }
+    };
+    for entry in entries {
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
@@ -88,10 +79,25 @@ fn scan_prefix_dir(zone: &CacheZone, dir: &Path, index: &mut CacheIndex) -> io::
                 continue;
             }
         };
+        loader.maybe_sleep(zone);
         let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            tracing::warn!(path = %path.display(), "failed to read cache directory entry type; skipping");
+            continue;
+        };
+        if file_type.is_dir() {
+            if let Err(error) = scan_cache_dir(zone, path.as_path(), index, loader) {
+                tracing::warn!(
+                    path = %path.display(),
+                    %error,
+                    "failed to scan cache subdirectory; skipping"
+                );
+            }
+            continue;
+        }
         let Some(hash) = metadata_hash(&path) else {
             if let Some(hash) = body_hash(&path)
-                && !cache_paths(&zone.path, &hash).metadata.exists()
+                && !cache_paths_for_zone(zone, &hash).metadata.exists()
             {
                 remove_cache_files(zone, &hash);
             }
@@ -114,7 +120,7 @@ fn scan_prefix_dir(zone: &CacheZone, dir: &Path, index: &mut CacheIndex) -> io::
 }
 
 fn load_cache_index_entry(zone: &CacheZone, hash: &str) -> Option<(String, CacheIndexEntry)> {
-    let paths = cache_paths(&zone.path, hash);
+    let paths = cache_paths_for_zone(zone, hash);
     let Ok(metadata) = read_cache_metadata(&paths.metadata) else {
         remove_cache_files(zone, hash);
         return None;
@@ -200,9 +206,33 @@ fn body_hash(path: &Path) -> Option<String> {
 }
 
 fn remove_cache_files(zone: &CacheZone, hash: &str) {
-    let paths = cache_paths(&zone.path, hash);
+    let paths = cache_paths_for_zone(zone, hash);
     let _ = fs::remove_file(paths.metadata);
     let _ = fs::remove_file(paths.body);
+}
+
+#[derive(Default)]
+struct LoaderState {
+    processed_entries: usize,
+}
+
+impl LoaderState {
+    fn maybe_sleep(&mut self, zone: &CacheZone) {
+        self.processed_entries = self.processed_entries.saturating_add(1);
+        if zone.loader_batch_entries == 0
+            || zone.loader_sleep.is_zero()
+            || !self.processed_entries.is_multiple_of(zone.loader_batch_entries)
+        {
+            return;
+        }
+        if let Ok(handle) = tokio::runtime::Handle::try_current()
+            && handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+        {
+            tokio::task::block_in_place(|| thread::sleep(zone.loader_sleep));
+            return;
+        }
+        thread::sleep(zone.loader_sleep);
+    }
 }
 
 fn add_variant_key(

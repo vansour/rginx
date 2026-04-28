@@ -104,7 +104,7 @@ pub(super) async fn read_cached_response(
     entry: &CacheIndexEntry,
     read_body: bool,
 ) -> std::io::Result<HttpResponse> {
-    let paths = cache_paths(&zone.config.path, &entry.hash);
+    let paths = cache_paths_for_zone(zone.config.as_ref(), &entry.hash);
     let metadata = read_cache_metadata(&paths.metadata).await?;
     if metadata.key != key {
         return Err(std::io::Error::new(
@@ -201,14 +201,33 @@ pub(super) async fn write_cache_metadata(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn cache_paths(base: &Path, hash: &str) -> CachePaths {
-    let prefix = hash.get(..2).unwrap_or("00");
-    let dir = base.join(prefix);
+    cache_paths_with_levels(base, &[2], hash)
+}
+
+pub(super) fn cache_paths_for_zone(zone: &rginx_core::CacheZone, hash: &str) -> CachePaths {
+    cache_paths_with_levels(&zone.path, &zone.path_levels, hash)
+}
+
+fn cache_paths_with_levels(base: &Path, levels: &[usize], hash: &str) -> CachePaths {
+    let mut dir = base.to_path_buf();
+    let mut offset = 0usize;
+    for level in levels {
+        dir = dir.join(cache_path_segment(hash, offset, *level));
+        offset = offset.saturating_add(*level);
+    }
     CachePaths {
         metadata: dir.join(format!("{hash}.meta.json")),
         body: dir.join(format!("{hash}.body")),
         dir,
     }
+}
+
+fn cache_path_segment(hash: &str, offset: usize, level_len: usize) -> String {
+    hash.get(offset..offset.saturating_add(level_len)).map(str::to_string).unwrap_or_else(|| {
+        format!("{:0<width$}", hash.get(offset..).unwrap_or(""), width = level_len)
+    })
 }
 
 impl CacheMetadata {

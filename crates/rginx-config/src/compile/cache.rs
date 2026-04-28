@@ -6,12 +6,13 @@ use std::time::Duration;
 use http::header::HeaderName;
 use http::{Method, StatusCode};
 use rginx_core::{
-    CacheKeyTemplate, CachePredicate, CacheStatusTtlRule, CacheUseStaleCondition, CacheZone, Error,
-    Result, RouteCachePolicy,
+    CacheIgnoreHeader, CacheKeyTemplate, CachePredicate, CacheRangeRequestPolicy,
+    CacheStatusTtlRule, CacheUseStaleCondition, CacheZone, Error, Result, RouteCachePolicy,
 };
 
 use crate::model::{
-    CachePredicateConfig, CacheRouteConfig, CacheUseStaleConditionConfig, CacheZoneConfig,
+    CacheIgnoreHeaderConfig, CachePredicateConfig, CacheRangeRequestPolicyConfig, CacheRouteConfig,
+    CacheUseStaleConditionConfig, CacheZoneConfig,
 };
 
 const DEFAULT_CACHE_INACTIVE_SECS: u64 = 600;
@@ -20,6 +21,13 @@ const DEFAULT_CACHE_MAX_ENTRY_BYTES: u64 = 10 * 1024 * 1024;
 const DEFAULT_CACHE_KEY: &str = "{scheme}:{host}:{uri}";
 const DEFAULT_CACHE_LOCK_TIMEOUT_SECS: u64 = 5;
 const DEFAULT_CACHE_LOCK_AGE_SECS: u64 = 5;
+const DEFAULT_CACHE_PATH_LEVELS: &[u8] = &[2];
+const DEFAULT_CACHE_LOADER_BATCH_ENTRIES: u64 = 100;
+const DEFAULT_CACHE_LOADER_SLEEP_MILLIS: u64 = 50;
+const DEFAULT_CACHE_MANAGER_BATCH_ENTRIES: u64 = 100;
+const DEFAULT_CACHE_MANAGER_SLEEP_MILLIS: u64 = 50;
+const DEFAULT_CACHE_INACTIVE_CLEANUP_INTERVAL_SECS: u64 = 60;
+const DEFAULT_CACHE_MIN_USES: u64 = 1;
 
 pub(super) fn compile_cache_zones(
     zones: Vec<CacheZoneConfig>,
@@ -56,6 +64,28 @@ pub(super) fn compile_cache_zones(
                     zone.default_ttl_secs.unwrap_or(DEFAULT_CACHE_TTL_SECS),
                 ),
                 max_entry_bytes,
+                path_levels: zone
+                    .path_levels
+                    .unwrap_or_else(|| DEFAULT_CACHE_PATH_LEVELS.to_vec())
+                    .into_iter()
+                    .map(usize::from)
+                    .collect(),
+                loader_batch_entries: usize_from_u64(
+                    zone.loader_batch_entries.unwrap_or(DEFAULT_CACHE_LOADER_BATCH_ENTRIES),
+                )?,
+                loader_sleep: Duration::from_millis(
+                    zone.loader_sleep_millis.unwrap_or(DEFAULT_CACHE_LOADER_SLEEP_MILLIS),
+                ),
+                manager_batch_entries: usize_from_u64(
+                    zone.manager_batch_entries.unwrap_or(DEFAULT_CACHE_MANAGER_BATCH_ENTRIES),
+                )?,
+                manager_sleep: Duration::from_millis(
+                    zone.manager_sleep_millis.unwrap_or(DEFAULT_CACHE_MANAGER_SLEEP_MILLIS),
+                ),
+                inactive_cleanup_interval: Duration::from_secs(
+                    zone.inactive_cleanup_interval_secs
+                        .unwrap_or(DEFAULT_CACHE_INACTIVE_CLEANUP_INTERVAL_SECS),
+                ),
             };
             Ok((name, Arc::new(compiled)))
         })
@@ -134,6 +164,19 @@ pub(super) fn compile_route_cache(
                 lock_age: Duration::from_secs(
                     cache.lock_age_secs.unwrap_or(DEFAULT_CACHE_LOCK_AGE_SECS),
                 ),
+                min_uses: cache.min_uses.unwrap_or(DEFAULT_CACHE_MIN_USES),
+                ignore_headers: dedup_preserving_order(
+                    cache
+                        .ignore_headers
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(compile_ignore_header)
+                        .collect::<Vec<_>>(),
+                ),
+                range_requests: cache
+                    .range_requests
+                    .map(compile_range_request_policy)
+                    .unwrap_or(CacheRangeRequestPolicy::Bypass),
             })
         })
         .transpose()
@@ -200,6 +243,23 @@ fn compile_use_stale_condition(condition: CacheUseStaleConditionConfig) -> Cache
         CacheUseStaleConditionConfig::Http502 => CacheUseStaleCondition::Http502,
         CacheUseStaleConditionConfig::Http503 => CacheUseStaleCondition::Http503,
         CacheUseStaleConditionConfig::Http504 => CacheUseStaleCondition::Http504,
+    }
+}
+
+fn compile_ignore_header(header: CacheIgnoreHeaderConfig) -> CacheIgnoreHeader {
+    match header {
+        CacheIgnoreHeaderConfig::XAccelExpires => CacheIgnoreHeader::XAccelExpires,
+        CacheIgnoreHeaderConfig::Expires => CacheIgnoreHeader::Expires,
+        CacheIgnoreHeaderConfig::CacheControl => CacheIgnoreHeader::CacheControl,
+        CacheIgnoreHeaderConfig::SetCookie => CacheIgnoreHeader::SetCookie,
+        CacheIgnoreHeaderConfig::Vary => CacheIgnoreHeader::Vary,
+    }
+}
+
+fn compile_range_request_policy(policy: CacheRangeRequestPolicyConfig) -> CacheRangeRequestPolicy {
+    match policy {
+        CacheRangeRequestPolicyConfig::Bypass => CacheRangeRequestPolicy::Bypass,
+        CacheRangeRequestPolicyConfig::Cache => CacheRangeRequestPolicy::Cache,
     }
 }
 
