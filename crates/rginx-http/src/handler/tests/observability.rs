@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn render_access_log_line_uses_configured_template() {
     let format = AccessLogFormat::parse(
-            "ACCESS reqid=$request_id status=$status request=\"$request\" grpc=$grpc_protocol svc=$grpc_service rpc=$grpc_method grpc_status=$grpc_status grpc_message=\"$grpc_message\" bytes=$body_bytes_sent ua=\"$http_user_agent\" source=$client_ip_source route=$route",
+            "ACCESS reqid=$request_id status=$status cache=$cache_status request=\"$request\" grpc=$grpc_protocol svc=$grpc_service rpc=$grpc_method grpc_status=$grpc_status grpc_message=\"$grpc_message\" bytes=$body_bytes_sent ua=\"$http_user_agent\" source=$client_ip_source route=$route",
         )
         .expect("access log format should parse");
     let client_address = ClientAddress {
@@ -47,7 +47,7 @@ fn render_access_log_line_uses_configured_template() {
 
     assert_eq!(
         rendered,
-        "ACCESS reqid=client-log-42 status=200 request=\"GET /demo?x=1 HTTP/1.1\" grpc=grpc-web svc=grpc.health.v1.Health rpc=Check grpc_status=0 grpc_message=\"ok\" bytes=3 ua=\"curl/8.7.1\" source=x_forwarded_for route=servers[0]/routes[0]|exact:/demo"
+        "ACCESS reqid=client-log-42 status=200 cache=HIT request=\"GET /demo?x=1 HTTP/1.1\" grpc=grpc-web svc=grpc.health.v1.Health rpc=Check grpc_status=0 grpc_message=\"ok\" bytes=3 ua=\"curl/8.7.1\" source=x_forwarded_for route=servers[0]/routes[0]|exact:/demo"
     );
 }
 

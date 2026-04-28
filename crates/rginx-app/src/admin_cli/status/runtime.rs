@@ -122,13 +122,7 @@ pub(super) fn print_status_summary(status: &rginx_http::RuntimeStatusSnapshot) {
             ("cache_zones", status.cache.zones.len().to_string()),
             (
                 "cache_entries",
-                status
-                    .cache
-                    .zones
-                    .iter()
-                    .map(|zone| zone.entry_count)
-                    .sum::<usize>()
-                    .to_string(),
+                status.cache.zones.iter().map(|zone| zone.entry_count).sum::<usize>().to_string(),
             ),
             (
                 "cache_current_size_bytes",

@@ -64,10 +64,8 @@ impl SharedState {
         next: &ConfigSnapshot,
         version: u64,
     ) {
-        let mut cache_versions = self
-            .cache_component_versions
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut cache_versions =
+            self.cache_component_versions.write().unwrap_or_else(|poisoned| poisoned.into_inner());
         for zone_name in previous.cache_zones.keys() {
             cache_versions.insert(zone_name.clone(), version);
         }

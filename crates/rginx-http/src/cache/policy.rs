@@ -19,39 +19,57 @@ pub(super) struct ResponseFreshness {
     pub(super) must_revalidate: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ResponseBodySize {
+    exact: Option<u64>,
+    upper: Option<u64>,
+}
+
 pub(super) fn response_is_storable(context: &CacheStoreContext, response: &HttpResponse) -> bool {
-    if !context.policy.statuses.iter().any(|status| *status == response.status()) {
+    response_is_storable_with_size(
+        context,
+        response.status(),
+        response.headers(),
+        ResponseBodySize::from_response(response),
+    )
+}
+
+pub(super) fn response_is_storable_with_size(
+    context: &CacheStoreContext,
+    status: StatusCode,
+    headers: &HeaderMap,
+    body_size: ResponseBodySize,
+) -> bool {
+    if !context.policy.statuses.contains(&status) {
         return false;
     }
-    if response.status() == StatusCode::PARTIAL_CONTENT
-        || response.headers().contains_key(CONTENT_RANGE)
-        || response.headers().contains_key(SET_COOKIE)
+    if status == StatusCode::PARTIAL_CONTENT
+        || headers.contains_key(CONTENT_RANGE)
+        || headers.contains_key(SET_COOKIE)
     {
         return false;
     }
-    if !vary_is_supported(response.headers()) {
+    if !vary_is_supported(headers) {
         return false;
     }
-    if response_is_grpc(response.headers()) {
+    if response_is_grpc(headers) {
         return false;
     }
-    if cache_control_contains(response.headers(), &["no-store", "private"]) {
+    if cache_control_contains(headers, &["no-store", "private"]) {
         return false;
     }
-    if let Some(length) = parse_content_length(response.headers())
+    if let Some(length) = parse_content_length(headers)
         && length > context.zone.config.max_entry_bytes
     {
         return false;
     }
-    if let Some(exact) = response.body().size_hint().exact()
+    if let Some(exact) = body_size.exact
         && exact > context.zone.config.max_entry_bytes as u64
     {
         return false;
     }
-    if !matches!(
-        response.body().size_hint().upper(),
-        Some(upper) if upper <= context.zone.config.max_entry_bytes as u64
-    ) {
+    if !matches!(body_size.upper, Some(upper) if upper <= context.zone.config.max_entry_bytes as u64)
+    {
         return false;
     }
     true
@@ -169,9 +187,11 @@ pub(super) fn vary_is_supported(headers: &HeaderMap) -> bool {
 
     headers.get_all(VARY).iter().all(|value| {
         value.to_str().ok().is_some_and(|value| {
-            value.split(',').map(str::trim).filter(|token| !token.is_empty()).all(|token| {
-                !token.eq("*") && token.eq_ignore_ascii_case("accept-encoding")
-            })
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|token| !token.is_empty())
+                .all(|token| !token.eq("*") && token.eq_ignore_ascii_case("accept-encoding"))
         })
     })
 }
@@ -181,4 +201,18 @@ fn parse_content_length(headers: &HeaderMap) -> Option<usize> {
         .get(CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<usize>().ok())
+}
+
+impl ResponseBodySize {
+    fn from_response(response: &HttpResponse) -> Self {
+        Self {
+            exact: response.body().size_hint().exact(),
+            upper: response.body().size_hint().upper(),
+        }
+    }
+
+    pub(super) fn exact(body_size_bytes: usize) -> Self {
+        let body_size_bytes = body_size_bytes as u64;
+        Self { exact: Some(body_size_bytes), upper: Some(body_size_bytes) }
+    }
 }

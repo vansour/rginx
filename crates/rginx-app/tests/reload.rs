@@ -24,10 +24,10 @@ mod support;
 
 use support::{READY_ROUTE_CONFIG, ServerHarness, reserve_loopback_addr};
 
-#[path = "reload/reload_boundary.rs"]
-mod reload_boundary;
 #[path = "reload/cache.rs"]
 mod cache;
+#[path = "reload/reload_boundary.rs"]
+mod reload_boundary;
 #[path = "reload/reload_flow.rs"]
 mod reload_flow;
 #[path = "reload/restart_flow.rs"]

@@ -125,8 +125,8 @@ fn cli_accepts_snapshot_include_flags() {
 
 #[test]
 fn cli_accepts_cache_snapshot_module() {
-    let cli = Cli::try_parse_from(["rginx", "snapshot", "--include", "cache"])
-        .expect("cli should parse");
+    let cli =
+        Cli::try_parse_from(["rginx", "snapshot", "--include", "cache"]).expect("cli should parse");
 
     assert!(matches!(
         cli.command,

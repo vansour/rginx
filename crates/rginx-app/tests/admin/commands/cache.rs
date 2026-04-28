@@ -17,9 +17,7 @@ fn cache_command_reports_inventory_and_purge_cache_key_removes_entry() {
 
     let first = send_raw_request(
         listen_addr,
-        &format!(
-            "GET /api/demo HTTP/1.1\r\nHost: {listen_addr}\r\nConnection: close\r\n\r\n"
-        ),
+        &format!("GET /api/demo HTTP/1.1\r\nHost: {listen_addr}\r\nConnection: close\r\n\r\n"),
     )
     .expect("first request should succeed");
     assert_eq!(response_header_value(&first, "x-cache").as_deref(), Some("MISS"));
@@ -27,9 +25,7 @@ fn cache_command_reports_inventory_and_purge_cache_key_removes_entry() {
 
     let second = send_raw_request(
         listen_addr,
-        &format!(
-            "GET /api/demo HTTP/1.1\r\nHost: {listen_addr}\r\nConnection: close\r\n\r\n"
-        ),
+        &format!("GET /api/demo HTTP/1.1\r\nHost: {listen_addr}\r\nConnection: close\r\n\r\n"),
     )
     .expect("second request should succeed");
     assert_eq!(response_header_value(&second, "x-cache").as_deref(), Some("HIT"));
@@ -67,9 +63,7 @@ fn cache_command_reports_inventory_and_purge_cache_key_removes_entry() {
 
     let third = send_raw_request(
         listen_addr,
-        &format!(
-            "GET /api/demo HTTP/1.1\r\nHost: {listen_addr}\r\nConnection: close\r\n\r\n"
-        ),
+        &format!("GET /api/demo HTTP/1.1\r\nHost: {listen_addr}\r\nConnection: close\r\n\r\n"),
     )
     .expect("third request should succeed");
     assert_eq!(response_header_value(&third, "x-cache").as_deref(), Some("MISS"));

@@ -290,15 +290,14 @@ async fn status_snapshot_reports_cache_zone_stats() {
         .header("host", "example.com")
         .body(full_body(Bytes::new()))
         .expect("request should build");
-    let context = match active
-        .cache
-        .lookup(CacheRequest::from_request(&request), "https", &policy)
-        .await
-    {
-        CacheLookup::Miss(context) => context,
-        CacheLookup::Hit(_) => panic!("empty cache should miss"),
-        CacheLookup::Bypass(status) => panic!("cacheable request should not bypass: {status:?}"),
-    };
+    let context =
+        match active.cache.lookup(CacheRequest::from_request(&request), "https", &policy).await {
+            CacheLookup::Miss(context) => *context,
+            CacheLookup::Hit(_) => panic!("empty cache should miss"),
+            CacheLookup::Bypass(status) => {
+                panic!("cacheable request should not bypass: {status:?}")
+            }
+        };
     let response = Response::builder()
         .status(StatusCode::OK)
         .header(CACHE_CONTROL, "max-age=60")

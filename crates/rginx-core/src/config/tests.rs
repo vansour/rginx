@@ -362,7 +362,8 @@ fn access_log_format_renders_tls_client_identity_variables() {
 
 #[test]
 fn access_log_format_renders_cache_status_variable() {
-    let format = AccessLogFormat::parse("cache=$cache_status").expect("access log format should parse");
+    let format =
+        AccessLogFormat::parse("cache=$cache_status").expect("access log format should parse");
 
     let rendered = format.render(&AccessLogValues {
         request_id: "req-3",

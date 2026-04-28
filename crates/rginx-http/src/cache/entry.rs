@@ -48,37 +48,49 @@ pub(super) struct CachePaths {
     pub(super) body: PathBuf,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(super) struct CacheMetadataInput {
+    pub(super) stored_at_unix_ms: u64,
+    pub(super) expires_at_unix_ms: u64,
+    pub(super) stale_if_error_until_unix_ms: Option<u64>,
+    pub(super) stale_while_revalidate_until_unix_ms: Option<u64>,
+    pub(super) must_revalidate: bool,
+    pub(super) body_size_bytes: usize,
+}
+
 pub(super) fn cache_metadata(
     key: String,
     status: StatusCode,
     headers: &HeaderMap,
-    stored_at_unix_ms: u64,
-    expires_at_unix_ms: u64,
-    stale_if_error_until_unix_ms: Option<u64>,
-    stale_while_revalidate_until_unix_ms: Option<u64>,
-    must_revalidate: bool,
-    body_size_bytes: usize,
+    input: CacheMetadataInput,
 ) -> CacheMetadata {
     CacheMetadata {
         key,
         status: status.as_u16(),
-        headers: cached_headers(headers, body_size_bytes),
-        stored_at_unix_ms,
-        expires_at_unix_ms,
-        stale_if_error_until_unix_ms,
-        stale_while_revalidate_until_unix_ms,
-        must_revalidate,
-        body_size_bytes,
+        headers: cached_headers(headers, input.body_size_bytes),
+        stored_at_unix_ms: input.stored_at_unix_ms,
+        expires_at_unix_ms: input.expires_at_unix_ms,
+        stale_if_error_until_unix_ms: input.stale_if_error_until_unix_ms,
+        stale_while_revalidate_until_unix_ms: input.stale_while_revalidate_until_unix_ms,
+        must_revalidate: input.must_revalidate,
+        body_size_bytes: input.body_size_bytes,
     }
 }
 
 pub(super) async fn read_cached_response(
     zone: &CacheZoneRuntime,
+    key: &str,
     entry: &CacheIndexEntry,
     read_body: bool,
 ) -> std::io::Result<HttpResponse> {
     let paths = cache_paths(&zone.config.path, &entry.hash);
     let metadata = read_cache_metadata(&paths.metadata).await?;
+    if metadata.key != key {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("cached metadata key mismatch: expected `{key}`, found `{}`", metadata.key),
+        ));
+    }
     build_cached_response(&paths.body, &metadata, read_body).await
 }
 

@@ -83,10 +83,8 @@ impl SharedState {
             &self.upstream_component_versions,
             since_version,
         );
-        let changed_cache_zone_names = self.changed_named_component_targets_since(
-            &self.cache_component_versions,
-            since_version,
-        );
+        let changed_cache_zone_names = self
+            .changed_named_component_targets_since(&self.cache_component_versions, since_version);
 
         SnapshotDeltaSnapshot {
             schema_version: 3,

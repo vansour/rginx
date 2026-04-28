@@ -11,17 +11,22 @@ use super::listeners::{
     initiate_shutdown_for_groups, join_aborted_listener_worker_groups, join_listener_worker_groups,
 };
 
+pub(super) struct ShutdownTasks<'a> {
+    pub(super) admin_task: &'a mut Option<JoinHandle<std::io::Result<()>>>,
+    pub(super) cache_task: &'a mut Option<JoinHandle<()>>,
+    pub(super) health_task: &'a mut Option<JoinHandle<()>>,
+    pub(super) ocsp_task: &'a mut Option<JoinHandle<()>>,
+}
+
 pub(super) async fn graceful_shutdown(
     state: &RuntimeState,
     shutdown_timeout: Duration,
     shutdown_tx: &watch::Sender<bool>,
     active_listener_groups: &mut ListenerGroupMap,
     draining_listener_groups: &mut Vec<ListenerWorkerGroup>,
-    admin_task: &mut Option<JoinHandle<std::io::Result<()>>>,
-    cache_task: &mut Option<JoinHandle<()>>,
-    health_task: &mut Option<JoinHandle<()>>,
-    ocsp_task: &mut Option<JoinHandle<()>>,
+    tasks: ShutdownTasks<'_>,
 ) -> Result<()> {
+    let ShutdownTasks { admin_task, cache_task, health_task, ocsp_task } = tasks;
     let _ = shutdown_tx.send(true);
     initiate_shutdown_for_groups(active_listener_groups.values());
     initiate_shutdown_for_groups(draining_listener_groups.iter());

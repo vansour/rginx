@@ -159,7 +159,9 @@ async fn dispatch_request(request: AdminRequest, state: &SharedState) -> io::Res
             AdminResponse::SnapshotVersion(SnapshotVersionSnapshot { snapshot_version })
         }
         AdminRequest::GetStatus => AdminResponse::Status(state.status_snapshot().await),
-        AdminRequest::GetCacheStats => AdminResponse::CacheStats(state.cache_stats_snapshot().await),
+        AdminRequest::GetCacheStats => {
+            AdminResponse::CacheStats(state.cache_stats_snapshot().await)
+        }
         AdminRequest::GetCounters => AdminResponse::Counters(state.counters_snapshot()),
         AdminRequest::GetTrafficStats { window_secs } => {
             let window_secs = normalize_recent_window_secs(window_secs)

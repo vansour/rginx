@@ -11,7 +11,7 @@ pub(super) struct UpstreamSuccessContext<'a> {
     pub(super) grpc_response_deadline: Option<super::response::GrpcResponseDeadline>,
     pub(super) grpc_web_mode: Option<&'a GrpcWebMode>,
     pub(super) cache_manager: crate::cache::CacheManager,
-    pub(super) cache_store: Option<crate::cache::CacheStoreContext>,
+    pub(super) cache_store: Option<Box<crate::cache::CacheStoreContext>>,
     pub(super) cache_status: Option<crate::cache::CacheStatus>,
 }
 
@@ -27,7 +27,7 @@ pub(super) async fn finalize_upstream_success(
         return match context
             .cache_manager
             .complete_not_modified(
-                context.cache_store.expect("cache store should be present for revalidation"),
+                *context.cache_store.expect("cache store should be present for revalidation"),
                 response,
             )
             .await
@@ -44,12 +44,11 @@ pub(super) async fn finalize_upstream_success(
         };
     }
 
-    if let Some(cache_store) = context.cache_store.as_ref() {
-        if response.status().is_server_error()
-            && let Some(stale) = cache_store.serve_stale_on_error().await
-        {
-            return stale;
-        }
+    if let Some(cache_store) = context.cache_store.as_ref()
+        && response.status().is_server_error()
+        && let Some(stale) = cache_store.serve_stale_on_error().await
+    {
+        return stale;
     }
 
     let mut response = response;
@@ -101,12 +100,12 @@ pub(super) async fn finalize_upstream_success(
 
 async fn apply_cache_store(
     cache_manager: &crate::cache::CacheManager,
-    cache_store: Option<crate::cache::CacheStoreContext>,
+    cache_store: Option<Box<crate::cache::CacheStoreContext>>,
     cache_status: Option<crate::cache::CacheStatus>,
     response: HttpResponse,
 ) -> HttpResponse {
     if let Some(cache_store) = cache_store {
-        cache_manager.store_response(cache_store, response).await
+        cache_manager.store_response(*cache_store, response).await
     } else if let Some(cache_status) = cache_status {
         crate::cache::with_cache_status(response, cache_status)
     } else {

@@ -148,7 +148,11 @@ impl SharedState {
                 next_revision,
             );
         }
-        self.mark_all_cache_zones_changed(previous_config.as_ref(), prepared.config.as_ref(), next_revision);
+        self.mark_all_cache_zones_changed(
+            previous_config.as_ref(),
+            prepared.config.as_ref(),
+            next_revision,
+        );
         self.notify_snapshot_waiters();
 
         prepared.config

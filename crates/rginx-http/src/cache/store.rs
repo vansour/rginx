@@ -9,10 +9,13 @@ use tokio::fs;
 use crate::handler::{HttpResponse, full_body};
 
 use super::entry::{
-    build_cached_response, cache_key_hash, cache_metadata, cache_paths, unix_time_ms,
-    write_cache_entry, write_cache_metadata,
+    CacheMetadataInput, build_cached_response, cache_key_hash, cache_metadata, cache_paths,
+    unix_time_ms, write_cache_entry, write_cache_metadata,
 };
-use super::policy::{ResponseFreshness, response_freshness, response_is_storable};
+use super::policy::{
+    ResponseBodySize, ResponseFreshness, response_freshness, response_is_storable,
+    response_is_storable_with_size,
+};
 use super::{
     CacheIndex, CacheIndexEntry, CachePurgeResult, CacheStatus, CacheStoreContext,
     CacheZoneRuntime, PurgeSelector, with_cache_status,
@@ -67,21 +70,11 @@ pub(super) async fn store_response(
         return Ok(Response::from_parts(parts, full_body(collected)));
     }
 
-    let expires_at_unix_ms = now.saturating_add(duration_to_ms(freshness.ttl));
     let metadata = cache_metadata(
         context.key.clone(),
         parts.status,
         &parts.headers,
-        now,
-        expires_at_unix_ms,
-        freshness
-            .stale_if_error
-            .map(|duration| now.saturating_add(duration_to_ms(duration))),
-        freshness
-            .stale_while_revalidate
-            .map(|duration| now.saturating_add(duration_to_ms(duration))),
-        freshness.must_revalidate,
-        collected.len(),
+        cache_metadata_input(now, &freshness, collected.len()),
     );
     let hash = context
         .cached_entry
@@ -110,7 +103,7 @@ pub(super) async fn store_response(
             CacheIndexEntry {
                 hash,
                 body_size_bytes: metadata.body_size_bytes,
-                expires_at_unix_ms,
+                expires_at_unix_ms: metadata.expires_at_unix_ms,
                 stale_if_error_until_unix_ms: metadata.stale_if_error_until_unix_ms,
                 stale_while_revalidate_until_unix_ms: metadata.stale_while_revalidate_until_unix_ms,
                 must_revalidate: metadata.must_revalidate,
@@ -140,28 +133,42 @@ pub(super) async fn refresh_not_modified_response(
         });
     };
 
-    let cached_headers = cached_metadata.headers_map().map_err(|error| CacheStoreError {
-        source: Box::new(error),
-    })?;
+    let cached_headers = cached_metadata
+        .headers_map()
+        .map_err(|error| CacheStoreError { source: Box::new(error) })?;
     let merged_headers = merge_not_modified_headers(&cached_headers, response.headers());
     let now = unix_time_ms(SystemTime::now());
+    let cached_status = StatusCode::from_u16(cached_metadata.status).unwrap_or(StatusCode::OK);
     let freshness = response_freshness(&context, &merged_headers);
     let metadata = cache_metadata(
         context.key.clone(),
-        StatusCode::from_u16(cached_metadata.status).unwrap_or(StatusCode::OK),
+        cached_status,
         &merged_headers,
-        now,
-        now.saturating_add(duration_to_ms(freshness.ttl)),
-        freshness
-            .stale_if_error
-            .map(|duration| now.saturating_add(duration_to_ms(duration))),
-        freshness
-            .stale_while_revalidate
-            .map(|duration| now.saturating_add(duration_to_ms(duration))),
-        freshness.must_revalidate,
-        cached_metadata.body_size_bytes,
+        cache_metadata_input(now, &freshness, cached_metadata.body_size_bytes),
     );
     let paths = cache_paths(&context.zone.config.path, &cached_entry.hash);
+    if !response_is_storable_with_size(
+        &context,
+        cached_status,
+        &merged_headers,
+        ResponseBodySize::exact(cached_metadata.body_size_bytes),
+    ) || !freshness_is_cacheable(&freshness)
+    {
+        let refreshed = {
+            let _io_guard = context.zone.io_lock.lock().await;
+            build_cached_response(&paths.body, &metadata, context.read_cached_body)
+                .await
+                .map_err(|error| CacheStoreError { source: Box::new(error) })
+        };
+        remove_index_entry(&context.zone, &context.key);
+        {
+            let _io_guard = context.zone.io_lock.lock().await;
+            let _ = fs::remove_file(&paths.metadata).await;
+            let _ = fs::remove_file(&paths.body).await;
+        }
+        context.zone.record_revalidated();
+        return refreshed.map(|response| with_cache_status(response, CacheStatus::Revalidated));
+    }
     {
         let _io_guard = context.zone.io_lock.lock().await;
         write_cache_metadata(&paths, &metadata)
@@ -199,12 +206,16 @@ pub(super) async fn cleanup_inactive_entries_in_zone(zone: &Arc<CacheZoneRuntime
     let now = unix_time_ms(SystemTime::now());
     let removed = {
         let mut index = lock_index(&zone.index);
+        let keys_to_remove = index
+            .entries
+            .iter()
+            .filter_map(|(key, entry)| {
+                (now.saturating_sub(entry.last_access_unix_ms) > inactive_ms).then_some(key.clone())
+            })
+            .collect::<Vec<_>>();
         let mut removed = Vec::new();
-        for (key, entry) in index.entries.clone() {
-            if now.saturating_sub(entry.last_access_unix_ms) <= inactive_ms {
-                continue;
-            }
-            if index.entries.remove(&key).is_some() {
+        for key in keys_to_remove {
+            if let Some(entry) = index.entries.remove(&key) {
                 index.current_size_bytes =
                     index.current_size_bytes.saturating_sub(entry.body_size_bytes);
                 removed.push(entry);
@@ -222,6 +233,7 @@ pub(super) async fn cleanup_inactive_entries_in_zone(zone: &Arc<CacheZoneRuntime
         let _ = fs::remove_file(paths.metadata).await;
         let _ = fs::remove_file(paths.body).await;
     }
+    zone.notify_changed();
 }
 
 pub(super) async fn purge_zone_entries(
@@ -231,15 +243,14 @@ pub(super) async fn purge_zone_entries(
     let scope = purge_scope(&selector);
     let removed = {
         let mut index = lock_index(&zone.index);
-        let matching = index
+        let matching_keys = index
             .entries
-            .iter()
-            .filter(|(key, _)| purge_selector_matches(&selector, key))
-            .map(|(key, entry)| (key.clone(), entry.clone()))
+            .keys()
+            .filter_map(|key| purge_selector_matches(&selector, key).then_some(key.clone()))
             .collect::<Vec<_>>();
-        let mut removed = Vec::with_capacity(matching.len());
-        for (key, entry) in matching {
-            if index.entries.remove(&key).is_some() {
+        let mut removed = Vec::with_capacity(matching_keys.len());
+        for key in matching_keys {
+            if let Some(entry) = index.entries.remove(&key) {
                 index.current_size_bytes =
                     index.current_size_bytes.saturating_sub(entry.body_size_bytes);
                 removed.push(entry);
@@ -256,6 +267,7 @@ pub(super) async fn purge_zone_entries(
             let _ = fs::remove_file(paths.metadata).await;
             let _ = fs::remove_file(paths.body).await;
         }
+        zone.notify_changed();
     }
     CachePurgeResult {
         zone_name: zone.config.name.clone(),
@@ -330,6 +342,25 @@ pub(super) fn remove_index_entry(zone: &CacheZoneRuntime, key: &str) {
 
 fn duration_to_ms(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn cache_metadata_input(
+    now: u64,
+    freshness: &ResponseFreshness,
+    body_size_bytes: usize,
+) -> CacheMetadataInput {
+    CacheMetadataInput {
+        stored_at_unix_ms: now,
+        expires_at_unix_ms: now.saturating_add(duration_to_ms(freshness.ttl)),
+        stale_if_error_until_unix_ms: freshness
+            .stale_if_error
+            .map(|duration| now.saturating_add(duration_to_ms(duration))),
+        stale_while_revalidate_until_unix_ms: freshness
+            .stale_while_revalidate
+            .map(|duration| now.saturating_add(duration_to_ms(duration))),
+        must_revalidate: freshness.must_revalidate,
+        body_size_bytes,
+    }
 }
 
 pub(super) fn lock_index(mutex: &Mutex<CacheIndex>) -> std::sync::MutexGuard<'_, CacheIndex> {

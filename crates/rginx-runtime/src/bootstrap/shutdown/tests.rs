@@ -100,10 +100,12 @@ async fn graceful_shutdown_waits_for_background_tasks_and_signals_shutdown() {
         &shutdown_tx,
         &mut active_listener_groups,
         &mut draining_listener_groups,
-        &mut admin_task,
-        &mut cache_task,
-        &mut health_task,
-        &mut ocsp_task,
+        ShutdownTasks {
+            admin_task: &mut admin_task,
+            cache_task: &mut cache_task,
+            health_task: &mut health_task,
+            ocsp_task: &mut ocsp_task,
+        },
     )
     .await
     .expect("graceful shutdown should succeed");
@@ -144,10 +146,12 @@ async fn graceful_shutdown_aborts_pending_tasks_after_timeout() {
         &shutdown_tx,
         &mut active_listener_groups,
         &mut draining_listener_groups,
-        &mut admin_task,
-        &mut cache_task,
-        &mut health_task,
-        &mut ocsp_task,
+        ShutdownTasks {
+            admin_task: &mut admin_task,
+            cache_task: &mut cache_task,
+            health_task: &mut health_task,
+            ocsp_task: &mut ocsp_task,
+        },
     )
     .await
     .expect("timeout branch should still resolve successfully");

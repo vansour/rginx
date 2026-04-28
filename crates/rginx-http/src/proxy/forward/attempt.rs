@@ -229,10 +229,10 @@ pub async fn forward_request(
                     %error,
                     "upstream request failed"
                 );
-                state.record_upstream_bad_gateway_response(&target.upstream_name);
                 if let Some(stale) = cache.serve_stale_on_error().await {
                     return stale;
                 }
+                state.record_upstream_bad_gateway_response(&target.upstream_name);
                 return cache.mark_response(bad_gateway(
                     &request_headers,
                     format!("upstream `{}` is unavailable\n", target.upstream_name),
@@ -280,10 +280,10 @@ pub async fn forward_request(
                     %error,
                     "upstream request timed out"
                 );
-                state.record_upstream_gateway_timeout_response(&target.upstream_name);
                 if let Some(stale) = cache.serve_stale_on_error().await {
                     return stale;
                 }
+                state.record_upstream_gateway_timeout_response(&target.upstream_name);
                 return cache.mark_response(gateway_timeout(
                     &request_headers,
                     format!(

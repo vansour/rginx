@@ -11,6 +11,7 @@ use http::{Method, Request, StatusCode, Uri};
 use rginx_core::{CacheZone, ConfigSnapshot, Error, Result, RouteCachePolicy};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
+use tokio::sync::futures::OwnedNotified;
 use tokio::sync::{Mutex as AsyncMutex, Notify};
 
 use crate::handler::{HttpBody, HttpResponse};
@@ -21,12 +22,12 @@ mod policy;
 mod request;
 mod store;
 
-#[cfg(test)]
-use entry::{cache_key_hash, cache_metadata, write_cache_entry};
 use entry::{
     CacheMetadata, build_cached_response, cache_paths, read_cache_metadata, read_cached_response,
     unix_time_ms,
 };
+#[cfg(test)]
+use entry::{cache_key_hash, cache_metadata, write_cache_entry};
 use load::load_index_from_disk;
 use policy::{header_value, request_requires_revalidation};
 #[cfg(test)]
@@ -70,7 +71,7 @@ pub(crate) struct CacheRequest {
 
 pub(crate) enum CacheLookup {
     Hit(HttpResponse),
-    Miss(CacheStoreContext),
+    Miss(Box<CacheStoreContext>),
     Bypass(CacheStatus),
 }
 
@@ -190,7 +191,12 @@ enum LookupDecision {
         cache_status: CacheStatus,
         allow_stale_on_error: bool,
     },
-    Wait(Arc<Notify>),
+    Wait(OwnedNotified),
+}
+
+enum FillLockDecision {
+    Acquired(CacheFillGuard),
+    Wait(OwnedNotified),
 }
 
 impl CacheManager {
@@ -262,16 +268,11 @@ impl CacheManager {
 
         loop {
             let now = unix_time_ms(SystemTime::now());
-            match self.lookup_decision(
-                &zone,
-                &key,
-                now,
-                request_forces_revalidation,
-            ) {
+            match self.lookup_decision(&zone, &key, now, request_forces_revalidation) {
                 LookupDecision::FreshHit(entry) => {
                     let cached_response = {
                         let _io_guard = zone.io_lock.lock().await;
-                        read_cached_response(&zone, &entry, read_cached_body).await
+                        read_cached_response(&zone, &key, &entry, read_cached_body).await
                     };
                     match cached_response {
                         Ok(mut response) => {
@@ -302,8 +303,8 @@ impl CacheManager {
                         None => continue,
                     }
                 }
-                LookupDecision::Wait(notify) => {
-                    notify.notified().await;
+                LookupDecision::Wait(waiter) => {
+                    waiter.await;
                 }
                 LookupDecision::Miss {
                     cached_entry,
@@ -311,7 +312,8 @@ impl CacheManager {
                     cache_status,
                     allow_stale_on_error,
                 } => {
-                    let (cached_metadata, conditional_headers) = if let Some(entry) = &cached_entry {
+                    let (cached_metadata, conditional_headers) = if let Some(entry) = &cached_entry
+                    {
                         match self.load_lookup_metadata(&zone, &key, entry).await {
                             Some((metadata, conditional_headers)) => {
                                 (Some(metadata), conditional_headers)
@@ -330,7 +332,7 @@ impl CacheManager {
                         zone.record_expired();
                     }
 
-                    return CacheLookup::Miss(CacheStoreContext {
+                    return CacheLookup::Miss(Box::new(CacheStoreContext {
                         zone,
                         policy: policy.clone(),
                         key,
@@ -343,7 +345,7 @@ impl CacheManager {
                         revalidating: cache_status == CacheStatus::Revalidated,
                         conditional_headers,
                         read_cached_body,
-                    });
+                    }));
                 }
             }
         }
@@ -383,11 +385,7 @@ impl CacheManager {
     }
 
     pub(crate) fn snapshot(&self) -> Vec<CacheZoneRuntimeSnapshot> {
-        let mut snapshots = self
-            .zones
-            .values()
-            .map(|zone| zone.snapshot())
-            .collect::<Vec<_>>();
+        let mut snapshots = self.zones.values().map(|zone| zone.snapshot()).collect::<Vec<_>>();
         snapshots.sort_by(|left, right| left.zone_name.cmp(&right.zone_name));
         snapshots
     }
@@ -455,51 +453,40 @@ impl CacheManager {
             }
             Some(entry) => {
                 entry.last_access_unix_ms = now;
-                if let Some(fill_guard) = zone.try_acquire_fill_guard(key) {
-                    let expired = now > entry.expires_at_unix_ms;
-                    let cache_status = if expired {
-                        CacheStatus::Expired
-                    } else {
-                        CacheStatus::Revalidated
-                    };
-                    let allow_stale_on_error = expired
-                        && entry
-                            .stale_if_error_until_unix_ms
-                            .is_some_and(|until| now <= until);
-                    LookupDecision::Miss {
-                        cached_entry: Some(entry.clone()),
-                        fill_guard,
-                        cache_status,
-                        allow_stale_on_error,
+                match zone.fill_lock_decision(key) {
+                    FillLockDecision::Acquired(fill_guard) => {
+                        let expired = now > entry.expires_at_unix_ms;
+                        let cache_status =
+                            if expired { CacheStatus::Expired } else { CacheStatus::Revalidated };
+                        let allow_stale_on_error = expired
+                            && entry.stale_if_error_until_unix_ms.is_some_and(|until| now <= until);
+                        LookupDecision::Miss {
+                            cached_entry: Some(entry.clone()),
+                            fill_guard,
+                            cache_status,
+                            allow_stale_on_error,
+                        }
                     }
-                } else if now > entry.expires_at_unix_ms
-                    && entry
-                        .stale_while_revalidate_until_unix_ms
-                        .is_some_and(|until| now <= until)
-                {
-                    LookupDecision::StaleWhileRevalidate(entry.clone())
-                } else {
-                    LookupDecision::Wait(
-                        zone.current_fill_notify(key)
-                            .expect("fill lock should still exist when waiting"),
-                    )
+                    FillLockDecision::Wait(_waiter)
+                        if now > entry.expires_at_unix_ms
+                            && entry
+                                .stale_while_revalidate_until_unix_ms
+                                .is_some_and(|until| now <= until) =>
+                    {
+                        LookupDecision::StaleWhileRevalidate(entry.clone())
+                    }
+                    FillLockDecision::Wait(waiter) => LookupDecision::Wait(waiter),
                 }
             }
-            None => {
-                if let Some(fill_guard) = zone.try_acquire_fill_guard(key) {
-                    LookupDecision::Miss {
-                        cached_entry: None,
-                        fill_guard,
-                        cache_status: CacheStatus::Miss,
-                        allow_stale_on_error: false,
-                    }
-                } else {
-                    LookupDecision::Wait(
-                        zone.current_fill_notify(key)
-                            .expect("fill lock should still exist when waiting"),
-                    )
-                }
-            }
+            None => match zone.fill_lock_decision(key) {
+                FillLockDecision::Acquired(fill_guard) => LookupDecision::Miss {
+                    cached_entry: None,
+                    fill_guard,
+                    cache_status: CacheStatus::Miss,
+                    allow_stale_on_error: false,
+                },
+                FillLockDecision::Wait(waiter) => LookupDecision::Wait(waiter),
+            },
         }
     }
 
@@ -528,6 +515,18 @@ impl CacheManager {
                 return None;
             }
         };
+        if metadata.key != key {
+            tracing::warn!(
+                zone = %zone.config.name,
+                key = %key,
+                cached_key = %metadata.key,
+                key_hash = %entry.hash,
+                "cache metadata key mismatch; removing entry"
+            );
+            remove_index_entry(zone, key);
+            remove_cache_files_if_unindexed(zone, key, &entry.hash).await;
+            return None;
+        }
         let headers = match metadata.headers_map() {
             Ok(headers) => headers,
             Err(error) => {
@@ -557,10 +556,18 @@ impl CacheManager {
             let _io_guard = zone.io_lock.lock().await;
             let paths = cache_paths(&zone.config.path, &entry.hash);
             let metadata = read_cache_metadata(&paths.metadata).await.ok()?;
-            let response = build_cached_response(&paths.body, &metadata, read_cached_body).await.ok()?;
+            let response =
+                build_cached_response(&paths.body, &metadata, read_cached_body).await.ok()?;
             (metadata, response)
         };
         if metadata.key != key {
+            tracing::warn!(
+                zone = %zone.config.name,
+                key = %key,
+                cached_key = %metadata.key,
+                key_hash = %entry.hash,
+                "cache metadata key mismatch while serving stale entry; removing entry"
+            );
             remove_index_entry(zone, key);
             remove_cache_files_if_unindexed(zone, key, &entry.hash).await;
             return None;
@@ -598,7 +605,7 @@ impl CacheStoreContext {
     }
 
     pub(crate) fn should_refresh_from_not_modified(&self, status: StatusCode) -> bool {
-        self.revalidating && status == StatusCode::NOT_MODIFIED
+        self.cached_entry.is_some() && status == StatusCode::NOT_MODIFIED
     }
 
     pub(crate) fn can_serve_stale_on_error(&self) -> bool {
@@ -663,27 +670,19 @@ impl CacheZoneRuntime {
         }
     }
 
-    fn try_acquire_fill_guard(self: &Arc<Self>, key: &str) -> Option<CacheFillGuard> {
+    fn fill_lock_decision(self: &Arc<Self>, key: &str) -> FillLockDecision {
         let mut fill_locks =
             self.fill_locks.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if fill_locks.contains_key(key) {
-            return None;
+        if let Some(notify) = fill_locks.get(key).cloned() {
+            return FillLockDecision::Wait(notify.notified_owned());
         }
         let notify = Arc::new(Notify::new());
         fill_locks.insert(key.to_string(), notify.clone());
-        Some(CacheFillGuard {
+        FillLockDecision::Acquired(CacheFillGuard {
             key: key.to_string(),
             fill_locks: Arc::downgrade(&self.fill_locks),
             notify,
         })
-    }
-
-    fn current_fill_notify(&self, key: &str) -> Option<Arc<Notify>> {
-        self.fill_locks
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(key)
-            .cloned()
     }
 
     fn record_hit(&self) {
@@ -738,7 +737,6 @@ impl CacheZoneRuntime {
 
     fn record_counter(&self, counter: &AtomicU64, value: u64) {
         counter.fetch_add(value, Ordering::Relaxed);
-        self.notify_changed();
     }
 
     pub(super) fn notify_changed(&self) {
@@ -751,10 +749,7 @@ impl CacheZoneRuntime {
 impl Drop for CacheFillGuard {
     fn drop(&mut self) {
         if let Some(fill_locks) = self.fill_locks.upgrade() {
-            fill_locks
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .remove(&self.key);
+            fill_locks.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&self.key);
         }
         self.notify.notify_waiters();
     }
@@ -776,14 +771,12 @@ async fn remove_cache_files_if_unindexed(zone: &CacheZoneRuntime, key: &str, has
 }
 
 fn build_conditional_headers(headers: &HeaderMap) -> Option<CacheConditionalHeaders> {
-    let if_none_match = header_value(headers, ETAG)
-        .and_then(|value| HeaderValue::from_str(&value).ok());
-    let if_modified_since = header_value(headers, LAST_MODIFIED)
-        .and_then(|value| HeaderValue::from_str(&value).ok());
-    (if_none_match.is_some() || if_modified_since.is_some()).then_some(CacheConditionalHeaders {
-        if_none_match,
-        if_modified_since,
-    })
+    let if_none_match =
+        header_value(headers, ETAG).and_then(|value| HeaderValue::from_str(&value).ok());
+    let if_modified_since =
+        header_value(headers, LAST_MODIFIED).and_then(|value| HeaderValue::from_str(&value).ok());
+    (if_none_match.is_some() || if_modified_since.is_some())
+        .then_some(CacheConditionalHeaders { if_none_match, if_modified_since })
 }
 
 #[derive(Debug, Clone)]

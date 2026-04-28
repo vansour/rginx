@@ -40,20 +40,19 @@ pub(super) struct PreparedState {
     retired_listeners: Vec<Listener>,
 }
 
+pub use crate::cache::{CachePurgeResult, CacheZoneRuntimeSnapshot};
 pub use snapshots::ActiveState;
 pub use snapshots::{
     CacheStatsSnapshot, GrpcTrafficSnapshot, Http3ListenerRuntimeSnapshot, HttpCountersSnapshot,
     ListenerStatsSnapshot, MtlsStatusSnapshot, RecentTrafficStatsSnapshot,
-    RecentUpstreamStatsSnapshot, ReloadOutcomeSnapshot, ReloadResultSnapshot,
-    ReloadStatusSnapshot, RouteStatsSnapshot, RuntimeListenerBindingSnapshot,
-    RuntimeListenerSnapshot, RuntimeStatusSnapshot, SnapshotDeltaSnapshot, SnapshotModule,
-    TlsCertificateStatusSnapshot, TlsDefaultCertificateBindingSnapshot,
-    TlsListenerStatusSnapshot, TlsOcspRefreshSpec, TlsOcspStatusSnapshot,
-    TlsReloadBoundarySnapshot, TlsRuntimeSnapshot, TlsSniBindingSnapshot,
+    RecentUpstreamStatsSnapshot, ReloadOutcomeSnapshot, ReloadResultSnapshot, ReloadStatusSnapshot,
+    RouteStatsSnapshot, RuntimeListenerBindingSnapshot, RuntimeListenerSnapshot,
+    RuntimeStatusSnapshot, SnapshotDeltaSnapshot, SnapshotModule, TlsCertificateStatusSnapshot,
+    TlsDefaultCertificateBindingSnapshot, TlsListenerStatusSnapshot, TlsOcspRefreshSpec,
+    TlsOcspStatusSnapshot, TlsReloadBoundarySnapshot, TlsRuntimeSnapshot, TlsSniBindingSnapshot,
     TlsVhostBindingSnapshot, TrafficStatsSnapshot, UpstreamPeerStatsSnapshot,
     UpstreamStatsSnapshot, UpstreamTlsStatusSnapshot, VhostStatsSnapshot,
 };
-pub use crate::cache::{CachePurgeResult, CacheZoneRuntimeSnapshot};
 include!("counters/http.rs");
 include!("counters/rolling.rs");
 include!("counters/grpc.rs");

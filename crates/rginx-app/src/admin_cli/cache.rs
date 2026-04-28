@@ -17,14 +17,12 @@ pub(super) fn print_admin_purge_cache(
     args: &PurgeCacheArgs,
 ) -> anyhow::Result<()> {
     let request = match (&args.key, &args.prefix) {
-        (Some(key), None) => AdminRequest::PurgeCacheKey {
-            zone_name: args.zone.clone(),
-            key: key.clone(),
-        },
-        (None, Some(prefix)) => AdminRequest::PurgeCachePrefix {
-            zone_name: args.zone.clone(),
-            prefix: prefix.clone(),
-        },
+        (Some(key), None) => {
+            AdminRequest::PurgeCacheKey { zone_name: args.zone.clone(), key: key.clone() }
+        }
+        (None, Some(prefix)) => {
+            AdminRequest::PurgeCachePrefix { zone_name: args.zone.clone(), prefix: prefix.clone() }
+        }
         (None, None) => AdminRequest::PurgeCacheZone { zone_name: args.zone.clone() },
         (Some(_), Some(_)) => unreachable!("clap enforces purge cache selector exclusivity"),
     };
@@ -50,44 +48,22 @@ pub(super) fn print_status_cache(cache: &rginx_http::CacheStatsSnapshot) {
     print_cache_stats(cache, "status_cache", "status_cache_zone");
 }
 
-fn print_cache_stats(
-    cache: &rginx_http::CacheStatsSnapshot,
-    summary_kind: &str,
-    zone_kind: &str,
-) {
+fn print_cache_stats(cache: &rginx_http::CacheStatsSnapshot, summary_kind: &str, zone_kind: &str) {
     let zones = &cache.zones;
     print_record(
         summary_kind,
         [
             ("zones", zones.len().to_string()),
-            (
-                "entries",
-                zones.iter().map(|zone| zone.entry_count).sum::<usize>().to_string(),
-            ),
+            ("entries", zones.iter().map(|zone| zone.entry_count).sum::<usize>().to_string()),
             (
                 "current_size_bytes",
                 zones.iter().map(|zone| zone.current_size_bytes).sum::<usize>().to_string(),
             ),
-            (
-                "hit_total",
-                zones.iter().map(|zone| zone.hit_total).sum::<u64>().to_string(),
-            ),
-            (
-                "miss_total",
-                zones.iter().map(|zone| zone.miss_total).sum::<u64>().to_string(),
-            ),
-            (
-                "bypass_total",
-                zones.iter().map(|zone| zone.bypass_total).sum::<u64>().to_string(),
-            ),
-            (
-                "expired_total",
-                zones.iter().map(|zone| zone.expired_total).sum::<u64>().to_string(),
-            ),
-            (
-                "stale_total",
-                zones.iter().map(|zone| zone.stale_total).sum::<u64>().to_string(),
-            ),
+            ("hit_total", zones.iter().map(|zone| zone.hit_total).sum::<u64>().to_string()),
+            ("miss_total", zones.iter().map(|zone| zone.miss_total).sum::<u64>().to_string()),
+            ("bypass_total", zones.iter().map(|zone| zone.bypass_total).sum::<u64>().to_string()),
+            ("expired_total", zones.iter().map(|zone| zone.expired_total).sum::<u64>().to_string()),
+            ("stale_total", zones.iter().map(|zone| zone.stale_total).sum::<u64>().to_string()),
             (
                 "revalidated_total",
                 zones.iter().map(|zone| zone.revalidated_total).sum::<u64>().to_string(),
@@ -104,10 +80,7 @@ fn print_cache_stats(
                 "eviction_total",
                 zones.iter().map(|zone| zone.eviction_total).sum::<u64>().to_string(),
             ),
-            (
-                "purge_total",
-                zones.iter().map(|zone| zone.purge_total).sum::<u64>().to_string(),
-            ),
+            ("purge_total", zones.iter().map(|zone| zone.purge_total).sum::<u64>().to_string()),
             (
                 "inactive_cleanup_total",
                 zones.iter().map(|zone| zone.inactive_cleanup_total).sum::<u64>().to_string(),
