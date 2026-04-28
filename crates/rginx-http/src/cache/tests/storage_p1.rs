@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use bytes::Bytes;
-use http::header::{CACHE_CONTROL, CONTENT_RANGE, SET_COOKIE};
+use http::header::{ACCEPT_LANGUAGE, CACHE_CONTROL, CONTENT_RANGE, SET_COOKIE};
 use http::{Method, Request, Response, StatusCode};
 use http_body_util::BodyExt;
 use tokio::sync::Mutex as AsyncMutex;
@@ -274,4 +274,58 @@ async fn cleanup_inactive_entries_honors_manager_batch_entries() {
     cleanup_inactive_entries_in_zone(&zone).await;
     assert!(lock_index(&zone.index).entries.is_empty());
     assert!(started.elapsed() >= manager_sleep, "cleanup should pause between batches");
+}
+
+#[tokio::test]
+async fn rebucketed_response_still_respects_min_uses_for_new_final_key() {
+    let temp = tempfile::tempdir().expect("cache temp dir should exist");
+    let manager = test_manager(temp.path().to_path_buf(), 1024);
+    let zone = manager.zones.get("default").expect("default zone should exist").clone();
+    let base_key = "https:example.com:/rebucket";
+    let hash = cache_key_hash(base_key);
+    let now = unix_time_ms(SystemTime::now());
+    let metadata = cache_metadata(
+        base_key.to_string(),
+        StatusCode::OK,
+        &http::HeaderMap::new(),
+        test_metadata_input(base_key, now.saturating_sub(5_000), now.saturating_sub(1_000), 6),
+    );
+    let paths = cache_paths_for_zone(zone.config.as_ref(), &hash);
+    write_cache_entry(&paths, &metadata, b"cached").await.expect("entry should be written");
+    let cached_entry =
+        test_index_entry(base_key, hash, 6, now.saturating_sub(1_000), now.saturating_sub(5_000));
+    {
+        let mut index = lock_index(&zone.index);
+        index.entries.insert(base_key.to_string(), cached_entry.clone());
+        index.current_size_bytes = 6;
+    }
+
+    let expected_final_key = cache_variant_key(
+        base_key,
+        &[CachedVaryHeaderValue { name: ACCEPT_LANGUAGE, value: Some("zh-CN".to_string()) }],
+    );
+
+    for attempt in 1..=2 {
+        let mut context = test_store_context(zone.clone(), base_key);
+        context.policy.min_uses = 2;
+        context.request.uri = http::Uri::from_static("/rebucket");
+        context.request.headers.insert(ACCEPT_LANGUAGE, "zh-CN".parse().unwrap());
+        context.cached_entry = Some(cached_entry.clone());
+        context.key = base_key.to_string();
+        context.base_key = base_key.to_string();
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header(CACHE_CONTROL, "max-age=60")
+            .header("vary", "accept-language")
+            .body(full_body("rebucketed"))
+            .expect("response should build");
+        let _ = manager.store_response(context, response).await;
+
+        let has_final_key = lock_index(&zone.index).entries.contains_key(&expected_final_key);
+        assert_eq!(
+            has_final_key,
+            attempt == 2,
+            "rebucketed key should only be admitted after min_uses is reached"
+        );
+    }
 }

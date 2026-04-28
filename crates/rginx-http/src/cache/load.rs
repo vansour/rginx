@@ -60,7 +60,14 @@ fn scan_cache_dir(
     index: &mut CacheIndex,
     loader: &mut LoaderState,
 ) -> io::Result<()> {
-    for entry in fs::read_dir(dir)? {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(path = %dir.display(), %error, "failed to read cache directory; skipping");
+            return Ok(());
+        }
+    };
+    for entry in entries {
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
@@ -79,7 +86,13 @@ fn scan_cache_dir(
             continue;
         };
         if file_type.is_dir() {
-            scan_cache_dir(zone, path.as_path(), index, loader)?;
+            if let Err(error) = scan_cache_dir(zone, path.as_path(), index, loader) {
+                tracing::warn!(
+                    path = %path.display(),
+                    %error,
+                    "failed to scan cache subdirectory; skipping"
+                );
+            }
             continue;
         }
         let Some(hash) = metadata_hash(&path) else {
@@ -210,6 +223,12 @@ impl LoaderState {
             || zone.loader_sleep.is_zero()
             || !self.processed_entries.is_multiple_of(zone.loader_batch_entries)
         {
+            return;
+        }
+        if let Ok(handle) = tokio::runtime::Handle::try_current()
+            && handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
+        {
+            tokio::task::block_in_place(|| thread::sleep(zone.loader_sleep));
             return;
         }
         thread::sleep(zone.loader_sleep);

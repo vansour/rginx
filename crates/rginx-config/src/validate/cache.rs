@@ -171,17 +171,26 @@ pub(super) fn validate_route_cache(
 }
 
 fn validate_path_levels(zone: &str, levels: &[u8]) -> Result<()> {
+    const CACHE_KEY_HASH_HEX_LEN: usize = 64;
+
     if levels.is_empty() {
         return Err(Error::Config(format!(
             "cache zone `{zone}` path_levels must not be empty when provided"
         )));
     }
+    let mut total_level_len = 0usize;
     for level in levels {
         if *level == 0 {
             return Err(Error::Config(format!(
                 "cache zone `{zone}` path_levels entries must be greater than 0"
             )));
         }
+        total_level_len = total_level_len.saturating_add(usize::from(*level));
+    }
+    if total_level_len > CACHE_KEY_HASH_HEX_LEN {
+        return Err(Error::Config(format!(
+            "cache zone `{zone}` path_levels total length `{total_level_len}` exceeds cache hash length `{CACHE_KEY_HASH_HEX_LEN}`"
+        )));
     }
     Ok(())
 }

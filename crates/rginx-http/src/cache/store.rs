@@ -86,12 +86,7 @@ pub(super) async fn store_response(
 
     let vary = cache_vary_values(&context, &context.request, &parts.headers);
     let final_key = cache_variant_key(&context.base_key, &vary);
-    if !record_cache_admission_attempt(
-        context.zone.as_ref(),
-        &final_key,
-        context.policy.min_uses,
-        context.cached_entry.is_some(),
-    ) {
+    if !record_cache_admission_attempt(context.zone.as_ref(), &final_key, context.policy.min_uses) {
         return Ok(Response::from_parts(parts, full_body(collected)));
     }
     let metadata = cache_metadata(

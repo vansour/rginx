@@ -15,61 +15,53 @@ pub(in crate::cache) async fn cleanup_inactive_entries_in_zone(zone: &Arc<CacheZ
 
     let inactive_ms = duration_to_ms(zone.config.inactive);
     let batch_size = zone.config.manager_batch_entries.max(1);
+    let inactive_keys = {
+        let index = lock_index(&zone.index);
+        let mut keys = index
+            .entries
+            .iter()
+            .filter_map(|(key, entry)| {
+                (now.saturating_sub(entry.last_access_unix_ms) > inactive_ms)
+                    .then_some((key.clone(), entry.last_access_unix_ms))
+            })
+            .collect::<Vec<_>>();
+        keys.sort_by_key(|(_, last_access)| *last_access);
+        keys.into_iter().map(|(key, _)| key).collect::<Vec<_>>()
+    };
+    if inactive_keys.is_empty() {
+        return;
+    }
+
     let mut total_removed = 0usize;
     let mut changed = false;
-
-    loop {
+    let mut batches = inactive_keys.chunks(batch_size).peekable();
+    while let Some(batch) = batches.next() {
         let removed = {
             let mut index = lock_index(&zone.index);
-            let mut keys_to_remove = index
-                .entries
-                .iter()
-                .filter_map(|(key, entry)| {
-                    (now.saturating_sub(entry.last_access_unix_ms) > inactive_ms)
-                        .then_some((key.clone(), entry.last_access_unix_ms))
-                })
-                .collect::<Vec<_>>();
-            keys_to_remove.sort_by_key(|(_, last_access)| *last_access);
-            let keys_to_remove =
-                keys_to_remove.into_iter().take(batch_size).map(|(key, _)| key).collect::<Vec<_>>();
             let mut removed = Vec::new();
-            for key in keys_to_remove {
-                if let Some(entry) = index.entries.remove(&key) {
+            for key in batch {
+                if let Some(entry) = index.entries.remove(key) {
                     index.current_size_bytes =
                         index.current_size_bytes.saturating_sub(entry.body_size_bytes);
-                    index.admission_counts.remove(&key);
-                    remove_variant_key(&mut index.variants, &entry.base_key, &key);
+                    index.admission_counts.remove(key);
+                    remove_variant_key(&mut index.variants, &entry.base_key, key);
                     removed.push(entry);
                 }
             }
             removed
         };
-        if removed.is_empty() {
-            break;
+        if !removed.is_empty() {
+            changed = true;
+            total_removed += removed.len();
+            let io_guard = zone.io_lock.lock().await;
+            for entry in &removed {
+                let paths = cache_paths_for_zone(zone.config.as_ref(), &entry.hash);
+                let _ = fs::remove_file(paths.metadata).await;
+                let _ = fs::remove_file(paths.body).await;
+            }
+            drop(io_guard);
         }
-        changed = true;
-        total_removed += removed.len();
-        let io_guard = zone.io_lock.lock().await;
-        for entry in &removed {
-            let paths = cache_paths_for_zone(zone.config.as_ref(), &entry.hash);
-            let _ = fs::remove_file(paths.metadata).await;
-            let _ = fs::remove_file(paths.body).await;
-        }
-        drop(io_guard);
-        if removed.len() < batch_size {
-            break;
-        }
-        let has_more_inactive = {
-            let index = lock_index(&zone.index);
-            index
-                .entries
-                .values()
-                .any(|entry| now.saturating_sub(entry.last_access_unix_ms) > inactive_ms)
-        };
-        if !has_more_inactive {
-            break;
-        }
-        if !zone.config.manager_sleep.is_zero() {
+        if batches.peek().is_some() && !zone.config.manager_sleep.is_zero() {
             tokio::time::sleep(zone.config.manager_sleep).await;
         }
     }
@@ -160,7 +152,6 @@ pub(in crate::cache) async fn update_index_after_store(
         if let Some(existing) = index.entries.insert(key.clone(), entry.clone()) {
             index.current_size_bytes =
                 index.current_size_bytes.saturating_sub(existing.body_size_bytes);
-            index.admission_counts.remove(&key);
             remove_variant_key(&mut index.variants, &existing.base_key, &key);
             if existing.hash != entry.hash {
                 removed_hashes.push(existing.hash);
@@ -243,15 +234,13 @@ pub(in crate::cache) fn record_cache_admission_attempt(
     zone: &CacheZoneRuntime,
     key: &str,
     min_uses: u64,
-    cached_entry_exists: bool,
 ) -> bool {
-    if cached_entry_exists || min_uses <= 1 {
-        let mut index = lock_index(&zone.index);
+    let mut index = lock_index(&zone.index);
+    if min_uses <= 1 || index.entries.contains_key(key) {
         index.admission_counts.remove(key);
         return true;
     }
 
-    let mut index = lock_index(&zone.index);
     let uses = index.admission_counts.entry(key.to_string()).or_insert(0);
     *uses = uses.saturating_add(1);
     if *uses >= min_uses {

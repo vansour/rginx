@@ -165,3 +165,26 @@ fn validate_rejects_empty_path_levels() {
     let error = validate(&config).expect_err("empty path_levels should fail validation");
     assert!(error.to_string().contains("path_levels must not be empty"), "{error}");
 }
+
+#[test]
+fn validate_rejects_zero_path_level() {
+    let mut config = base_config();
+    config.cache_zones =
+        vec![CacheZoneConfig { path_levels: Some(vec![0]), ..cache_zone("default") }];
+    config.locations[0].cache = Some(route_cache("default"));
+
+    let error = validate(&config).expect_err("zero path_levels entry should fail validation");
+    assert!(error.to_string().contains("path_levels entries must be greater than 0"), "{error}");
+}
+
+#[test]
+fn validate_rejects_path_levels_longer_than_cache_hash() {
+    let mut config = base_config();
+    config.cache_zones =
+        vec![CacheZoneConfig { path_levels: Some(vec![32, 33]), ..cache_zone("default") }];
+    config.locations[0].cache = Some(route_cache("default"));
+
+    let error =
+        validate(&config).expect_err("path_levels longer than cache hash should fail validation");
+    assert!(error.to_string().contains("exceeds cache hash length"), "{error}");
+}

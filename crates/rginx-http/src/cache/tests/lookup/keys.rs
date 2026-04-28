@@ -230,3 +230,34 @@ fn cache_key_includes_range_when_enabled() {
         "https:example.com:/video.mp4|range:0-99"
     );
 }
+
+#[test]
+fn multiple_range_headers_bypass_cache_when_range_caching_is_enabled() {
+    let policy = RouteCachePolicy {
+        zone: "default".to_string(),
+        methods: vec![Method::GET],
+        statuses: vec![StatusCode::OK],
+        ttl_by_status: Vec::new(),
+        key: rginx_core::CacheKeyTemplate::parse("{uri}").expect("key should parse"),
+        cache_bypass: None,
+        no_cache: None,
+        stale_if_error: None,
+        use_stale: Vec::new(),
+        background_update: false,
+        lock_timeout: Duration::from_secs(5),
+        lock_age: Duration::from_secs(5),
+        min_uses: 1,
+        ignore_headers: Vec::new(),
+        range_requests: rginx_core::CacheRangeRequestPolicy::Cache,
+    };
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/video.mp4")
+        .header(http::header::RANGE, "bytes=0-99")
+        .header(http::header::RANGE, "bytes=100-199")
+        .body(full_body(Bytes::new()))
+        .expect("request should build");
+    let request = CacheRequest::from_request(&request);
+
+    assert!(cache_request_bypass(&request, &policy));
+}

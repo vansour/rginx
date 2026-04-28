@@ -130,7 +130,11 @@ fn cacheable_range_request_from_parts(
     {
         return None;
     }
-    let value = headers.get(RANGE)?.to_str().ok()?;
+    let mut values = headers.get_all(RANGE).iter();
+    let value = values.next()?.to_str().ok()?;
+    if values.next().is_some() {
+        return None;
+    }
     parse_single_bounded_byte_range(value)
 }
 

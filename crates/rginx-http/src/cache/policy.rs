@@ -50,7 +50,7 @@ pub(super) fn response_is_storable_with_size(
     body_size: ResponseBodySize,
 ) -> bool {
     let requested_range = cacheable_range_request(&context.request, &context.policy);
-    if !status_is_cacheable(context, status) {
+    if !status_is_cacheable(context, status, requested_range.is_some()) {
         return false;
     }
     if requested_range.is_some() && status != StatusCode::PARTIAL_CONTENT {
@@ -197,10 +197,13 @@ pub(super) fn vary_headers(headers: &HeaderMap) -> Option<Vec<HeaderName>> {
     Some(names)
 }
 
-fn status_is_cacheable(context: &CacheStoreContext, status: StatusCode) -> bool {
+fn status_is_cacheable(
+    context: &CacheStoreContext,
+    status: StatusCode,
+    has_cacheable_request_range: bool,
+) -> bool {
     context.policy.statuses.contains(&status)
-        || (status == StatusCode::PARTIAL_CONTENT
-            && cacheable_range_request(&context.request, &context.policy).is_some())
+        || (status == StatusCode::PARTIAL_CONTENT && has_cacheable_request_range)
 }
 
 fn ignores_header(context: &CacheStoreContext, header: CacheIgnoreHeader) -> bool {

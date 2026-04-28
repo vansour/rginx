@@ -214,16 +214,20 @@ fn cache_paths_with_levels(base: &Path, levels: &[usize], hash: &str) -> CachePa
     let mut dir = base.to_path_buf();
     let mut offset = 0usize;
     for level in levels {
-        let next = offset.saturating_add(*level);
-        let prefix = hash.get(offset..next).unwrap_or("00");
-        dir = dir.join(prefix);
-        offset = next;
+        dir = dir.join(cache_path_segment(hash, offset, *level));
+        offset = offset.saturating_add(*level);
     }
     CachePaths {
         metadata: dir.join(format!("{hash}.meta.json")),
         body: dir.join(format!("{hash}.body")),
         dir,
     }
+}
+
+fn cache_path_segment(hash: &str, offset: usize, level_len: usize) -> String {
+    hash.get(offset..offset.saturating_add(level_len)).map(str::to_string).unwrap_or_else(|| {
+        format!("{:0<width$}", hash.get(offset..).unwrap_or(""), width = level_len)
+    })
 }
 
 impl CacheMetadata {
