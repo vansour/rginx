@@ -8,6 +8,12 @@ fn cache_zone(name: &str) -> CacheZoneConfig {
         inactive_secs: Some(60),
         default_ttl_secs: Some(30),
         max_entry_bytes: Some(1024),
+        path_levels: None,
+        loader_batch_entries: None,
+        loader_sleep_millis: None,
+        manager_batch_entries: None,
+        manager_sleep_millis: None,
+        inactive_cleanup_interval_secs: None,
     }
 }
 
@@ -25,6 +31,9 @@ fn route_cache(zone: &str) -> CacheRouteConfig {
         background_update: None,
         lock_timeout_secs: None,
         lock_age_secs: None,
+        min_uses: None,
+        ignore_headers: None,
+        range_requests: None,
     }
 }
 
@@ -120,4 +129,39 @@ fn validate_accepts_status_match_in_no_cache() {
     config.locations[0].cache = Some(policy);
 
     validate(&config).expect("status-based no_cache should pass validation");
+}
+
+#[test]
+fn validate_rejects_zero_min_uses() {
+    let mut config = base_config();
+    config.cache_zones = vec![cache_zone("default")];
+    let mut policy = route_cache("default");
+    policy.min_uses = Some(0);
+    config.locations[0].cache = Some(policy);
+
+    let error = validate(&config).expect_err("zero min_uses should fail validation");
+    assert!(error.to_string().contains("cache.min_uses must be greater than 0"), "{error}");
+}
+
+#[test]
+fn validate_rejects_empty_ignore_headers() {
+    let mut config = base_config();
+    config.cache_zones = vec![cache_zone("default")];
+    let mut policy = route_cache("default");
+    policy.ignore_headers = Some(Vec::new());
+    config.locations[0].cache = Some(policy);
+
+    let error = validate(&config).expect_err("empty ignore_headers should fail validation");
+    assert!(error.to_string().contains("cache.ignore_headers must not be empty"), "{error}");
+}
+
+#[test]
+fn validate_rejects_empty_path_levels() {
+    let mut config = base_config();
+    config.cache_zones =
+        vec![CacheZoneConfig { path_levels: Some(Vec::new()), ..cache_zone("default") }];
+    config.locations[0].cache = Some(route_cache("default"));
+
+    let error = validate(&config).expect_err("empty path_levels should fail validation");
+    assert!(error.to_string().contains("path_levels must not be empty"), "{error}");
 }

@@ -1,9 +1,12 @@
 use std::collections::HashSet;
 
-use http::{HeaderName, Method};
 use rginx_core::{Error, Result};
 
-use crate::model::{CachePredicateConfig, CacheRouteConfig, CacheStatusTtlConfig, CacheZoneConfig};
+use crate::model::{CacheRouteConfig, CacheStatusTtlConfig, CacheZoneConfig};
+
+mod predicate;
+
+use predicate::{PredicateValidationMode, validate_cache_predicate};
 
 pub(super) fn validate_cache_zones(zones: &[CacheZoneConfig]) -> Result<HashSet<String>> {
     let mut names = HashSet::new();
@@ -23,6 +26,18 @@ pub(super) fn validate_cache_zones(zones: &[CacheZoneConfig]) -> Result<HashSet<
         validate_positive_optional(name, "inactive_secs", zone.inactive_secs)?;
         validate_positive_optional(name, "default_ttl_secs", zone.default_ttl_secs)?;
         validate_positive_optional(name, "max_entry_bytes", zone.max_entry_bytes)?;
+        validate_positive_optional(name, "loader_batch_entries", zone.loader_batch_entries)?;
+        validate_positive_optional(name, "loader_sleep_millis", zone.loader_sleep_millis)?;
+        validate_positive_optional(name, "manager_batch_entries", zone.manager_batch_entries)?;
+        validate_positive_optional(name, "manager_sleep_millis", zone.manager_sleep_millis)?;
+        validate_positive_optional(
+            name,
+            "inactive_cleanup_interval_secs",
+            zone.inactive_cleanup_interval_secs,
+        )?;
+        if let Some(levels) = zone.path_levels.as_deref() {
+            validate_path_levels(name, levels)?;
+        }
         if let (Some(max_size), Some(max_entry)) = (zone.max_size_bytes, zone.max_entry_bytes)
             && max_entry > max_size
         {
@@ -140,6 +155,34 @@ pub(super) fn validate_route_cache(
         )));
     }
 
+    if cache.min_uses.is_some_and(|value| value == 0) {
+        return Err(Error::Config(format!("{route_scope} cache.min_uses must be greater than 0")));
+    }
+
+    if let Some(ignore_headers) = cache.ignore_headers.as_deref()
+        && ignore_headers.is_empty()
+    {
+        return Err(Error::Config(format!(
+            "{route_scope} cache.ignore_headers must not be empty when provided"
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_path_levels(zone: &str, levels: &[u8]) -> Result<()> {
+    if levels.is_empty() {
+        return Err(Error::Config(format!(
+            "cache zone `{zone}` path_levels must not be empty when provided"
+        )));
+    }
+    for level in levels {
+        if *level == 0 {
+            return Err(Error::Config(format!(
+                "cache zone `{zone}` path_levels entries must be greater than 0"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -177,92 +220,9 @@ fn validate_statuses(route_scope: &str, field: &str, statuses: &[u16]) -> Result
     Ok(())
 }
 
-fn validate_cache_predicate(
-    route_scope: &str,
-    field: &str,
-    predicate: &CachePredicateConfig,
-    mode: PredicateValidationMode,
-) -> Result<()> {
-    match predicate {
-        CachePredicateConfig::Any(predicates) | CachePredicateConfig::All(predicates) => {
-            if predicates.is_empty() {
-                return Err(Error::Config(format!(
-                    "{route_scope} {field} composite predicates must not be empty"
-                )));
-            }
-            for predicate in predicates {
-                validate_cache_predicate(route_scope, field, predicate, mode)?;
-            }
-        }
-        CachePredicateConfig::Not(predicate) => {
-            validate_cache_predicate(route_scope, field, predicate, mode)?;
-        }
-        CachePredicateConfig::Method(method) => {
-            method.trim().to_ascii_uppercase().parse::<Method>().map_err(|error| {
-                Error::Config(format!(
-                    "{route_scope} {field} method `{method}` is invalid: {error}"
-                ))
-            })?;
-        }
-        CachePredicateConfig::HeaderExists(name)
-        | CachePredicateConfig::QueryExists(name)
-        | CachePredicateConfig::CookieExists(name) => {
-            validate_non_empty(route_scope, field, name, "name")?;
-            if matches!(predicate, CachePredicateConfig::HeaderExists(_)) {
-                validate_header_name(route_scope, field, name)?;
-            }
-        }
-        CachePredicateConfig::HeaderEquals { name, .. } => {
-            validate_non_empty(route_scope, field, name, "name")?;
-            validate_header_name(route_scope, field, name)?;
-        }
-        CachePredicateConfig::QueryEquals { name, .. }
-        | CachePredicateConfig::CookieEquals { name, .. } => {
-            validate_non_empty(route_scope, field, name, "name")?;
-        }
-        CachePredicateConfig::Status(status) => {
-            validate_statuses(route_scope, field, &[*status])?;
-            if mode == PredicateValidationMode::RequestOnly {
-                return Err(Error::Config(format!(
-                    "{route_scope} {field} cannot match response status"
-                )));
-            }
-        }
-        CachePredicateConfig::Statuses(statuses) => {
-            validate_statuses(route_scope, field, statuses)?;
-            if mode == PredicateValidationMode::RequestOnly {
-                return Err(Error::Config(format!(
-                    "{route_scope} {field} cannot match response status"
-                )));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_non_empty(route_scope: &str, field: &str, value: &str, part: &str) -> Result<()> {
-    if value.trim().is_empty() {
-        return Err(Error::Config(format!("{route_scope} {field} {part} must not be empty")));
-    }
-    Ok(())
-}
-
-fn validate_header_name(route_scope: &str, field: &str, name: &str) -> Result<()> {
-    name.parse::<HeaderName>().map_err(|error| {
-        Error::Config(format!("{route_scope} {field} header `{name}` is invalid: {error}"))
-    })?;
-    Ok(())
-}
-
 fn validate_positive_optional(zone: &str, field: &str, value: Option<u64>) -> Result<()> {
     if value.is_some_and(|value| value == 0) {
         return Err(Error::Config(format!("cache zone `{zone}` {field} must be greater than 0")));
     }
     Ok(())
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PredicateValidationMode {
-    RequestOnly,
-    RequestOrResponse,
 }

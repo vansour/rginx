@@ -15,6 +15,9 @@ fn cache_policy() -> rginx_core::RouteCachePolicy {
         background_update: false,
         lock_timeout: Duration::from_secs(5),
         lock_age: Duration::from_secs(5),
+        min_uses: 1,
+        ignore_headers: Vec::new(),
+        range_requests: rginx_core::CacheRangeRequestPolicy::Bypass,
     }
 }
 
@@ -86,6 +89,12 @@ async fn forward_request_uses_route_cache_for_miss_then_hit() {
             inactive: Duration::from_secs(60),
             default_ttl: Duration::from_secs(60),
             max_entry_bytes: 1024,
+            path_levels: vec![2],
+            loader_batch_entries: 100,
+            loader_sleep: Duration::ZERO,
+            manager_batch_entries: 100,
+            manager_sleep: Duration::ZERO,
+            inactive_cleanup_interval: Duration::from_secs(60),
         }),
     );
     let state = crate::state::SharedState::from_config(snapshot).expect("state should build");
@@ -144,6 +153,12 @@ async fn forward_request_marks_authorization_request_as_cache_bypass() {
             inactive: Duration::from_secs(60),
             default_ttl: Duration::from_secs(60),
             max_entry_bytes: 1024,
+            path_levels: vec![2],
+            loader_batch_entries: 100,
+            loader_sleep: Duration::ZERO,
+            manager_batch_entries: 100,
+            manager_sleep: Duration::ZERO,
+            inactive_cleanup_interval: Duration::from_secs(60),
         }),
     );
     let state = crate::state::SharedState::from_config(snapshot).expect("state should build");

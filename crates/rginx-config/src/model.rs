@@ -10,8 +10,8 @@ mod upstream;
 mod vhost;
 
 pub use cache::{
-    CachePredicateConfig, CacheRouteConfig, CacheStatusTtlConfig, CacheUseStaleConditionConfig,
-    CacheZoneConfig,
+    CacheIgnoreHeaderConfig, CachePredicateConfig, CacheRangeRequestPolicyConfig, CacheRouteConfig,
+    CacheStatusTtlConfig, CacheUseStaleConditionConfig, CacheZoneConfig,
 };
 pub use listener::{Http3Config, ListenerConfig};
 pub use route::{

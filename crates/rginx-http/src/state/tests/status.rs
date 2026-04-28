@@ -290,6 +290,9 @@ async fn status_snapshot_reports_cache_zone_stats() {
         background_update: false,
         lock_timeout: Duration::from_secs(5),
         lock_age: Duration::from_secs(5),
+        min_uses: 1,
+        ignore_headers: Vec::new(),
+        range_requests: rginx_core::CacheRangeRequestPolicy::Bypass,
     };
     let request = Request::builder()
         .method(Method::GET)

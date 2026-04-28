@@ -14,6 +14,7 @@ mod lookup;
 mod notifications;
 mod policy;
 mod storage;
+mod storage_p1;
 mod storage_regressions;
 
 fn test_zone(path: PathBuf, max_entry_bytes: usize) -> Arc<CacheZoneRuntime> {
@@ -33,11 +34,18 @@ fn test_zone_with_notifier(
             inactive: Duration::from_secs(60),
             default_ttl: Duration::from_secs(60),
             max_entry_bytes,
+            path_levels: vec![2],
+            loader_batch_entries: 100,
+            loader_sleep: Duration::ZERO,
+            manager_batch_entries: 100,
+            manager_sleep: Duration::ZERO,
+            inactive_cleanup_interval: Duration::from_secs(60),
         }),
         index: Mutex::new(CacheIndex::default()),
         io_lock: AsyncMutex::new(()),
         fill_locks: Arc::new(Mutex::new(HashMap::new())),
         fill_lock_generation: AtomicU64::new(0),
+        last_inactive_cleanup_unix_ms: AtomicU64::new(0),
         stats: CacheZoneStats::default(),
         change_notifier,
     })
@@ -79,6 +87,9 @@ fn test_store_context(zone: Arc<CacheZoneRuntime>, key: &str) -> CacheStoreConte
             background_update: false,
             lock_timeout: Duration::from_secs(5),
             lock_age: Duration::from_secs(5),
+            min_uses: 1,
+            ignore_headers: Vec::new(),
+            range_requests: rginx_core::CacheRangeRequestPolicy::Bypass,
         },
         request: CacheRequest {
             method: Method::GET,
@@ -119,6 +130,9 @@ fn test_policy() -> RouteCachePolicy {
         background_update: false,
         lock_timeout: Duration::from_secs(5),
         lock_age: Duration::from_secs(5),
+        min_uses: 1,
+        ignore_headers: Vec::new(),
+        range_requests: rginx_core::CacheRangeRequestPolicy::Bypass,
     }
 }
 

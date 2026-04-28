@@ -11,6 +11,12 @@ fn compile_attaches_cache_zones_and_route_policy() {
             inactive_secs: Some(120),
             default_ttl_secs: Some(30),
             max_entry_bytes: Some(1024),
+            path_levels: None,
+            loader_batch_entries: None,
+            loader_sleep_millis: None,
+            manager_batch_entries: None,
+            manager_sleep_millis: None,
+            inactive_cleanup_interval_secs: None,
         }],
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
@@ -85,6 +91,9 @@ fn compile_attaches_cache_zones_and_route_policy() {
                 background_update: None,
                 lock_timeout_secs: None,
                 lock_age_secs: None,
+                min_uses: None,
+                ignore_headers: None,
+                range_requests: None,
             }),
             matcher: MatcherConfig::Prefix("/assets".to_string()),
             handler: HandlerConfig::Proxy {
@@ -143,6 +152,9 @@ fn compile_attaches_cache_zones_and_route_policy() {
         background_update: None,
         lock_timeout_secs: None,
         lock_age_secs: None,
+        min_uses: None,
+        ignore_headers: None,
+        range_requests: None,
     });
     let snapshot = compile_with_base(config.clone(), base_dir.path())
         .expect("default cache policy should compile");
@@ -181,6 +193,12 @@ fn compile_cache_policy_supports_p0_controls() {
             inactive_secs: Some(120),
             default_ttl_secs: Some(30),
             max_entry_bytes: Some(1024),
+            path_levels: None,
+            loader_batch_entries: None,
+            loader_sleep_millis: None,
+            manager_batch_entries: None,
+            manager_sleep_millis: None,
+            inactive_cleanup_interval_secs: None,
         }],
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
@@ -265,6 +283,9 @@ fn compile_cache_policy_supports_p0_controls() {
                 background_update: Some(true),
                 lock_timeout_secs: Some(2),
                 lock_age_secs: Some(3),
+                min_uses: None,
+                ignore_headers: None,
+                range_requests: None,
             }),
             matcher: MatcherConfig::Prefix("/assets".to_string()),
             handler: HandlerConfig::Proxy {

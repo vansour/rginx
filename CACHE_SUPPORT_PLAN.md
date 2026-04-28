@@ -33,9 +33,11 @@ HTTP/3 session、TLS session 和 OCSP staple cache，继续作为运行时实现
 - `P0` 中的 `cache_bypass` / `no_cache`、按状态 TTL + `X-Accel-Expires`、
   通用 `Vary`、`background_update` / `use_stale` / `lock_timeout` /
   `lock_age` / `UPDATING` 已完成并已落地。
+- `P1` 中的 `cache_min_uses`、可配置的精确单段 `Range`/`206` 缓存、
+  `proxy_ignore_headers` 和 loader / manager / path tunables 已完成并已落地。
 - 下文保留这些条目，是为了把“已交付能力”和“下一轮继续补齐的剩余差距”放在同一张
   对标清单里，避免后续阶段重复整理。
-- `P1` / `P2` 仍是后续规划项，当前 PR 不覆盖。
+- `P2` 仍是后续规划项，当前文档的主用途已经切换为记录“已交付边界 + 剩余架构级差距”。
 
 对标范围：
 
@@ -102,7 +104,7 @@ HTTP/3 session、TLS session 和 OCSP staple cache，继续作为运行时实现
 - 热点 key 过期时可选择前台返回 stale、后台刷新，并暴露 `UPDATING` 或等价状态。
 - 并发同 key 过期测试中，不会出现无界等待，也不会放大 upstream 压力。
 
-### P1：补齐大对象场景和维护控制面（当前状态：规划中）
+### P1：补齐大对象场景和维护控制面（当前状态：本 PR 已完成）
 
 目标：支持更接近 NGINX 中大型生产缓存部署的行为，特别是长尾控制、大对象和后台维护。
 
@@ -114,14 +116,17 @@ HTTP/3 session、TLS session 和 OCSP staple cache，继续作为运行时实现
 - Range / `206` / slice 缓存
   - 目标：支持范围请求和切片缓存，而不是简单 bypass `Range`。
   - 价值：补齐安装包、媒体、超大静态资源这类缓存场景。
-  - 当前差距：当前 `Range` 请求默认 bypass，`206` 和 `Content-Range` 响应不缓存。
+  - 本轮交付边界：已支持 route 级可配置的精确单段 bounded range 缓存，
+    即 `Range: bytes=start-end` 命中独立 cache key，并允许对应 `206` 落盘；
+    multi-range、suffix range、open-ended range 和 slice 仍保留为后续增强项。
 - `proxy_ignore_headers` 等价能力
   - 目标：允许在 route 级覆盖上游的部分缓存相关响应头。
   - 价值：适配缓存头不规范、历史包袱较重的上游系统。
 - cache loader / manager / path tunables
   - 目标：让磁盘扫描、批次加载、后台清理和目录布局可配置。
   - 价值：改善大 cache 目录、冷启动、慢磁盘和大规模部署时的运行体验。
-  - 当前差距：当前 loader、inactive cleanup 和驱逐策略基本固定，调优面较少。
+  - 本轮交付边界：已开放 `path_levels`、loader / manager batch 与 sleep 参数，以及
+    `inactive_cleanup_interval`；同步写路径上的容量驱逐仍保持即时淘汰模型。
 
 建议改动范围：
 
@@ -144,6 +149,8 @@ HTTP/3 session、TLS session 和 OCSP staple cache，继续作为运行时实现
 - route 可以有选择地忽略 `Cache-Control`、`Expires`、`Set-Cookie`、`Vary`
   等缓存相关头。
 - 大目录冷启动时，扫描和加载行为可通过配置调优，而不是单一固定策略。
+- `manager_batch_entries` / `manager_sleep` 对后台 inactive cleanup 生效，
+  `loader_batch_entries` / `loader_sleep` 对冷启动扫描生效，`path_levels` 可调整磁盘目录布局。
 
 ### P2：架构级追平项（当前状态：规划中）
 
@@ -158,7 +165,8 @@ HTTP/3 session、TLS session 和 OCSP staple cache，继续作为运行时实现
   - 目标：进一步细化 `GET`/`HEAD` 的互通规则和 admission policy。
 - 未知大小流式响应和 partial-body caching
   - 目标：评估是否在不破坏流式代理行为的前提下支持更复杂的缓存写入模型。
-  - 当前差距：当前无法安全确认 body size 的响应不会写入缓存。
+  - 当前差距：当前无法安全确认 body size 的响应不会写入缓存，也未实现完整 slice
+    或更通用的 partial-body caching 模型。
 - 更广协议族缓存
   - 目标：仅在产品边界明确扩展时，再考虑是否引入 `fastcgi_cache`、
     `uwsgi_cache`、`scgi_cache` 这类能力。
@@ -195,21 +203,17 @@ HTTP/3 session、TLS session 和 OCSP staple cache，继续作为运行时实现
 
 建议下一轮按以下顺序推进：
 
-1. `P0-1`：`cache_bypass` / `no_cache`
-2. `P0-2`：按状态 TTL + `X-Accel-Expires`
-3. `P0-3`：通用 `Vary` + 更强 key 模型
-4. `P0-4`：后台更新、等待超时和 `UPDATING`
-5. `P1-1`：`cache_min_uses`
-6. `P1-2`：Range / `206` / slice
-7. `P1-3`：`proxy_ignore_headers`
-8. `P1-4`：loader / manager tunables
+1. `P2-1`：`keys_zone` 等价的共享索引 / 多进程协调
+2. `P2-2`：`proxy_cache_convert_head` 和更完整的方法语义
+3. `P2-3`：完整 slice / partial-body / 未知大小流式响应缓存模型
+4. `P2-4`：仅在产品边界明确后，再评估更广协议族缓存
 
 交付原则：
 
 - 每个子项都应先补配置模型、再补运行时、最后补 admin/status 和测试。
 - `P0-3` 与 `P0-4` 变更较大，建议分别拆成独立设计文档和多阶段 PR。
-- `P1-2` 不建议以“先支持一部分 `206`”的方式快速落地；若要做，应直接设计成
-  可长期维护的 slice 或等价分片模型。
+- 已交付的 `P1-2` 采用“精确单段 bounded range 独立 key”模型；若继续向完整
+  slice 演进，必须同时定义 purge、reload、一致性和 partial-body 失败恢复语义。
 
 ## 阶段 0：范围与边界
 

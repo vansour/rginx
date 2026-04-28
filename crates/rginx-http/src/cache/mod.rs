@@ -26,11 +26,11 @@ mod store;
 mod vary;
 
 use entry::{
-    CacheMetadata, build_cached_response, cache_paths, read_cache_metadata, read_cached_response,
-    unix_time_ms,
+    CacheMetadata, build_cached_response, cache_paths_for_zone, read_cache_metadata,
+    read_cached_response, unix_time_ms,
 };
 #[cfg(test)]
-use entry::{cache_key_hash, cache_metadata, cache_variant_key, write_cache_entry};
+use entry::{cache_key_hash, cache_metadata, cache_paths, cache_variant_key, write_cache_entry};
 use load::load_index_from_disk;
 use policy::{header_value, request_requires_revalidation};
 #[cfg(test)]
@@ -146,6 +146,7 @@ struct CacheZoneRuntime {
     io_lock: AsyncMutex<()>,
     fill_locks: Arc<Mutex<HashMap<String, CacheFillLockState>>>,
     fill_lock_generation: AtomicU64,
+    last_inactive_cleanup_unix_ms: AtomicU64,
     stats: CacheZoneStats,
     change_notifier: Option<CacheChangeNotifier>,
 }
@@ -154,6 +155,7 @@ struct CacheZoneRuntime {
 struct CacheIndex {
     entries: HashMap<String, CacheIndexEntry>,
     variants: HashMap<String, Vec<String>>,
+    admission_counts: HashMap<String, u64>,
     current_size_bytes: usize,
 }
 

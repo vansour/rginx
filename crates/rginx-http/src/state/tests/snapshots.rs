@@ -151,6 +151,9 @@ async fn cache_snapshot_and_delta_report_zone_changes() {
         background_update: false,
         lock_timeout: Duration::from_secs(5),
         lock_age: Duration::from_secs(5),
+        min_uses: 1,
+        ignore_headers: Vec::new(),
+        range_requests: rginx_core::CacheRangeRequestPolicy::Bypass,
     };
     let request = Request::builder()
         .method(Method::GET)

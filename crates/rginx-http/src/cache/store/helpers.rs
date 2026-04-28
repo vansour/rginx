@@ -1,4 +1,5 @@
 use http::header::{CONTENT_LENGTH, HeaderMap};
+use rginx_core::CacheIgnoreHeader;
 
 use super::super::policy::{ResponseFreshness, vary_headers};
 use super::super::vary::normalized_request_header_values;
@@ -29,9 +30,13 @@ pub(super) fn cache_metadata_input(
 }
 
 pub(super) fn cache_vary_values(
+    context: &crate::cache::CacheStoreContext,
     request: &crate::cache::CacheRequest,
     headers: &HeaderMap,
 ) -> Vec<CachedVaryHeaderValue> {
+    if context.policy.ignore_headers.contains(&CacheIgnoreHeader::Vary) {
+        return Vec::new();
+    }
     let mut vary = vary_headers(headers)
         .unwrap_or_default()
         .into_iter()

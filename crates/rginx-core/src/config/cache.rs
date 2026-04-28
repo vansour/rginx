@@ -16,6 +16,12 @@ pub struct CacheZone {
     pub inactive: Duration,
     pub default_ttl: Duration,
     pub max_entry_bytes: usize,
+    pub path_levels: Vec<usize>,
+    pub loader_batch_entries: usize,
+    pub loader_sleep: Duration,
+    pub manager_batch_entries: usize,
+    pub manager_sleep: Duration,
+    pub inactive_cleanup_interval: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -32,6 +38,9 @@ pub struct RouteCachePolicy {
     pub background_update: bool,
     pub lock_timeout: Duration,
     pub lock_age: Duration,
+    pub min_uses: u64,
+    pub ignore_headers: Vec<CacheIgnoreHeader>,
+    pub range_requests: CacheRangeRequestPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +73,21 @@ pub enum CacheUseStaleCondition {
     Http502,
     Http503,
     Http504,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheIgnoreHeader {
+    XAccelExpires,
+    Expires,
+    CacheControl,
+    SetCookie,
+    Vary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheRangeRequestPolicy {
+    Bypass,
+    Cache,
 }
 
 #[derive(Debug, Clone, Copy)]

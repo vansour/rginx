@@ -149,6 +149,12 @@ pub(crate) fn snapshot_with_cache_zone(listen: &str, path: PathBuf) -> ConfigSna
             inactive: Duration::from_secs(60),
             default_ttl: Duration::from_secs(60),
             max_entry_bytes: 1024,
+            path_levels: vec![2],
+            loader_batch_entries: 100,
+            loader_sleep: Duration::ZERO,
+            manager_batch_entries: 100,
+            manager_sleep: Duration::ZERO,
+            inactive_cleanup_interval: Duration::from_secs(60),
         }),
     );
     snapshot

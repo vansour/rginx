@@ -31,6 +31,7 @@ impl CacheManager {
                         io_lock: AsyncMutex::new(()),
                         fill_locks: Arc::new(Mutex::new(HashMap::new())),
                         fill_lock_generation: AtomicU64::new(0),
+                        last_inactive_cleanup_unix_ms: AtomicU64::new(0),
                         stats: CacheZoneStats::default(),
                         change_notifier: change_notifier.clone(),
                     }),

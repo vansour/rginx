@@ -88,7 +88,7 @@ impl CacheManager {
     ) -> Option<(CacheMetadata, Option<CacheConditionalHeaders>)> {
         let metadata = {
             let _io_guard = zone.io_lock.lock().await;
-            let paths = cache_paths(&zone.config.path, &entry.hash);
+            let paths = cache_paths_for_zone(zone.config.as_ref(), &entry.hash);
             read_cache_metadata(&paths.metadata).await
         };
         let metadata = match metadata {
@@ -145,7 +145,7 @@ impl CacheManager {
     ) -> Option<HttpResponse> {
         let (metadata, response) = {
             let _io_guard = zone.io_lock.lock().await;
-            let paths = cache_paths(&zone.config.path, &entry.hash);
+            let paths = cache_paths_for_zone(zone.config.as_ref(), &entry.hash);
             let metadata = read_cache_metadata(&paths.metadata).await.ok()?;
             let response =
                 build_cached_response(&paths.body, &metadata, read_cached_body).await.ok()?;

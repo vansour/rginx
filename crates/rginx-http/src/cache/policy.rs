@@ -1,16 +1,24 @@
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use http::StatusCode;
 use http::header::{
-    CACHE_CONTROL, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, EXPIRES, HeaderMap, HeaderName,
-    PRAGMA, SET_COOKIE, VARY,
+    CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, HeaderMap, HeaderName, SET_COOKIE, VARY,
 };
 use hyper::body::Body as _;
+use rginx_core::CacheIgnoreHeader;
 use rginx_core::CachePredicateRequestContext;
 
 use crate::handler::HttpResponse;
 
 use super::CacheStoreContext;
+use super::request::{cacheable_range_request, response_content_range_matches_request};
+
+mod directives;
+
+use directives::{
+    cache_control_contains, cache_control_duration, cache_control_max_age, expires_ttl,
+    pragma_contains, x_accel_expires_ttl,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ResponseFreshness {
@@ -41,22 +49,34 @@ pub(super) fn response_is_storable_with_size(
     headers: &HeaderMap,
     body_size: ResponseBodySize,
 ) -> bool {
-    if !context.policy.statuses.contains(&status) {
+    let requested_range = cacheable_range_request(&context.request, &context.policy);
+    if !status_is_cacheable(context, status) {
         return false;
     }
-    if status == StatusCode::PARTIAL_CONTENT
-        || headers.contains_key(CONTENT_RANGE)
-        || headers.contains_key(SET_COOKIE)
-    {
+    if requested_range.is_some() && status != StatusCode::PARTIAL_CONTENT {
         return false;
     }
-    if !vary_is_supported(headers) {
+    if status == StatusCode::PARTIAL_CONTENT {
+        if requested_range.is_none()
+            || !response_content_range_matches_request(&context.request, &context.policy, headers)
+        {
+            return false;
+        }
+    } else if headers.contains_key(CONTENT_RANGE) {
+        return false;
+    }
+    if !ignores_header(context, CacheIgnoreHeader::SetCookie) && headers.contains_key(SET_COOKIE) {
+        return false;
+    }
+    if !vary_is_supported(context, headers) {
         return false;
     }
     if response_is_grpc(headers) {
         return false;
     }
-    if cache_control_contains(headers, &["no-store", "private"]) {
+    if !ignores_header(context, CacheIgnoreHeader::CacheControl)
+        && cache_control_contains(headers, &["no-store", "private"])
+    {
         return false;
     }
     if let Some(length) = parse_content_length(headers)
@@ -83,10 +103,15 @@ pub(super) fn response_freshness(
 ) -> ResponseFreshness {
     ResponseFreshness {
         ttl: response_ttl(context, status, headers),
-        stale_if_error: cache_control_duration(headers, "stale-if-error")
+        stale_if_error: (!ignores_header(context, CacheIgnoreHeader::CacheControl))
+            .then(|| cache_control_duration(headers, "stale-if-error"))
+            .flatten()
             .or(context.policy.stale_if_error),
-        stale_while_revalidate: cache_control_duration(headers, "stale-while-revalidate"),
-        must_revalidate: cache_control_contains(headers, &["no-cache", "must-revalidate"]),
+        stale_while_revalidate: (!ignores_header(context, CacheIgnoreHeader::CacheControl))
+            .then(|| cache_control_duration(headers, "stale-while-revalidate"))
+            .flatten(),
+        must_revalidate: !ignores_header(context, CacheIgnoreHeader::CacheControl)
+            && cache_control_contains(headers, &["no-cache", "must-revalidate"]),
     }
 }
 
@@ -127,9 +152,19 @@ pub(super) fn response_ttl(
     status: StatusCode,
     headers: &HeaderMap,
 ) -> Duration {
-    x_accel_expires_ttl(headers)
-        .or_else(|| cache_control_max_age(headers))
-        .or_else(|| expires_ttl(headers))
+    (!ignores_header(context, CacheIgnoreHeader::XAccelExpires))
+        .then(|| x_accel_expires_ttl(headers))
+        .flatten()
+        .or_else(|| {
+            (!ignores_header(context, CacheIgnoreHeader::CacheControl))
+                .then(|| cache_control_max_age(headers))
+                .flatten()
+        })
+        .or_else(|| {
+            (!ignores_header(context, CacheIgnoreHeader::Expires))
+                .then(|| expires_ttl(headers))
+                .flatten()
+        })
         .or_else(|| {
             context
                 .policy
@@ -140,86 +175,8 @@ pub(super) fn response_ttl(
         .unwrap_or(context.zone.config.default_ttl)
 }
 
-fn cache_control_max_age(headers: &HeaderMap) -> Option<Duration> {
-    let mut max_age = None;
-    for value in headers.get_all(CACHE_CONTROL) {
-        let Ok(value) = value.to_str() else {
-            continue;
-        };
-        for directive in value.split(',').map(str::trim) {
-            let Some((name, value)) = directive.split_once('=') else {
-                continue;
-            };
-            if name.trim().eq_ignore_ascii_case("s-maxage")
-                || name.trim().eq_ignore_ascii_case("max-age")
-            {
-                let Ok(seconds) = value.trim().trim_matches('"').parse::<u64>() else {
-                    continue;
-                };
-                let duration = Duration::from_secs(seconds);
-                if name.trim().eq_ignore_ascii_case("s-maxage") {
-                    return Some(duration);
-                }
-                if max_age.is_none() {
-                    max_age = Some(duration);
-                }
-            }
-        }
-    }
-    max_age
-}
-
-fn expires_ttl(headers: &HeaderMap) -> Option<Duration> {
-    let expires = headers.get(EXPIRES)?.to_str().ok()?;
-    let expires = httpdate::parse_http_date(expires).ok()?;
-    Some(expires.duration_since(SystemTime::now()).unwrap_or(Duration::ZERO))
-}
-
-fn cache_control_contains(headers: &HeaderMap, directives: &[&str]) -> bool {
-    headers.get_all(CACHE_CONTROL).iter().any(|value| {
-        value.to_str().ok().is_some_and(|value| {
-            value.split(',').any(|directive| {
-                let name = directive.split_once('=').map_or(directive, |(name, _)| name).trim();
-                directives.iter().any(|expected| name.eq_ignore_ascii_case(expected))
-            })
-        })
-    })
-}
-
-fn pragma_contains(headers: &HeaderMap, directive: &str) -> bool {
-    headers.get_all(PRAGMA).iter().any(|value| {
-        value.to_str().ok().is_some_and(|value| {
-            value.split(',').map(str::trim).any(|token| token.eq_ignore_ascii_case(directive))
-        })
-    })
-}
-
-pub(super) fn cache_control_duration(
-    headers: &HeaderMap,
-    directive_name: &str,
-) -> Option<Duration> {
-    for value in headers.get_all(CACHE_CONTROL) {
-        let Ok(value) = value.to_str() else {
-            continue;
-        };
-        for directive in value.split(',').map(str::trim) {
-            let Some((name, value)) = directive.split_once('=') else {
-                continue;
-            };
-            if !name.trim().eq_ignore_ascii_case(directive_name) {
-                continue;
-            }
-            let Ok(seconds) = value.trim().trim_matches('"').parse::<u64>() else {
-                continue;
-            };
-            return Some(Duration::from_secs(seconds));
-        }
-    }
-    None
-}
-
-pub(super) fn vary_is_supported(headers: &HeaderMap) -> bool {
-    vary_headers(headers).is_some()
+pub(super) fn vary_is_supported(context: &CacheStoreContext, headers: &HeaderMap) -> bool {
+    ignores_header(context, CacheIgnoreHeader::Vary) || vary_headers(headers).is_some()
 }
 
 pub(super) fn vary_headers(headers: &HeaderMap) -> Option<Vec<HeaderName>> {
@@ -240,24 +197,21 @@ pub(super) fn vary_headers(headers: &HeaderMap) -> Option<Vec<HeaderName>> {
     Some(names)
 }
 
+fn status_is_cacheable(context: &CacheStoreContext, status: StatusCode) -> bool {
+    context.policy.statuses.contains(&status)
+        || (status == StatusCode::PARTIAL_CONTENT
+            && cacheable_range_request(&context.request, &context.policy).is_some())
+}
+
+fn ignores_header(context: &CacheStoreContext, header: CacheIgnoreHeader) -> bool {
+    context.policy.ignore_headers.contains(&header)
+}
+
 fn parse_content_length(headers: &HeaderMap) -> Option<usize> {
     headers
         .get(CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<usize>().ok())
-}
-
-fn x_accel_expires_ttl(headers: &HeaderMap) -> Option<Duration> {
-    let value = headers.get("x-accel-expires")?.to_str().ok()?.trim();
-    if value == "0" {
-        return Some(Duration::ZERO);
-    }
-    if let Some(value) = value.strip_prefix('@') {
-        let seconds = value.parse::<u64>().ok()?;
-        let expires_at = std::time::UNIX_EPOCH.checked_add(Duration::from_secs(seconds))?;
-        return Some(expires_at.duration_since(SystemTime::now()).unwrap_or(Duration::ZERO));
-    }
-    value.parse::<u64>().ok().map(Duration::from_secs)
 }
 
 impl ResponseBodySize {
