@@ -167,11 +167,15 @@ impl CacheManager {
         read_cached_body: bool,
         status: CacheStatus,
     ) -> Option<HttpResponse> {
-        let (metadata, response) = {
+        let metadata = {
             let _io_guard = zone.io_lock.lock().await;
             let paths = cache_paths_for_zone(zone.config.as_ref(), &entry.hash);
-            let metadata = read_cache_metadata(&paths.metadata).await.ok()?;
-            let response = build_cached_response_for_request(
+            read_cache_metadata(&paths.metadata).await.ok()?
+        };
+        let response = {
+            let _io_guard = zone.io_lock.lock().await;
+            let paths = cache_paths_for_zone(zone.config.as_ref(), &entry.hash);
+            match build_cached_response_for_request(
                 &paths.body,
                 &metadata,
                 request,
@@ -179,8 +183,22 @@ impl CacheManager {
                 read_cached_body,
             )
             .await
-            .ok()?;
-            (metadata, response)
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    tracing::warn!(
+                        zone = %zone.config.name,
+                        key = %key,
+                        key_hash = %entry.hash,
+                        %error,
+                        "failed to build stale cached response; removing entry"
+                    );
+                    remove_index_entry(zone, key);
+                    remove_cache_files_if_unindexed(zone, key, &entry.hash).await;
+                    persist_zone_shared_index(zone).await;
+                    return None;
+                }
+            }
         };
         if metadata.key != key {
             tracing::warn!(

@@ -68,19 +68,25 @@ impl ForwardCacheContext {
     }
 
     pub(super) fn apply_upstream_request_method(&self, request: &mut http::Request<HttpBody>) {
-        if let Some(store) = self.store.as_ref() {
+        if let Some(store) =
+            self.store.as_ref().filter(|store| store.prepares_cacheable_upstream_request())
+        {
             *request.method_mut() = store.upstream_request_method();
         }
     }
 
     pub(super) fn apply_upstream_request_headers(&self, headers: &mut HeaderMap) {
-        if let Some(store) = self.store.as_ref() {
+        if let Some(store) =
+            self.store.as_ref().filter(|store| store.prepares_cacheable_upstream_request())
+        {
             store.apply_upstream_request_headers(headers);
         }
     }
 
     pub(super) fn apply_conditional_request_headers(&self, headers: &mut HeaderMap) {
-        if let Some(store) = self.store.as_ref() {
+        if let Some(store) =
+            self.store.as_ref().filter(|store| store.prepares_cacheable_upstream_request())
+        {
             store.apply_conditional_request_headers(headers);
         }
     }

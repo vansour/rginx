@@ -55,6 +55,8 @@ fn test_location(matcher: MatcherConfig, handler: HandlerConfig) -> LocationConf
 
 mod cache;
 mod cache_p1;
+mod cache_p2;
+mod cache_p3;
 mod http3;
 mod listeners;
 mod route;

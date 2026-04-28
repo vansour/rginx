@@ -12,4 +12,6 @@ use super::*;
 
 mod background;
 mod keys;
+mod keys_head;
+mod keys_slice;
 mod recovery;

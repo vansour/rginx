@@ -1,5 +1,6 @@
 use super::*;
 
+mod fill_lock;
 mod support;
 
 pub(in crate::cache) use support::PurgeSelector;
@@ -27,6 +28,10 @@ impl CacheRequest {
 impl CacheStoreContext {
     pub(crate) fn cache_status(&self) -> CacheStatus {
         self.cache_status
+    }
+
+    pub(crate) fn prepares_cacheable_upstream_request(&self) -> bool {
+        self.store_response
     }
 
     pub(crate) fn upstream_request_method(&self) -> Method {
@@ -163,67 +168,6 @@ impl CacheZoneRuntime {
         }
     }
 
-    pub(super) fn fill_lock_decision(
-        self: &Arc<Self>,
-        key: &str,
-        now: u64,
-        lock_age: std::time::Duration,
-    ) -> FillLockDecision {
-        let mut fill_locks =
-            self.fill_locks.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(lock) = fill_locks.get(key).cloned()
-            && now.saturating_sub(lock.acquired_at_unix_ms) <= lock_age.as_millis() as u64
-        {
-            return FillLockDecision::WaitLocal { waiter: lock.notify.notified_owned() };
-        }
-
-        let external_lock_path = if self.config.shared_index {
-            match self.try_acquire_shared_fill_lock(key, now, lock_age) {
-                Some(path) => Some(path),
-                None => return FillLockDecision::WaitExternal { key: key.to_string() },
-            }
-        } else {
-            None
-        };
-        let notify = Arc::new(Notify::new());
-        let generation = self.fill_lock_generation.fetch_add(1, Ordering::Relaxed) + 1;
-        fill_locks.insert(
-            key.to_string(),
-            CacheFillLockState { notify: notify.clone(), acquired_at_unix_ms: now, generation },
-        );
-        FillLockDecision::Acquired(CacheFillGuard {
-            key: key.to_string(),
-            generation,
-            fill_locks: Arc::downgrade(&self.fill_locks),
-            notify,
-            external_lock_path,
-        })
-    }
-
-    pub(super) async fn wait_for_external_fill_lock(
-        &self,
-        key: &str,
-        lock_timeout: std::time::Duration,
-        lock_age: std::time::Duration,
-    ) -> bool {
-        let lock_path = shared::shared_fill_lock_path(self.config.as_ref(), key);
-        let deadline = tokio::time::Instant::now() + lock_timeout;
-        loop {
-            if !lock_path.exists() {
-                return true;
-            }
-            if self.shared_fill_lock_is_stale(&lock_path, lock_age) {
-                let _ = std::fs::remove_file(&lock_path);
-                return true;
-            }
-            let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now())
-            else {
-                return false;
-            };
-            tokio::time::sleep(remaining.min(std::time::Duration::from_millis(25))).await;
-        }
-    }
-
     pub(super) fn record_hit(&self) {
         self.record_counter(&self.stats.hit_total, 1);
     }
@@ -286,61 +230,6 @@ impl CacheZoneRuntime {
         if let Some(notifier) = &self.change_notifier {
             notifier(&self.config.name);
         }
-    }
-
-    fn try_acquire_shared_fill_lock(
-        &self,
-        key: &str,
-        now: u64,
-        lock_age: std::time::Duration,
-    ) -> Option<std::path::PathBuf> {
-        let lock_path = shared::shared_fill_lock_path(self.config.as_ref(), key);
-        loop {
-            match std::fs::OpenOptions::new().write(true).create_new(true).open(&lock_path) {
-                Ok(mut file) => {
-                    let _ = std::io::Write::write_all(&mut file, now.to_string().as_bytes());
-                    return Some(lock_path);
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if self.shared_fill_lock_is_stale(&lock_path, lock_age) {
-                        let _ = std::fs::remove_file(&lock_path);
-                        continue;
-                    }
-                    return None;
-                }
-                Err(_) => return None,
-            }
-        }
-    }
-
-    fn shared_fill_lock_is_stale(
-        &self,
-        lock_path: &std::path::Path,
-        lock_age: std::time::Duration,
-    ) -> bool {
-        let Ok(metadata) = std::fs::metadata(lock_path) else {
-            return false;
-        };
-        let Ok(modified) = metadata.modified() else {
-            return false;
-        };
-        unix_time_ms(SystemTime::now()).saturating_sub(unix_time_ms(modified))
-            > lock_age.as_millis() as u64
-    }
-}
-
-impl Drop for CacheFillGuard {
-    fn drop(&mut self) {
-        if let Some(fill_locks) = self.fill_locks.upgrade() {
-            let mut fill_locks = fill_locks.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            if fill_locks.get(&self.key).is_some_and(|lock| lock.generation == self.generation) {
-                fill_locks.remove(&self.key);
-            }
-        }
-        if let Some(external_lock_path) = &self.external_lock_path {
-            let _ = std::fs::remove_file(external_lock_path);
-        }
-        self.notify.notify_waiters();
     }
 }
 
