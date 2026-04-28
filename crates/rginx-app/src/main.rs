@@ -61,6 +61,8 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Check) => unreachable!("`check` subcommand and `-t` conflict at clap level"),
         Some(
             Command::Status
+            | Command::Cache
+            | Command::PurgeCache(_)
             | Command::SnapshotVersion
             | Command::Snapshot(_)
             | Command::Delta(_)

@@ -253,6 +253,7 @@ fn access_log_format_renders_nginx_style_variables() {
         grpc_method: Some("Check"),
         grpc_status: Some("0"),
         grpc_message: Some("ok"),
+        cache_status: Some("HIT"),
     });
 
     assert_eq!(
@@ -305,6 +306,7 @@ fn access_log_format_supports_braced_variables_and_literal_dollar() {
         grpc_method: None,
         grpc_status: None,
         grpc_message: None,
+        cache_status: None,
     });
 
     assert_eq!(rendered, "$ req-1 204");
@@ -349,12 +351,55 @@ fn access_log_format_renders_tls_client_identity_variables() {
         grpc_method: None,
         grpc_status: None,
         grpc_message: None,
+        cache_status: None,
     });
 
     assert_eq!(
         rendered,
         "mtls=true subject=CN=client.example.com sans=client.example.com,api.example.com"
     );
+}
+
+#[test]
+fn access_log_format_renders_cache_status_variable() {
+    let format = AccessLogFormat::parse("cache=$cache_status").expect("access log format should parse");
+
+    let rendered = format.render(&AccessLogValues {
+        request_id: "req-3",
+        remote_addr: "127.0.0.1",
+        peer_addr: "127.0.0.1:80",
+        method: "GET",
+        host: "example.com",
+        path: "/",
+        request: "GET / HTTP/1.1",
+        status: 200,
+        body_bytes_sent: Some(2),
+        elapsed_ms: 1,
+        client_ip_source: "peer",
+        vhost: "server",
+        route: "server/routes[0]|exact:/",
+        scheme: "https",
+        http_version: "HTTP/1.1",
+        tls_version: None,
+        tls_alpn: None,
+        user_agent: None,
+        referer: None,
+        tls_client_authenticated: false,
+        tls_client_subject: None,
+        tls_client_issuer: None,
+        tls_client_serial: None,
+        tls_client_san_dns_names: None,
+        tls_client_chain_length: None,
+        tls_client_chain_subjects: None,
+        grpc_protocol: None,
+        grpc_service: None,
+        grpc_method: None,
+        grpc_status: None,
+        grpc_message: None,
+        cache_status: Some("REVALIDATED"),
+    });
+
+    assert_eq!(rendered, "cache=REVALIDATED");
 }
 
 fn route(path: &str) -> Route {

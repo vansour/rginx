@@ -19,19 +19,25 @@ use super::{CACHE_STATUS_HEADER, CacheIndexEntry, CacheZoneRuntime};
 
 static CACHE_TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct CacheMetadata {
     #[serde(default)]
     pub(super) key: String,
     pub(super) status: u16,
-    headers: Vec<CachedHeader>,
+    pub(super) headers: Vec<CachedHeader>,
     pub(super) stored_at_unix_ms: u64,
     pub(super) expires_at_unix_ms: u64,
+    #[serde(default)]
+    pub(super) stale_if_error_until_unix_ms: Option<u64>,
+    #[serde(default)]
+    pub(super) stale_while_revalidate_until_unix_ms: Option<u64>,
+    #[serde(default)]
+    pub(super) must_revalidate: bool,
     pub(super) body_size_bytes: usize,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct CachedHeader {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) struct CachedHeader {
     name: String,
     value: Vec<u8>,
 }
@@ -48,6 +54,9 @@ pub(super) fn cache_metadata(
     headers: &HeaderMap,
     stored_at_unix_ms: u64,
     expires_at_unix_ms: u64,
+    stale_if_error_until_unix_ms: Option<u64>,
+    stale_while_revalidate_until_unix_ms: Option<u64>,
+    must_revalidate: bool,
     body_size_bytes: usize,
 ) -> CacheMetadata {
     CacheMetadata {
@@ -56,6 +65,9 @@ pub(super) fn cache_metadata(
         headers: cached_headers(headers, body_size_bytes),
         stored_at_unix_ms,
         expires_at_unix_ms,
+        stale_if_error_until_unix_ms,
+        stale_while_revalidate_until_unix_ms,
+        must_revalidate,
         body_size_bytes,
     }
 }
@@ -66,11 +78,17 @@ pub(super) async fn read_cached_response(
     read_body: bool,
 ) -> std::io::Result<HttpResponse> {
     let paths = cache_paths(&zone.config.path, &entry.hash);
-    let metadata = fs::read(&paths.metadata).await?;
-    let metadata: CacheMetadata = serde_json::from_slice(&metadata)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let metadata = read_cache_metadata(&paths.metadata).await?;
+    build_cached_response(&paths.body, &metadata, read_body).await
+}
+
+pub(super) async fn build_cached_response(
+    body_path: &Path,
+    metadata: &CacheMetadata,
+    read_body: bool,
+) -> std::io::Result<HttpResponse> {
     let body = if read_body {
-        let body = fs::read(&paths.body).await?;
+        let body = fs::read(body_path).await?;
         if body.len() != metadata.body_size_bytes {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -86,17 +104,17 @@ pub(super) async fn read_cached_response(
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     let mut response = Response::builder().status(status);
     let headers = response.headers_mut().expect("response builder should expose headers");
-    for header in metadata.headers {
-        let name = HeaderName::from_bytes(header.name.as_bytes())
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-        let value = HeaderValue::from_bytes(&header.value)
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-        headers.append(name, value);
-    }
+    *headers = metadata.headers_map()?;
 
     response
         .body(full_body(Bytes::from(body)))
         .map_err(|error| std::io::Error::other(error.to_string()))
+}
+
+pub(super) async fn read_cache_metadata(path: &Path) -> std::io::Result<CacheMetadata> {
+    let metadata = fs::read(path).await?;
+    serde_json::from_slice(&metadata)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
 }
 
 pub(super) async fn write_cache_entry(
@@ -130,6 +148,26 @@ pub(super) async fn write_cache_entry(
     Ok(())
 }
 
+pub(super) async fn write_cache_metadata(
+    paths: &CachePaths,
+    metadata: &CacheMetadata,
+) -> std::io::Result<()> {
+    fs::create_dir_all(&paths.dir).await?;
+    let suffix = next_temp_suffix();
+    let metadata_tmp = sibling_temp_path(&paths.metadata, &suffix);
+    let metadata_bytes =
+        serde_json::to_vec(metadata).map_err(|error| std::io::Error::other(error.to_string()))?;
+    if let Err(error) = fs::write(&metadata_tmp, metadata_bytes).await {
+        let _ = fs::remove_file(&metadata_tmp).await;
+        return Err(error);
+    }
+    if let Err(error) = fs::rename(&metadata_tmp, &paths.metadata).await {
+        let _ = fs::remove_file(&metadata_tmp).await;
+        return Err(error);
+    }
+    Ok(())
+}
+
 pub(super) fn cache_paths(base: &Path, hash: &str) -> CachePaths {
     let prefix = hash.get(..2).unwrap_or("00");
     let dir = base.join(prefix);
@@ -154,6 +192,20 @@ pub(super) fn unix_time_ms(time: SystemTime) -> u64 {
     time.duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
         .unwrap_or(0)
+}
+
+impl CacheMetadata {
+    pub(super) fn headers_map(&self) -> std::io::Result<HeaderMap> {
+        let mut headers = HeaderMap::new();
+        for header in &self.headers {
+            let name = HeaderName::from_bytes(header.name.as_bytes())
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            let value = HeaderValue::from_bytes(&header.value)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            headers.append(name, value);
+        }
+        Ok(headers)
+    }
 }
 
 fn cached_headers(headers: &HeaderMap, body_size_bytes: usize) -> Vec<CachedHeader> {

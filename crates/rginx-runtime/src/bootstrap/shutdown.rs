@@ -18,6 +18,7 @@ pub(super) async fn graceful_shutdown(
     active_listener_groups: &mut ListenerGroupMap,
     draining_listener_groups: &mut Vec<ListenerWorkerGroup>,
     admin_task: &mut Option<JoinHandle<std::io::Result<()>>>,
+    cache_task: &mut Option<JoinHandle<()>>,
     health_task: &mut Option<JoinHandle<()>>,
     ocsp_task: &mut Option<JoinHandle<()>>,
 ) -> Result<()> {
@@ -29,6 +30,7 @@ pub(super) async fn graceful_shutdown(
         join_listener_worker_groups(&state.http, active_listener_groups, draining_listener_groups)
             .await?;
         join_admin_task(admin_task).await?;
+        join_unit_task(cache_task, "cache cleanup").await?;
         join_unit_task(health_task, "active health").await?;
         join_unit_task(ocsp_task, "OCSP refresh").await?;
         state.http.drain_background_tasks().await;
@@ -44,6 +46,7 @@ pub(super) async fn graceful_shutdown(
             abort_listener_worker_groups(active_listener_groups.values());
             abort_listener_worker_groups(draining_listener_groups.iter());
             abort_task(admin_task.as_ref());
+            abort_task(cache_task.as_ref());
             abort_task(health_task.as_ref());
             abort_task(ocsp_task.as_ref());
 
@@ -55,6 +58,7 @@ pub(super) async fn graceful_shutdown(
             .await;
 
             join_admin_task_after_abort(admin_task).await;
+            join_unit_task_after_abort(cache_task, "cache cleanup").await;
             join_unit_task_after_abort(health_task, "active health").await;
             join_unit_task_after_abort(ocsp_task, "OCSP refresh").await;
 

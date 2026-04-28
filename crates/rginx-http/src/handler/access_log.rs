@@ -24,6 +24,7 @@ pub(super) struct AccessLogContext<'a> {
     pub(crate) body_bytes_sent: Option<u64>,
     pub(crate) tls_client_identity: Option<&'a TlsClientIdentity>,
     pub(crate) grpc: Option<&'a GrpcObservability>,
+    pub(crate) cache_status: Option<&'a str>,
 }
 
 #[derive(Debug, Clone)]
@@ -45,6 +46,7 @@ pub(super) struct OwnedAccessLogContext {
     pub(crate) tls_alpn: Option<String>,
     pub(crate) body_bytes_sent: Option<u64>,
     pub(crate) tls_client_identity: Option<TlsClientIdentity>,
+    pub(crate) cache_status: Option<String>,
 }
 
 impl OwnedAccessLogContext {
@@ -71,6 +73,7 @@ impl OwnedAccessLogContext {
             body_bytes_sent: self.body_bytes_sent,
             tls_client_identity: self.tls_client_identity.as_ref(),
             grpc,
+            cache_status: self.cache_status.as_deref(),
         }
     }
 }
@@ -119,6 +122,7 @@ pub(super) fn log_access_event(format: Option<&AccessLogFormat>, context: Access
             .tls_client_identity
             .and_then(|identity| identity.serial_number.as_deref())
             .unwrap_or("-"),
+        cache_status = context.cache_status.unwrap_or("-"),
         tls_client_san_dns_names = joined_tls_client_san_dns_names(context.tls_client_identity)
             .as_deref()
             .unwrap_or("-"),
@@ -188,6 +192,7 @@ pub(super) fn render_access_log_line(
         grpc_method: context.grpc.map(|grpc| grpc.method.as_str()),
         grpc_status: context.grpc.and_then(|grpc| grpc.status.as_deref()),
         grpc_message: context.grpc.and_then(|grpc| grpc.message.as_deref()),
+        cache_status: context.cache_status,
     })
 }
 

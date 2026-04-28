@@ -9,6 +9,7 @@ pub async fn forward_request(
     client_address: ClientAddress,
     downstream: DownstreamRequestContext<'_>,
 ) -> HttpResponse {
+    let mut request = request;
     let cache_manager = active.cache.clone();
     let clients = active.clients;
     let cache_request = crate::cache::CacheRequest::from_request(&request);
@@ -23,6 +24,7 @@ pub async fn forward_request(
         ForwardCacheLookup::Hit(response) => return response,
         ForwardCacheLookup::Proceed(cache) => cache,
     };
+    cache.apply_conditional_request_headers(request.headers_mut());
 
     let prepared = match prepare_forward_request(
         &state,
@@ -228,6 +230,9 @@ pub async fn forward_request(
                     "upstream request failed"
                 );
                 state.record_upstream_bad_gateway_response(&target.upstream_name);
+                if let Some(stale) = cache.serve_stale_on_error().await {
+                    return stale;
+                }
                 return cache.mark_response(bad_gateway(
                     &request_headers,
                     format!("upstream `{}` is unavailable\n", target.upstream_name),
@@ -276,6 +281,9 @@ pub async fn forward_request(
                     "upstream request timed out"
                 );
                 state.record_upstream_gateway_timeout_response(&target.upstream_name);
+                if let Some(stale) = cache.serve_stale_on_error().await {
+                    return stale;
+                }
                 return cache.mark_response(gateway_timeout(
                     &request_headers,
                     format!(

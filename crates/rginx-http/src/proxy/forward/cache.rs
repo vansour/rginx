@@ -43,4 +43,17 @@ impl ForwardCacheContext {
             response
         }
     }
+
+    pub(super) fn apply_conditional_request_headers(&self, headers: &mut HeaderMap) {
+        if let Some(store) = self.store.as_ref() {
+            store.apply_conditional_request_headers(headers);
+        }
+    }
+    pub(super) async fn serve_stale_on_error(&self) -> Option<HttpResponse> {
+        let store = self.store.as_ref()?;
+        if !store.can_serve_stale_on_error() {
+            return None;
+        }
+        store.serve_stale_on_error().await
+    }
 }

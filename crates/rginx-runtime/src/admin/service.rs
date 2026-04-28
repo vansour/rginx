@@ -119,6 +119,11 @@ async fn dispatch_request(request: AdminRequest, state: &SharedState) -> io::Res
             let upstreams = included_modules
                 .contains(&SnapshotModule::Upstreams)
                 .then(|| state.upstream_stats_snapshot_with_window(window_secs));
+            let cache = if included_modules.contains(&SnapshotModule::Cache) {
+                Some(state.cache_stats_snapshot().await)
+            } else {
+                None
+            };
             AdminResponse::Snapshot(AdminSnapshot {
                 schema_version: ADMIN_SNAPSHOT_SCHEMA_VERSION,
                 snapshot_version: state.current_snapshot_version(),
@@ -131,6 +136,7 @@ async fn dispatch_request(request: AdminRequest, state: &SharedState) -> io::Res
                 traffic,
                 peer_health,
                 upstreams,
+                cache,
             })
         }
         AdminRequest::GetSnapshotVersion => {
@@ -153,6 +159,7 @@ async fn dispatch_request(request: AdminRequest, state: &SharedState) -> io::Res
             AdminResponse::SnapshotVersion(SnapshotVersionSnapshot { snapshot_version })
         }
         AdminRequest::GetStatus => AdminResponse::Status(state.status_snapshot().await),
+        AdminRequest::GetCacheStats => AdminResponse::CacheStats(state.cache_stats_snapshot().await),
         AdminRequest::GetCounters => AdminResponse::Counters(state.counters_snapshot()),
         AdminRequest::GetTrafficStats { window_secs } => {
             let window_secs = normalize_recent_window_secs(window_secs)
@@ -166,6 +173,24 @@ async fn dispatch_request(request: AdminRequest, state: &SharedState) -> io::Res
             let window_secs = normalize_recent_window_secs(window_secs)
                 .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
             AdminResponse::UpstreamStats(state.upstream_stats_snapshot_with_window(window_secs))
+        }
+        AdminRequest::PurgeCacheZone { zone_name } => {
+            match state.purge_cache_zone(&zone_name).await {
+                Ok(result) => AdminResponse::CachePurge(result),
+                Err(message) => AdminResponse::Error { message },
+            }
+        }
+        AdminRequest::PurgeCacheKey { zone_name, key } => {
+            match state.purge_cache_key(&zone_name, &key).await {
+                Ok(result) => AdminResponse::CachePurge(result),
+                Err(message) => AdminResponse::Error { message },
+            }
+        }
+        AdminRequest::PurgeCachePrefix { zone_name, prefix } => {
+            match state.purge_cache_prefix(&zone_name, &prefix).await {
+                Ok(result) => AdminResponse::CachePurge(result),
+                Err(message) => AdminResponse::Error { message },
+            }
         }
         AdminRequest::GetRevision => {
             AdminResponse::Revision(RevisionSnapshot { revision: state.current_revision().await })

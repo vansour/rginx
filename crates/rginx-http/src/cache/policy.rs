@@ -2,14 +2,22 @@ use std::time::{Duration, SystemTime};
 
 use http::StatusCode;
 use http::header::{
-    CACHE_CONTROL, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, EXPIRES, HeaderMap, SET_COOKIE,
-    VARY,
+    CACHE_CONTROL, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, EXPIRES, HeaderMap, HeaderName,
+    SET_COOKIE, VARY,
 };
 use hyper::body::Body as _;
 
 use crate::handler::HttpResponse;
 
 use super::CacheStoreContext;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ResponseFreshness {
+    pub(super) ttl: Duration,
+    pub(super) stale_if_error: Option<Duration>,
+    pub(super) stale_while_revalidate: Option<Duration>,
+    pub(super) must_revalidate: bool,
+}
 
 pub(super) fn response_is_storable(context: &CacheStoreContext, response: &HttpResponse) -> bool {
     if !context.policy.statuses.iter().any(|status| *status == response.status()) {
@@ -18,14 +26,16 @@ pub(super) fn response_is_storable(context: &CacheStoreContext, response: &HttpR
     if response.status() == StatusCode::PARTIAL_CONTENT
         || response.headers().contains_key(CONTENT_RANGE)
         || response.headers().contains_key(SET_COOKIE)
-        || response.headers().contains_key(VARY)
     {
+        return false;
+    }
+    if !vary_is_supported(response.headers()) {
         return false;
     }
     if response_is_grpc(response.headers()) {
         return false;
     }
-    if cache_control_contains(response.headers(), &["no-store", "private", "no-cache"]) {
+    if cache_control_contains(response.headers(), &["no-store", "private"]) {
         return false;
     }
     if let Some(length) = parse_content_length(response.headers())
@@ -45,6 +55,28 @@ pub(super) fn response_is_storable(context: &CacheStoreContext, response: &HttpR
         return false;
     }
     true
+}
+
+pub(super) fn response_freshness(
+    context: &CacheStoreContext,
+    headers: &HeaderMap,
+) -> ResponseFreshness {
+    ResponseFreshness {
+        ttl: response_ttl(headers, context.zone.config.default_ttl),
+        stale_if_error: cache_control_duration(headers, "stale-if-error")
+            .or(context.policy.stale_if_error),
+        stale_while_revalidate: cache_control_duration(headers, "stale-while-revalidate"),
+        must_revalidate: cache_control_contains(headers, &["no-cache", "must-revalidate"]),
+    }
+}
+
+pub(super) fn request_requires_revalidation(headers: &HeaderMap) -> bool {
+    cache_control_contains(headers, &["no-cache"])
+        || cache_control_duration(headers, "max-age") == Some(Duration::ZERO)
+}
+
+pub(super) fn header_value(headers: &HeaderMap, name: HeaderName) -> Option<String> {
+    headers.get(name).and_then(|value| value.to_str().ok()).map(str::to_string)
 }
 
 fn response_is_grpc(headers: &HeaderMap) -> bool {
@@ -92,8 +124,6 @@ fn cache_control_max_age(headers: &HeaderMap) -> Option<Duration> {
 fn expires_ttl(headers: &HeaderMap) -> Option<Duration> {
     let expires = headers.get(EXPIRES)?.to_str().ok()?;
     let expires = httpdate::parse_http_date(expires).ok()?;
-    // An explicit stale Expires value means "do not cache"; default_ttl only applies
-    // when upstream sends no freshness metadata.
     Some(expires.duration_since(SystemTime::now()).unwrap_or(Duration::ZERO))
 }
 
@@ -103,6 +133,44 @@ fn cache_control_contains(headers: &HeaderMap, directives: &[&str]) -> bool {
             value.split(',').any(|directive| {
                 let name = directive.split_once('=').map_or(directive, |(name, _)| name).trim();
                 directives.iter().any(|expected| name.eq_ignore_ascii_case(expected))
+            })
+        })
+    })
+}
+
+pub(super) fn cache_control_duration(
+    headers: &HeaderMap,
+    directive_name: &str,
+) -> Option<Duration> {
+    for value in headers.get_all(CACHE_CONTROL) {
+        let Ok(value) = value.to_str() else {
+            continue;
+        };
+        for directive in value.split(',').map(str::trim) {
+            let Some((name, value)) = directive.split_once('=') else {
+                continue;
+            };
+            if !name.trim().eq_ignore_ascii_case(directive_name) {
+                continue;
+            }
+            let Ok(seconds) = value.trim().trim_matches('"').parse::<u64>() else {
+                continue;
+            };
+            return Some(Duration::from_secs(seconds));
+        }
+    }
+    None
+}
+
+pub(super) fn vary_is_supported(headers: &HeaderMap) -> bool {
+    if headers.get(VARY).is_none() {
+        return true;
+    }
+
+    headers.get_all(VARY).iter().all(|value| {
+        value.to_str().ok().is_some_and(|value| {
+            value.split(',').map(str::trim).filter(|token| !token.is_empty()).all(|token| {
+                !token.eq("*") && token.eq_ignore_ascii_case("accept-encoding")
             })
         })
     })

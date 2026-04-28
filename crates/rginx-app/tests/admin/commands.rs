@@ -1,3 +1,5 @@
+#[path = "commands/cache.rs"]
+mod cache;
 #[path = "commands/lifecycle.rs"]
 mod lifecycle;
 #[path = "commands/status.rs"]

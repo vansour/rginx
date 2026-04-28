@@ -41,6 +41,7 @@ fn render_access_log_line_uses_configured_template() {
             body_bytes_sent: Some(3),
             tls_client_identity: None,
             grpc: Some(&grpc),
+            cache_status: Some("HIT"),
         },
     );
 

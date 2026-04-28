@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use clap::Parser;
 
 use super::{
-    Cli, Command, DeltaArgs, SignalCommand, SnapshotArgs, SnapshotModuleArg, WaitArgs, WindowArgs,
-    installed_config_path, pid_path_for_config,
+    Cli, Command, DeltaArgs, PurgeCacheArgs, SignalCommand, SnapshotArgs, SnapshotModuleArg,
+    WaitArgs, WindowArgs, installed_config_path, pid_path_for_config,
 };
 
 #[test]
@@ -124,6 +124,18 @@ fn cli_accepts_snapshot_include_flags() {
 }
 
 #[test]
+fn cli_accepts_cache_snapshot_module() {
+    let cli = Cli::try_parse_from(["rginx", "snapshot", "--include", "cache"])
+        .expect("cli should parse");
+
+    assert!(matches!(
+        cli.command,
+        Some(Command::Snapshot(SnapshotArgs { include, window_secs: None }))
+            if include == vec![SnapshotModuleArg::Cache]
+    ));
+}
+
+#[test]
 fn cli_accepts_window_secs_flags() {
     let cli = Cli::try_parse_from(["rginx", "traffic", "--window-secs", "300"])
         .expect("cli should parse");
@@ -155,4 +167,49 @@ fn cli_accepts_upstreams_subcommand() {
     let cli = Cli::try_parse_from(["rginx", "upstreams"]).expect("cli should parse");
 
     assert!(matches!(cli.command, Some(Command::Upstreams(WindowArgs { window_secs: None }))));
+}
+
+#[test]
+fn cli_accepts_cache_subcommand() {
+    let cli = Cli::try_parse_from(["rginx", "cache"]).expect("cli should parse");
+
+    assert!(matches!(cli.command, Some(Command::Cache)));
+}
+
+#[test]
+fn cli_accepts_purge_cache_key_subcommand() {
+    let cli = Cli::try_parse_from([
+        "rginx",
+        "purge-cache",
+        "--zone",
+        "default",
+        "--key",
+        "http:example.com:/demo",
+    ])
+    .expect("cli should parse");
+
+    assert!(matches!(
+        cli.command,
+        Some(Command::PurgeCache(PurgeCacheArgs { zone, key: Some(key), prefix: None }))
+            if zone == "default" && key == "http:example.com:/demo"
+    ));
+}
+
+#[test]
+fn cli_accepts_purge_cache_prefix_subcommand() {
+    let cli = Cli::try_parse_from([
+        "rginx",
+        "purge-cache",
+        "--zone",
+        "default",
+        "--prefix",
+        "http:example.com:/assets/",
+    ])
+    .expect("cli should parse");
+
+    assert!(matches!(
+        cli.command,
+        Some(Command::PurgeCache(PurgeCacheArgs { zone, key: None, prefix: Some(prefix) }))
+            if zone == "default" && prefix == "http:example.com:/assets/"
+    ));
 }

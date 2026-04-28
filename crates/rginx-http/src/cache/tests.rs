@@ -26,7 +26,50 @@ fn test_zone(path: PathBuf, max_entry_bytes: usize) -> Arc<CacheZoneRuntime> {
         }),
         index: Mutex::new(CacheIndex::default()),
         io_lock: AsyncMutex::new(()),
+        fill_locks: Arc::new(Mutex::new(HashMap::new())),
+        stats: CacheZoneStats::default(),
+        change_notifier: None,
     })
+}
+
+fn test_index_entry(
+    hash: String,
+    body_size_bytes: usize,
+    expires_at_unix_ms: u64,
+    last_access_unix_ms: u64,
+) -> CacheIndexEntry {
+    CacheIndexEntry {
+        hash,
+        body_size_bytes,
+        expires_at_unix_ms,
+        stale_if_error_until_unix_ms: None,
+        stale_while_revalidate_until_unix_ms: None,
+        must_revalidate: false,
+        last_access_unix_ms,
+    }
+}
+
+fn test_store_context(zone: Arc<CacheZoneRuntime>, key: &str) -> CacheStoreContext {
+    CacheStoreContext {
+        zone,
+        policy: RouteCachePolicy {
+            zone: "default".to_string(),
+            methods: vec![Method::GET],
+            statuses: vec![StatusCode::OK],
+            key: rginx_core::CacheKeyTemplate::parse("{uri}").expect("key should parse"),
+            stale_if_error: None,
+        },
+        key: key.to_string(),
+        cache_status: CacheStatus::Miss,
+        store_response: true,
+        _fill_guard: None,
+        cached_entry: None,
+        cached_metadata: None,
+        allow_stale_on_error: false,
+        revalidating: false,
+        conditional_headers: None,
+        read_cached_body: true,
+    }
 }
 
 fn test_manager(path: PathBuf, max_entry_bytes: usize) -> CacheManager {
@@ -146,12 +189,12 @@ async fn cache_manager_treats_corrupt_metadata_as_miss() {
         let mut index = lock_index(&zone.index);
         index.entries.insert(
             key.to_string(),
-            CacheIndexEntry {
+            test_index_entry(
                 hash,
-                body_size_bytes: 6,
-                expires_at_unix_ms: unix_time_ms(SystemTime::now()) + 60_000,
-                last_access_unix_ms: unix_time_ms(SystemTime::now()),
-            },
+                6,
+                unix_time_ms(SystemTime::now()) + 60_000,
+                unix_time_ms(SystemTime::now()),
+            ),
         );
         index.current_size_bytes = 6;
     }
@@ -188,6 +231,9 @@ async fn cache_manager_removes_expired_entries_on_lookup() {
         &http::HeaderMap::new(),
         now.saturating_sub(2_000),
         now.saturating_sub(1_000),
+        None,
+        None,
+        false,
         7,
     );
     write_cache_entry(&paths, &metadata, b"expired").await.expect("entry should be written");
@@ -196,12 +242,7 @@ async fn cache_manager_removes_expired_entries_on_lookup() {
         let mut index = lock_index(&zone.index);
         index.entries.insert(
             key.to_string(),
-            CacheIndexEntry {
-                hash: hash.clone(),
-                body_size_bytes: 7,
-                expires_at_unix_ms: now.saturating_sub(1_000),
-                last_access_unix_ms: now.saturating_sub(2_000),
-            },
+            test_index_entry(hash.clone(), 7, now.saturating_sub(1_000), now.saturating_sub(2_000)),
         );
         index.current_size_bytes = 7;
     }
@@ -220,10 +261,10 @@ async fn cache_manager_removes_expired_entries_on_lookup() {
 
     let zone = manager.zones.get("default").expect("zone should exist");
     let index = lock_index(&zone.index);
-    assert!(!index.entries.contains_key(key));
-    assert_eq!(index.current_size_bytes, 0);
-    assert!(!paths.metadata.exists());
-    assert!(!paths.body.exists());
+    assert!(index.entries.contains_key(key));
+    assert_eq!(index.current_size_bytes, 7);
+    assert!(paths.metadata.exists());
+    assert!(paths.body.exists());
 }
 
 #[tokio::test]
@@ -374,20 +415,11 @@ fn no_store_response_is_not_storable() {
         }),
         index: Mutex::new(CacheIndex::default()),
         io_lock: AsyncMutex::new(()),
+        fill_locks: Arc::new(Mutex::new(HashMap::new())),
+        stats: CacheZoneStats::default(),
+        change_notifier: None,
     });
-    let context = CacheStoreContext {
-        zone,
-        policy: RouteCachePolicy {
-            zone: "default".to_string(),
-            methods: vec![Method::GET],
-            statuses: vec![StatusCode::OK],
-            key: rginx_core::CacheKeyTemplate::parse("{uri}").expect("key should parse"),
-            stale_if_error: None,
-        },
-        key: "/".to_string(),
-        cache_status: CacheStatus::Miss,
-        store_response: true,
-    };
+    let context = test_store_context(zone, "/");
     let response = Response::builder()
         .status(StatusCode::OK)
         .header(CACHE_CONTROL, "no-store")

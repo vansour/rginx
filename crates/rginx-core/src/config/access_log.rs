@@ -47,6 +47,7 @@ enum AccessLogVariable {
     GrpcMethod,
     GrpcStatus,
     GrpcMessage,
+    CacheStatus,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -82,6 +83,7 @@ pub struct AccessLogValues<'a> {
     pub grpc_method: Option<&'a str>,
     pub grpc_status: Option<&'a str>,
     pub grpc_message: Option<&'a str>,
+    pub cache_status: Option<&'a str>,
 }
 
 impl AccessLogFormat {
@@ -239,6 +241,9 @@ impl AccessLogFormat {
                     AccessLogVariable::GrpcMessage => {
                         rendered.push_str(fallback_access_log_option(values.grpc_message))
                     }
+                    AccessLogVariable::CacheStatus => {
+                        rendered.push_str(fallback_access_log_option(values.cache_status))
+                    }
                 },
             }
         }
@@ -280,6 +285,7 @@ fn parse_access_log_variable(name: &str) -> Result<AccessLogVariable> {
         "grpc_method" => Ok(AccessLogVariable::GrpcMethod),
         "grpc_status" => Ok(AccessLogVariable::GrpcStatus),
         "grpc_message" => Ok(AccessLogVariable::GrpcMessage),
+        "cache_status" | "upstream_cache_status" => Ok(AccessLogVariable::CacheStatus),
         _ => Err(Error::Config(format!("access_log_format variable `${name}` is not supported"))),
     }
 }

@@ -21,6 +21,8 @@ fn status_command_reads_local_admin_socket() {
     assert!(stdout.contains("tls_listeners=1"));
     assert!(stdout.contains("tls_certificates=0"));
     assert!(stdout.contains("tls_expiring_certificates=0"));
+    assert!(stdout.contains("cache_zones=0"));
+    assert!(stdout.contains("kind=status_cache"));
     assert!(stdout.contains("http3_active_connections=0"));
     assert!(stdout.contains("http3_active_request_streams=0"));
     assert!(stdout.contains("http3_retry_issued_total=0"));

@@ -5,10 +5,17 @@
 - 阶段 0：已完成。第一版边界固定为 route 级反向代理响应缓存，默认关闭。
 - 阶段 1：已完成。缓存配置可 parse、validate、compile，并出现在
   `rginx check` 摘要中。
-- 阶段 2：已完成 MVP。已实现内存 index + 磁盘 metadata/body 的缓存模块，
+- 阶段 2：已完成。已实现内存 index + 磁盘 metadata/body 的缓存模块，
   覆盖 key、TTL、存储策略、启动扫描、损坏 metadata 和对象大小限制。
-- 阶段 3：已完成 MVP。代理路径已接入 lookup/store，并输出 `X-Cache:
-  HIT`、`MISS`、`BYPASS`、`EXPIRED`。
+- 阶段 3：已完成。代理路径已接入 lookup/store，并输出 `X-Cache:
+  HIT`、`MISS`、`BYPASS`、`EXPIRED`、`STALE`、`REVALIDATED`。
+- 阶段 4：已完成。缓存已接入 runtime snapshot/status、admin socket、
+  CLI 和 access log `$cache_status`。
+- 阶段 5：已完成。已支持 `ETag`/`Last-Modified` revalidation、`304`
+  刷新、`stale-if-error`、`stale-while-revalidate`、`Vary:
+  Accept-Encoding` 和 cache lock。
+- 阶段 6：已完成。已接入后台 inactive cleanup、admin/CLI purge、reload
+  保留 cache data 和安装脚本 cache 根目录准备。
 
 本文档按阶段规划 rginx 的缓存支持。第一目标是实现用户可配置的 HTTP
 反向代理响应缓存。现有内部缓存，例如 DNS 解析缓存、上游 client pool、

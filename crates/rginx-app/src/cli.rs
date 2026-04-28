@@ -1,7 +1,7 @@
 use std::env;
 use std::path::{Path, PathBuf};
 
-use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, ArgGroup, Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -31,6 +31,8 @@ pub enum Command {
     Delta(DeltaArgs),
     Wait(WaitArgs),
     Status,
+    Cache,
+    PurgeCache(PurgeCacheArgs),
     Counters,
     Traffic(WindowArgs),
     Peers,
@@ -73,6 +75,19 @@ pub struct DeltaArgs {
     pub window_secs: Option<u64>,
 }
 
+#[derive(Debug, Clone, Args)]
+#[command(group = ArgGroup::new("selector").args(["key", "prefix"]).multiple(false))]
+pub struct PurgeCacheArgs {
+    #[arg(long)]
+    pub zone: String,
+
+    #[arg(long)]
+    pub key: Option<String>,
+
+    #[arg(long)]
+    pub prefix: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum SnapshotModuleArg {
     Status,
@@ -81,6 +96,7 @@ pub enum SnapshotModuleArg {
     #[value(name = "peer-health")]
     PeerHealth,
     Upstreams,
+    Cache,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

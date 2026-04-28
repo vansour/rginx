@@ -16,9 +16,43 @@ pub(super) struct UpstreamSuccessContext<'a> {
 }
 
 pub(super) async fn finalize_upstream_success(
-    mut response: Response<HttpBody>,
+    response: Response<HttpBody>,
     context: UpstreamSuccessContext<'_>,
 ) -> HttpResponse {
+    if context
+        .cache_store
+        .as_ref()
+        .is_some_and(|cache_store| cache_store.should_refresh_from_not_modified(response.status()))
+    {
+        return match context
+            .cache_manager
+            .complete_not_modified(
+                context.cache_store.expect("cache store should be present for revalidation"),
+                response,
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!(%error, "failed to refresh cached metadata from 304 response");
+                crate::handler::text_response(
+                    StatusCode::BAD_GATEWAY,
+                    "text/plain; charset=utf-8",
+                    format!("failed to refresh cached response from upstream 304: {error}\n"),
+                )
+            }
+        };
+    }
+
+    if let Some(cache_store) = context.cache_store.as_ref() {
+        if response.status().is_server_error()
+            && let Some(stale) = cache_store.serve_stale_on_error().await
+        {
+            return stale;
+        }
+    }
+
+    let mut response = response;
     let upstream_upgrade = if context.downstream_upgrade.is_some()
         && is_upgrade_response(response.status(), response.headers())
     {

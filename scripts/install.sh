@@ -355,6 +355,7 @@ DOC_DIR="/usr/share/doc/rginx"
 CONF_D_DIR="${CONFIG_DIR}/conf.d"
 ACTIVE_CONFIG="${CONFIG_DIR}/rginx.ron"
 STATE_DIR="/var/lib/rginx"
+CACHE_ROOT_DIR="/var/cache/rginx"
 SERVICE_USER="rginx"
 SERVICE_GROUP="rginx"
 SYSTEMD_UNIT_DIR="/etc/systemd/system"
@@ -423,6 +424,8 @@ if [[ -d "${STAGED_ROOT}/configs/conf.d" ]]; then
 fi
 
 ensure_service_account
+log "ensuring cache root: ${CACHE_ROOT_DIR}"
+run_root install -d -m 750 -o "${SERVICE_USER}" -g "${SERVICE_GROUP}" "${CACHE_ROOT_DIR}"
 install_systemd_unit
 activate_systemd_unit
 
@@ -430,5 +433,6 @@ log "binary: ${SBIN_DIR}/rginx"
 log "uninstall: ${SBIN_DIR}/rginx-uninstall"
 log "active config (${ACTIVE_CONFIG_RESULT}): ${ACTIVE_CONFIG}"
 log "conf.d dir: ${CONF_D_DIR} (installed ${CONF_D_INSTALLED}, preserved ${CONF_D_PRESERVED})"
+log "cache root: ${CACHE_ROOT_DIR}"
 log "systemd unit: ${SYSTEMD_UNIT_PATH} (enabled)"
 log "default config search will now pick ${ACTIVE_CONFIG} when running ${SBIN_DIR}/rginx"

@@ -1,4 +1,4 @@
-use http::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, RANGE};
+use http::header::{ACCEPT_ENCODING, AUTHORIZATION, CONTENT_TYPE, HeaderMap, RANGE};
 use http::{Method, Uri};
 use rginx_core::{CacheKeyRenderContext, RouteCachePolicy};
 
@@ -42,10 +42,31 @@ pub(super) fn render_cache_key(
         .filter(|value| !value.trim().is_empty())
         .or_else(|| uri.authority().map(|authority| authority.as_str()))
         .unwrap_or("-");
-    policy.key.render(&CacheKeyRenderContext {
+    let mut rendered = policy.key.render(&CacheKeyRenderContext {
         scheme,
         host,
         uri: request_uri,
         method: method.as_str(),
-    })
+    });
+    if let Some(accept_encoding) = normalized_accept_encoding(headers) {
+        rendered.push_str("|ae:");
+        rendered.push_str(&accept_encoding);
+    }
+    rendered
+}
+
+fn normalized_accept_encoding(headers: &HeaderMap) -> Option<String> {
+    let value = headers.get(ACCEPT_ENCODING)?.to_str().ok()?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    Some(
+        value
+            .split(',')
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .collect::<Vec<_>>()
+            .join(",")
+            .to_ascii_lowercase(),
+    )
 }
