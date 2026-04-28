@@ -167,6 +167,19 @@ pub(super) fn validate_route_cache(
         )));
     }
 
+    if cache.slice_size_bytes.is_some_and(|value| value == 0) {
+        return Err(Error::Config(format!(
+            "{route_scope} cache.slice_size_bytes must be greater than 0"
+        )));
+    }
+    if cache.slice_size_bytes.is_some()
+        && !matches!(cache.range_requests, Some(crate::model::CacheRangeRequestPolicyConfig::Cache))
+    {
+        return Err(Error::Config(format!(
+            "{route_scope} cache.slice_size_bytes requires cache.range_requests = Cache"
+        )));
+    }
+
     Ok(())
 }
 

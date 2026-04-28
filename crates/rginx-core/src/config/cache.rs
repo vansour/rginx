@@ -22,6 +22,7 @@ pub struct CacheZone {
     pub manager_batch_entries: usize,
     pub manager_sleep: Duration,
     pub inactive_cleanup_interval: Duration,
+    pub shared_index: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +42,8 @@ pub struct RouteCachePolicy {
     pub min_uses: u64,
     pub ignore_headers: Vec<CacheIgnoreHeader>,
     pub range_requests: CacheRangeRequestPolicy,
+    pub slice_size_bytes: Option<u64>,
+    pub convert_head: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

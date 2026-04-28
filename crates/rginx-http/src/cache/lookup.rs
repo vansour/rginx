@@ -55,7 +55,7 @@ impl CacheManager {
                             }
                         }
                     }
-                    FillLockDecision::Wait { waiter: _waiter }
+                    FillLockDecision::WaitLocal { waiter: _waiter }
                         if expired && stale_allowed_for_entry(policy, entry, now) =>
                     {
                         LookupDecision::Stale {
@@ -64,7 +64,21 @@ impl CacheManager {
                             status: CacheStatus::Updating,
                         }
                     }
-                    FillLockDecision::Wait { waiter } => LookupDecision::Wait { waiter },
+                    FillLockDecision::WaitExternal { key: _external_key }
+                        if expired && stale_allowed_for_entry(policy, entry, now) =>
+                    {
+                        LookupDecision::Stale {
+                            key,
+                            entry: entry.clone(),
+                            status: CacheStatus::Updating,
+                        }
+                    }
+                    FillLockDecision::WaitLocal { waiter } => {
+                        LookupDecision::Wait { strategy: LookupWait::Local { waiter } }
+                    }
+                    FillLockDecision::WaitExternal { key } => {
+                        LookupDecision::Wait { strategy: LookupWait::External { key } }
+                    }
                 }
             }
             None => match zone.fill_lock_decision(base_key, now, policy.lock_age) {
@@ -75,7 +89,12 @@ impl CacheManager {
                     fill_guard: Some(fill_guard),
                     cache_status: CacheStatus::Miss,
                 },
-                FillLockDecision::Wait { waiter } => LookupDecision::Wait { waiter },
+                FillLockDecision::WaitLocal { waiter } => {
+                    LookupDecision::Wait { strategy: LookupWait::Local { waiter } }
+                }
+                FillLockDecision::WaitExternal { key } => {
+                    LookupDecision::Wait { strategy: LookupWait::External { key } }
+                }
             },
         }
     }
@@ -102,6 +121,7 @@ impl CacheManager {
                 );
                 remove_index_entry(zone, key);
                 remove_cache_files_if_unindexed(zone, key, &entry.hash).await;
+                persist_zone_shared_index(zone).await;
                 return None;
             }
         };
@@ -115,6 +135,7 @@ impl CacheManager {
             );
             remove_index_entry(zone, key);
             remove_cache_files_if_unindexed(zone, key, &entry.hash).await;
+            persist_zone_shared_index(zone).await;
             return None;
         }
         let headers = match metadata.headers_map() {
@@ -128,6 +149,7 @@ impl CacheManager {
                 );
                 remove_index_entry(zone, key);
                 remove_cache_files_if_unindexed(zone, key, &entry.hash).await;
+                persist_zone_shared_index(zone).await;
                 return None;
             }
         };
@@ -140,6 +162,8 @@ impl CacheManager {
         zone: &Arc<CacheZoneRuntime>,
         key: &str,
         entry: &CacheIndexEntry,
+        request: &CacheRequest,
+        policy: &RouteCachePolicy,
         read_cached_body: bool,
         status: CacheStatus,
     ) -> Option<HttpResponse> {
@@ -147,8 +171,15 @@ impl CacheManager {
             let _io_guard = zone.io_lock.lock().await;
             let paths = cache_paths_for_zone(zone.config.as_ref(), &entry.hash);
             let metadata = read_cache_metadata(&paths.metadata).await.ok()?;
-            let response =
-                build_cached_response(&paths.body, &metadata, read_cached_body).await.ok()?;
+            let response = build_cached_response_for_request(
+                &paths.body,
+                &metadata,
+                request,
+                policy,
+                read_cached_body,
+            )
+            .await
+            .ok()?;
             (metadata, response)
         };
         if metadata.key != key {
@@ -161,6 +192,7 @@ impl CacheManager {
             );
             remove_index_entry(zone, key);
             remove_cache_files_if_unindexed(zone, key, &entry.hash).await;
+            persist_zone_shared_index(zone).await;
             return None;
         }
         if status == CacheStatus::Updating {

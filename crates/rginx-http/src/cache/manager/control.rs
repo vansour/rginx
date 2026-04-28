@@ -7,8 +7,16 @@ impl CacheManager {
         snapshots
     }
 
+    pub(crate) async fn snapshot_with_shared_sync(&self) -> Vec<CacheZoneRuntimeSnapshot> {
+        for zone in self.zones.values() {
+            sync_zone_shared_index_if_needed(zone).await;
+        }
+        self.snapshot()
+    }
+
     pub(crate) async fn cleanup_inactive_entries(&self) {
         for zone in self.zones.values() {
+            sync_zone_shared_index_if_needed(zone).await;
             cleanup_inactive_entries_in_zone(zone).await;
         }
     }
@@ -22,6 +30,7 @@ impl CacheManager {
             .get(zone_name)
             .cloned()
             .ok_or_else(|| format!("unknown cache zone `{zone_name}`"))?;
+        sync_zone_shared_index_if_needed(&zone).await;
         Ok(purge_zone_entries(zone, PurgeSelector::All).await)
     }
 
@@ -35,6 +44,7 @@ impl CacheManager {
             .get(zone_name)
             .cloned()
             .ok_or_else(|| format!("unknown cache zone `{zone_name}`"))?;
+        sync_zone_shared_index_if_needed(&zone).await;
         Ok(purge_zone_entries(zone, PurgeSelector::Exact(key.to_string())).await)
     }
 
@@ -48,6 +58,13 @@ impl CacheManager {
             .get(zone_name)
             .cloned()
             .ok_or_else(|| format!("unknown cache zone `{zone_name}`"))?;
+        sync_zone_shared_index_if_needed(&zone).await;
         Ok(purge_zone_entries(zone, PurgeSelector::Prefix(prefix.to_string())).await)
+    }
+
+    pub(crate) fn record_bypass_for_zone(&self, zone_name: &str) {
+        if let Some(zone) = self.zones.get(zone_name) {
+            zone.record_bypass();
+        }
     }
 }

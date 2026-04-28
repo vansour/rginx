@@ -15,6 +15,7 @@ pub(super) async fn lookup_forward_cache(
     cache_manager: &crate::cache::CacheManager,
     request: crate::cache::CacheRequest,
     downstream_scheme: &str,
+    response_buffering: rginx_core::RouteBufferingPolicy,
     policy: Option<&rginx_core::RouteCachePolicy>,
 ) -> ForwardCacheLookup {
     let Some(policy) = policy else {
@@ -23,6 +24,14 @@ pub(super) async fn lookup_forward_cache(
             status: None,
         }));
     };
+
+    if response_buffering == rginx_core::RouteBufferingPolicy::Off {
+        cache_manager.record_bypass_for_zone(&policy.zone);
+        return ForwardCacheLookup::Proceed(Box::new(ForwardCacheContext {
+            store: None,
+            status: Some(crate::cache::CacheStatus::Bypass),
+        }));
+    }
 
     match cache_manager.lookup(request, downstream_scheme, policy).await {
         crate::cache::CacheLookup::Hit(response) => ForwardCacheLookup::Hit(response),
@@ -55,6 +64,18 @@ impl ForwardCacheContext {
             crate::cache::with_cache_status(response, status)
         } else {
             response
+        }
+    }
+
+    pub(super) fn apply_upstream_request_method(&self, request: &mut http::Request<HttpBody>) {
+        if let Some(store) = self.store.as_ref() {
+            *request.method_mut() = store.upstream_request_method();
+        }
+    }
+
+    pub(super) fn apply_upstream_request_headers(&self, headers: &mut HeaderMap) {
+        if let Some(store) = self.store.as_ref() {
+            store.apply_upstream_request_headers(headers);
         }
     }
 

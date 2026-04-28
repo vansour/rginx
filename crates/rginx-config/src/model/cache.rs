@@ -24,6 +24,8 @@ pub struct CacheZoneConfig {
     pub manager_sleep_millis: Option<u64>,
     #[serde(default)]
     pub inactive_cleanup_interval_secs: Option<u64>,
+    #[serde(default)]
+    pub shared_index: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -57,6 +59,10 @@ pub struct CacheRouteConfig {
     pub ignore_headers: Option<Vec<CacheIgnoreHeaderConfig>>,
     #[serde(default)]
     pub range_requests: Option<CacheRangeRequestPolicyConfig>,
+    #[serde(default)]
+    pub slice_size_bytes: Option<u64>,
+    #[serde(default)]
+    pub convert_head: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

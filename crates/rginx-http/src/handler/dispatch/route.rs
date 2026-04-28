@@ -44,6 +44,7 @@ pub(super) async fn build_route_response(
                         request_body_read_timeout: listener.request_body_read_timeout,
                         max_request_body_bytes: listener.max_request_body_bytes,
                         request_buffering: route.request_buffering,
+                        response_buffering: route.response_buffering,
                         streaming_response_idle_timeout: route.streaming_response_idle_timeout,
                         cache: route.cache,
                     },

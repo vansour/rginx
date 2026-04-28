@@ -48,6 +48,7 @@ struct ListenerRequestContext<'a> {
 struct RouteExecutionContext {
     action: RouteAction,
     request_buffering: rginx_core::RouteBufferingPolicy,
+    response_buffering: rginx_core::RouteBufferingPolicy,
     streaming_response_idle_timeout: Option<std::time::Duration>,
     cache: Option<rginx_core::RouteCachePolicy>,
 }
@@ -165,6 +166,7 @@ pub async fn handle(
                     RouteExecutionContext {
                         action: route.action.clone(),
                         request_buffering: route.request_buffering,
+                        response_buffering: route.response_buffering,
                         streaming_response_idle_timeout: route.streaming_response_idle_timeout,
                         cache: route.cache.clone(),
                     },

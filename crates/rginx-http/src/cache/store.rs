@@ -1,15 +1,16 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use http::{Response, StatusCode};
+use http::StatusCode;
 use http_body_util::BodyExt;
 use tokio::fs;
 
-use crate::handler::{HttpResponse, full_body};
+use crate::handler::HttpResponse;
 
 use super::entry::{
-    CacheMetadataInput, build_cached_response, cache_key_hash, cache_metadata,
-    cache_paths_for_zone, cache_variant_key, unix_time_ms, write_cache_entry, write_cache_metadata,
+    CacheMetadataInput, build_cached_response_for_request, cache_key_hash, cache_metadata,
+    cache_paths_for_zone, cache_variant_key, finalize_response_for_request, unix_time_ms,
+    write_cache_entry, write_cache_metadata,
 };
 use super::policy::{
     ResponseBodySize, response_freshness, response_is_storable, response_is_storable_with_size,
@@ -17,7 +18,7 @@ use super::policy::{
 };
 use super::{
     CacheIndex, CacheIndexEntry, CachePurgeResult, CacheStatus, CacheStoreContext,
-    CacheZoneRuntime, with_cache_status,
+    CacheZoneRuntime, persist_zone_shared_index, with_cache_status,
 };
 
 mod helpers;
@@ -58,10 +59,15 @@ pub(super) async fn store_response(
     context: CacheStoreContext,
     response: HttpResponse,
 ) -> std::result::Result<HttpResponse, CacheStoreError> {
-    if !response_is_storable(&context, &response) {
+    let needs_downstream_range_trim =
+        super::request::cacheable_range_request(&context.request, &context.policy)
+            .is_some_and(|range| range.needs_downstream_trimming());
+    let storable = response_is_storable(&context, &response);
+    let no_cache = response_no_cache(&context, response.status());
+    if !needs_downstream_range_trim && !storable {
         return Ok(response);
     }
-    if response_no_cache(&context, response.status()) {
+    if !needs_downstream_range_trim && no_cache {
         return Ok(response);
     }
 
@@ -73,21 +79,34 @@ pub(super) async fn store_response(
             return Err(CacheStoreError { source: error });
         }
     };
+    let downstream_response = || {
+        finalize_response_for_request(
+            parts.status,
+            &parts.headers,
+            collected.as_ref(),
+            &context.request,
+            &context.policy,
+        )
+        .map_err(|error| CacheStoreError { source: Box::new(error) })
+    };
 
-    if collected.len() > context.zone.config.max_entry_bytes {
-        return Ok(Response::from_parts(parts, full_body(collected)));
+    if !storable || no_cache || collected.len() > context.zone.config.max_entry_bytes {
+        return downstream_response();
     }
 
     let now = unix_time_ms(SystemTime::now());
     let freshness = response_freshness(&context, parts.status, &parts.headers);
     if !freshness_is_cacheable(&freshness) {
-        return Ok(Response::from_parts(parts, full_body(collected)));
+        return downstream_response();
     }
 
     let vary = cache_vary_values(&context, &context.request, &parts.headers);
     let final_key = cache_variant_key(&context.base_key, &vary);
-    if !record_cache_admission_attempt(context.zone.as_ref(), &final_key, context.policy.min_uses) {
-        return Ok(Response::from_parts(parts, full_body(collected)));
+    let admitted =
+        record_cache_admission_attempt(context.zone.as_ref(), &final_key, context.policy.min_uses);
+    persist_zone_shared_index(&context.zone).await;
+    if !admitted {
+        return downstream_response();
     }
     let metadata = cache_metadata(
         final_key.clone(),
@@ -140,7 +159,7 @@ pub(super) async fn store_response(
         .await;
     }
 
-    Ok(Response::from_parts(parts, full_body(collected)))
+    downstream_response()
 }
 
 pub(super) async fn refresh_not_modified_response(
@@ -186,7 +205,14 @@ pub(super) async fn refresh_not_modified_response(
         );
         let refreshed = {
             let _io_guard = context.zone.io_lock.lock().await;
-            build_cached_response(&paths.body, &response_metadata, context.read_cached_body).await
+            build_cached_response_for_request(
+                &paths.body,
+                &response_metadata,
+                &context.request,
+                &context.policy,
+                context.read_cached_body,
+            )
+            .await
         };
         return refreshed
             .map(|response| with_cache_status(response, CacheStatus::Revalidated))
@@ -218,9 +244,15 @@ pub(super) async fn refresh_not_modified_response(
     {
         let refreshed = {
             let _io_guard = context.zone.io_lock.lock().await;
-            build_cached_response(&paths.body, &metadata, context.read_cached_body)
-                .await
-                .map_err(|error| CacheStoreError { source: Box::new(error) })
+            build_cached_response_for_request(
+                &paths.body,
+                &metadata,
+                &context.request,
+                &context.policy,
+                context.read_cached_body,
+            )
+            .await
+            .map_err(|error| CacheStoreError { source: Box::new(error) })
         };
         remove_index_entry(&context.zone, &context.key);
         {
@@ -228,6 +260,7 @@ pub(super) async fn refresh_not_modified_response(
             let _ = fs::remove_file(&paths.metadata).await;
             let _ = fs::remove_file(&paths.body).await;
         }
+        persist_zone_shared_index(&context.zone).await;
         context.zone.record_revalidated();
         return refreshed.map(|response| with_cache_status(response, CacheStatus::Revalidated));
     }
@@ -259,9 +292,15 @@ pub(super) async fn refresh_not_modified_response(
 
     let refreshed = {
         let _io_guard = context.zone.io_lock.lock().await;
-        build_cached_response(&paths.body, &metadata, context.read_cached_body)
-            .await
-            .map_err(|error| CacheStoreError { source: Box::new(error) })?
+        build_cached_response_for_request(
+            &paths.body,
+            &metadata,
+            &context.request,
+            &context.policy,
+            context.read_cached_body,
+        )
+        .await
+        .map_err(|error| CacheStoreError { source: Box::new(error) })?
     };
     Ok(with_cache_status(refreshed, CacheStatus::Revalidated))
 }

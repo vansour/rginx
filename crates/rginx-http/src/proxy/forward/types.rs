@@ -5,6 +5,7 @@ pub struct DownstreamRequestOptions {
     pub request_body_read_timeout: Option<Duration>,
     pub max_request_body_bytes: Option<usize>,
     pub request_buffering: RouteBufferingPolicy,
+    pub response_buffering: RouteBufferingPolicy,
     pub streaming_response_idle_timeout: Option<Duration>,
     pub cache: Option<rginx_core::RouteCachePolicy>,
 }

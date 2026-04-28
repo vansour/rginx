@@ -358,6 +358,101 @@ async fn spawn_status_server(statuses: Arc<Mutex<VecDeque<StatusCode>>>) -> Stat
     StatusServerHandle { listen_addr, shutdown, thread: Some(thread) }
 }
 
+async fn spawn_range_server(seen_ranges: Arc<Mutex<Vec<String>>>) -> StatusServerHandle {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("test range listener should bind");
+    listener.set_nonblocking(true).expect("range listener should support nonblocking mode");
+    let listen_addr = listener.local_addr().expect("listener addr should exist");
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_thread = shutdown.clone();
+
+    let thread = thread::spawn(move || {
+        while !shutdown_thread.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let seen_ranges = seen_ranges.clone();
+
+                    thread::spawn(move || {
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+                        let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
+                        let mut buffer = [0u8; 2048];
+                        let bytes_read = match stream.read(&mut buffer) {
+                            Ok(bytes_read) => bytes_read,
+                            Err(error)
+                                if matches!(
+                                    error.kind(),
+                                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                                ) =>
+                            {
+                                return;
+                            }
+                            Err(_) => return,
+                        };
+                        let request = String::from_utf8_lossy(&buffer[..bytes_read]);
+                        let range = request.lines().find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.trim()
+                                .eq_ignore_ascii_case("range")
+                                .then_some(value.trim().to_string())
+                        });
+                        if let Some(range) = &range {
+                            let mut seen_ranges =
+                                seen_ranges.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                            seen_ranges.push(range.clone());
+                        }
+
+                        let payload = b"abcdefghijklmnopqrstuvwxyz";
+                        let response = match range.and_then(|range| parse_test_range_header(&range))
+                        {
+                            Some((start, end)) if start < payload.len() => {
+                                let end = end.min(payload.len() - 1);
+                                let body = &payload[start..=end];
+                                format!(
+                                    "HTTP/1.1 206 Partial Content\r\ncontent-length: {}\r\ncontent-range: bytes {}-{}/{}\r\nconnection: close\r\n\r\n{}",
+                                    body.len(),
+                                    start,
+                                    end,
+                                    payload.len(),
+                                    String::from_utf8_lossy(body)
+                                )
+                            }
+                            Some(_) => {
+                                "HTTP/1.1 416 Range Not Satisfiable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_string()
+                            }
+                            None => format!(
+                                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                                payload.len(),
+                                String::from_utf8_lossy(payload)
+                            ),
+                        };
+
+                        if stream.write_all(response.as_bytes()).is_err() {
+                            return;
+                        }
+                        let _ = stream.flush();
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    StatusServerHandle { listen_addr, shutdown, thread: Some(thread) }
+}
+
+fn parse_test_range_header(value: &str) -> Option<(usize, usize)> {
+    let value = value.trim().strip_prefix("bytes=")?.trim();
+    if value.contains(',') {
+        return None;
+    }
+    let (start, end) = value.split_once('-')?;
+    let start = start.trim().parse::<usize>().ok()?;
+    let end = end.trim().parse::<usize>().ok()?;
+    (start <= end).then_some((start, end))
+}
+
 const TEST_CA_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\nMIIDXTCCAkWgAwIBAgIJAOIvDiVb18eVMA0GCSqGSIb3DQEBCwUAMEUxCzAJBgNV\nBAYTAkFVMRMwEQYDVQQIDApTb21lLVN0YXRlMSEwHwYDVQQKDBhJbnRlcm5ldCBX\naWRnaXRzIFB0eSBMdGQwHhcNMTYwODE0MTY1NjExWhcNMjYwODEyMTY1NjExWjBF\nMQswCQYDVQQGEwJBVTETMBEGA1UECAwKU29tZS1TdGF0ZTEhMB8GA1UECgwYSW50\nZXJuZXQgV2lkZ2l0cyBQdHkgTHRkMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIB\nCgKCAQEArVHWFn52Lbl1l59exduZntVSZyDYpzDND+S2LUcO6fRBWhV/1Kzox+2G\nZptbuMGmfI3iAnb0CFT4uC3kBkQQlXonGATSVyaFTFR+jq/lc0SP+9Bd7SBXieIV\neIXlY1TvlwIvj3Ntw9zX+scTA4SXxH6M0rKv9gTOub2vCMSHeF16X8DQr4XsZuQr\n7Cp7j1I4aqOJyap5JTl5ijmG8cnu0n+8UcRlBzy99dLWJG0AfI3VRJdWpGTNVZ92\naFff3RpK3F/WI2gp3qV1ynRAKuvmncGC3LDvYfcc2dgsc1N6Ffq8GIrkgRob6eBc\nklDHp1d023Lwre+VaVDSo1//Y72UFwIDAQABo1AwTjAdBgNVHQ4EFgQUbNOlA6sN\nXyzJjYqciKeId7g3/ZowHwYDVR0jBBgwFoAUbNOlA6sNXyzJjYqciKeId7g3/Zow\nDAYDVR0TBAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAVVaR5QWLZIRR4Dw6TSBn\nBQiLpBSXN6oAxdDw6n4PtwW6CzydaA+creiK6LfwEsiifUfQe9f+T+TBSpdIYtMv\nZ2H2tjlFX8VrjUFvPrvn5c28CuLI0foBgY8XGSkR2YMYzWw2jPEq3Th/KM5Catn3\nAFm3bGKWMtGPR4v+90chEN0jzaAmJYRrVUh9vea27bOCn31Nse6XXQPmSI6Gyncy\nOAPUsvPClF3IjeL1tmBotWqSGn1cYxLo+Lwjk22A9h6vjcNQRyZF2VLVvtwYrNU3\nmwJ6GCLsLHpwW/yjyvn8iEltnJvByM/eeRnfXV6WDObyiZsE/n6DxIRJodQzFqy9\nGA==\n-----END CERTIFICATE-----\n";
 
 type TestCertifiedKey = CertifiedKey<KeyPair>;

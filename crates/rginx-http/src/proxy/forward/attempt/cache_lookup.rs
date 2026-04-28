@@ -12,6 +12,7 @@ pub(super) async fn resolve_forward_cache(
         cache_manager,
         cache_request,
         downstream.downstream_proto,
+        downstream.options.response_buffering,
         downstream.options.cache.as_ref(),
     )
     .await

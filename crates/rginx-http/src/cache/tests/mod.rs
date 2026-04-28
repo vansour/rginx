@@ -15,6 +15,8 @@ mod notifications;
 mod policy;
 mod storage;
 mod storage_p1;
+mod storage_p2;
+mod storage_p3;
 mod storage_regressions;
 
 fn test_zone(path: PathBuf, max_entry_bytes: usize) -> Arc<CacheZoneRuntime> {
@@ -40,12 +42,16 @@ fn test_zone_with_notifier(
             manager_batch_entries: 100,
             manager_sleep: Duration::ZERO,
             inactive_cleanup_interval: Duration::from_secs(60),
+            shared_index: true,
         }),
         index: Mutex::new(CacheIndex::default()),
         io_lock: AsyncMutex::new(()),
+        shared_index_sync_lock: AsyncMutex::new(()),
         fill_locks: Arc::new(Mutex::new(HashMap::new())),
         fill_lock_generation: AtomicU64::new(0),
         last_inactive_cleanup_unix_ms: AtomicU64::new(0),
+        shared_index_generation: AtomicU64::new(1),
+        shared_index_last_modified_unix_ms: AtomicU64::new(0),
         stats: CacheZoneStats::default(),
         change_notifier,
     })
@@ -90,6 +96,8 @@ fn test_store_context(zone: Arc<CacheZoneRuntime>, key: &str) -> CacheStoreConte
             min_uses: 1,
             ignore_headers: Vec::new(),
             range_requests: rginx_core::CacheRangeRequestPolicy::Bypass,
+            slice_size_bytes: None,
+            convert_head: true,
         },
         request: CacheRequest {
             method: Method::GET,
@@ -133,6 +141,8 @@ fn test_policy() -> RouteCachePolicy {
         min_uses: 1,
         ignore_headers: Vec::new(),
         range_requests: rginx_core::CacheRangeRequestPolicy::Bypass,
+        slice_size_bytes: None,
+        convert_head: true,
     }
 }
 

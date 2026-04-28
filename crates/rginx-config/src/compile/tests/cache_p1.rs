@@ -17,6 +17,7 @@ fn compile_cache_policy_supports_p1_controls() {
             manager_batch_entries: Some(50),
             manager_sleep_millis: Some(7),
             inactive_cleanup_interval_secs: Some(11),
+            shared_index: None,
         }],
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
@@ -97,6 +98,8 @@ fn compile_cache_policy_supports_p1_controls() {
                     crate::model::CacheIgnoreHeaderConfig::Vary,
                 ]),
                 range_requests: Some(crate::model::CacheRangeRequestPolicyConfig::Cache),
+                slice_size_bytes: None,
+                convert_head: None,
             }),
             matcher: MatcherConfig::Prefix("/assets".to_string()),
             handler: HandlerConfig::Proxy {

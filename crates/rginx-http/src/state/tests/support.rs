@@ -155,6 +155,7 @@ pub(crate) fn snapshot_with_cache_zone(listen: &str, path: PathBuf) -> ConfigSna
             manager_batch_entries: 100,
             manager_sleep: Duration::ZERO,
             inactive_cleanup_interval: Duration::from_secs(60),
+            shared_index: true,
         }),
     );
     snapshot
@@ -178,5 +179,7 @@ pub(crate) fn default_route_cache_policy() -> rginx_core::RouteCachePolicy {
         min_uses: 1,
         ignore_headers: Vec::new(),
         range_requests: rginx_core::CacheRangeRequestPolicy::Bypass,
+        slice_size_bytes: None,
+        convert_head: true,
     }
 }

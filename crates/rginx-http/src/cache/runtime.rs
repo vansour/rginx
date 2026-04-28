@@ -29,19 +29,24 @@ impl CacheStoreContext {
         self.cache_status
     }
 
+    pub(crate) fn upstream_request_method(&self) -> Method {
+        request::upstream_cache_request_method(&self.request.method, &self.policy)
+    }
+
     pub(crate) fn build_background_request(&self) -> Request<HttpBody> {
-        let method = if self.request.method == Method::HEAD {
-            Method::GET
-        } else {
-            self.request.method.clone()
-        };
+        let method = request::upstream_cache_request_method(&self.request.method, &self.policy);
         let mut request = Request::builder()
             .method(method)
             .uri(self.request.uri.clone())
             .body(crate::handler::full_body(bytes::Bytes::new()))
             .expect("background cache refresh request should build");
         *request.headers_mut() = self.request.headers.clone();
+        self.apply_upstream_request_headers(request.headers_mut());
         request
+    }
+
+    pub(crate) fn apply_upstream_request_headers(&self, headers: &mut HeaderMap) {
+        request::apply_upstream_range_headers(&self.request.method, headers, &self.policy);
     }
 
     pub(crate) fn apply_conditional_request_headers(&self, headers: &mut HeaderMap) {
@@ -95,7 +100,14 @@ impl CacheStoreContext {
         let response = {
             let _io_guard = self.zone.io_lock.lock().await;
             let paths = cache_paths_for_zone(self.zone.config.as_ref(), &entry.hash);
-            build_cached_response(&paths.body, metadata, self.read_cached_body).await
+            build_cached_response_for_request(
+                &paths.body,
+                metadata,
+                &self.request,
+                &self.policy,
+                self.read_cached_body,
+            )
+            .await
         };
         match response {
             Ok(response) => {
@@ -115,6 +127,7 @@ impl CacheStoreContext {
                 );
                 remove_index_entry(&self.zone, &self.key);
                 remove_cache_files_if_unindexed(&self.zone, &self.key, &entry.hash).await;
+                persist_zone_shared_index(&self.zone).await;
                 None
             }
         }
@@ -145,6 +158,8 @@ impl CacheZoneRuntime {
             eviction_total: self.stats.eviction_total.load(Ordering::Relaxed),
             purge_total: self.stats.purge_total.load(Ordering::Relaxed),
             inactive_cleanup_total: self.stats.inactive_cleanup_total.load(Ordering::Relaxed),
+            shared_index_enabled: self.config.shared_index,
+            shared_index_generation: self.shared_index_generation.load(Ordering::Relaxed),
         }
     }
 
@@ -159,8 +174,17 @@ impl CacheZoneRuntime {
         if let Some(lock) = fill_locks.get(key).cloned()
             && now.saturating_sub(lock.acquired_at_unix_ms) <= lock_age.as_millis() as u64
         {
-            return FillLockDecision::Wait { waiter: lock.notify.notified_owned() };
+            return FillLockDecision::WaitLocal { waiter: lock.notify.notified_owned() };
         }
+
+        let external_lock_path = if self.config.shared_index {
+            match self.try_acquire_shared_fill_lock(key, now, lock_age) {
+                Some(path) => Some(path),
+                None => return FillLockDecision::WaitExternal { key: key.to_string() },
+            }
+        } else {
+            None
+        };
         let notify = Arc::new(Notify::new());
         let generation = self.fill_lock_generation.fetch_add(1, Ordering::Relaxed) + 1;
         fill_locks.insert(
@@ -172,7 +196,32 @@ impl CacheZoneRuntime {
             generation,
             fill_locks: Arc::downgrade(&self.fill_locks),
             notify,
+            external_lock_path,
         })
+    }
+
+    pub(super) async fn wait_for_external_fill_lock(
+        &self,
+        key: &str,
+        lock_timeout: std::time::Duration,
+        lock_age: std::time::Duration,
+    ) -> bool {
+        let lock_path = shared::shared_fill_lock_path(self.config.as_ref(), key);
+        let deadline = tokio::time::Instant::now() + lock_timeout;
+        loop {
+            if !lock_path.exists() {
+                return true;
+            }
+            if self.shared_fill_lock_is_stale(&lock_path, lock_age) {
+                let _ = std::fs::remove_file(&lock_path);
+                return true;
+            }
+            let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now())
+            else {
+                return false;
+            };
+            tokio::time::sleep(remaining.min(std::time::Duration::from_millis(25))).await;
+        }
     }
 
     pub(super) fn record_hit(&self) {
@@ -238,6 +287,46 @@ impl CacheZoneRuntime {
             notifier(&self.config.name);
         }
     }
+
+    fn try_acquire_shared_fill_lock(
+        &self,
+        key: &str,
+        now: u64,
+        lock_age: std::time::Duration,
+    ) -> Option<std::path::PathBuf> {
+        let lock_path = shared::shared_fill_lock_path(self.config.as_ref(), key);
+        loop {
+            match std::fs::OpenOptions::new().write(true).create_new(true).open(&lock_path) {
+                Ok(mut file) => {
+                    let _ = std::io::Write::write_all(&mut file, now.to_string().as_bytes());
+                    return Some(lock_path);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if self.shared_fill_lock_is_stale(&lock_path, lock_age) {
+                        let _ = std::fs::remove_file(&lock_path);
+                        continue;
+                    }
+                    return None;
+                }
+                Err(_) => return None,
+            }
+        }
+    }
+
+    fn shared_fill_lock_is_stale(
+        &self,
+        lock_path: &std::path::Path,
+        lock_age: std::time::Duration,
+    ) -> bool {
+        let Ok(metadata) = std::fs::metadata(lock_path) else {
+            return false;
+        };
+        let Ok(modified) = metadata.modified() else {
+            return false;
+        };
+        unix_time_ms(SystemTime::now()).saturating_sub(unix_time_ms(modified))
+            > lock_age.as_millis() as u64
+    }
 }
 
 impl Drop for CacheFillGuard {
@@ -247,6 +336,9 @@ impl Drop for CacheFillGuard {
             if fill_locks.get(&self.key).is_some_and(|lock| lock.generation == self.generation) {
                 fill_locks.remove(&self.key);
             }
+        }
+        if let Some(external_lock_path) = &self.external_lock_path {
+            let _ = std::fs::remove_file(external_lock_path);
         }
         self.notify.notify_waiters();
     }

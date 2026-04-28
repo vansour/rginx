@@ -28,6 +28,8 @@ const DEFAULT_CACHE_MANAGER_BATCH_ENTRIES: u64 = 100;
 const DEFAULT_CACHE_MANAGER_SLEEP_MILLIS: u64 = 50;
 const DEFAULT_CACHE_INACTIVE_CLEANUP_INTERVAL_SECS: u64 = 60;
 const DEFAULT_CACHE_MIN_USES: u64 = 1;
+const DEFAULT_CACHE_SHARED_INDEX: bool = true;
+const DEFAULT_CACHE_CONVERT_HEAD: bool = true;
 
 pub(super) fn compile_cache_zones(
     zones: Vec<CacheZoneConfig>,
@@ -86,6 +88,7 @@ pub(super) fn compile_cache_zones(
                     zone.inactive_cleanup_interval_secs
                         .unwrap_or(DEFAULT_CACHE_INACTIVE_CLEANUP_INTERVAL_SECS),
                 ),
+                shared_index: zone.shared_index.unwrap_or(DEFAULT_CACHE_SHARED_INDEX),
             };
             Ok((name, Arc::new(compiled)))
         })
@@ -177,6 +180,8 @@ pub(super) fn compile_route_cache(
                     .range_requests
                     .map(compile_range_request_policy)
                     .unwrap_or(CacheRangeRequestPolicy::Bypass),
+                slice_size_bytes: cache.slice_size_bytes,
+                convert_head: cache.convert_head.unwrap_or(DEFAULT_CACHE_CONVERT_HEAD),
             })
         })
         .transpose()

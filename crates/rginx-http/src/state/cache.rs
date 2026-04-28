@@ -2,8 +2,11 @@ use super::*;
 
 impl SharedState {
     pub async fn cache_stats_snapshot(&self) -> CacheStatsSnapshot {
-        let state = self.inner.read().await;
-        CacheStatsSnapshot { zones: state.cache.snapshot() }
+        let cache = {
+            let state = self.inner.read().await;
+            state.cache.clone()
+        };
+        CacheStatsSnapshot { zones: cache.snapshot_with_shared_sync().await }
     }
 
     pub async fn cleanup_cache_inactive_entries(&self) {

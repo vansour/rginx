@@ -20,6 +20,8 @@ fn cache_key_template_renders_request_parts() {
         min_uses: 1,
         ignore_headers: Vec::new(),
         range_requests: rginx_core::CacheRangeRequestPolicy::Bypass,
+        slice_size_bytes: None,
+        convert_head: true,
     };
     let request = Request::builder()
         .method(Method::GET)
@@ -53,6 +55,8 @@ fn cache_key_includes_all_accept_encoding_header_values() {
         min_uses: 1,
         ignore_headers: Vec::new(),
         range_requests: rginx_core::CacheRangeRequestPolicy::Bypass,
+        slice_size_bytes: None,
+        convert_head: true,
     };
     let request = Request::builder()
         .method(Method::GET)
@@ -90,6 +94,8 @@ fn cache_key_template_renders_header_query_and_cookie_variables() {
         min_uses: 1,
         ignore_headers: Vec::new(),
         range_requests: rginx_core::CacheRangeRequestPolicy::Bypass,
+        slice_size_bytes: None,
+        convert_head: true,
     };
     let request = Request::builder()
         .method(Method::GET)
@@ -123,6 +129,8 @@ fn authorization_request_bypasses_cache() {
         min_uses: 1,
         ignore_headers: Vec::new(),
         range_requests: rginx_core::CacheRangeRequestPolicy::Bypass,
+        slice_size_bytes: None,
+        convert_head: true,
     };
     let request = Request::builder()
         .method(Method::GET)
@@ -155,6 +163,8 @@ fn configured_header_bypasses_cache() {
         min_uses: 1,
         ignore_headers: Vec::new(),
         range_requests: rginx_core::CacheRangeRequestPolicy::Bypass,
+        slice_size_bytes: None,
+        convert_head: true,
     };
     let request = Request::builder()
         .method(Method::GET)
@@ -185,6 +195,8 @@ fn range_request_bypasses_cache_by_default() {
         min_uses: 1,
         ignore_headers: Vec::new(),
         range_requests: rginx_core::CacheRangeRequestPolicy::Bypass,
+        slice_size_bytes: None,
+        convert_head: true,
     };
     let request = Request::builder()
         .method(Method::GET)
@@ -216,6 +228,8 @@ fn cache_key_includes_range_when_enabled() {
         min_uses: 1,
         ignore_headers: Vec::new(),
         range_requests: rginx_core::CacheRangeRequestPolicy::Cache,
+        slice_size_bytes: None,
+        convert_head: true,
     };
     let request = Request::builder()
         .method(Method::GET)
@@ -249,6 +263,8 @@ fn multiple_range_headers_bypass_cache_when_range_caching_is_enabled() {
         min_uses: 1,
         ignore_headers: Vec::new(),
         range_requests: rginx_core::CacheRangeRequestPolicy::Cache,
+        slice_size_bytes: None,
+        convert_head: true,
     };
     let request = Request::builder()
         .method(Method::GET)
@@ -260,4 +276,146 @@ fn multiple_range_headers_bypass_cache_when_range_caching_is_enabled() {
     let request = CacheRequest::from_request(&request);
 
     assert!(cache_request_bypass(&request, &policy));
+}
+
+#[test]
+fn head_cache_key_is_separated_when_convert_head_is_disabled() {
+    let mut policy = RouteCachePolicy {
+        zone: "default".to_string(),
+        methods: vec![Method::GET, Method::HEAD],
+        statuses: vec![StatusCode::OK],
+        ttl_by_status: Vec::new(),
+        key: rginx_core::CacheKeyTemplate::parse("{scheme}:{host}:{uri}")
+            .expect("key should parse"),
+        cache_bypass: None,
+        no_cache: None,
+        stale_if_error: None,
+        use_stale: Vec::new(),
+        background_update: false,
+        lock_timeout: Duration::from_secs(5),
+        lock_age: Duration::from_secs(5),
+        min_uses: 1,
+        ignore_headers: Vec::new(),
+        range_requests: rginx_core::CacheRangeRequestPolicy::Bypass,
+        slice_size_bytes: None,
+        convert_head: false,
+    };
+    let get_request = Request::builder()
+        .method(Method::GET)
+        .uri("/head-key")
+        .header("host", "example.com")
+        .body(full_body(Bytes::new()))
+        .expect("request should build");
+    let head_request = Request::builder()
+        .method(Method::HEAD)
+        .uri("/head-key")
+        .header("host", "example.com")
+        .body(full_body(Bytes::new()))
+        .expect("request should build");
+
+    let get_key = render_cache_key(
+        get_request.method(),
+        get_request.uri(),
+        get_request.headers(),
+        "https",
+        &policy,
+    );
+    let head_key = render_cache_key(
+        head_request.method(),
+        head_request.uri(),
+        head_request.headers(),
+        "https",
+        &policy,
+    );
+
+    assert_eq!(get_key, "https:example.com:/head-key|cache-method:GET");
+    assert_eq!(head_key, "https:example.com:/head-key|cache-method:HEAD");
+
+    policy.convert_head = true;
+    let shared_head_key = render_cache_key(
+        head_request.method(),
+        head_request.uri(),
+        head_request.headers(),
+        "https",
+        &policy,
+    );
+    assert_eq!(shared_head_key, "https:example.com:/head-key");
+}
+
+#[test]
+fn cache_key_reuses_slice_for_subranges_within_same_slice() {
+    let policy = RouteCachePolicy {
+        zone: "default".to_string(),
+        methods: vec![Method::GET],
+        statuses: vec![StatusCode::OK],
+        ttl_by_status: Vec::new(),
+        key: rginx_core::CacheKeyTemplate::parse("{scheme}:{host}:{uri}")
+            .expect("key should parse"),
+        cache_bypass: None,
+        no_cache: None,
+        stale_if_error: None,
+        use_stale: Vec::new(),
+        background_update: false,
+        lock_timeout: Duration::from_secs(5),
+        lock_age: Duration::from_secs(5),
+        min_uses: 1,
+        ignore_headers: Vec::new(),
+        range_requests: rginx_core::CacheRangeRequestPolicy::Cache,
+        slice_size_bytes: Some(128),
+        convert_head: true,
+    };
+    let first = Request::builder()
+        .method(Method::GET)
+        .uri("/video.mp4")
+        .header("host", "example.com")
+        .header(http::header::RANGE, "bytes=2-4")
+        .body(full_body(Bytes::new()))
+        .expect("request should build");
+    let second = Request::builder()
+        .method(Method::GET)
+        .uri("/video.mp4")
+        .header("host", "example.com")
+        .header(http::header::RANGE, "bytes=5-6")
+        .body(full_body(Bytes::new()))
+        .expect("request should build");
+
+    assert_eq!(
+        render_cache_key(first.method(), first.uri(), first.headers(), "https", &policy),
+        "https:example.com:/video.mp4|range:0-127"
+    );
+    assert_eq!(
+        render_cache_key(second.method(), second.uri(), second.headers(), "https", &policy),
+        "https:example.com:/video.mp4|range:0-127"
+    );
+}
+
+#[test]
+fn cross_slice_range_bypasses_when_slice_size_is_configured() {
+    let policy = RouteCachePolicy {
+        zone: "default".to_string(),
+        methods: vec![Method::GET],
+        statuses: vec![StatusCode::OK],
+        ttl_by_status: Vec::new(),
+        key: rginx_core::CacheKeyTemplate::parse("{uri}").expect("key should parse"),
+        cache_bypass: None,
+        no_cache: None,
+        stale_if_error: None,
+        use_stale: Vec::new(),
+        background_update: false,
+        lock_timeout: Duration::from_secs(5),
+        lock_age: Duration::from_secs(5),
+        min_uses: 1,
+        ignore_headers: Vec::new(),
+        range_requests: rginx_core::CacheRangeRequestPolicy::Cache,
+        slice_size_bytes: Some(8),
+        convert_head: true,
+    };
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/video.mp4")
+        .header(http::header::RANGE, "bytes=6-9")
+        .body(full_body(Bytes::new()))
+        .expect("request should build");
+
+    assert!(cache_request_bypass(&CacheRequest::from_request(&request), &policy));
 }
