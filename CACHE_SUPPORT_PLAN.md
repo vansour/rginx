@@ -22,6 +22,195 @@
 HTTP/3 session、TLS session 和 OCSP staple cache，继续作为运行时实现细节；
 除非后续阶段明确扩展其配置或观测面。
 
+## 下一阶段：对标 NGINX 的功能补齐清单
+
+当前阶段 0 到阶段 6 已完成，rginx 已具备可工作的 route 级反向代理响应缓存。
+但如果对标开源 NGINX 的 `proxy_cache` 能力，当前实现更接近“基础可用”而不是
+“生产级全面替代”。下面的优先级清单用于指导下一轮补齐。
+
+本 PR 交付说明：
+
+- `P0` 中的 `cache_bypass` / `no_cache`、按状态 TTL + `X-Accel-Expires`、
+  通用 `Vary`、`background_update` / `use_stale` / `lock_timeout` /
+  `lock_age` / `UPDATING` 已完成并已落地。
+- 下文保留这些条目，是为了把“已交付能力”和“下一轮继续补齐的剩余差距”放在同一张
+  对标清单里，避免后续阶段重复整理。
+- `P1` / `P2` 仍是后续规划项，当前 PR 不覆盖。
+
+对标范围：
+
+- 以开源 NGINX 的 `proxy_cache`、`proxy_cache_path`、`proxy_cache_revalidate`、
+  `proxy_cache_lock`、`proxy_cache_use_stale`、`proxy_cache_background_update`
+  和 `slice` 协作能力为基准。
+- 不以 `fastcgi_cache`、`uwsgi_cache`、`scgi_cache` 这类协议族扩展为近期目标。
+- 不把 DNS 解析缓存、上游 client cache、HTTP/3 session cache、TLS session
+  cache、OCSP staple cache 计入本节的主对标范围；它们继续作为独立运行时能力。
+
+优先级原则：
+
+- `P0`：优先补齐最影响现网迁移和日常缓存正确性的能力。
+- `P1`：补齐大流量和复杂场景下的控制面、范围请求和后台维护细节。
+- `P2`：补齐架构级能力与长周期追平项。
+
+### P0：先补齐现网迁移阻塞项（当前状态：本 PR 已完成）
+
+目标：让常见 NGINX `proxy_cache` 配置可以较低成本迁移到 rginx，并明显缩小
+缓存正确性和控制面的差距。
+
+功能：
+
+- 条件化 `cache_bypass` / `no_cache`
+  - 目标：把“是否读缓存”和“是否写缓存”从当前硬编码策略提升为 route 可配置策略。
+  - 价值：支持按 header、cookie、query、method、status 等条件做命中旁路或禁止落盘。
+  - 当前差距：当前主要由固定规则控制，例如 `Authorization`、`Range` 和 gRPC 请求默认 bypass。
+- `cache_valid` 等价能力和 `X-Accel-Expires`
+  - 目标：支持按状态码配置 TTL，并支持上游通过 `X-Accel-Expires` 显式控制 freshness。
+  - 价值：让缓存时长不再只能依赖上游 `Cache-Control` / `Expires` 或 zone 默认 TTL。
+  - 当前差距：当前只有“状态码是否允许缓存”，没有“不同状态缓存多久”的配置面。
+- 更强的 cache key 和通用 `Vary`
+  - 目标：扩展 cache key 变量空间，并支持除 `Vary: *` 外的常见 `Vary` 语义。
+  - 价值：支持真实页面缓存、按语言或设备维度缓存、按上游 `Vary` 正确分桶。
+  - 当前差距：当前 key 变量只覆盖 `{scheme}`、`{host}`、`{uri}`、`{method}`，`Vary`
+    只支持 `Accept-Encoding`。
+- `background_update` / `use_stale` / `lock_timeout` / `lock_age` / `UPDATING`
+  - 目标：把过期条目的并发行为从当前“同步回源 + 其余等待”为主，升级为更细粒度的前台命中、
+    后台刷新和等待超时控制。
+  - 价值：明显改善过期热点对象的尾延迟、惊群控制和可观测性。
+  - 当前差距：当前已有 cache lock、`stale-if-error`、`stale-while-revalidate`，但没有
+    独立的后台更新路径，也没有 `UPDATING` 级别的状态暴露。
+
+建议改动范围：
+
+- `crates/rginx-config/src/model/cache.rs`
+- `crates/rginx-config/src/validate/cache.rs`
+- `crates/rginx-config/src/compile/cache.rs`
+- `crates/rginx-core/src/config/cache.rs`
+- `crates/rginx-http/src/cache/request.rs`
+- `crates/rginx-http/src/cache/policy.rs`
+- `crates/rginx-http/src/cache/lookup.rs`
+- `crates/rginx-http/src/cache/store.rs`
+- `crates/rginx-http/src/cache/mod.rs`
+- `crates/rginx-http/src/proxy/forward/cache.rs`
+- `crates/rginx-http/src/proxy/forward/success.rs`
+- `crates/rginx-http/src/handler/access_log.rs`
+
+验收标准：
+
+- route 可以独立配置 cache 读取旁路和写入旁路条件。
+- route 可以按状态码定义缓存 TTL，并支持 `X-Accel-Expires`。
+- `Vary: Accept-Language`、`Vary: User-Agent` 等常见场景可以正确分桶，`Vary: *` 仍保持不缓存。
+- 热点 key 过期时可选择前台返回 stale、后台刷新，并暴露 `UPDATING` 或等价状态。
+- 并发同 key 过期测试中，不会出现无界等待，也不会放大 upstream 压力。
+
+### P1：补齐大对象场景和维护控制面（当前状态：规划中）
+
+目标：支持更接近 NGINX 中大型生产缓存部署的行为，特别是长尾控制、大对象和后台维护。
+
+功能：
+
+- `cache_min_uses` 等价能力
+  - 目标：为对象建立准入门槛，避免首个偶发请求就污染缓存。
+  - 价值：降低长尾 API、低复用页面对 cache zone 的挤占。
+- Range / `206` / slice 缓存
+  - 目标：支持范围请求和切片缓存，而不是简单 bypass `Range`。
+  - 价值：补齐安装包、媒体、超大静态资源这类缓存场景。
+  - 当前差距：当前 `Range` 请求默认 bypass，`206` 和 `Content-Range` 响应不缓存。
+- `proxy_ignore_headers` 等价能力
+  - 目标：允许在 route 级覆盖上游的部分缓存相关响应头。
+  - 价值：适配缓存头不规范、历史包袱较重的上游系统。
+- cache loader / manager / path tunables
+  - 目标：让磁盘扫描、批次加载、后台清理和目录布局可配置。
+  - 价值：改善大 cache 目录、冷启动、慢磁盘和大规模部署时的运行体验。
+  - 当前差距：当前 loader、inactive cleanup 和驱逐策略基本固定，调优面较少。
+
+建议改动范围：
+
+- `crates/rginx-core/src/config/cache.rs`
+- `crates/rginx-config/src/model/cache.rs`
+- `crates/rginx-config/src/validate/cache.rs`
+- `crates/rginx-config/src/compile/cache.rs`
+- `crates/rginx-http/src/cache/load.rs`
+- `crates/rginx-http/src/cache/entry.rs`
+- `crates/rginx-http/src/cache/policy.rs`
+- `crates/rginx-http/src/cache/store.rs`
+- `crates/rginx-http/src/cache/store/maintenance.rs`
+- `crates/rginx-runtime/src/cache.rs`
+
+验收标准：
+
+- 同一资源在低频单次访问下不会立即落盘，达到最小使用次数后才进入缓存。
+- `Range`/`206` 场景有可预测、可测试的缓存行为；若引入 slice，则 key、metadata、purge
+  和 reload 都能覆盖。
+- route 可以有选择地忽略 `Cache-Control`、`Expires`、`Set-Cookie`、`Vary`
+  等缓存相关头。
+- 大目录冷启动时，扫描和加载行为可通过配置调优，而不是单一固定策略。
+
+### P2：架构级追平项（当前状态：规划中）
+
+目标：追平 NGINX 在架构层、共享索引和极端场景下的能力，而不是只补语义缺口。
+
+功能：
+
+- `keys_zone` 等价的共享索引 / 多进程协调
+  - 目标：让 active cache index 不再仅依赖单进程内存结构。
+  - 价值：为未来多 worker、多进程或共享本地磁盘目录打基础。
+- `proxy_cache_convert_head` 和更完整的方法语义
+  - 目标：进一步细化 `GET`/`HEAD` 的互通规则和 admission policy。
+- 未知大小流式响应和 partial-body caching
+  - 目标：评估是否在不破坏流式代理行为的前提下支持更复杂的缓存写入模型。
+  - 当前差距：当前无法安全确认 body size 的响应不会写入缓存。
+- 更广协议族缓存
+  - 目标：仅在产品边界明确扩展时，再考虑是否引入 `fastcgi_cache`、
+    `uwsgi_cache`、`scgi_cache` 这类能力。
+
+建议改动范围：
+
+- `crates/rginx-http/src/cache/mod.rs`
+- `crates/rginx-http/src/cache/load.rs`
+- `crates/rginx-http/src/cache/store.rs`
+- `crates/rginx-http/src/cache/store/maintenance.rs`
+- `crates/rginx-http/src/state/mod.rs`
+- `crates/rginx-runtime/src/cache.rs`
+
+验收标准：
+
+- cache index 的生命周期和可见性不再完全绑定当前单进程内存模型。
+- `HEAD` 和 `GET` 的复用规则更接近 NGINX，可通过配置控制。
+- 若支持流式/分段写入，其失败恢复、purge、reload 和一致性语义必须先被定义清楚。
+
+### 暂不优先追的能力
+
+这些能力暂不应抢占 `P0` / `P1`：
+
+- purge 扩展
+  - 当前已支持按 zone、精确 key、prefix 清理，并已接入 admin socket 和 CLI。
+- 单纯增加更多统计字段
+  - 当前 cache 已进入 `status`、`snapshot`、`delta`、access log 和 `cache` CLI，
+    后续优先级应让位于缓存语义和控制面补齐。
+- 把内部辅助缓存统一抽象成同一套外部配置
+  - DNS、upstream client、HTTP/3 session、TLS session、OCSP staple cache
+    目前仍更适合作为各自子系统能力独立演进。
+
+## 下一轮推荐交付顺序
+
+建议下一轮按以下顺序推进：
+
+1. `P0-1`：`cache_bypass` / `no_cache`
+2. `P0-2`：按状态 TTL + `X-Accel-Expires`
+3. `P0-3`：通用 `Vary` + 更强 key 模型
+4. `P0-4`：后台更新、等待超时和 `UPDATING`
+5. `P1-1`：`cache_min_uses`
+6. `P1-2`：Range / `206` / slice
+7. `P1-3`：`proxy_ignore_headers`
+8. `P1-4`：loader / manager tunables
+
+交付原则：
+
+- 每个子项都应先补配置模型、再补运行时、最后补 admin/status 和测试。
+- `P0-3` 与 `P0-4` 变更较大，建议分别拆成独立设计文档和多阶段 PR。
+- `P1-2` 不建议以“先支持一部分 `206`”的方式快速落地；若要做，应直接设计成
+  可长期维护的 slice 或等价分片模型。
+
 ## 阶段 0：范围与边界
 
 目标：先确定第一版缓存边界，避免影响现有代理行为。

@@ -51,7 +51,7 @@ async fn cleanup_inactive_entries_notifies_change_listeners() {
         key.to_string(),
         StatusCode::OK,
         &http::HeaderMap::new(),
-        test_metadata_input(now.saturating_sub(120_000), now.saturating_add(60_000), 6),
+        test_metadata_input(key, now.saturating_sub(120_000), now.saturating_add(60_000), 6),
     );
     let paths = cache_paths(temp.path(), &hash);
     write_cache_entry(&paths, &metadata, b"cached").await.expect("entry should be written");
@@ -59,7 +59,7 @@ async fn cleanup_inactive_entries_notifies_change_listeners() {
         let mut index = lock_index(&zone.index);
         index.entries.insert(
             key.to_string(),
-            test_index_entry(hash, 6, now.saturating_add(60_000), now.saturating_sub(120_000)),
+            test_index_entry(key, hash, 6, now.saturating_add(60_000), now.saturating_sub(120_000)),
         );
         index.current_size_bytes = 6;
     }
@@ -90,7 +90,7 @@ async fn purge_zone_entries_notifies_change_listeners() {
         key.to_string(),
         StatusCode::OK,
         &http::HeaderMap::new(),
-        test_metadata_input(now.saturating_sub(2_000), now.saturating_add(60_000), 6),
+        test_metadata_input(key, now.saturating_sub(2_000), now.saturating_add(60_000), 6),
     );
     let paths = cache_paths(temp.path(), &hash);
     write_cache_entry(&paths, &metadata, b"cached").await.expect("entry should be written");
@@ -98,7 +98,7 @@ async fn purge_zone_entries_notifies_change_listeners() {
         let mut index = lock_index(&zone.index);
         index.entries.insert(
             key.to_string(),
-            test_index_entry(hash, 6, now.saturating_add(60_000), now.saturating_sub(1_000)),
+            test_index_entry(key, hash, 6, now.saturating_add(60_000), now.saturating_sub(1_000)),
         );
         index.current_size_bytes = 6;
     }

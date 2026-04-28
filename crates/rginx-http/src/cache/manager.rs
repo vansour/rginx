@@ -1,5 +1,7 @@
 use super::*;
 
+mod control;
+
 impl CacheManager {
     pub(crate) fn from_config_with_notifier(
         config: &ConfigSnapshot,
@@ -28,6 +30,7 @@ impl CacheManager {
                         index: Mutex::new(index),
                         io_lock: AsyncMutex::new(()),
                         fill_locks: Arc::new(Mutex::new(HashMap::new())),
+                        fill_lock_generation: AtomicU64::new(0),
                         stats: CacheZoneStats::default(),
                         change_notifier: change_notifier.clone(),
                     }),
@@ -57,7 +60,7 @@ impl CacheManager {
             return CacheLookup::Bypass(CacheStatus::Bypass);
         }
 
-        let key = render_cache_key(
+        let base_key = render_cache_key(
             &request.method,
             &request.uri,
             &request.headers,
@@ -69,8 +72,15 @@ impl CacheManager {
 
         loop {
             let now = unix_time_ms(SystemTime::now());
-            match self.lookup_decision(&zone, &key, now, request_forces_revalidation) {
-                LookupDecision::FreshHit(entry) => {
+            match self.lookup_decision(
+                &zone,
+                &request,
+                &base_key,
+                now,
+                request_forces_revalidation,
+                policy,
+            ) {
+                LookupDecision::FreshHit { key, entry } => {
                     let cached_response = {
                         let _io_guard = zone.io_lock.lock().await;
                         read_cached_response(&zone, &key, &entry, read_cached_body).await
@@ -95,21 +105,83 @@ impl CacheManager {
                         }
                     }
                 }
-                LookupDecision::StaleWhileRevalidate(entry) => {
+                LookupDecision::Stale { key, entry, status } => {
                     match self
-                        .stale_response_from_entry(&zone, &key, &entry, read_cached_body)
+                        .stale_response_from_entry(&zone, &key, &entry, read_cached_body, status)
                         .await
                     {
                         Some(response) => return CacheLookup::Hit(response),
                         None => continue,
                     }
                 }
-                LookupDecision::Wait(waiter) => waiter.await,
+                LookupDecision::Wait { waiter } => {
+                    if tokio::time::timeout(policy.lock_timeout, waiter).await.is_ok() {
+                        continue;
+                    }
+                    zone.record_bypass();
+                    return CacheLookup::Miss(Box::new(CacheStoreContext {
+                        zone,
+                        policy: policy.clone(),
+                        request,
+                        base_key: base_key.clone(),
+                        key: base_key.clone(),
+                        cache_status: CacheStatus::Bypass,
+                        store_response: false,
+                        _fill_guard: None,
+                        cached_entry: None,
+                        cached_metadata: None,
+                        revalidating: false,
+                        conditional_headers: None,
+                        read_cached_body,
+                    }));
+                }
+                LookupDecision::BackgroundUpdate { key, cached_entry, fill_guard } => {
+                    let (cached_metadata, conditional_headers) =
+                        match self.load_lookup_metadata(&zone, &key, &cached_entry).await {
+                            Some((metadata, conditional_headers)) => {
+                                (Some(metadata), conditional_headers)
+                            }
+                            None => {
+                                drop(fill_guard);
+                                continue;
+                            }
+                        };
+                    zone.record_expired();
+                    let context = Box::new(CacheStoreContext {
+                        zone: zone.clone(),
+                        policy: policy.clone(),
+                        request: request.with_method(Method::GET),
+                        base_key: cached_entry.base_key.clone(),
+                        key: key.clone(),
+                        cache_status: CacheStatus::Updating,
+                        store_response: true,
+                        _fill_guard: Some(fill_guard),
+                        cached_entry: Some(cached_entry.clone()),
+                        cached_metadata,
+                        revalidating: true,
+                        conditional_headers,
+                        read_cached_body,
+                    });
+                    let Some(response) = self
+                        .stale_response_from_entry(
+                            &zone,
+                            &key,
+                            &cached_entry,
+                            read_cached_body,
+                            CacheStatus::Updating,
+                        )
+                        .await
+                    else {
+                        continue;
+                    };
+                    return CacheLookup::Updating(response, context);
+                }
                 LookupDecision::Miss {
+                    key,
+                    base_key: context_base_key,
                     cached_entry,
                     fill_guard,
                     cache_status,
-                    allow_stale_on_error,
                 } => {
                     let (cached_metadata, conditional_headers) = if let Some(entry) = &cached_entry
                     {
@@ -134,13 +206,14 @@ impl CacheManager {
                     return CacheLookup::Miss(Box::new(CacheStoreContext {
                         zone,
                         policy: policy.clone(),
+                        request: request.clone(),
+                        base_key: context_base_key,
                         key,
                         cache_status,
                         store_response: request.method == Method::GET,
-                        _fill_guard: Some(fill_guard),
+                        _fill_guard: fill_guard,
                         cached_entry,
                         cached_metadata,
-                        allow_stale_on_error,
                         revalidating: cache_status == CacheStatus::Revalidated,
                         conditional_headers,
                         read_cached_body,
@@ -181,55 +254,5 @@ impl CacheManager {
         response: HttpResponse,
     ) -> std::result::Result<HttpResponse, CacheStoreError> {
         refresh_not_modified_response(context, response).await
-    }
-
-    pub(crate) fn snapshot(&self) -> Vec<CacheZoneRuntimeSnapshot> {
-        let mut snapshots = self.zones.values().map(|zone| zone.snapshot()).collect::<Vec<_>>();
-        snapshots.sort_by(|left, right| left.zone_name.cmp(&right.zone_name));
-        snapshots
-    }
-
-    pub(crate) async fn cleanup_inactive_entries(&self) {
-        for zone in self.zones.values() {
-            cleanup_inactive_entries_in_zone(zone).await;
-        }
-    }
-
-    pub(crate) async fn purge_zone(
-        &self,
-        zone_name: &str,
-    ) -> std::result::Result<CachePurgeResult, String> {
-        let zone = self
-            .zones
-            .get(zone_name)
-            .cloned()
-            .ok_or_else(|| format!("unknown cache zone `{zone_name}`"))?;
-        Ok(purge_zone_entries(zone, PurgeSelector::All).await)
-    }
-
-    pub(crate) async fn purge_key(
-        &self,
-        zone_name: &str,
-        key: &str,
-    ) -> std::result::Result<CachePurgeResult, String> {
-        let zone = self
-            .zones
-            .get(zone_name)
-            .cloned()
-            .ok_or_else(|| format!("unknown cache zone `{zone_name}`"))?;
-        Ok(purge_zone_entries(zone, PurgeSelector::Exact(key.to_string())).await)
-    }
-
-    pub(crate) async fn purge_prefix(
-        &self,
-        zone_name: &str,
-        prefix: &str,
-    ) -> std::result::Result<CachePurgeResult, String> {
-        let zone = self
-            .zones
-            .get(zone_name)
-            .cloned()
-            .ok_or_else(|| format!("unknown cache zone `{zone_name}`"))?;
-        Ok(purge_zone_entries(zone, PurgeSelector::Prefix(prefix.to_string())).await)
     }
 }

@@ -6,11 +6,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::SystemTime;
 
-use http::header::{ETAG, HeaderMap, HeaderValue, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED};
+use http::header::{HeaderMap, HeaderValue, IF_MODIFIED_SINCE, IF_NONE_MATCH};
 use http::{Method, Request, StatusCode, Uri};
 use rginx_core::{CacheZone, ConfigSnapshot, Error, Result, RouteCachePolicy};
 use serde::{Deserialize, Serialize};
-use tokio::fs;
 use tokio::sync::futures::OwnedNotified;
 use tokio::sync::{Mutex as AsyncMutex, Notify};
 
@@ -24,13 +23,14 @@ mod policy;
 mod request;
 mod runtime;
 mod store;
+mod vary;
 
 use entry::{
     CacheMetadata, build_cached_response, cache_paths, read_cache_metadata, read_cached_response,
     unix_time_ms,
 };
 #[cfg(test)]
-use entry::{cache_key_hash, cache_metadata, write_cache_entry};
+use entry::{cache_key_hash, cache_metadata, cache_variant_key, write_cache_entry};
 use load::load_index_from_disk;
 use policy::{header_value, request_requires_revalidation};
 #[cfg(test)]
@@ -56,13 +56,14 @@ pub(crate) struct CacheManager {
 pub(crate) struct CacheStoreContext {
     zone: Arc<CacheZoneRuntime>,
     policy: RouteCachePolicy,
+    request: CacheRequest,
+    base_key: String,
     key: String,
     cache_status: CacheStatus,
     store_response: bool,
     _fill_guard: Option<CacheFillGuard>,
     cached_entry: Option<CacheIndexEntry>,
     cached_metadata: Option<CacheMetadata>,
-    allow_stale_on_error: bool,
     revalidating: bool,
     conditional_headers: Option<CacheConditionalHeaders>,
     read_cached_body: bool,
@@ -78,6 +79,7 @@ pub(crate) struct CacheRequest {
 pub(crate) enum CacheLookup {
     Hit(HttpResponse),
     Miss(Box<CacheStoreContext>),
+    Updating(HttpResponse, Box<CacheStoreContext>),
     Bypass(CacheStatus),
 }
 
@@ -88,6 +90,7 @@ pub(crate) enum CacheStatus {
     Bypass,
     Expired,
     Stale,
+    Updating,
     Revalidated,
 }
 
@@ -106,6 +109,7 @@ pub struct CacheZoneRuntimeSnapshot {
     pub bypass_total: u64,
     pub expired_total: u64,
     pub stale_total: u64,
+    pub updating_total: u64,
     pub revalidated_total: u64,
     pub write_success_total: u64,
     pub write_error_total: u64,
@@ -130,6 +134,7 @@ impl CacheStatus {
             Self::Bypass => "BYPASS",
             Self::Expired => "EXPIRED",
             Self::Stale => "STALE",
+            Self::Updating => "UPDATING",
             Self::Revalidated => "REVALIDATED",
         })
     }
@@ -139,7 +144,8 @@ struct CacheZoneRuntime {
     config: Arc<CacheZone>,
     index: Mutex<CacheIndex>,
     io_lock: AsyncMutex<()>,
-    fill_locks: Arc<Mutex<HashMap<String, Arc<Notify>>>>,
+    fill_locks: Arc<Mutex<HashMap<String, CacheFillLockState>>>,
+    fill_lock_generation: AtomicU64,
     stats: CacheZoneStats,
     change_notifier: Option<CacheChangeNotifier>,
 }
@@ -147,12 +153,15 @@ struct CacheZoneRuntime {
 #[derive(Default)]
 struct CacheIndex {
     entries: HashMap<String, CacheIndexEntry>,
+    variants: HashMap<String, Vec<String>>,
     current_size_bytes: usize,
 }
 
 #[derive(Clone)]
 struct CacheIndexEntry {
     hash: String,
+    base_key: String,
+    vary: Vec<CachedVaryHeaderValue>,
     body_size_bytes: usize,
     expires_at_unix_ms: u64,
     stale_if_error_until_unix_ms: Option<u64>,
@@ -168,6 +177,7 @@ struct CacheZoneStats {
     bypass_total: AtomicU64,
     expired_total: AtomicU64,
     stale_total: AtomicU64,
+    updating_total: AtomicU64,
     revalidated_total: AtomicU64,
     write_success_total: AtomicU64,
     write_error_total: AtomicU64,
@@ -178,8 +188,22 @@ struct CacheZoneStats {
 
 struct CacheFillGuard {
     key: String,
-    fill_locks: Weak<Mutex<HashMap<String, Arc<Notify>>>>,
+    generation: u64,
+    fill_locks: Weak<Mutex<HashMap<String, CacheFillLockState>>>,
     notify: Arc<Notify>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedVaryHeaderValue {
+    name: http::header::HeaderName,
+    value: Option<String>,
+}
+
+#[derive(Clone)]
+struct CacheFillLockState {
+    notify: Arc<Notify>,
+    acquired_at_unix_ms: u64,
+    generation: u64,
 }
 
 #[derive(Clone)]
@@ -189,20 +213,42 @@ struct CacheConditionalHeaders {
 }
 
 enum LookupDecision {
-    FreshHit(CacheIndexEntry),
-    StaleWhileRevalidate(CacheIndexEntry),
-    Miss {
-        cached_entry: Option<CacheIndexEntry>,
-        fill_guard: CacheFillGuard,
-        cache_status: CacheStatus,
-        allow_stale_on_error: bool,
+    FreshHit {
+        key: String,
+        entry: CacheIndexEntry,
     },
-    Wait(OwnedNotified),
+    Stale {
+        key: String,
+        entry: CacheIndexEntry,
+        status: CacheStatus,
+    },
+    BackgroundUpdate {
+        key: String,
+        cached_entry: CacheIndexEntry,
+        fill_guard: CacheFillGuard,
+    },
+    Miss {
+        key: String,
+        base_key: String,
+        cached_entry: Option<CacheIndexEntry>,
+        fill_guard: Option<CacheFillGuard>,
+        cache_status: CacheStatus,
+    },
+    Wait {
+        waiter: OwnedNotified,
+    },
 }
 
 enum FillLockDecision {
     Acquired(CacheFillGuard),
-    Wait(OwnedNotified),
+    Wait { waiter: OwnedNotified },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CacheStaleReason {
+    Error,
+    Timeout,
+    Status(StatusCode),
 }
 
 #[cfg(test)]

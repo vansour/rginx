@@ -7,6 +7,7 @@ pub(super) struct ForwardCacheContext {
 
 pub(super) enum ForwardCacheLookup {
     Hit(HttpResponse),
+    Updating(HttpResponse, Box<ForwardCacheContext>),
     Proceed(Box<ForwardCacheContext>),
 }
 
@@ -25,6 +26,13 @@ pub(super) async fn lookup_forward_cache(
 
     match cache_manager.lookup(request, downstream_scheme, policy).await {
         crate::cache::CacheLookup::Hit(response) => ForwardCacheLookup::Hit(response),
+        crate::cache::CacheLookup::Updating(response, context) => {
+            let status = context.cache_status();
+            ForwardCacheLookup::Updating(
+                response,
+                Box::new(ForwardCacheContext { store: Some(context), status: Some(status) }),
+            )
+        }
         crate::cache::CacheLookup::Miss(context) => {
             let status = context.cache_status();
             ForwardCacheLookup::Proceed(Box::new(ForwardCacheContext {
@@ -55,11 +63,16 @@ impl ForwardCacheContext {
             store.apply_conditional_request_headers(headers);
         }
     }
-    pub(super) async fn serve_stale_on_error(&self) -> Option<HttpResponse> {
+
+    pub(super) async fn serve_stale_for_reason(
+        &self,
+        reason: crate::cache::CacheStaleReason,
+        status: crate::cache::CacheStatus,
+    ) -> Option<HttpResponse> {
         let store = self.store.as_ref()?;
-        if !store.can_serve_stale_on_error() {
+        if !store.can_serve_stale(reason) {
             return None;
         }
-        store.serve_stale_on_error().await
+        store.serve_stale(status).await
     }
 }

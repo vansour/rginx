@@ -5,14 +5,18 @@ use std::path::Path;
 use rginx_core::CacheZone;
 use serde::Deserialize;
 
-use super::entry::{cache_key_hash, cache_paths, unix_time_ms};
+use super::entry::{cache_key_hash, cache_paths};
 use super::store::eviction_candidates;
-use super::{CacheIndex, CacheIndexEntry};
+use super::{CacheIndex, CacheIndexEntry, CachedVaryHeaderValue};
 
 #[derive(Debug, Deserialize)]
 struct ScannedCacheMetadata {
     #[serde(default)]
     key: String,
+    #[serde(default)]
+    base_key: String,
+    #[serde(default)]
+    vary: Vec<ScannedVaryHeader>,
     #[serde(default)]
     stored_at_unix_ms: u64,
     expires_at_unix_ms: u64,
@@ -25,13 +29,19 @@ struct ScannedCacheMetadata {
     body_size_bytes: usize,
 }
 
+#[derive(Debug, Deserialize)]
+struct ScannedVaryHeader {
+    name: String,
+    #[serde(default)]
+    value: Option<String>,
+}
+
 pub(super) fn load_index_from_disk(zone: &CacheZone) -> io::Result<CacheIndex> {
     let mut index = CacheIndex::default();
     if !zone.path.exists() {
         return Ok(index);
     }
 
-    let now = unix_time_ms(std::time::SystemTime::now());
     for prefix_dir in fs::read_dir(&zone.path)? {
         let prefix_dir = match prefix_dir {
             Ok(prefix_dir) => prefix_dir,
@@ -54,22 +64,18 @@ pub(super) fn load_index_from_disk(zone: &CacheZone) -> io::Result<CacheIndex> {
         if !file_type.is_dir() {
             continue;
         }
-        scan_prefix_dir(zone, prefix_dir.path().as_path(), now, &mut index)?;
+        scan_prefix_dir(zone, prefix_dir.path().as_path(), &mut index)?;
     }
 
-    for hash in eviction_candidates(&mut index, zone.max_size_bytes) {
-        remove_cache_files(zone, &hash);
+    for (key, entry) in eviction_candidates(&mut index, zone.max_size_bytes) {
+        remove_variant_key(&mut index.variants, &entry.base_key, &key);
+        remove_cache_files(zone, &entry.hash);
     }
 
     Ok(index)
 }
 
-fn scan_prefix_dir(
-    zone: &CacheZone,
-    dir: &Path,
-    now: u64,
-    index: &mut CacheIndex,
-) -> io::Result<()> {
+fn scan_prefix_dir(zone: &CacheZone, dir: &Path, index: &mut CacheIndex) -> io::Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = match entry {
             Ok(entry) => entry,
@@ -91,42 +97,29 @@ fn scan_prefix_dir(
             }
             continue;
         };
-        let Some((key, index_entry)) = load_cache_index_entry(zone, &hash, now) else {
+        let Some((key, index_entry)) = load_cache_index_entry(zone, &hash) else {
             continue;
         };
 
-        if let Some(existing) = index.entries.insert(key, index_entry.clone()) {
+        if let Some(existing) = index.entries.insert(key.clone(), index_entry.clone()) {
             index.current_size_bytes =
                 index.current_size_bytes.saturating_sub(existing.body_size_bytes);
+            remove_variant_key(&mut index.variants, &existing.base_key, &key);
         }
         index.current_size_bytes =
             index.current_size_bytes.saturating_add(index_entry.body_size_bytes);
+        add_variant_key(&mut index.variants, index_entry.base_key.clone(), key);
     }
     Ok(())
 }
 
-fn load_cache_index_entry(
-    zone: &CacheZone,
-    hash: &str,
-    now: u64,
-) -> Option<(String, CacheIndexEntry)> {
+fn load_cache_index_entry(zone: &CacheZone, hash: &str) -> Option<(String, CacheIndexEntry)> {
     let paths = cache_paths(&zone.path, hash);
     let Ok(metadata) = read_cache_metadata(&paths.metadata) else {
         remove_cache_files(zone, hash);
         return None;
     };
     if metadata.key.is_empty() || cache_key_hash(&metadata.key) != hash {
-        remove_cache_files(zone, hash);
-        return None;
-    }
-    let mut stale_windows =
-        [metadata.stale_if_error_until_unix_ms, metadata.stale_while_revalidate_until_unix_ms]
-            .into_iter()
-            .flatten();
-    let beyond_stale_windows = stale_windows
-        .next()
-        .is_some_and(|first| now > first && stale_windows.all(|value| now > value));
-    if now > metadata.expires_at_unix_ms && beyond_stale_windows && !metadata.must_revalidate {
         remove_cache_files(zone, hash);
         return None;
     }
@@ -145,18 +138,45 @@ fn load_cache_index_entry(
         return None;
     }
 
+    let ScannedCacheMetadata {
+        key,
+        base_key,
+        vary,
+        stored_at_unix_ms,
+        expires_at_unix_ms,
+        stale_if_error_until_unix_ms,
+        stale_while_revalidate_until_unix_ms,
+        must_revalidate,
+        body_size_bytes,
+    } = metadata;
+    let Some(vary) = parse_vary_headers(vary) else {
+        remove_cache_files(zone, hash);
+        return None;
+    };
+
     Some((
-        metadata.key,
+        key.clone(),
         CacheIndexEntry {
             hash: hash.to_string(),
-            body_size_bytes: metadata.body_size_bytes,
-            expires_at_unix_ms: metadata.expires_at_unix_ms,
-            stale_if_error_until_unix_ms: metadata.stale_if_error_until_unix_ms,
-            stale_while_revalidate_until_unix_ms: metadata.stale_while_revalidate_until_unix_ms,
-            must_revalidate: metadata.must_revalidate,
-            last_access_unix_ms: metadata.stored_at_unix_ms,
+            base_key: if base_key.is_empty() { key } else { base_key },
+            vary,
+            body_size_bytes,
+            expires_at_unix_ms,
+            stale_if_error_until_unix_ms,
+            stale_while_revalidate_until_unix_ms,
+            must_revalidate,
+            last_access_unix_ms: stored_at_unix_ms,
         },
     ))
+}
+
+fn parse_vary_headers(vary: Vec<ScannedVaryHeader>) -> Option<Vec<CachedVaryHeaderValue>> {
+    let mut parsed = Vec::with_capacity(vary.len());
+    for header in vary {
+        let name = header.name.parse::<http::header::HeaderName>().ok()?;
+        parsed.push(CachedVaryHeaderValue { name, value: header.value });
+    }
+    Some(parsed)
 }
 
 fn read_cache_metadata(path: &Path) -> io::Result<ScannedCacheMetadata> {
@@ -183,4 +203,29 @@ fn remove_cache_files(zone: &CacheZone, hash: &str) {
     let paths = cache_paths(&zone.path, hash);
     let _ = fs::remove_file(paths.metadata);
     let _ = fs::remove_file(paths.body);
+}
+
+fn add_variant_key(
+    variants: &mut std::collections::HashMap<String, Vec<String>>,
+    base_key: String,
+    key: String,
+) {
+    let entry = variants.entry(base_key).or_default();
+    if !entry.contains(&key) {
+        entry.push(key);
+    }
+}
+
+fn remove_variant_key(
+    variants: &mut std::collections::HashMap<String, Vec<String>>,
+    base_key: &str,
+    key: &str,
+) {
+    let Some(keys) = variants.get_mut(base_key) else {
+        return;
+    };
+    keys.retain(|candidate| candidate != key);
+    if keys.is_empty() {
+        variants.remove(base_key);
+    }
 }

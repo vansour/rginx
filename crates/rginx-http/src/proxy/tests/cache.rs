@@ -5,9 +5,16 @@ fn cache_policy() -> rginx_core::RouteCachePolicy {
         zone: "default".to_string(),
         methods: vec![Method::GET, Method::HEAD],
         statuses: vec![StatusCode::OK],
+        ttl_by_status: Vec::new(),
         key: rginx_core::CacheKeyTemplate::parse("{scheme}:{host}:{uri}")
             .expect("cache key should parse"),
+        cache_bypass: None,
+        no_cache: None,
         stale_if_error: None,
+        use_stale: Vec::new(),
+        background_update: false,
+        lock_timeout: Duration::from_secs(5),
+        lock_age: Duration::from_secs(5),
     }
 }
 

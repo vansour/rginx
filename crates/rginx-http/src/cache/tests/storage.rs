@@ -27,6 +27,7 @@ async fn cache_manager_returns_miss_then_hit_for_cacheable_get() {
     {
         CacheLookup::Miss(context) => *context,
         CacheLookup::Hit(_) => panic!("empty cache should miss"),
+        CacheLookup::Updating(_, _) => panic!("empty cache should not update"),
         CacheLookup::Bypass(status) => panic!("cacheable request should not bypass: {status:?}"),
     };
 
@@ -46,6 +47,7 @@ async fn cache_manager_returns_miss_then_hit_for_cacheable_get() {
             assert_eq!(body.as_ref(), b"cached body");
         }
         CacheLookup::Miss(_) => panic!("stored response should hit"),
+        CacheLookup::Updating(_, _) => panic!("stored response should hit directly"),
         CacheLookup::Bypass(status) => panic!("cacheable request should not bypass: {status:?}"),
     }
 }
@@ -65,6 +67,7 @@ async fn cache_manager_does_not_store_entries_over_max_entry_size() {
     {
         CacheLookup::Miss(context) => *context,
         CacheLookup::Hit(_) => panic!("empty cache should miss"),
+        CacheLookup::Updating(_, _) => panic!("empty cache should not update"),
         CacheLookup::Bypass(status) => panic!("cacheable request should not bypass: {status:?}"),
     };
 
@@ -78,6 +81,7 @@ async fn cache_manager_does_not_store_entries_over_max_entry_size() {
     match manager.lookup(CacheRequest::from_request(&request), "https", &policy).await {
         CacheLookup::Miss(_) => {}
         CacheLookup::Hit(_) => panic!("oversized response should not be cached"),
+        CacheLookup::Updating(_, _) => panic!("oversized response should not update"),
         CacheLookup::Bypass(status) => panic!("cacheable request should not bypass: {status:?}"),
     }
 }
@@ -97,6 +101,7 @@ async fn cache_manager_skips_unknown_size_response_without_consuming_body() {
     {
         CacheLookup::Miss(context) => *context,
         CacheLookup::Hit(_) => panic!("empty cache should miss"),
+        CacheLookup::Updating(_, _) => panic!("empty cache should not update"),
         CacheLookup::Bypass(status) => panic!("cacheable request should not bypass: {status:?}"),
     };
 
@@ -114,6 +119,7 @@ async fn cache_manager_skips_unknown_size_response_without_consuming_body() {
     match manager.lookup(CacheRequest::from_request(&request), "https", &policy).await {
         CacheLookup::Miss(_) => {}
         CacheLookup::Hit(_) => panic!("unknown-size response should not be cached"),
+        CacheLookup::Updating(_, _) => panic!("unknown-size response should not update"),
         CacheLookup::Bypass(status) => panic!("cacheable request should not bypass: {status:?}"),
     }
 }
@@ -129,12 +135,17 @@ async fn refresh_not_modified_response_serves_body_and_evicts_uncacheable_entry(
         key.to_string(),
         StatusCode::OK,
         &http::HeaderMap::new(),
-        test_metadata_input(now.saturating_sub(2_000), now.saturating_sub(1_000), 6),
+        test_metadata_input(key, now.saturating_sub(2_000), now.saturating_sub(1_000), 6),
     );
     let paths = cache_paths(temp.path(), &hash);
     write_cache_entry(&paths, &cached_metadata, b"cached").await.expect("entry should be written");
-    let cached_entry =
-        test_index_entry(hash.clone(), 6, now.saturating_sub(1_000), now.saturating_sub(2_000));
+    let cached_entry = test_index_entry(
+        key,
+        hash.clone(),
+        6,
+        now.saturating_sub(1_000),
+        now.saturating_sub(2_000),
+    );
     {
         let mut index = lock_index(&zone.index);
         index.entries.insert(key.to_string(), cached_entry.clone());
@@ -164,6 +175,109 @@ async fn refresh_not_modified_response_serves_body_and_evicts_uncacheable_entry(
     assert!(!paths.body.exists());
     assert_eq!(zone.stats.revalidated_total.load(std::sync::atomic::Ordering::Relaxed), 1);
     assert_eq!(zone.stats.write_success_total.load(std::sync::atomic::Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn cache_manager_respects_no_cache_status_predicate() {
+    let temp = tempfile::tempdir().expect("cache temp dir should exist");
+    let manager = test_manager(temp.path().to_path_buf(), 1024);
+    let mut policy = test_policy();
+    policy.no_cache = Some(rginx_core::CachePredicate::Status(vec![StatusCode::OK]));
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/no-cache")
+        .header("host", "example.com")
+        .body(full_body(Bytes::new()))
+        .expect("request should build");
+    let context = match manager.lookup(CacheRequest::from_request(&request), "https", &policy).await
+    {
+        CacheLookup::Miss(context) => *context,
+        CacheLookup::Hit(_) => panic!("empty cache should miss"),
+        CacheLookup::Updating(_, _) => panic!("empty cache should not update"),
+        CacheLookup::Bypass(status) => panic!("cacheable request should not bypass: {status:?}"),
+    };
+
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(CACHE_CONTROL, "max-age=60")
+        .body(full_body("skip"))
+        .expect("response should build");
+    let stored = manager.store_response(context, response).await;
+    assert_eq!(stored.headers().get(CACHE_STATUS_HEADER).unwrap(), "MISS");
+
+    match manager.lookup(CacheRequest::from_request(&request), "https", &policy).await {
+        CacheLookup::Miss(_) => {}
+        CacheLookup::Hit(_) => panic!("response should not be cached"),
+        CacheLookup::Updating(_, _) => panic!("response should not update"),
+        CacheLookup::Bypass(status) => panic!("cacheable request should not bypass: {status:?}"),
+    }
+}
+
+#[tokio::test]
+async fn cache_manager_partitions_variants_by_vary_header() {
+    let temp = tempfile::tempdir().expect("cache temp dir should exist");
+    let manager = test_manager(temp.path().to_path_buf(), 1024);
+    let policy = test_policy();
+
+    let zh_request = Request::builder()
+        .method(Method::GET)
+        .uri("/vary")
+        .header("host", "example.com")
+        .header("accept-language", "zh-CN")
+        .body(full_body(Bytes::new()))
+        .expect("request should build");
+    let zh_context = match manager
+        .lookup(CacheRequest::from_request(&zh_request), "https", &policy)
+        .await
+    {
+        CacheLookup::Miss(context) => *context,
+        CacheLookup::Hit(_) => panic!("empty cache should miss"),
+        CacheLookup::Updating(_, _) => panic!("empty cache should not update"),
+        CacheLookup::Bypass(status) => panic!("cacheable request should not bypass: {status:?}"),
+    };
+    let zh_response = Response::builder()
+        .status(StatusCode::OK)
+        .header(CACHE_CONTROL, "max-age=60")
+        .header("vary", "accept-language")
+        .body(full_body("zh"))
+        .expect("response should build");
+    let _ = manager.store_response(zh_context, zh_response).await;
+
+    let en_request = Request::builder()
+        .method(Method::GET)
+        .uri("/vary")
+        .header("host", "example.com")
+        .header("accept-language", "en-US")
+        .body(full_body(Bytes::new()))
+        .expect("request should build");
+    match manager.lookup(CacheRequest::from_request(&en_request), "https", &policy).await {
+        CacheLookup::Miss(context) => {
+            let en_response = Response::builder()
+                .status(StatusCode::OK)
+                .header(CACHE_CONTROL, "max-age=60")
+                .header("vary", "accept-language")
+                .body(full_body("en"))
+                .expect("response should build");
+            let _ = manager.store_response(*context, en_response).await;
+        }
+        _ => panic!("different vary value should miss"),
+    }
+
+    match manager.lookup(CacheRequest::from_request(&zh_request), "https", &policy).await {
+        CacheLookup::Hit(response) => {
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(body.as_ref(), b"zh");
+        }
+        _ => panic!("original vary bucket should hit"),
+    }
+
+    match manager.lookup(CacheRequest::from_request(&en_request), "https", &policy).await {
+        CacheLookup::Hit(response) => {
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(body.as_ref(), b"en");
+        }
+        _ => panic!("second vary bucket should hit"),
+    }
 }
 
 #[test]
@@ -197,4 +311,40 @@ fn load_index_from_disk_keeps_legacy_expired_entries_without_stale_windows() {
     assert_eq!(index.current_size_bytes, 6);
     assert!(paths.metadata.exists());
     assert!(paths.body.exists());
+}
+
+#[test]
+fn load_index_from_disk_removes_entries_with_invalid_vary_metadata() {
+    let temp = tempfile::tempdir().expect("cache temp dir should exist");
+    let zone = test_zone(temp.path().to_path_buf(), 1024);
+    let key = "https:example.com:/invalid-vary";
+    let hash = cache_key_hash(key);
+    let paths = cache_paths(temp.path(), &hash);
+    let now = unix_time_ms(SystemTime::now());
+    std::fs::create_dir_all(&paths.dir).expect("cache dir should be created");
+    std::fs::write(
+        &paths.metadata,
+        serde_json::to_vec(&serde_json::json!({
+            "key": key,
+            "base_key": key,
+            "vary": [
+                { "name": "accept-language", "value": "zh-CN" },
+                { "name": "bad header", "value": "broken" }
+            ],
+            "stored_at_unix_ms": now.saturating_sub(2_000),
+            "expires_at_unix_ms": now.saturating_add(60_000),
+            "must_revalidate": false,
+            "body_size_bytes": 6
+        }))
+        .expect("invalid vary metadata should serialize"),
+    )
+    .expect("invalid vary metadata should be written");
+    std::fs::write(&paths.body, b"cached").expect("body should be written");
+
+    let index = load_index_from_disk(zone.config.as_ref()).expect("index should load");
+
+    assert!(!index.entries.contains_key(key));
+    assert_eq!(index.current_size_bytes, 0);
+    assert!(!paths.metadata.exists());
+    assert!(!paths.body.exists());
 }

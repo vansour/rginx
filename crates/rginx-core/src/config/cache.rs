@@ -1,13 +1,17 @@
-use std::path::PathBuf;
 use std::time::Duration;
 
-use http::{Method, StatusCode};
-use thiserror::Error;
+use http::header::HeaderName;
+use http::{HeaderMap, Method, StatusCode};
+
+mod key_template;
+mod predicate;
+
+pub use key_template::CacheKeyTemplateError;
 
 #[derive(Debug, Clone)]
 pub struct CacheZone {
     pub name: String,
-    pub path: PathBuf,
+    pub path: std::path::PathBuf,
     pub max_size_bytes: Option<usize>,
     pub inactive: Duration,
     pub default_ttl: Duration,
@@ -19,8 +23,54 @@ pub struct RouteCachePolicy {
     pub zone: String,
     pub methods: Vec<Method>,
     pub statuses: Vec<StatusCode>,
+    pub ttl_by_status: Vec<CacheStatusTtlRule>,
     pub key: CacheKeyTemplate,
+    pub cache_bypass: Option<CachePredicate>,
+    pub no_cache: Option<CachePredicate>,
     pub stale_if_error: Option<Duration>,
+    pub use_stale: Vec<CacheUseStaleCondition>,
+    pub background_update: bool,
+    pub lock_timeout: Duration,
+    pub lock_age: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CacheStatusTtlRule {
+    pub statuses: Vec<StatusCode>,
+    pub ttl: Duration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CachePredicate {
+    Any(Vec<CachePredicate>),
+    All(Vec<CachePredicate>),
+    Not(Box<CachePredicate>),
+    Method(Method),
+    HeaderExists(HeaderName),
+    HeaderEquals { name: HeaderName, value: String },
+    QueryExists(String),
+    QueryEquals { name: String, value: String },
+    CookieExists(String),
+    CookieEquals { name: String, value: String },
+    Status(Vec<StatusCode>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheUseStaleCondition {
+    Error,
+    Timeout,
+    Updating,
+    Http500,
+    Http502,
+    Http503,
+    Http504,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CachePredicateRequestContext<'a> {
+    pub method: &'a Method,
+    pub uri: &'a str,
+    pub headers: &'a HeaderMap,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,12 +85,15 @@ enum CacheKeyTemplatePart {
     Variable(CacheKeyVariable),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum CacheKeyVariable {
     Scheme,
     Host,
     Uri,
     Method,
+    Header(HeaderName),
+    Query(String),
+    Cookie(String),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -49,104 +102,5 @@ pub struct CacheKeyRenderContext<'a> {
     pub host: &'a str,
     pub uri: &'a str,
     pub method: &'a str,
-}
-
-impl CacheKeyTemplate {
-    pub fn parse(raw: impl Into<String>) -> Result<Self, CacheKeyTemplateError> {
-        let raw = raw.into();
-        let mut parts = Vec::new();
-        let mut literal = String::new();
-        let mut index = 0usize;
-
-        while index < raw.len() {
-            let remainder = &raw[index..];
-            if remainder.starts_with("{{") {
-                literal.push('{');
-                index += 2;
-                continue;
-            }
-            if remainder.starts_with("}}") {
-                literal.push('}');
-                index += 2;
-                continue;
-            }
-
-            let ch = remainder.chars().next().expect("index is inside raw string");
-            match ch {
-                '{' => {
-                    if !literal.is_empty() {
-                        parts.push(CacheKeyTemplatePart::Literal(std::mem::take(&mut literal)));
-                    }
-
-                    let after_start = &raw[index + 1..];
-                    let Some(end) = after_start.find('}') else {
-                        return Err(CacheKeyTemplateError::UnclosedVariable {
-                            template: raw.clone(),
-                        });
-                    };
-                    let variable = after_start[..end].trim();
-                    if variable.is_empty() {
-                        return Err(CacheKeyTemplateError::EmptyVariable { template: raw.clone() });
-                    }
-                    parts.push(CacheKeyTemplatePart::Variable(parse_cache_key_variable(variable)?));
-                    index += end + 2;
-                }
-                '}' => {
-                    return Err(CacheKeyTemplateError::UnescapedClose { template: raw.clone() });
-                }
-                _ => {
-                    literal.push(ch);
-                    index += ch.len_utf8();
-                }
-            }
-        }
-
-        if !literal.is_empty() {
-            parts.push(CacheKeyTemplatePart::Literal(literal));
-        }
-
-        Ok(Self { raw, parts })
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.raw
-    }
-
-    pub fn render(&self, context: &CacheKeyRenderContext<'_>) -> String {
-        let mut rendered = String::with_capacity(self.raw.len() + context.uri.len());
-        for part in &self.parts {
-            match part {
-                CacheKeyTemplatePart::Literal(value) => rendered.push_str(value),
-                CacheKeyTemplatePart::Variable(variable) => match variable {
-                    CacheKeyVariable::Scheme => rendered.push_str(context.scheme),
-                    CacheKeyVariable::Host => rendered.push_str(context.host),
-                    CacheKeyVariable::Uri => rendered.push_str(context.uri),
-                    CacheKeyVariable::Method => rendered.push_str(context.method),
-                },
-            }
-        }
-        rendered
-    }
-}
-
-#[derive(Debug, Error)]
-pub enum CacheKeyTemplateError {
-    #[error("cache key template `{template}` has an unclosed variable")]
-    UnclosedVariable { template: String },
-    #[error("cache key template `{template}` has an unescaped closing brace")]
-    UnescapedClose { template: String },
-    #[error("cache key template `{template}` has an empty variable")]
-    EmptyVariable { template: String },
-    #[error("cache key template variable `{name}` is not supported")]
-    UnknownVariable { name: String },
-}
-
-fn parse_cache_key_variable(name: &str) -> Result<CacheKeyVariable, CacheKeyTemplateError> {
-    match name {
-        "scheme" => Ok(CacheKeyVariable::Scheme),
-        "host" => Ok(CacheKeyVariable::Host),
-        "uri" => Ok(CacheKeyVariable::Uri),
-        "method" => Ok(CacheKeyVariable::Method),
-        _ => Err(CacheKeyTemplateError::UnknownVariable { name: name.to_string() }),
-    }
+    pub headers: &'a HeaderMap,
 }

@@ -1,58 +1,81 @@
+use super::vary::matches_vary_headers;
 use super::*;
 
 impl CacheManager {
     pub(super) fn lookup_decision(
         &self,
         zone: &Arc<CacheZoneRuntime>,
-        key: &str,
+        request: &CacheRequest,
+        base_key: &str,
         now: u64,
         request_forces_revalidation: bool,
+        policy: &RouteCachePolicy,
     ) -> LookupDecision {
         let mut index = lock_index(&zone.index);
-        match index.entries.get_mut(key) {
-            Some(entry)
+        let matching_key = matching_variant_key(&index, base_key, request);
+
+        match matching_key {
+            Some(key) => {
+                let entry = index
+                    .entries
+                    .get_mut(&key)
+                    .expect("matching cache key should still be present in the index");
+                entry.last_access_unix_ms = now;
+
                 if now <= entry.expires_at_unix_ms
                     && !entry.must_revalidate
-                    && !request_forces_revalidation =>
-            {
-                entry.last_access_unix_ms = now;
-                LookupDecision::FreshHit(entry.clone())
-            }
-            Some(entry) => {
-                entry.last_access_unix_ms = now;
-                match zone.fill_lock_decision(key) {
+                    && !request_forces_revalidation
+                {
+                    return LookupDecision::FreshHit { key, entry: entry.clone() };
+                }
+
+                let expired = now > entry.expires_at_unix_ms;
+                match zone.fill_lock_decision(&key, now, policy.lock_age) {
                     FillLockDecision::Acquired(fill_guard) => {
-                        let expired = now > entry.expires_at_unix_ms;
-                        let cache_status =
-                            if expired { CacheStatus::Expired } else { CacheStatus::Revalidated };
-                        let allow_stale_on_error = expired
-                            && entry.stale_if_error_until_unix_ms.is_some_and(|until| now <= until);
-                        LookupDecision::Miss {
-                            cached_entry: Some(entry.clone()),
-                            fill_guard,
-                            cache_status,
-                            allow_stale_on_error,
+                        if expired
+                            && stale_allowed_for_entry(policy, entry, now)
+                            && policy.background_update
+                        {
+                            LookupDecision::BackgroundUpdate {
+                                key,
+                                cached_entry: entry.clone(),
+                                fill_guard,
+                            }
+                        } else {
+                            LookupDecision::Miss {
+                                key,
+                                base_key: entry.base_key.clone(),
+                                cached_entry: Some(entry.clone()),
+                                fill_guard: Some(fill_guard),
+                                cache_status: if expired {
+                                    CacheStatus::Expired
+                                } else {
+                                    CacheStatus::Revalidated
+                                },
+                            }
                         }
                     }
-                    FillLockDecision::Wait(_waiter)
-                        if now > entry.expires_at_unix_ms
-                            && entry
-                                .stale_while_revalidate_until_unix_ms
-                                .is_some_and(|until| now <= until) =>
+                    FillLockDecision::Wait { waiter: _waiter }
+                        if expired && stale_allowed_for_entry(policy, entry, now) =>
                     {
-                        LookupDecision::StaleWhileRevalidate(entry.clone())
+                        LookupDecision::Stale {
+                            key,
+                            entry: entry.clone(),
+                            status: CacheStatus::Updating,
+                        }
                     }
-                    FillLockDecision::Wait(waiter) => LookupDecision::Wait(waiter),
+                    FillLockDecision::Wait { waiter } => LookupDecision::Wait { waiter },
                 }
             }
-            None => match zone.fill_lock_decision(key) {
+            None => match zone.fill_lock_decision(base_key, now, policy.lock_age) {
                 FillLockDecision::Acquired(fill_guard) => LookupDecision::Miss {
+                    key: base_key.to_string(),
+                    base_key: base_key.to_string(),
                     cached_entry: None,
-                    fill_guard,
+                    fill_guard: Some(fill_guard),
                     cache_status: CacheStatus::Miss,
-                    allow_stale_on_error: false,
                 },
-                FillLockDecision::Wait(waiter) => LookupDecision::Wait(waiter),
+                FillLockDecision::Wait { waiter } => LookupDecision::Wait { waiter },
             },
         }
     }
@@ -118,6 +141,7 @@ impl CacheManager {
         key: &str,
         entry: &CacheIndexEntry,
         read_cached_body: bool,
+        status: CacheStatus,
     ) -> Option<HttpResponse> {
         let (metadata, response) = {
             let _io_guard = zone.io_lock.lock().await;
@@ -139,7 +163,43 @@ impl CacheManager {
             remove_cache_files_if_unindexed(zone, key, &entry.hash).await;
             return None;
         }
-        zone.record_stale();
-        Some(with_cache_status(response, CacheStatus::Stale))
+        if status == CacheStatus::Updating {
+            zone.record_updating();
+        } else {
+            zone.record_stale();
+        }
+        Some(with_cache_status(response, status))
     }
+}
+
+fn matching_variant_key(
+    index: &CacheIndex,
+    base_key: &str,
+    request: &CacheRequest,
+) -> Option<String> {
+    if !index.variants.contains_key(base_key)
+        && index
+            .entries
+            .get(base_key)
+            .is_some_and(|entry| matches_vary_headers(request, &entry.vary))
+    {
+        return Some(base_key.to_string());
+    }
+    index
+        .variants
+        .get(base_key)
+        .into_iter()
+        .flatten()
+        .find(|candidate_key| {
+            index
+                .entries
+                .get(*candidate_key)
+                .is_some_and(|entry| matches_vary_headers(request, &entry.vary))
+        })
+        .cloned()
+}
+
+fn stale_allowed_for_entry(policy: &RouteCachePolicy, entry: &CacheIndexEntry, now: u64) -> bool {
+    policy.use_stale.contains(&rginx_core::CacheUseStaleCondition::Updating)
+        || entry.stale_while_revalidate_until_unix_ms.is_some_and(|until| now <= until)
 }

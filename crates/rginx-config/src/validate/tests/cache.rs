@@ -16,8 +16,15 @@ fn route_cache(zone: &str) -> CacheRouteConfig {
         zone: zone.to_string(),
         methods: Some(vec!["GET".to_string(), "HEAD".to_string()]),
         statuses: Some(vec![200, 301, 404]),
+        ttl_secs_by_status: None,
         key: Some("{scheme}:{host}:{uri}".to_string()),
+        cache_bypass: None,
+        no_cache: None,
         stale_if_error_secs: Some(10),
+        use_stale: None,
+        background_update: None,
+        lock_timeout_secs: None,
+        lock_age_secs: None,
     }
 }
 
@@ -90,4 +97,27 @@ fn validate_rejects_head_only_cache_methods() {
 
     let error = validate(&config).expect_err("HEAD-only cache methods should fail validation");
     assert!(error.to_string().contains("cache.methods must include GET"), "{error}");
+}
+
+#[test]
+fn validate_rejects_status_match_in_cache_bypass() {
+    let mut config = base_config();
+    config.cache_zones = vec![cache_zone("default")];
+    let mut policy = route_cache("default");
+    policy.cache_bypass = Some(crate::model::CachePredicateConfig::Status(200));
+    config.locations[0].cache = Some(policy);
+
+    let error = validate(&config).expect_err("status-based bypass should fail validation");
+    assert!(error.to_string().contains("cache.cache_bypass cannot match response status"));
+}
+
+#[test]
+fn validate_accepts_status_match_in_no_cache() {
+    let mut config = base_config();
+    config.cache_zones = vec![cache_zone("default")];
+    let mut policy = route_cache("default");
+    policy.no_cache = Some(crate::model::CachePredicateConfig::Status(200));
+    config.locations[0].cache = Some(policy);
+
+    validate(&config).expect("status-based no_cache should pass validation");
 }

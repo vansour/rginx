@@ -1,7 +1,6 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use http::header::{CONTENT_LENGTH, HeaderMap};
 use http::{Response, StatusCode};
 use http_body_util::BodyExt;
 use tokio::fs;
@@ -10,19 +9,24 @@ use crate::handler::{HttpResponse, full_body};
 
 use super::entry::{
     CacheMetadataInput, build_cached_response, cache_key_hash, cache_metadata, cache_paths,
-    unix_time_ms, write_cache_entry, write_cache_metadata,
+    cache_variant_key, unix_time_ms, write_cache_entry, write_cache_metadata,
 };
 use super::policy::{
-    ResponseBodySize, ResponseFreshness, response_freshness, response_is_storable,
-    response_is_storable_with_size,
+    ResponseBodySize, response_freshness, response_is_storable, response_is_storable_with_size,
+    response_no_cache,
 };
 use super::{
     CacheIndex, CacheIndexEntry, CachePurgeResult, CacheStatus, CacheStoreContext,
-    CacheZoneRuntime, PurgeSelector, with_cache_status,
+    CacheZoneRuntime, with_cache_status,
 };
 
+mod helpers;
 mod maintenance;
 
+use helpers::{
+    cache_metadata_input, cache_vary_values, freshness_is_cacheable, merge_not_modified_headers,
+};
+pub(in crate::cache) use helpers::{purge_scope, purge_selector_matches};
 pub(super) use maintenance::{
     cleanup_inactive_entries_in_zone, eviction_candidates, lock_index, purge_zone_entries,
     remove_index_entry,
@@ -57,6 +61,9 @@ pub(super) async fn store_response(
     if !response_is_storable(&context, &response) {
         return Ok(response);
     }
+    if response_no_cache(&context, response.status()) {
+        return Ok(response);
+    }
 
     let (parts, body) = response.into_parts();
     let collected = match body.collect().await {
@@ -72,22 +79,25 @@ pub(super) async fn store_response(
     }
 
     let now = unix_time_ms(SystemTime::now());
-    let freshness = response_freshness(&context, &parts.headers);
+    let freshness = response_freshness(&context, parts.status, &parts.headers);
     if !freshness_is_cacheable(&freshness) {
         return Ok(Response::from_parts(parts, full_body(collected)));
     }
 
+    let vary = cache_vary_values(&context.request, &parts.headers);
+    let final_key = cache_variant_key(&context.base_key, &vary);
     let metadata = cache_metadata(
-        context.key.clone(),
+        final_key.clone(),
         parts.status,
         &parts.headers,
-        cache_metadata_input(now, &freshness, collected.len()),
+        cache_metadata_input(&context.base_key, vary.clone(), now, &freshness, collected.len()),
     );
     let hash = context
         .cached_entry
         .as_ref()
+        .filter(|_| context.key == final_key)
         .map(|entry| entry.hash.clone())
-        .unwrap_or_else(|| cache_key_hash(&context.key));
+        .unwrap_or_else(|| cache_key_hash(&final_key));
     let paths = cache_paths(&context.zone.config.path, &hash);
     let _io_guard = context.zone.io_lock.lock().await;
 
@@ -106,9 +116,11 @@ pub(super) async fn store_response(
         }
         update_index_after_store(
             &context.zone,
-            context.key,
+            final_key.clone(),
             CacheIndexEntry {
                 hash,
+                base_key: context.base_key.clone(),
+                vary,
                 body_size_bytes: metadata.body_size_bytes,
                 expires_at_unix_ms: metadata.expires_at_unix_ms,
                 stale_if_error_until_unix_ms: metadata.stale_if_error_until_unix_ms,
@@ -116,6 +128,11 @@ pub(super) async fn store_response(
                 must_revalidate: metadata.must_revalidate,
                 last_access_unix_ms: now,
             },
+            context
+                .cached_entry
+                .as_ref()
+                .filter(|_| context.key != final_key)
+                .map(|entry| (context.key.clone(), entry.clone())),
         )
         .await;
     }
@@ -146,20 +163,55 @@ pub(super) async fn refresh_not_modified_response(
     let merged_headers = merge_not_modified_headers(&cached_headers, response.headers());
     let now = unix_time_ms(SystemTime::now());
     let cached_status = StatusCode::from_u16(cached_metadata.status).unwrap_or(StatusCode::OK);
-    let freshness = response_freshness(&context, &merged_headers);
+    let paths = cache_paths(&context.zone.config.path, &cached_entry.hash);
+    if response_no_cache(&context, cached_status) {
+        let response_metadata = cache_metadata(
+            cached_metadata.key.clone(),
+            cached_status,
+            &merged_headers,
+            CacheMetadataInput {
+                base_key: cached_metadata.base_key.clone(),
+                vary: cached_entry.vary.clone(),
+                stored_at_unix_ms: cached_metadata.stored_at_unix_ms,
+                expires_at_unix_ms: cached_metadata.expires_at_unix_ms,
+                stale_if_error_until_unix_ms: cached_metadata.stale_if_error_until_unix_ms,
+                stale_while_revalidate_until_unix_ms: cached_metadata
+                    .stale_while_revalidate_until_unix_ms,
+                must_revalidate: cached_metadata.must_revalidate,
+                body_size_bytes: cached_metadata.body_size_bytes,
+            },
+        );
+        let refreshed = {
+            let _io_guard = context.zone.io_lock.lock().await;
+            build_cached_response(&paths.body, &response_metadata, context.read_cached_body).await
+        };
+        return refreshed
+            .map(|response| with_cache_status(response, CacheStatus::Revalidated))
+            .map_err(|error| CacheStoreError { source: Box::new(error) });
+    }
+
+    let freshness = response_freshness(&context, cached_status, &merged_headers);
+    let vary = cache_vary_values(&context.request, &merged_headers);
+    let final_key = cache_variant_key(&context.base_key, &vary);
     let metadata = cache_metadata(
-        context.key.clone(),
+        final_key.clone(),
         cached_status,
         &merged_headers,
-        cache_metadata_input(now, &freshness, cached_metadata.body_size_bytes),
+        cache_metadata_input(
+            &context.base_key,
+            vary.clone(),
+            now,
+            &freshness,
+            cached_metadata.body_size_bytes,
+        ),
     );
-    let paths = cache_paths(&context.zone.config.path, &cached_entry.hash);
     if !response_is_storable_with_size(
         &context,
         cached_status,
         &merged_headers,
         ResponseBodySize::exact(cached_metadata.body_size_bytes),
     ) || !freshness_is_cacheable(&freshness)
+        || final_key != context.key
     {
         let refreshed = {
             let _io_guard = context.zone.io_lock.lock().await;
@@ -189,6 +241,8 @@ pub(super) async fn refresh_not_modified_response(
         context.key,
         CacheIndexEntry {
             hash: cached_entry.hash.clone(),
+            base_key: context.base_key.clone(),
+            vary,
             body_size_bytes: metadata.body_size_bytes,
             expires_at_unix_ms: metadata.expires_at_unix_ms,
             stale_if_error_until_unix_ms: metadata.stale_if_error_until_unix_ms,
@@ -196,6 +250,7 @@ pub(super) async fn refresh_not_modified_response(
             must_revalidate: metadata.must_revalidate,
             last_access_unix_ms: now,
         },
+        None,
     )
     .await;
 
@@ -212,66 +267,11 @@ async fn update_index_after_store(
     zone: &Arc<CacheZoneRuntime>,
     key: String,
     entry: CacheIndexEntry,
+    replaced_entry: Option<(String, CacheIndexEntry)>,
 ) {
-    maintenance::update_index_after_store(zone, key, entry).await;
+    maintenance::update_index_after_store(zone, key, entry, replaced_entry).await;
 }
 
 pub(super) fn duration_to_ms(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
-}
-
-fn cache_metadata_input(
-    now: u64,
-    freshness: &ResponseFreshness,
-    body_size_bytes: usize,
-) -> CacheMetadataInput {
-    CacheMetadataInput {
-        stored_at_unix_ms: now,
-        expires_at_unix_ms: now.saturating_add(duration_to_ms(freshness.ttl)),
-        stale_if_error_until_unix_ms: freshness
-            .stale_if_error
-            .map(|duration| now.saturating_add(duration_to_ms(duration))),
-        stale_while_revalidate_until_unix_ms: freshness
-            .stale_while_revalidate
-            .map(|duration| now.saturating_add(duration_to_ms(duration))),
-        must_revalidate: freshness.must_revalidate,
-        body_size_bytes,
-    }
-}
-
-fn freshness_is_cacheable(freshness: &ResponseFreshness) -> bool {
-    !freshness.ttl.is_zero()
-        || freshness.must_revalidate
-        || freshness.stale_if_error.is_some()
-        || freshness.stale_while_revalidate.is_some()
-}
-
-fn merge_not_modified_headers(cached: &HeaderMap, not_modified: &HeaderMap) -> HeaderMap {
-    let mut merged = cached.clone();
-    for name in not_modified.keys() {
-        if *name == CONTENT_LENGTH {
-            continue;
-        }
-        merged.remove(name);
-        for value in not_modified.get_all(name) {
-            merged.append(name.clone(), value.clone());
-        }
-    }
-    merged
-}
-
-pub(super) fn purge_selector_matches(selector: &PurgeSelector, key: &str) -> bool {
-    match selector {
-        PurgeSelector::All => true,
-        PurgeSelector::Exact(expected) => key == expected,
-        PurgeSelector::Prefix(prefix) => key.starts_with(prefix),
-    }
-}
-
-pub(super) fn purge_scope(selector: &PurgeSelector) -> String {
-    match selector {
-        PurgeSelector::All => "all".to_string(),
-        PurgeSelector::Exact(key) => format!("key:{key}"),
-        PurgeSelector::Prefix(prefix) => format!("prefix:{prefix}"),
-    }
 }

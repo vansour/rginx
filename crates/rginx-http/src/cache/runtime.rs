@@ -1,5 +1,11 @@
 use super::*;
 
+mod support;
+
+pub(in crate::cache) use support::PurgeSelector;
+pub(in crate::cache) use support::{build_conditional_headers, remove_cache_files_if_unindexed};
+use support::{stale_if_error_window_open, use_stale_matches_status};
+
 impl CacheRequest {
     pub(crate) fn from_request(request: &Request<HttpBody>) -> Self {
         Self {
@@ -8,11 +14,34 @@ impl CacheRequest {
             headers: request.headers().clone(),
         }
     }
+
+    pub(crate) fn with_method(&self, method: Method) -> Self {
+        Self { method, uri: self.uri.clone(), headers: self.headers.clone() }
+    }
+
+    pub(crate) fn request_uri(&self) -> &str {
+        self.uri.path_and_query().map(|value| value.as_str()).unwrap_or("/")
+    }
 }
 
 impl CacheStoreContext {
     pub(crate) fn cache_status(&self) -> CacheStatus {
         self.cache_status
+    }
+
+    pub(crate) fn build_background_request(&self) -> Request<HttpBody> {
+        let method = if self.request.method == Method::HEAD {
+            Method::GET
+        } else {
+            self.request.method.clone()
+        };
+        let mut request = Request::builder()
+            .method(method)
+            .uri(self.request.uri.clone())
+            .body(crate::handler::full_body(bytes::Bytes::new()))
+            .expect("background cache refresh request should build");
+        *request.headers_mut() = self.request.headers.clone();
+        request
     }
 
     pub(crate) fn apply_conditional_request_headers(&self, headers: &mut HeaderMap) {
@@ -31,11 +60,32 @@ impl CacheStoreContext {
         self.cached_entry.is_some() && status == StatusCode::NOT_MODIFIED
     }
 
-    pub(crate) fn can_serve_stale_on_error(&self) -> bool {
-        self.allow_stale_on_error && self.cached_entry.is_some() && self.cached_metadata.is_some()
+    pub(crate) fn can_serve_stale(&self, reason: CacheStaleReason) -> bool {
+        let Some(entry) = &self.cached_entry else {
+            return false;
+        };
+        if self.cached_metadata.is_none() {
+            return false;
+        }
+
+        let now = unix_time_ms(SystemTime::now());
+        match reason {
+            CacheStaleReason::Error => {
+                self.policy.use_stale.contains(&rginx_core::CacheUseStaleCondition::Error)
+                    || stale_if_error_window_open(entry, now)
+            }
+            CacheStaleReason::Timeout => {
+                self.policy.use_stale.contains(&rginx_core::CacheUseStaleCondition::Timeout)
+                    || stale_if_error_window_open(entry, now)
+            }
+            CacheStaleReason::Status(status) => {
+                use_stale_matches_status(&self.policy.use_stale, status)
+                    || (status.is_server_error() && stale_if_error_window_open(entry, now))
+            }
+        }
     }
 
-    pub(crate) async fn serve_stale_on_error(&self) -> Option<HttpResponse> {
+    pub(crate) async fn serve_stale(&self, cache_status: CacheStatus) -> Option<HttpResponse> {
         let Some(entry) = &self.cached_entry else {
             return None;
         };
@@ -49,8 +99,12 @@ impl CacheStoreContext {
         };
         match response {
             Ok(response) => {
-                self.zone.record_stale();
-                Some(with_cache_status(response, CacheStatus::Stale))
+                if cache_status == CacheStatus::Updating {
+                    self.zone.record_updating();
+                } else {
+                    self.zone.record_stale();
+                }
+                Some(with_cache_status(response, cache_status))
             }
             Err(error) => {
                 tracing::warn!(
@@ -84,6 +138,7 @@ impl CacheZoneRuntime {
             bypass_total: self.stats.bypass_total.load(Ordering::Relaxed),
             expired_total: self.stats.expired_total.load(Ordering::Relaxed),
             stale_total: self.stats.stale_total.load(Ordering::Relaxed),
+            updating_total: self.stats.updating_total.load(Ordering::Relaxed),
             revalidated_total: self.stats.revalidated_total.load(Ordering::Relaxed),
             write_success_total: self.stats.write_success_total.load(Ordering::Relaxed),
             write_error_total: self.stats.write_error_total.load(Ordering::Relaxed),
@@ -93,16 +148,28 @@ impl CacheZoneRuntime {
         }
     }
 
-    pub(super) fn fill_lock_decision(self: &Arc<Self>, key: &str) -> FillLockDecision {
+    pub(super) fn fill_lock_decision(
+        self: &Arc<Self>,
+        key: &str,
+        now: u64,
+        lock_age: std::time::Duration,
+    ) -> FillLockDecision {
         let mut fill_locks =
             self.fill_locks.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(notify) = fill_locks.get(key).cloned() {
-            return FillLockDecision::Wait(notify.notified_owned());
+        if let Some(lock) = fill_locks.get(key).cloned()
+            && now.saturating_sub(lock.acquired_at_unix_ms) <= lock_age.as_millis() as u64
+        {
+            return FillLockDecision::Wait { waiter: lock.notify.notified_owned() };
         }
         let notify = Arc::new(Notify::new());
-        fill_locks.insert(key.to_string(), notify.clone());
+        let generation = self.fill_lock_generation.fetch_add(1, Ordering::Relaxed) + 1;
+        fill_locks.insert(
+            key.to_string(),
+            CacheFillLockState { notify: notify.clone(), acquired_at_unix_ms: now, generation },
+        );
         FillLockDecision::Acquired(CacheFillGuard {
             key: key.to_string(),
+            generation,
             fill_locks: Arc::downgrade(&self.fill_locks),
             notify,
         })
@@ -126,6 +193,10 @@ impl CacheZoneRuntime {
 
     pub(super) fn record_stale(&self) {
         self.record_counter(&self.stats.stale_total, 1);
+    }
+
+    pub(super) fn record_updating(&self) {
+        self.record_counter(&self.stats.updating_total, 1);
     }
 
     pub(super) fn record_revalidated(&self) {
@@ -172,7 +243,10 @@ impl CacheZoneRuntime {
 impl Drop for CacheFillGuard {
     fn drop(&mut self) {
         if let Some(fill_locks) = self.fill_locks.upgrade() {
-            fill_locks.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&self.key);
+            let mut fill_locks = fill_locks.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if fill_locks.get(&self.key).is_some_and(|lock| lock.generation == self.generation) {
+                fill_locks.remove(&self.key);
+            }
         }
         self.notify.notify_waiters();
     }
@@ -181,34 +255,4 @@ impl Drop for CacheFillGuard {
 pub(crate) fn with_cache_status(mut response: HttpResponse, status: CacheStatus) -> HttpResponse {
     response.headers_mut().insert(CACHE_STATUS_HEADER, status.as_header_value());
     response
-}
-
-pub(super) async fn remove_cache_files_if_unindexed(
-    zone: &CacheZoneRuntime,
-    key: &str,
-    hash: &str,
-) {
-    let _io_guard = zone.io_lock.lock().await;
-    if lock_index(&zone.index).entries.contains_key(key) {
-        return;
-    }
-    let paths = cache_paths(&zone.config.path, hash);
-    let _ = fs::remove_file(paths.metadata).await;
-    let _ = fs::remove_file(paths.body).await;
-}
-
-pub(super) fn build_conditional_headers(headers: &HeaderMap) -> Option<CacheConditionalHeaders> {
-    let if_none_match =
-        header_value(headers, ETAG).and_then(|value| HeaderValue::from_str(&value).ok());
-    let if_modified_since =
-        header_value(headers, LAST_MODIFIED).and_then(|value| HeaderValue::from_str(&value).ok());
-    (if_none_match.is_some() || if_modified_since.is_some())
-        .then_some(CacheConditionalHeaders { if_none_match, if_modified_since })
-}
-
-#[derive(Debug, Clone)]
-pub(in crate::cache) enum PurgeSelector {
-    All,
-    Exact(String),
-    Prefix(String),
 }
