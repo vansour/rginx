@@ -1,6 +1,7 @@
 use rginx_http::{
-    HttpCountersSnapshot, RuntimeStatusSnapshot, SnapshotDeltaSnapshot, SnapshotModule,
-    TrafficStatsSnapshot, UpstreamHealthSnapshot, UpstreamStatsSnapshot,
+    CachePurgeResult, CacheStatsSnapshot, HttpCountersSnapshot, RuntimeStatusSnapshot,
+    SnapshotDeltaSnapshot, SnapshotModule, TrafficStatsSnapshot, UpstreamHealthSnapshot,
+    UpstreamStatsSnapshot,
 };
 use serde::{Deserialize, Serialize};
 
@@ -11,10 +12,14 @@ pub enum AdminRequest {
     GetDelta { since_version: u64, include: Option<Vec<SnapshotModule>>, window_secs: Option<u64> },
     WaitForSnapshotChange { since_version: u64, timeout_ms: Option<u64> },
     GetStatus,
+    GetCacheStats,
     GetCounters,
     GetTrafficStats { window_secs: Option<u64> },
     GetPeerHealth,
     GetUpstreamStats { window_secs: Option<u64> },
+    PurgeCacheZone { zone_name: String },
+    PurgeCacheKey { zone_name: String, key: String },
+    PurgeCachePrefix { zone_name: String, prefix: String },
     GetRevision,
 }
 
@@ -46,6 +51,8 @@ pub struct AdminSnapshot {
     pub peer_health: Option<Vec<UpstreamHealthSnapshot>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upstreams: Option<Vec<UpstreamStatsSnapshot>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache: Option<CacheStatsSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,10 +63,12 @@ pub enum AdminResponse {
     SnapshotVersion(SnapshotVersionSnapshot),
     Delta(SnapshotDeltaSnapshot),
     Status(RuntimeStatusSnapshot),
+    CacheStats(CacheStatsSnapshot),
     Counters(HttpCountersSnapshot),
     TrafficStats(TrafficStatsSnapshot),
     PeerHealth(Vec<UpstreamHealthSnapshot>),
     UpstreamStats(Vec<UpstreamStatsSnapshot>),
+    CachePurge(CachePurgeResult),
     Revision(RevisionSnapshot),
     Error { message: String },
 }

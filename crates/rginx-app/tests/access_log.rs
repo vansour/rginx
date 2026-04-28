@@ -1,7 +1,8 @@
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -66,6 +67,36 @@ fn tls_access_log_format_emits_tls_version_and_alpn() {
     );
 }
 
+#[test]
+fn cache_access_log_format_emits_cache_status() {
+    let listen_addr = reserve_loopback_addr();
+    let (upstream_addr, upstream_hits) = spawn_counting_response_server("cache log ok\n");
+    let mut server = ServerHarness::spawn("rginx-access-log-cache", |temp_dir| {
+        cached_proxy_access_log_config(listen_addr, upstream_addr, &temp_dir.join("cache"))
+    });
+    server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
+
+    let first = send_http_request(
+        listen_addr,
+        &format!("GET /api/demo HTTP/1.1\r\nHost: {listen_addr}\r\nConnection: close\r\n\r\n"),
+    )
+    .expect("first request should succeed");
+    assert_eq!(response_header_value(&first, "x-cache").as_deref(), Some("MISS"));
+
+    let second = send_http_request(
+        listen_addr,
+        &format!("GET /api/demo HTTP/1.1\r\nHost: {listen_addr}\r\nConnection: close\r\n\r\n"),
+    )
+    .expect("second request should succeed");
+    assert_eq!(response_header_value(&second, "x-cache").as_deref(), Some("HIT"));
+    assert_eq!(upstream_hits.load(Ordering::Relaxed), 1);
+
+    server.shutdown_and_wait(Duration::from_secs(5));
+    let logs = server.combined_output();
+    assert!(logs.contains("CACHE cache=MISS"), "expected MISS access log line, got {logs:?}");
+    assert!(logs.contains("CACHE cache=HIT"), "expected HIT access log line, got {logs:?}");
+}
+
 fn return_config(listen_addr: SocketAddr) -> String {
     format!(
         "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n        access_log_format: Some(\"ACCESS reqid=$request_id status=$status request=\\\"$request\\\" bytes=$body_bytes_sent ua=\\\"$http_user_agent\\\"\"),\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Return(\n                status: 200,\n                location: \"\",\n                body: Some(\"ok\\n\"),\n            ),\n        ),\n    ],\n)\n",
@@ -80,6 +111,20 @@ fn tls_return_config(listen_addr: SocketAddr, cert_path: &Path, key_path: &Path)
         listen_addr.to_string(),
         cert_path.display().to_string(),
         key_path.display().to_string(),
+        ready_route = READY_ROUTE_CONFIG,
+    )
+}
+
+fn cached_proxy_access_log_config(
+    listen_addr: SocketAddr,
+    upstream_addr: SocketAddr,
+    cache_dir: &Path,
+) -> String {
+    format!(
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    cache_zones: [\n        CacheZoneConfig(\n            name: \"default\",\n            path: {:?},\n            max_size_bytes: Some(1048576),\n            inactive_secs: Some(600),\n            default_ttl_secs: Some(60),\n            max_entry_bytes: Some(65536),\n        ),\n    ],\n    server: ServerConfig(\n        listen: {:?},\n        access_log_format: Some(\"CACHE cache=$cache_status\"),\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [\n                UpstreamPeerConfig(\n                    url: {:?},\n                ),\n            ],\n        ),\n    ],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/api/demo\"),\n            handler: Proxy(\n                upstream: \"backend\",\n            ),\n            cache: Some(CacheRouteConfig(\n                zone: \"default\",\n                methods: Some([\"GET\", \"HEAD\"]),\n                statuses: Some([200]),\n                key: Some(\"{{scheme}}:{{host}}:{{uri}}\"),\n                stale_if_error_secs: Some(60),\n            )),\n        ),\n    ],\n)\n",
+        cache_dir.display().to_string(),
+        listen_addr.to_string(),
+        format!("http://{upstream_addr}"),
         ready_route = READY_ROUTE_CONFIG,
     )
 }
@@ -103,6 +148,44 @@ fn send_http_request(listen_addr: SocketAddr, request: &str) -> Result<String, S
         .read_to_string(&mut response)
         .map_err(|error| format!("failed to read response: {error}"))?;
     Ok(response)
+}
+
+fn response_header_value(response: &str, header_name: &str) -> Option<String> {
+    let (head, _) = response.split_once("\r\n\r\n")?;
+    head.lines().skip(1).find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case(header_name).then(|| value.trim().to_string())
+    })
+}
+
+fn spawn_counting_response_server(body: &'static str) -> (SocketAddr, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("test upstream listener should bind");
+    let listen_addr = listener.local_addr().expect("listener addr should be available");
+    let hits = Arc::new(AtomicUsize::new(0));
+    let hits_task = hits.clone();
+
+    std::thread::spawn(move || {
+        loop {
+            let Ok((mut stream, _)) = listener.accept() else {
+                break;
+            };
+            let hits = hits_task.clone();
+            std::thread::spawn(move || {
+                hits.fetch_add(1, Ordering::Relaxed);
+                let mut buffer = [0u8; 1024];
+                let _ = stream.read(&mut buffer);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/plain; charset=utf-8\r\ncache-control: max-age=60\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            });
+        }
+    });
+
+    (listen_addr, hits)
 }
 
 fn send_https_request(listen_addr: SocketAddr, request: &str) -> Result<String, String> {

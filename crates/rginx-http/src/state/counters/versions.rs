@@ -5,4 +5,5 @@ pub(crate) struct SnapshotComponentVersions {
     traffic: AtomicU64,
     peer_health: AtomicU64,
     upstreams: AtomicU64,
+    cache: AtomicU64,
 }

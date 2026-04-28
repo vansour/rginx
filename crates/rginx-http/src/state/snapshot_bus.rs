@@ -72,6 +72,7 @@ impl SharedState {
         let traffic_version = self.snapshot_components.traffic.load(Ordering::Relaxed);
         let peer_health_version = self.snapshot_components.peer_health.load(Ordering::Relaxed);
         let upstreams_version = self.snapshot_components.upstreams.load(Ordering::Relaxed);
+        let cache_version = self.snapshot_components.cache.load(Ordering::Relaxed);
         let (changed_listener_ids, changed_vhost_ids, changed_route_ids) =
             self.changed_traffic_targets_since(since_version);
         let changed_peer_health_upstream_names = self.changed_named_component_targets_since(
@@ -82,9 +83,11 @@ impl SharedState {
             &self.upstream_component_versions,
             since_version,
         );
+        let changed_cache_zone_names = self
+            .changed_named_component_targets_since(&self.cache_component_versions, since_version);
 
         SnapshotDeltaSnapshot {
-            schema_version: 2,
+            schema_version: 3,
             since_version,
             current_snapshot_version,
             included_modules: included_modules.clone(),
@@ -104,6 +107,9 @@ impl SharedState {
             upstreams_version: included_modules
                 .contains(&SnapshotModule::Upstreams)
                 .then_some(upstreams_version),
+            cache_version: included_modules
+                .contains(&SnapshotModule::Cache)
+                .then_some(cache_version),
             status_changed: included_modules
                 .contains(&SnapshotModule::Status)
                 .then_some(status_version > since_version),
@@ -122,6 +128,9 @@ impl SharedState {
             upstreams_changed: included_modules
                 .contains(&SnapshotModule::Upstreams)
                 .then_some(upstreams_version > since_version),
+            cache_changed: included_modules
+                .contains(&SnapshotModule::Cache)
+                .then_some(cache_version > since_version),
             upstreams_recent_changed: (included_modules.contains(&SnapshotModule::Upstreams)
                 && window_secs.is_some())
             .then_some(upstreams_version > since_version),
@@ -152,6 +161,9 @@ impl SharedState {
             changed_recent_upstream_names: (included_modules.contains(&SnapshotModule::Upstreams)
                 && window_secs.is_some())
             .then_some(changed_upstream_names.clone()),
+            changed_cache_zone_names: included_modules
+                .contains(&SnapshotModule::Cache)
+                .then_some(changed_cache_zone_names.clone()),
         }
     }
 
@@ -189,6 +201,25 @@ impl SharedState {
         peer_health: bool,
         upstreams: bool,
     ) -> u64 {
+        self.mark_snapshot_changed_components_with_cache(
+            status,
+            counters,
+            traffic,
+            peer_health,
+            upstreams,
+            false,
+        )
+    }
+
+    pub(crate) fn mark_snapshot_changed_components_with_cache(
+        &self,
+        status: bool,
+        counters: bool,
+        traffic: bool,
+        peer_health: bool,
+        upstreams: bool,
+        cache: bool,
+    ) -> u64 {
         let version = self.snapshot_version.fetch_add(1, Ordering::Relaxed) + 1;
         if status {
             self.snapshot_components.status.store(version, Ordering::Relaxed);
@@ -204,6 +235,9 @@ impl SharedState {
         }
         if upstreams {
             self.snapshot_components.upstreams.store(version, Ordering::Relaxed);
+        }
+        if cache {
+            self.snapshot_components.cache.store(version, Ordering::Relaxed);
         }
         version
     }

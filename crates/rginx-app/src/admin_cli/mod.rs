@@ -8,8 +8,11 @@ pub(super) use rginx_runtime::admin::{
 };
 
 use crate::cli::Command;
-pub(super) use crate::cli::{DeltaArgs, SnapshotArgs, SnapshotModuleArg, WaitArgs, WindowArgs};
+pub(super) use crate::cli::{
+    DeltaArgs, PurgeCacheArgs, SnapshotArgs, SnapshotModuleArg, WaitArgs, WindowArgs,
+};
 
+mod cache;
 mod counters;
 mod peers;
 mod render;
@@ -39,6 +42,14 @@ pub(crate) fn run_admin_command(config_path: &Path, command: &Command) -> anyhow
         }
         Command::Status => {
             status::print_admin_status(config_path)?;
+            Ok(true)
+        }
+        Command::Cache => {
+            cache::print_admin_cache(config_path)?;
+            Ok(true)
+        }
+        Command::PurgeCache(args) => {
+            cache::print_admin_purge_cache(config_path, args)?;
             Ok(true)
         }
         Command::Counters => {

@@ -40,7 +40,7 @@ fn snapshot_command_returns_aggregate_json_snapshot() {
     let AdminResponse::Snapshot(snapshot) = response else {
         panic!("admin socket should return aggregate snapshot");
     };
-    assert_eq!(snapshot.schema_version, 13);
+    assert_eq!(snapshot.schema_version, 14);
     assert!(snapshot.captured_at_unix_ms > 0);
     assert!(snapshot.pid > 0);
     assert_eq!(snapshot.binary_version, env!("CARGO_PKG_VERSION"));
@@ -59,13 +59,14 @@ fn snapshot_command_returns_aggregate_json_snapshot() {
     assert_eq!(snapshot.traffic.as_ref().map(|t| t.listeners.len()), Some(1));
     assert_eq!(snapshot.peer_health.as_ref().map(Vec::len), Some(1));
     assert_eq!(snapshot.upstreams.as_ref().map(Vec::len), Some(1));
+    assert_eq!(snapshot.cache.as_ref().map(|cache| cache.zones.len()), Some(0));
 
     let output = run_rginx(["--config", server.config_path().to_str().unwrap(), "snapshot"]);
     assert!(output.status.success(), "snapshot command should succeed: {}", render_output(&output));
     let stdout = String::from_utf8_lossy(&output.stdout);
     let snapshot: serde_json::Value =
         serde_json::from_str(&stdout).expect("snapshot command should print valid JSON");
-    assert_eq!(snapshot["schema_version"], serde_json::Value::from(13));
+    assert_eq!(snapshot["schema_version"], serde_json::Value::from(14));
     assert!(snapshot["captured_at_unix_ms"].as_u64().unwrap_or(0) > 0);
     assert!(snapshot["pid"].as_u64().unwrap_or(0) > 0);
     assert_eq!(snapshot["binary_version"], serde_json::Value::from(env!("CARGO_PKG_VERSION")));
@@ -79,6 +80,7 @@ fn snapshot_command_returns_aggregate_json_snapshot() {
     assert_eq!(snapshot["traffic"]["listeners"].as_array().map(Vec::len), Some(1));
     assert_eq!(snapshot["peer_health"].as_array().map(Vec::len), Some(1));
     assert_eq!(snapshot["upstreams"].as_array().map(Vec::len), Some(1));
+    assert_eq!(snapshot["cache"]["zones"].as_array().map(Vec::len), Some(0));
 
     server.shutdown_and_wait(Duration::from_secs(5));
 }

@@ -5,6 +5,7 @@ use rginx_core::{ConfigSnapshot, Result};
 use tokio::sync::{Notify, watch};
 
 use crate::admin;
+use crate::cache;
 use crate::health;
 use crate::ocsp;
 use crate::shutdown as runtime_shutdown;
@@ -49,6 +50,8 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
         state.http.clone(),
         shutdown_tx.subscribe(),
     )));
+    let mut cache_task =
+        Some(tokio::spawn(cache::run(state.http.clone(), shutdown_tx.subscribe())));
     let mut health_task =
         Some(tokio::spawn(health::run(state.http.clone(), shutdown_tx.subscribe())));
     let mut ocsp_task = Some(tokio::spawn(ocsp::run(state.http.clone(), shutdown_tx.subscribe())));
@@ -102,9 +105,12 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
         &shutdown_tx,
         &mut active_listener_groups,
         &mut draining_listener_groups,
-        &mut admin_task,
-        &mut health_task,
-        &mut ocsp_task,
+        shutdown::ShutdownTasks {
+            admin_task: &mut admin_task,
+            cache_task: &mut cache_task,
+            health_task: &mut health_task,
+            ocsp_task: &mut ocsp_task,
+        },
     )
     .await
 }

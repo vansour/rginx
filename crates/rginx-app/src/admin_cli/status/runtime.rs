@@ -119,6 +119,21 @@ pub(super) fn print_status_summary(status: &rginx_http::RuntimeStatusSnapshot) {
                 status.tls.default_certificate_bindings.len().to_string(),
             ),
             ("tls_expiring_certificates", status.tls.expiring_certificate_count.to_string()),
+            ("cache_zones", status.cache.zones.len().to_string()),
+            (
+                "cache_entries",
+                status.cache.zones.iter().map(|zone| zone.entry_count).sum::<usize>().to_string(),
+            ),
+            (
+                "cache_current_size_bytes",
+                status
+                    .cache
+                    .zones
+                    .iter()
+                    .map(|zone| zone.current_size_bytes)
+                    .sum::<usize>()
+                    .to_string(),
+            ),
             ("mtls_listeners", status.mtls.configured_listeners.to_string()),
             ("mtls_optional_listeners", status.mtls.optional_listeners.to_string()),
             ("mtls_required_listeners", status.mtls.required_listeners.to_string()),

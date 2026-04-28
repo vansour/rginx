@@ -14,7 +14,7 @@ pub use socket::admin_socket_path_for_config;
 
 const INSTALLED_CONFIG_PATH: &str = "/etc/rginx/rginx.ron";
 const INSTALLED_ADMIN_SOCKET_PATH: &str = "/run/rginx/admin.sock";
-const ADMIN_SNAPSHOT_SCHEMA_VERSION: u32 = 13;
+const ADMIN_SNAPSHOT_SCHEMA_VERSION: u32 = 14;
 const DEFAULT_RECENT_WINDOW_SECS: u64 = 60;
 const EXTENDED_RECENT_WINDOW_SECS: u64 = 300;
 

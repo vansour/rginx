@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    MtlsStatusSnapshot, ReloadStatusSnapshot, TlsRuntimeSnapshot, UpstreamTlsStatusSnapshot,
+    CacheStatsSnapshot, MtlsStatusSnapshot, ReloadStatusSnapshot, TlsRuntimeSnapshot,
+    UpstreamTlsStatusSnapshot,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,6 +32,7 @@ pub struct RuntimeStatusSnapshot {
     pub tls: TlsRuntimeSnapshot,
     pub mtls: MtlsStatusSnapshot,
     pub upstream_tls: Vec<UpstreamTlsStatusSnapshot>,
+    pub cache: CacheStatsSnapshot,
     pub active_connections: usize,
     pub reload: ReloadStatusSnapshot,
 }

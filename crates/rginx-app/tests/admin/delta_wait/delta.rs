@@ -29,7 +29,7 @@ fn delta_command_reports_changed_modules_since_version() {
     let AdminResponse::Delta(delta) = response else {
         panic!("admin socket should return delta");
     };
-    assert_eq!(delta.schema_version, 2);
+    assert_eq!(delta.schema_version, 3);
     assert_eq!(delta.since_version, since_version);
     assert!(delta.current_snapshot_version > since_version);
     assert_eq!(delta.included_modules, rginx_http::SnapshotModule::all());
@@ -39,6 +39,7 @@ fn delta_command_reports_changed_modules_since_version() {
     assert_eq!(delta.traffic_recent_changed, None);
     assert_eq!(delta.peer_health_changed, Some(false));
     assert_eq!(delta.upstreams_changed, Some(false));
+    assert_eq!(delta.cache_changed, Some(false));
     assert_eq!(delta.upstreams_recent_changed, None);
     assert_eq!(delta.changed_listener_ids, Some(vec!["default".to_string()]));
     assert_eq!(delta.changed_vhost_ids, Some(vec!["server".to_string()]));
@@ -61,6 +62,7 @@ fn delta_command_reports_changed_modules_since_version() {
     assert_eq!(delta.changed_peer_health_upstream_names, Some(Vec::new()));
     assert_eq!(delta.changed_upstream_names, Some(Vec::new()));
     assert_eq!(delta.changed_recent_upstream_names, None);
+    assert_eq!(delta.changed_cache_zone_names, Some(Vec::new()));
 
     let since_version_arg = since_version.to_string();
     let output = run_rginx([
@@ -74,7 +76,7 @@ fn delta_command_reports_changed_modules_since_version() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let delta: serde_json::Value =
         serde_json::from_str(&stdout).expect("delta command should print valid JSON");
-    assert_eq!(delta["schema_version"], serde_json::Value::from(2));
+    assert_eq!(delta["schema_version"], serde_json::Value::from(3));
     assert_eq!(delta["since_version"], serde_json::Value::from(since_version));
     assert_eq!(delta["status_changed"], serde_json::Value::from(true));
     assert_eq!(delta["counters_changed"], serde_json::Value::from(true));
@@ -82,6 +84,7 @@ fn delta_command_reports_changed_modules_since_version() {
     assert!(delta.get("traffic_recent_changed").is_none());
     assert_eq!(delta["peer_health_changed"], serde_json::Value::from(false));
     assert_eq!(delta["upstreams_changed"], serde_json::Value::from(false));
+    assert_eq!(delta["cache_changed"], serde_json::Value::from(false));
     assert!(delta.get("upstreams_recent_changed").is_none());
     assert_eq!(delta["changed_listener_ids"], serde_json::json!(["default"]));
     assert_eq!(delta["changed_vhost_ids"], serde_json::json!(["server"]));
@@ -104,6 +107,7 @@ fn delta_command_reports_changed_modules_since_version() {
     assert_eq!(delta["changed_peer_health_upstream_names"], serde_json::json!([]));
     assert_eq!(delta["changed_upstream_names"], serde_json::json!([]));
     assert!(delta.get("changed_recent_upstream_names").is_none());
+    assert_eq!(delta["changed_cache_zone_names"], serde_json::json!([]));
 
     server.shutdown_and_wait(Duration::from_secs(5));
 }

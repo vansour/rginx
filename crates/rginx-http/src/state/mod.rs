@@ -11,12 +11,13 @@ use tokio::sync::{Notify, RwLock, watch};
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 
-use crate::cache::CacheManager;
+use crate::cache::{CacheChangeNotifier, CacheManager};
 use crate::proxy::{HealthChangeNotifier, ProxyClients, UpstreamHealthSnapshot};
 use crate::rate_limit::RateLimiters;
 use crate::tls::build_tls_acceptor;
 use crate::tls::ocsp::ocsp_responder_urls_for_certificate;
 
+mod cache;
 mod connections;
 mod lifecycle;
 mod snapshot_bus;
@@ -39,13 +40,14 @@ pub(super) struct PreparedState {
     retired_listeners: Vec<Listener>,
 }
 
+pub use crate::cache::{CachePurgeResult, CacheZoneRuntimeSnapshot};
 pub use snapshots::ActiveState;
 pub use snapshots::{
-    GrpcTrafficSnapshot, Http3ListenerRuntimeSnapshot, HttpCountersSnapshot, ListenerStatsSnapshot,
-    MtlsStatusSnapshot, RecentTrafficStatsSnapshot, RecentUpstreamStatsSnapshot,
-    ReloadOutcomeSnapshot, ReloadResultSnapshot, ReloadStatusSnapshot, RouteStatsSnapshot,
-    RuntimeListenerBindingSnapshot, RuntimeListenerSnapshot, RuntimeStatusSnapshot,
-    SnapshotDeltaSnapshot, SnapshotModule, TlsCertificateStatusSnapshot,
+    CacheStatsSnapshot, GrpcTrafficSnapshot, Http3ListenerRuntimeSnapshot, HttpCountersSnapshot,
+    ListenerStatsSnapshot, MtlsStatusSnapshot, RecentTrafficStatsSnapshot,
+    RecentUpstreamStatsSnapshot, ReloadOutcomeSnapshot, ReloadResultSnapshot, ReloadStatusSnapshot,
+    RouteStatsSnapshot, RuntimeListenerBindingSnapshot, RuntimeListenerSnapshot,
+    RuntimeStatusSnapshot, SnapshotDeltaSnapshot, SnapshotModule, TlsCertificateStatusSnapshot,
     TlsDefaultCertificateBindingSnapshot, TlsListenerStatusSnapshot, TlsOcspRefreshSpec,
     TlsOcspStatusSnapshot, TlsReloadBoundarySnapshot, TlsRuntimeSnapshot, TlsSniBindingSnapshot,
     TlsVhostBindingSnapshot, TrafficStatsSnapshot, UpstreamPeerStatsSnapshot,
@@ -88,6 +90,7 @@ pub struct SharedState {
     upstream_stats: Arc<StdRwLock<HashMap<String, UpstreamStatsEntry>>>,
     upstream_component_versions: Arc<StdRwLock<HashMap<String, u64>>>,
     peer_health_component_versions: Arc<StdRwLock<HashMap<String, u64>>>,
+    cache_component_versions: Arc<StdRwLock<HashMap<String, u64>>>,
     reload_history: Arc<Mutex<ReloadHistory>>,
     ocsp_statuses: Arc<StdRwLock<HashMap<String, OcspRuntimeStatusEntry>>>,
     config_path: Option<Arc<PathBuf>>,
@@ -116,6 +119,7 @@ impl SharedState {
         let snapshot_notify = Arc::new(Notify::new());
         let snapshot_components = Arc::new(SnapshotComponentVersions::default());
         let peer_health_component_versions = Arc::new(StdRwLock::new(HashMap::new()));
+        let cache_component_versions = Arc::new(StdRwLock::new(HashMap::new()));
         let prepared = prepare_state(
             config,
             Some(build_peer_health_notifier(
@@ -123,6 +127,12 @@ impl SharedState {
                 snapshot_notify.clone(),
                 snapshot_components.clone(),
                 peer_health_component_versions.clone(),
+            )),
+            Some(build_cache_notifier(
+                snapshot_version.clone(),
+                snapshot_notify.clone(),
+                snapshot_components.clone(),
+                cache_component_versions.clone(),
             )),
         )?;
         let revision = 0u64;
@@ -145,6 +155,8 @@ impl SharedState {
             Arc::new(StdRwLock::new(build_upstream_name_versions(prepared.config.as_ref(), None)));
         *peer_health_component_versions.write().unwrap_or_else(|poisoned| poisoned.into_inner()) =
             build_upstream_name_versions(prepared.config.as_ref(), None);
+        *cache_component_versions.write().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            cache::build_cache_zone_versions(prepared.config.as_ref(), None);
         let ocsp_statuses = Arc::new(StdRwLock::new(HashMap::new()));
 
         Ok(Self {
@@ -170,6 +182,7 @@ impl SharedState {
             upstream_stats,
             upstream_component_versions,
             peer_health_component_versions,
+            cache_component_versions,
             reload_history: Arc::new(Mutex::new(ReloadHistory::default())),
             ocsp_statuses,
             config_path: config_path.map(Arc::new),

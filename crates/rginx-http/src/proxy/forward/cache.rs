@@ -1,13 +1,13 @@
 use super::*;
 
 pub(super) struct ForwardCacheContext {
-    pub(super) store: Option<crate::cache::CacheStoreContext>,
+    pub(super) store: Option<Box<crate::cache::CacheStoreContext>>,
     pub(super) status: Option<crate::cache::CacheStatus>,
 }
 
 pub(super) enum ForwardCacheLookup {
     Hit(HttpResponse),
-    Proceed(ForwardCacheContext),
+    Proceed(Box<ForwardCacheContext>),
 }
 
 pub(super) async fn lookup_forward_cache(
@@ -17,20 +17,26 @@ pub(super) async fn lookup_forward_cache(
     policy: Option<&rginx_core::RouteCachePolicy>,
 ) -> ForwardCacheLookup {
     let Some(policy) = policy else {
-        return ForwardCacheLookup::Proceed(ForwardCacheContext { store: None, status: None });
+        return ForwardCacheLookup::Proceed(Box::new(ForwardCacheContext {
+            store: None,
+            status: None,
+        }));
     };
 
     match cache_manager.lookup(request, downstream_scheme, policy).await {
         crate::cache::CacheLookup::Hit(response) => ForwardCacheLookup::Hit(response),
         crate::cache::CacheLookup::Miss(context) => {
             let status = context.cache_status();
-            ForwardCacheLookup::Proceed(ForwardCacheContext {
+            ForwardCacheLookup::Proceed(Box::new(ForwardCacheContext {
                 store: Some(context),
                 status: Some(status),
-            })
+            }))
         }
         crate::cache::CacheLookup::Bypass(status) => {
-            ForwardCacheLookup::Proceed(ForwardCacheContext { store: None, status: Some(status) })
+            ForwardCacheLookup::Proceed(Box::new(ForwardCacheContext {
+                store: None,
+                status: Some(status),
+            }))
         }
     }
 }
@@ -42,5 +48,18 @@ impl ForwardCacheContext {
         } else {
             response
         }
+    }
+
+    pub(super) fn apply_conditional_request_headers(&self, headers: &mut HeaderMap) {
+        if let Some(store) = self.store.as_ref() {
+            store.apply_conditional_request_headers(headers);
+        }
+    }
+    pub(super) async fn serve_stale_on_error(&self) -> Option<HttpResponse> {
+        let store = self.store.as_ref()?;
+        if !store.can_serve_stale_on_error() {
+            return None;
+        }
+        store.serve_stale_on_error().await
     }
 }

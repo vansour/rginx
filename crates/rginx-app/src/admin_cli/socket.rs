@@ -36,10 +36,12 @@ fn admin_response_kind(response: &AdminResponse) -> &'static str {
         AdminResponse::SnapshotVersion(_) => "snapshot_version",
         AdminResponse::Delta(_) => "delta",
         AdminResponse::Status(_) => "status",
+        AdminResponse::CacheStats(_) => "cache_stats",
         AdminResponse::Counters(_) => "counters",
         AdminResponse::TrafficStats(_) => "traffic_stats",
         AdminResponse::PeerHealth(_) => "peer_health",
         AdminResponse::UpstreamStats(_) => "upstream_stats",
+        AdminResponse::CachePurge(_) => "cache_purge",
         AdminResponse::Revision(RevisionSnapshot { .. }) => "revision",
         AdminResponse::Error { .. } => "error",
     }

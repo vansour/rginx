@@ -13,9 +13,13 @@ impl SharedState {
     }
 
     pub async fn status_snapshot(&self) -> RuntimeStatusSnapshot {
-        let (revision, config) = {
+        let (revision, config, cache) = {
             let state = self.inner.read().await;
-            (state.revision, state.config.clone())
+            (
+                state.revision,
+                state.config.clone(),
+                CacheStatsSnapshot { zones: state.cache.snapshot() },
+            )
         };
         let ocsp_statuses =
             self.ocsp_statuses.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
@@ -149,6 +153,7 @@ impl SharedState {
             tls,
             mtls,
             upstream_tls: upstream_tls_status_snapshots(config.as_ref()),
+            cache,
             active_connections: self.active_connection_count(),
             reload: self.reload_status_snapshot(),
         }

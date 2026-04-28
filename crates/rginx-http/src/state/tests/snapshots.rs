@@ -1,4 +1,11 @@
 use super::*;
+use bytes::Bytes;
+use http::header::CACHE_CONTROL;
+use http::{Method, Request, Response, StatusCode};
+use tempfile::tempdir;
+
+use crate::cache::{CacheLookup, CacheRequest};
+use crate::handler::full_body;
 
 #[tokio::test]
 async fn wait_for_snapshot_change_returns_after_state_update() {
@@ -117,4 +124,90 @@ fn reload_outcome_snapshot_serializes_variants_in_snake_case() {
     let value = serde_json::to_value(ReloadOutcomeSnapshot::Success { revision: 2 })
         .expect("reload outcome should serialize");
     assert_eq!(value, serde_json::json!({ "success": { "revision": 2 } }));
+}
+
+#[tokio::test]
+async fn cache_snapshot_and_delta_report_zone_changes() {
+    let temp = tempdir().expect("cache temp dir should exist");
+    let shared = SharedState::from_config(snapshot_with_cache_zone(
+        "127.0.0.1:8080",
+        temp.path().to_path_buf(),
+    ))
+    .expect("shared state should build");
+    let since_version = shared.current_snapshot_version();
+
+    let active = shared.snapshot().await;
+    let policy = rginx_core::RouteCachePolicy {
+        zone: "default".to_string(),
+        methods: vec![Method::GET, Method::HEAD],
+        statuses: vec![StatusCode::OK],
+        key: rginx_core::CacheKeyTemplate::parse("{scheme}:{host}:{uri}")
+            .expect("cache key should parse"),
+        stale_if_error: None,
+    };
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/cached")
+        .header("host", "example.com")
+        .body(full_body(Bytes::new()))
+        .expect("request should build");
+    let context =
+        match active.cache.lookup(CacheRequest::from_request(&request), "https", &policy).await {
+            CacheLookup::Miss(context) => *context,
+            CacheLookup::Hit(_) => panic!("empty cache should miss"),
+            CacheLookup::Bypass(status) => {
+                panic!("cacheable request should not bypass: {status:?}")
+            }
+        };
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(CACHE_CONTROL, "max-age=60")
+        .body(full_body("cached"))
+        .expect("response should build");
+    let _ = active.cache.store_response(context, response).await;
+
+    let cache = shared.cache_stats_snapshot().await;
+    assert_eq!(cache.zones.len(), 1);
+    assert_eq!(cache.zones[0].zone_name, "default");
+    assert_eq!(cache.zones[0].entry_count, 1);
+    assert_eq!(cache.zones[0].miss_total, 1);
+    assert_eq!(cache.zones[0].write_success_total, 1);
+
+    let delta = shared.snapshot_delta_since(since_version, Some(&[SnapshotModule::Cache]), None);
+    assert_eq!(delta.schema_version, 3);
+    assert_eq!(delta.included_modules, vec![SnapshotModule::Cache]);
+    assert!(delta.cache_version.expect("cache version should be present") > since_version);
+    assert_eq!(delta.cache_changed, Some(true));
+    assert_eq!(delta.changed_cache_zone_names, Some(vec!["default".to_string()]));
+}
+
+#[tokio::test]
+async fn reload_delta_uses_snapshot_version_for_changed_cache_zone_names() {
+    let temp = tempdir().expect("cache temp dir should exist");
+    let shared = SharedState::from_config(snapshot_with_cache_zone(
+        "127.0.0.1:8080",
+        temp.path().to_path_buf(),
+    ))
+    .expect("shared state should build");
+
+    shared.record_ocsp_refresh_success("listener:default");
+    shared.record_ocsp_refresh_success("listener:default");
+    let since_version = shared.current_snapshot_version();
+
+    let mut next_config = shared.current_config().await.as_ref().clone();
+    let mut zone = next_config
+        .cache_zones
+        .get("default")
+        .expect("default cache zone should exist")
+        .as_ref()
+        .clone();
+    zone.default_ttl = Duration::from_secs(120);
+    next_config.cache_zones.insert("default".to_string(), Arc::new(zone));
+
+    shared.replace(next_config).await.expect("reload should succeed");
+
+    let delta = shared.snapshot_delta_since(since_version, Some(&[SnapshotModule::Cache]), None);
+    assert!(delta.cache_version.expect("cache version should be present") > since_version);
+    assert_eq!(delta.cache_changed, Some(true));
+    assert_eq!(delta.changed_cache_zone_names, Some(vec!["default".to_string()]));
 }

@@ -137,3 +137,19 @@ pub(crate) fn snapshot_with_routes_and_upstream(listen: &str) -> ConfigSnapshot 
     }];
     snapshot
 }
+
+pub(crate) fn snapshot_with_cache_zone(listen: &str, path: PathBuf) -> ConfigSnapshot {
+    let mut snapshot = snapshot(listen);
+    snapshot.cache_zones.insert(
+        "default".to_string(),
+        Arc::new(rginx_core::CacheZone {
+            name: "default".to_string(),
+            path,
+            max_size_bytes: Some(1024 * 1024),
+            inactive: Duration::from_secs(60),
+            default_ttl: Duration::from_secs(60),
+            max_entry_bytes: 1024,
+        }),
+    );
+    snapshot
+}

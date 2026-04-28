@@ -81,5 +81,6 @@ fn snapshot_module(module: SnapshotModuleArg) -> rginx_http::SnapshotModule {
         SnapshotModuleArg::Traffic => rginx_http::SnapshotModule::Traffic,
         SnapshotModuleArg::PeerHealth => rginx_http::SnapshotModule::PeerHealth,
         SnapshotModuleArg::Upstreams => rginx_http::SnapshotModule::Upstreams,
+        SnapshotModuleArg::Cache => rginx_http::SnapshotModule::Cache,
     }
 }

@@ -19,6 +19,8 @@ pub struct SnapshotDeltaSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upstreams_version: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_version: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub status_changed: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub counters_changed: Option<bool>,
@@ -30,6 +32,8 @@ pub struct SnapshotDeltaSnapshot {
     pub peer_health_changed: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upstreams_changed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_changed: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub upstreams_recent_changed: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -50,6 +54,8 @@ pub struct SnapshotDeltaSnapshot {
     pub changed_upstream_names: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub changed_recent_upstream_names: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub changed_cache_zone_names: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -60,11 +66,18 @@ pub enum SnapshotModule {
     Traffic,
     PeerHealth,
     Upstreams,
+    Cache,
 }
 
 impl SnapshotModule {
-    pub const ALL: [Self; 5] =
-        [Self::Status, Self::Counters, Self::Traffic, Self::PeerHealth, Self::Upstreams];
+    pub const ALL: [Self; 6] = [
+        Self::Status,
+        Self::Counters,
+        Self::Traffic,
+        Self::PeerHealth,
+        Self::Upstreams,
+        Self::Cache,
+    ];
 
     pub fn all() -> Vec<Self> {
         Self::ALL.to_vec()

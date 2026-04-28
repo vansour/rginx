@@ -90,6 +90,7 @@ async fn graceful_shutdown_waits_for_background_tasks_and_signals_shutdown() {
     let mut active_listener_groups = ListenerGroupMap::new();
     let mut draining_listener_groups = Vec::new();
     let mut admin_task = Some(tokio::spawn(async { Ok::<(), std::io::Error>(()) }));
+    let mut cache_task = Some(tokio::spawn(async {}));
     let mut health_task = Some(tokio::spawn(async {}));
     let mut ocsp_task = Some(tokio::spawn(async {}));
 
@@ -99,9 +100,12 @@ async fn graceful_shutdown_waits_for_background_tasks_and_signals_shutdown() {
         &shutdown_tx,
         &mut active_listener_groups,
         &mut draining_listener_groups,
-        &mut admin_task,
-        &mut health_task,
-        &mut ocsp_task,
+        ShutdownTasks {
+            admin_task: &mut admin_task,
+            cache_task: &mut cache_task,
+            health_task: &mut health_task,
+            ocsp_task: &mut ocsp_task,
+        },
     )
     .await
     .expect("graceful shutdown should succeed");
@@ -109,6 +113,7 @@ async fn graceful_shutdown_waits_for_background_tasks_and_signals_shutdown() {
     assert!(*shutdown_rx.borrow());
     assert!(background_task_drained.load(Ordering::Relaxed));
     assert!(admin_task.is_none());
+    assert!(cache_task.is_none());
     assert!(health_task.is_none());
     assert!(ocsp_task.is_none());
     assert!(active_listener_groups.is_empty());
@@ -130,6 +135,7 @@ async fn graceful_shutdown_aborts_pending_tasks_after_timeout() {
     let mut active_listener_groups = ListenerGroupMap::new();
     let mut draining_listener_groups = Vec::new();
     let mut admin_task = Some(tokio::spawn(async { pending::<std::io::Result<()>>().await }));
+    let mut cache_task = Some(tokio::spawn(async { pending::<()>().await }));
     let mut health_task = Some(tokio::spawn(async { pending::<()>().await }));
     let mut ocsp_task = Some(tokio::spawn(async { pending::<()>().await }));
 
@@ -140,9 +146,12 @@ async fn graceful_shutdown_aborts_pending_tasks_after_timeout() {
         &shutdown_tx,
         &mut active_listener_groups,
         &mut draining_listener_groups,
-        &mut admin_task,
-        &mut health_task,
-        &mut ocsp_task,
+        ShutdownTasks {
+            admin_task: &mut admin_task,
+            cache_task: &mut cache_task,
+            health_task: &mut health_task,
+            ocsp_task: &mut ocsp_task,
+        },
     )
     .await
     .expect("timeout branch should still resolve successfully");
@@ -150,6 +159,7 @@ async fn graceful_shutdown_aborts_pending_tasks_after_timeout() {
     assert!(*shutdown_rx.borrow());
     assert!(background_task_started.load(Ordering::Relaxed));
     assert!(admin_task.is_none());
+    assert!(cache_task.is_none());
     assert!(health_task.is_none());
     assert!(ocsp_task.is_none());
     assert!(active_listener_groups.is_empty());

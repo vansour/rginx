@@ -1,4 +1,5 @@
 mod active;
+mod cache;
 mod delta;
 mod http;
 mod reload;
@@ -8,6 +9,7 @@ mod traffic;
 mod upstreams;
 
 pub use active::ActiveState;
+pub use cache::CacheStatsSnapshot;
 pub use delta::{SnapshotDeltaSnapshot, SnapshotModule};
 pub use http::{HttpCountersSnapshot, MtlsStatusSnapshot};
 pub use reload::{ReloadOutcomeSnapshot, ReloadResultSnapshot, ReloadStatusSnapshot};

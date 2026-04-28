@@ -199,6 +199,12 @@ pub async fn handle(
     )
     .await;
     let status = finalized.status;
+    let cache_status = finalized
+        .response
+        .headers()
+        .get("x-cache")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
     state.record_downstream_response(
         listener_id,
         &selected_vhost_id,
@@ -228,6 +234,7 @@ pub async fn handle(
             tls_alpn: tls_alpn.clone(),
             body_bytes_sent,
             tls_client_identity: tls_client_identity.clone(),
+            cache_status: cache_status.clone(),
         };
         return wrap_grpc_observability_response(
             response,
@@ -264,6 +271,7 @@ pub async fn handle(
             body_bytes_sent,
             tls_client_identity: tls_client_identity.as_ref(),
             grpc: None,
+            cache_status: cache_status.as_deref(),
         },
     );
 

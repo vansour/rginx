@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod bootstrap;
+mod cache;
 mod health;
 mod ocsp;
 pub mod reload;

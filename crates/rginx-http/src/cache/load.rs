@@ -16,6 +16,12 @@ struct ScannedCacheMetadata {
     #[serde(default)]
     stored_at_unix_ms: u64,
     expires_at_unix_ms: u64,
+    #[serde(default)]
+    stale_if_error_until_unix_ms: Option<u64>,
+    #[serde(default)]
+    stale_while_revalidate_until_unix_ms: Option<u64>,
+    #[serde(default)]
+    must_revalidate: bool,
     body_size_bytes: usize,
 }
 
@@ -113,7 +119,14 @@ fn load_cache_index_entry(
         remove_cache_files(zone, hash);
         return None;
     }
-    if now > metadata.expires_at_unix_ms {
+    let mut stale_windows =
+        [metadata.stale_if_error_until_unix_ms, metadata.stale_while_revalidate_until_unix_ms]
+            .into_iter()
+            .flatten();
+    let beyond_stale_windows = stale_windows
+        .next()
+        .is_some_and(|first| now > first && stale_windows.all(|value| now > value));
+    if now > metadata.expires_at_unix_ms && beyond_stale_windows && !metadata.must_revalidate {
         remove_cache_files(zone, hash);
         return None;
     }
@@ -138,6 +151,9 @@ fn load_cache_index_entry(
             hash: hash.to_string(),
             body_size_bytes: metadata.body_size_bytes,
             expires_at_unix_ms: metadata.expires_at_unix_ms,
+            stale_if_error_until_unix_ms: metadata.stale_if_error_until_unix_ms,
+            stale_while_revalidate_until_unix_ms: metadata.stale_while_revalidate_until_unix_ms,
+            must_revalidate: metadata.must_revalidate,
             last_access_unix_ms: metadata.stored_at_unix_ms,
         },
     ))

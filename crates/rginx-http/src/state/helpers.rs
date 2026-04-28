@@ -1,11 +1,12 @@
 pub(super) fn prepare_state(
     config: ConfigSnapshot,
     peer_health_notifier: Option<HealthChangeNotifier>,
+    cache_change_notifier: Option<CacheChangeNotifier>,
 ) -> Result<PreparedState> {
     let config = Arc::new(config);
     let clients =
         ProxyClients::from_config_with_health_notifier(config.as_ref(), peer_health_notifier)?;
-    let cache = CacheManager::from_config(config.as_ref())?;
+    let cache = CacheManager::from_config_with_notifier(config.as_ref(), cache_change_notifier)?;
     let listener_tls_acceptors = prepare_listener_tls_acceptors(config.as_ref())?;
 
     Ok(PreparedState {
@@ -49,6 +50,24 @@ pub(super) fn build_peer_health_notifier(
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(upstream_name.to_string(), version);
+        snapshot_notify.notify_waiters();
+    })
+}
+
+pub(super) fn build_cache_notifier(
+    snapshot_version: Arc<AtomicU64>,
+    snapshot_notify: Arc<Notify>,
+    snapshot_components: Arc<SnapshotComponentVersions>,
+    cache_component_versions: Arc<StdRwLock<HashMap<String, u64>>>,
+) -> CacheChangeNotifier {
+    Arc::new(move |zone_name| {
+        let version = snapshot_version.fetch_add(1, Ordering::Relaxed) + 1;
+        snapshot_components.status.store(version, Ordering::Relaxed);
+        snapshot_components.cache.store(version, Ordering::Relaxed);
+        cache_component_versions
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(zone_name.to_string(), version);
         snapshot_notify.notify_waiters();
     })
 }

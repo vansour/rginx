@@ -81,6 +81,12 @@ impl SharedState {
                 self.snapshot_components.clone(),
                 self.peer_health_component_versions.clone(),
             )),
+            Some(build_cache_notifier(
+                self.snapshot_version.clone(),
+                self.snapshot_notify.clone(),
+                self.snapshot_components.clone(),
+                self.cache_component_versions.clone(),
+            )),
         )?;
         prepared.retired_listeners = current
             .listeners
@@ -113,6 +119,7 @@ impl SharedState {
         self.sync_traffic_stats(prepared.config.as_ref());
         self.sync_peer_health_versions(prepared.config.as_ref());
         self.sync_upstream_stats(prepared.config.as_ref());
+        self.sync_cache_versions(prepared.config.as_ref());
 
         let next_revision = {
             let mut state = self.inner.write().await;
@@ -126,21 +133,27 @@ impl SharedState {
 
         *self.listener_tls_acceptors.write().await = merged_acceptors;
         let _ = self.revisions.send(next_revision);
-        self.mark_snapshot_changed_components(true, false, true, true, true);
+        let snapshot_version =
+            self.mark_snapshot_changed_components_with_cache(true, false, true, true, true, true);
         if traffic_topology_changed(previous_config.as_ref(), prepared.config.as_ref()) {
             self.mark_all_traffic_targets_changed(
                 previous_config.as_ref(),
                 prepared.config.as_ref(),
-                next_revision,
+                snapshot_version,
             );
         }
         if upstream_topology_changed(previous_config.as_ref(), prepared.config.as_ref()) {
             self.mark_all_upstream_targets_changed(
                 previous_config.as_ref(),
                 prepared.config.as_ref(),
-                next_revision,
+                snapshot_version,
             );
         }
+        self.mark_all_cache_zones_changed(
+            previous_config.as_ref(),
+            prepared.config.as_ref(),
+            snapshot_version,
+        );
         self.notify_snapshot_waiters();
 
         prepared.config
