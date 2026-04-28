@@ -1,7 +1,6 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use http::header::{CONTENT_LENGTH, HeaderMap};
 use http::{Response, StatusCode};
 use http_body_util::BodyExt;
 use tokio::fs;
@@ -13,17 +12,21 @@ use super::entry::{
     cache_variant_key, unix_time_ms, write_cache_entry, write_cache_metadata,
 };
 use super::policy::{
-    ResponseBodySize, ResponseFreshness, response_freshness, response_is_storable,
-    response_is_storable_with_size, response_no_cache, vary_headers,
+    ResponseBodySize, response_freshness, response_is_storable, response_is_storable_with_size,
+    response_no_cache,
 };
-use super::runtime::normalized_request_header_values;
 use super::{
     CacheIndex, CacheIndexEntry, CachePurgeResult, CacheStatus, CacheStoreContext,
-    CacheZoneRuntime, CachedVaryHeaderValue, PurgeSelector, with_cache_status,
+    CacheZoneRuntime, with_cache_status,
 };
 
+mod helpers;
 mod maintenance;
 
+use helpers::{
+    cache_metadata_input, cache_vary_values, freshness_is_cacheable, merge_not_modified_headers,
+};
+pub(in crate::cache) use helpers::{purge_scope, purge_selector_matches};
 pub(super) use maintenance::{
     cleanup_inactive_entries_in_zone, eviction_candidates, lock_index, purge_zone_entries,
     remove_index_entry,
@@ -58,6 +61,9 @@ pub(super) async fn store_response(
     if !response_is_storable(&context, &response) {
         return Ok(response);
     }
+    if response_no_cache(&context, response.status()) {
+        return Ok(response);
+    }
 
     let (parts, body) = response.into_parts();
     let collected = match body.collect().await {
@@ -73,10 +79,6 @@ pub(super) async fn store_response(
     }
 
     let now = unix_time_ms(SystemTime::now());
-    if response_no_cache(&context, parts.status) {
-        return Ok(Response::from_parts(parts, full_body(collected)));
-    }
-
     let freshness = response_freshness(&context, parts.status, &parts.headers);
     if !freshness_is_cacheable(&freshness) {
         return Ok(Response::from_parts(parts, full_body(collected)));
@@ -163,9 +165,25 @@ pub(super) async fn refresh_not_modified_response(
     let cached_status = StatusCode::from_u16(cached_metadata.status).unwrap_or(StatusCode::OK);
     let paths = cache_paths(&context.zone.config.path, &cached_entry.hash);
     if response_no_cache(&context, cached_status) {
+        let response_metadata = cache_metadata(
+            cached_metadata.key.clone(),
+            cached_status,
+            &merged_headers,
+            CacheMetadataInput {
+                base_key: cached_metadata.base_key.clone(),
+                vary: cached_entry.vary.clone(),
+                stored_at_unix_ms: cached_metadata.stored_at_unix_ms,
+                expires_at_unix_ms: cached_metadata.expires_at_unix_ms,
+                stale_if_error_until_unix_ms: cached_metadata.stale_if_error_until_unix_ms,
+                stale_while_revalidate_until_unix_ms: cached_metadata
+                    .stale_while_revalidate_until_unix_ms,
+                must_revalidate: cached_metadata.must_revalidate,
+                body_size_bytes: cached_metadata.body_size_bytes,
+            },
+        );
         let refreshed = {
             let _io_guard = context.zone.io_lock.lock().await;
-            build_cached_response(&paths.body, &cached_metadata, context.read_cached_body).await
+            build_cached_response(&paths.body, &response_metadata, context.read_cached_body).await
         };
         return refreshed
             .map(|response| with_cache_status(response, CacheStatus::Revalidated))
@@ -256,78 +274,4 @@ async fn update_index_after_store(
 
 pub(super) fn duration_to_ms(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
-}
-
-fn cache_metadata_input(
-    base_key: &str,
-    vary: Vec<CachedVaryHeaderValue>,
-    now: u64,
-    freshness: &ResponseFreshness,
-    body_size_bytes: usize,
-) -> CacheMetadataInput {
-    CacheMetadataInput {
-        base_key: base_key.to_string(),
-        vary,
-        stored_at_unix_ms: now,
-        expires_at_unix_ms: now.saturating_add(duration_to_ms(freshness.ttl)),
-        stale_if_error_until_unix_ms: freshness
-            .stale_if_error
-            .map(|duration| now.saturating_add(duration_to_ms(duration))),
-        stale_while_revalidate_until_unix_ms: freshness
-            .stale_while_revalidate
-            .map(|duration| now.saturating_add(duration_to_ms(duration))),
-        must_revalidate: freshness.must_revalidate,
-        body_size_bytes,
-    }
-}
-
-fn cache_vary_values(
-    request: &crate::cache::CacheRequest,
-    headers: &HeaderMap,
-) -> Vec<CachedVaryHeaderValue> {
-    vary_headers(headers)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|name| CachedVaryHeaderValue {
-            value: normalized_request_header_values(&request.headers, &name),
-            name,
-        })
-        .collect()
-}
-
-fn freshness_is_cacheable(freshness: &ResponseFreshness) -> bool {
-    !freshness.ttl.is_zero()
-        || freshness.must_revalidate
-        || freshness.stale_if_error.is_some()
-        || freshness.stale_while_revalidate.is_some()
-}
-
-fn merge_not_modified_headers(cached: &HeaderMap, not_modified: &HeaderMap) -> HeaderMap {
-    let mut merged = cached.clone();
-    for name in not_modified.keys() {
-        if *name == CONTENT_LENGTH {
-            continue;
-        }
-        merged.remove(name);
-        for value in not_modified.get_all(name) {
-            merged.append(name.clone(), value.clone());
-        }
-    }
-    merged
-}
-
-pub(super) fn purge_selector_matches(selector: &PurgeSelector, key: &str) -> bool {
-    match selector {
-        PurgeSelector::All => true,
-        PurgeSelector::Exact(expected) => key == expected,
-        PurgeSelector::Prefix(prefix) => key.starts_with(prefix),
-    }
-}
-
-pub(super) fn purge_scope(selector: &PurgeSelector) -> String {
-    match selector {
-        PurgeSelector::All => "all".to_string(),
-        PurgeSelector::Exact(key) => format!("key:{key}"),
-        PurgeSelector::Prefix(prefix) => format!("prefix:{prefix}"),
-    }
 }

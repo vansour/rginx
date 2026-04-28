@@ -45,7 +45,6 @@ pub(super) async fn finalize_upstream_success(
     }
 
     if let Some(cache_store) = context.cache_store.as_ref()
-        && response.status().is_server_error()
         && cache_store.can_serve_stale(crate::cache::CacheStaleReason::Status(response.status()))
         && let Some(stale) = cache_store.serve_stale(crate::cache::CacheStatus::Stale).await
     {

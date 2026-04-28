@@ -1,4 +1,6 @@
 use super::*;
+use crate::cache::PurgeSelector;
+use crate::cache::vary::sorted_vary_dimension_names;
 use std::collections::HashMap;
 
 pub(in crate::cache) async fn cleanup_inactive_entries_in_zone(zone: &Arc<CacheZoneRuntime>) {
@@ -210,7 +212,7 @@ fn variant_keys_with_different_dimensions(
     entry: &CacheIndexEntry,
     key: &str,
 ) -> Vec<String> {
-    let expected_names = entry.vary.iter().map(|header| header.name.as_str()).collect::<Vec<_>>();
+    let expected_names = sorted_vary_dimension_names(&entry.vary);
     index
         .variants
         .get(&entry.base_key)
@@ -219,8 +221,7 @@ fn variant_keys_with_different_dimensions(
         .filter(|candidate| candidate.as_str() != key)
         .filter_map(|candidate| {
             let existing = index.entries.get(candidate)?;
-            let existing_names =
-                existing.vary.iter().map(|header| header.name.as_str()).collect::<Vec<_>>();
+            let existing_names = sorted_vary_dimension_names(&existing.vary);
             (existing_names != expected_names).then_some(candidate.clone())
         })
         .collect()

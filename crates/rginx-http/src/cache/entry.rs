@@ -1,6 +1,3 @@
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use bytes::Bytes;
 use http::header::{
     CONNECTION, CONTENT_LENGTH, HeaderMap, HeaderName, HeaderValue, PROXY_AUTHENTICATE,
@@ -8,15 +5,17 @@ use http::header::{
 };
 use http::{Response, StatusCode};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
 use tokio::fs;
 
 use crate::handler::{HttpResponse, full_body};
 
 use super::{CACHE_STATUS_HEADER, CacheIndexEntry, CacheZoneRuntime, CachedVaryHeaderValue};
 
+mod signature;
 mod temp;
 
+pub(in crate::cache) use signature::{cache_key_hash, cache_variant_key, unix_time_ms};
 use temp::{cleanup_failed_write, next_temp_suffix, sibling_temp_path};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -212,33 +211,6 @@ pub(super) fn cache_paths(base: &Path, hash: &str) -> CachePaths {
     }
 }
 
-pub(super) fn cache_key_hash(key: &str) -> String {
-    cache_bytes_hash(key.as_bytes())
-}
-
-pub(super) fn cache_variant_key(base_key: &str, vary: &[CachedVaryHeaderValue]) -> String {
-    if vary.is_empty() {
-        return base_key.to_string();
-    }
-
-    let mut signature = Vec::new();
-    for header in vary {
-        signature.extend_from_slice(header.name.as_str().as_bytes());
-        signature.push(0);
-        if let Some(value) = &header.value {
-            signature.extend_from_slice(value.as_bytes());
-        }
-        signature.push(0xff);
-    }
-    format!("{base_key}|vary:{}", cache_bytes_hash(&signature))
-}
-
-pub(super) fn unix_time_ms(time: SystemTime) -> u64 {
-    time.duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
-        .unwrap_or(0)
-}
-
 impl CacheMetadata {
     pub(super) fn headers_map(&self) -> std::io::Result<HeaderMap> {
         let mut headers = HeaderMap::new();
@@ -274,16 +246,6 @@ fn cached_headers(headers: &HeaderMap, body_size_bytes: usize) -> Vec<CachedHead
             value: value.as_bytes().to_vec(),
         })
         .collect()
-}
-
-fn cache_bytes_hash(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut encoded = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(encoded, "{byte:02x}");
-    }
-    encoded
 }
 
 fn remove_cache_hop_by_hop_headers(headers: &mut HeaderMap) {

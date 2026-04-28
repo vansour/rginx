@@ -6,11 +6,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::SystemTime;
 
-use http::header::{ETAG, HeaderMap, HeaderValue, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED};
+use http::header::{HeaderMap, HeaderValue, IF_MODIFIED_SINCE, IF_NONE_MATCH};
 use http::{Method, Request, StatusCode, Uri};
 use rginx_core::{CacheZone, ConfigSnapshot, Error, Result, RouteCachePolicy};
 use serde::{Deserialize, Serialize};
-use tokio::fs;
 use tokio::sync::futures::OwnedNotified;
 use tokio::sync::{Mutex as AsyncMutex, Notify};
 
@@ -24,13 +23,14 @@ mod policy;
 mod request;
 mod runtime;
 mod store;
+mod vary;
 
 use entry::{
     CacheMetadata, build_cached_response, cache_paths, read_cache_metadata, read_cached_response,
     unix_time_ms,
 };
 #[cfg(test)]
-use entry::{cache_key_hash, cache_metadata, write_cache_entry};
+use entry::{cache_key_hash, cache_metadata, cache_variant_key, write_cache_entry};
 use load::load_index_from_disk;
 use policy::{header_value, request_requires_revalidation};
 #[cfg(test)]

@@ -14,6 +14,7 @@ mod lookup;
 mod notifications;
 mod policy;
 mod storage;
+mod storage_regressions;
 
 fn test_zone(path: PathBuf, max_entry_bytes: usize) -> Arc<CacheZoneRuntime> {
     test_zone_with_notifier(path, max_entry_bytes, None)
@@ -43,6 +44,7 @@ fn test_zone_with_notifier(
 }
 
 fn test_index_entry(
+    base_key: &str,
     hash: String,
     body_size_bytes: usize,
     expires_at_unix_ms: u64,
@@ -50,7 +52,7 @@ fn test_index_entry(
 ) -> CacheIndexEntry {
     CacheIndexEntry {
         hash,
-        base_key: "https:example.com:/".to_string(),
+        base_key: base_key.to_string(),
         vary: Vec::new(),
         body_size_bytes,
         expires_at_unix_ms,
@@ -121,12 +123,13 @@ fn test_policy() -> RouteCachePolicy {
 }
 
 fn test_metadata_input(
+    base_key: &str,
     stored_at_unix_ms: u64,
     expires_at_unix_ms: u64,
     body_size_bytes: usize,
 ) -> CacheMetadataInput {
     CacheMetadataInput {
-        base_key: "https:example.com:/".to_string(),
+        base_key: base_key.to_string(),
         vary: Vec::new(),
         stored_at_unix_ms,
         expires_at_unix_ms,

@@ -1,4 +1,4 @@
-use super::runtime::matches_vary_headers;
+use super::vary::matches_vary_headers;
 use super::*;
 
 impl CacheManager {
@@ -177,7 +177,7 @@ fn matching_variant_key(
     base_key: &str,
     request: &CacheRequest,
 ) -> Option<String> {
-    if index.variants.get(base_key).is_none()
+    if !index.variants.contains_key(base_key)
         && index
             .entries
             .get(base_key)

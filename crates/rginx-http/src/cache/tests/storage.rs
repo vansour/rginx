@@ -135,12 +135,17 @@ async fn refresh_not_modified_response_serves_body_and_evicts_uncacheable_entry(
         key.to_string(),
         StatusCode::OK,
         &http::HeaderMap::new(),
-        test_metadata_input(now.saturating_sub(2_000), now.saturating_sub(1_000), 6),
+        test_metadata_input(key, now.saturating_sub(2_000), now.saturating_sub(1_000), 6),
     );
     let paths = cache_paths(temp.path(), &hash);
     write_cache_entry(&paths, &cached_metadata, b"cached").await.expect("entry should be written");
-    let cached_entry =
-        test_index_entry(hash.clone(), 6, now.saturating_sub(1_000), now.saturating_sub(2_000));
+    let cached_entry = test_index_entry(
+        key,
+        hash.clone(),
+        6,
+        now.saturating_sub(1_000),
+        now.saturating_sub(2_000),
+    );
     {
         let mut index = lock_index(&zone.index);
         index.entries.insert(key.to_string(), cached_entry.clone());

@@ -1,8 +1,9 @@
-use http::header::{ACCEPT_ENCODING, AUTHORIZATION, CONTENT_TYPE, HeaderMap, RANGE};
+use http::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, RANGE};
 use http::{Method, Uri};
 use rginx_core::{CacheKeyRenderContext, CachePredicateRequestContext, RouteCachePolicy};
 
 use super::CacheRequest;
+use super::vary::normalized_accept_encoding;
 
 pub(super) fn cache_request_bypass(request: &CacheRequest, policy: &RouteCachePolicy) -> bool {
     if !policy.methods.contains(&request.method) {
@@ -60,16 +61,4 @@ pub(super) fn render_cache_key(
         rendered.push_str(&accept_encoding);
     }
     rendered
-}
-
-fn normalized_accept_encoding(headers: &HeaderMap) -> Option<String> {
-    let mut tokens = Vec::new();
-    for value in headers.get_all(ACCEPT_ENCODING) {
-        let value = value.to_str().ok()?;
-        tokens.extend(value.split(',').map(str::trim).filter(|token| !token.is_empty()));
-    }
-    if tokens.is_empty() {
-        return None;
-    }
-    Some(tokens.join(",").to_ascii_lowercase())
 }
