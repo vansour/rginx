@@ -44,7 +44,7 @@ pub(in crate::cache) async fn refresh_not_modified_response(
             },
         );
         let refreshed = {
-            let _io_guard = context.zone.io_lock.lock().await;
+            let _io_guard = context.zone.io_read(&cached_entry.hash).await;
             build_cached_response_for_request(
                 &paths.body,
                 &response_metadata,
@@ -83,7 +83,7 @@ pub(in crate::cache) async fn refresh_not_modified_response(
         || final_key != context.key
     {
         let refreshed = {
-            let _io_guard = context.zone.io_lock.lock().await;
+            let _io_guard = context.zone.io_write(&cached_entry.hash).await;
             build_cached_response_for_request(
                 &paths.body,
                 &metadata,
@@ -92,45 +92,42 @@ pub(in crate::cache) async fn refresh_not_modified_response(
                 context.read_cached_body,
             )
             .await
-            .map_err(|error| CacheStoreError { source: Box::new(error) })
+            .map_err(|error| CacheStoreError { source: Box::new(error) })?
         };
-        remove_zone_index_entry(&context.zone, &context.key).await;
+        if let Some(removed) =
+            remove_zone_index_entry_if_matches(&context.zone, &context.key, &cached_entry).await
+            && removed.delete_files
         {
-            let _io_guard = context.zone.io_lock.lock().await;
             let _ = fs::remove_file(&paths.metadata).await;
             let _ = fs::remove_file(&paths.body).await;
         }
         context.zone.record_revalidated();
-        return refreshed.map(|response| with_cache_status(response, CacheStatus::Revalidated));
+        return Ok(with_cache_status(refreshed, CacheStatus::Revalidated));
     }
-    {
-        let _io_guard = context.zone.io_lock.lock().await;
+    let refreshed = {
+        let _io_guard = context.zone.io_write(&cached_entry.hash).await;
         write_cache_metadata(&paths, &metadata)
             .await
             .map_err(|error| CacheStoreError { source: Box::new(error) })?;
-    }
-    context.zone.record_write_success();
-    context.zone.record_revalidated();
-    update_index_after_store(
-        &context.zone,
-        context.key,
-        CacheIndexEntry {
-            hash: cached_entry.hash.clone(),
-            base_key: context.base_key.clone(),
-            vary,
-            body_size_bytes: metadata.body_size_bytes,
-            expires_at_unix_ms: metadata.expires_at_unix_ms,
-            stale_if_error_until_unix_ms: metadata.stale_if_error_until_unix_ms,
-            stale_while_revalidate_until_unix_ms: metadata.stale_while_revalidate_until_unix_ms,
-            must_revalidate: metadata.must_revalidate,
-            last_access_unix_ms: now,
-        },
-        None,
-    )
-    .await;
-
-    let refreshed = {
-        let _io_guard = context.zone.io_lock.lock().await;
+        context.zone.record_write_success();
+        context.zone.record_revalidated();
+        update_index_after_store(
+            &context.zone,
+            context.key,
+            CacheIndexEntry {
+                hash: cached_entry.hash.clone(),
+                base_key: context.base_key.clone(),
+                vary,
+                body_size_bytes: metadata.body_size_bytes,
+                expires_at_unix_ms: metadata.expires_at_unix_ms,
+                stale_if_error_until_unix_ms: metadata.stale_if_error_until_unix_ms,
+                stale_while_revalidate_until_unix_ms: metadata.stale_while_revalidate_until_unix_ms,
+                must_revalidate: metadata.must_revalidate,
+                last_access_unix_ms: now,
+            },
+            None,
+        )
+        .await;
         build_cached_response_for_request(
             &paths.body,
             &metadata,

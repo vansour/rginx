@@ -106,7 +106,7 @@ impl CacheManager {
         entry: &CacheIndexEntry,
     ) -> Option<(CacheMetadata, Option<CacheConditionalHeaders>)> {
         let metadata = {
-            let _io_guard = zone.io_lock.lock().await;
+            let _io_guard = zone.io_read(&entry.hash).await;
             let paths = cache_paths_for_zone(zone.config.as_ref(), &entry.hash);
             read_cache_metadata(&paths.metadata).await
         };
@@ -119,8 +119,7 @@ impl CacheManager {
                     %error,
                     "failed to read cache metadata; removing entry"
                 );
-                remove_zone_index_entry(zone, key).await;
-                remove_cache_files_if_unindexed(zone, key, &entry.hash).await;
+                remove_cache_entry_if_matches(zone, key, entry).await;
                 return None;
             }
         };
@@ -132,8 +131,7 @@ impl CacheManager {
                 key_hash = %entry.hash,
                 "cache metadata key mismatch; removing entry"
             );
-            remove_zone_index_entry(zone, key).await;
-            remove_cache_files_if_unindexed(zone, key, &entry.hash).await;
+            remove_cache_entry_if_matches(zone, key, entry).await;
             return None;
         }
         let headers = match metadata.headers_map() {
@@ -145,8 +143,7 @@ impl CacheManager {
                     %error,
                     "failed to decode cached response headers; removing entry"
                 );
-                remove_zone_index_entry(zone, key).await;
-                remove_cache_files_if_unindexed(zone, key, &entry.hash).await;
+                remove_cache_entry_if_matches(zone, key, entry).await;
                 return None;
             }
         };
@@ -164,36 +161,49 @@ impl CacheManager {
         read_cached_body: bool,
         status: CacheStatus,
     ) -> Option<HttpResponse> {
-        let metadata = {
-            let _io_guard = zone.io_lock.lock().await;
+        let stale_result = {
+            let _io_guard = zone.io_read(&entry.hash).await;
             let paths = cache_paths_for_zone(zone.config.as_ref(), &entry.hash);
-            read_cache_metadata(&paths.metadata).await.ok()?
-        };
-        let response = {
-            let _io_guard = zone.io_lock.lock().await;
-            let paths = cache_paths_for_zone(zone.config.as_ref(), &entry.hash);
-            match build_cached_response_for_request(
-                &paths.body,
-                &metadata,
-                request,
-                policy,
-                read_cached_body,
-            )
-            .await
-            {
-                Ok(response) => response,
+            match read_cache_metadata(&paths.metadata).await {
+                Ok(metadata) => Some((
+                    metadata.clone(),
+                    build_cached_response_for_request(
+                        &paths.body,
+                        &metadata,
+                        request,
+                        policy,
+                        read_cached_body,
+                    )
+                    .await,
+                )),
                 Err(error) => {
                     tracing::warn!(
                         zone = %zone.config.name,
                         key = %key,
                         key_hash = %entry.hash,
                         %error,
-                        "failed to build stale cached response; removing entry"
+                        "failed to read stale cache metadata; removing entry"
                     );
-                    remove_zone_index_entry(zone, key).await;
-                    remove_cache_files_if_unindexed(zone, key, &entry.hash).await;
-                    return None;
+                    None
                 }
+            }
+        };
+        let Some((metadata, response)) = stale_result else {
+            remove_cache_entry_if_matches(zone, key, entry).await;
+            return None;
+        };
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!(
+                    zone = %zone.config.name,
+                    key = %key,
+                    key_hash = %entry.hash,
+                    %error,
+                    "failed to build stale cached response; removing entry"
+                );
+                remove_cache_entry_if_matches(zone, key, entry).await;
+                return None;
             }
         };
         if metadata.key != key {
@@ -204,8 +214,7 @@ impl CacheManager {
                 key_hash = %entry.hash,
                 "cache metadata key mismatch while serving stale entry; removing entry"
             );
-            remove_zone_index_entry(zone, key).await;
-            remove_cache_files_if_unindexed(zone, key, &entry.hash).await;
+            remove_cache_entry_if_matches(zone, key, entry).await;
             return None;
         }
         if status == CacheStatus::Updating {

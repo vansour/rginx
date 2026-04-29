@@ -1,3 +1,4 @@
+use super::super::remove_cache_files_if_unreferenced;
 use super::super::shared::{SharedIndexOperation, apply_zone_shared_index_operations_locked};
 use super::*;
 use crate::cache::PurgeSelector;
@@ -6,7 +7,8 @@ mod index_state;
 
 use index_state::{add_variant_key, remove_variant_key, variant_keys_with_different_dimensions};
 pub(in crate::cache) use index_state::{
-    eviction_candidates, lock_index, record_cache_admission_attempt, remove_zone_index_entry,
+    eviction_candidates, lock_index, record_cache_admission_attempt,
+    remove_zone_index_entry_if_matches,
 };
 
 pub(in crate::cache) async fn cleanup_inactive_entries_in_zone(zone: &Arc<CacheZoneRuntime>) {
@@ -65,11 +67,12 @@ pub(in crate::cache) async fn cleanup_inactive_entries_in_zone(zone: &Arc<CacheZ
         if !removed.is_empty() {
             changed = true;
             total_removed += removed.len();
-            let _io_guard = zone.io_lock.lock().await;
-            for (_, entry) in &removed {
-                let paths = cache_paths_for_zone(zone.config.as_ref(), &entry.hash);
-                let _ = fs::remove_file(paths.metadata).await;
-                let _ = fs::remove_file(paths.body).await;
+            for hash in removed
+                .into_iter()
+                .map(|(_, entry)| entry.hash)
+                .collect::<std::collections::BTreeSet<_>>()
+            {
+                remove_cache_files_if_unreferenced(zone.as_ref(), &hash).await;
             }
         }
         if batches.peek().is_some() && !zone.config.manager_sleep.is_zero() {
@@ -115,22 +118,19 @@ pub(in crate::cache) async fn purge_zone_entries(
     };
 
     let removed_bytes = removed.iter().map(|(_, entry)| entry.body_size_bytes).sum::<usize>();
+    let removed_entries = removed.len();
     if !removed.is_empty() {
-        zone.record_purge(removed.len());
-        let _io_guard = zone.io_lock.lock().await;
-        for (_, entry) in &removed {
-            let paths = cache_paths_for_zone(zone.config.as_ref(), &entry.hash);
-            let _ = fs::remove_file(paths.metadata).await;
-            let _ = fs::remove_file(paths.body).await;
+        zone.record_purge(removed_entries);
+        for hash in removed
+            .into_iter()
+            .map(|(_, entry)| entry.hash)
+            .collect::<std::collections::BTreeSet<_>>()
+        {
+            remove_cache_files_if_unreferenced(zone.as_ref(), &hash).await;
         }
         zone.notify_changed();
     }
-    CachePurgeResult {
-        zone_name: zone.config.name.clone(),
-        scope,
-        removed_entries: removed.len(),
-        removed_bytes,
-    }
+    CachePurgeResult { zone_name: zone.config.name.clone(), scope, removed_entries, removed_bytes }
 }
 
 pub(in crate::cache) async fn update_index_after_store(
@@ -142,11 +142,12 @@ pub(in crate::cache) async fn update_index_after_store(
     let (removed_hashes, eviction_count) = {
         let _sync_guard = zone.shared_index_sync_lock.lock().await;
         let mut index = lock_index(&zone.index);
-        let mut removed_hashes = Vec::new();
+        let mut removed_hashes = std::collections::BTreeSet::new();
         let mut eviction_count = 0usize;
         let mut shared_operations = Vec::new();
 
-        if let Some((replaced_key, _)) = replaced_entry
+        if let Some((replaced_key, expected_entry)) = replaced_entry
+            && index.entries.get(&replaced_key).is_some_and(|current| current == &expected_entry)
             && let Some(removed) = index.entries.remove(&replaced_key)
         {
             index.current_size_bytes =
@@ -154,7 +155,7 @@ pub(in crate::cache) async fn update_index_after_store(
             index.admission_counts.remove(&replaced_key);
             remove_variant_key(&mut index.variants, &removed.base_key, &replaced_key);
             if removed.hash != entry.hash {
-                removed_hashes.push(removed.hash);
+                removed_hashes.insert(removed.hash);
             }
             shared_operations.push(SharedIndexOperation::RemoveEntry { key: replaced_key.clone() });
             shared_operations
@@ -169,7 +170,7 @@ pub(in crate::cache) async fn update_index_after_store(
                 index.admission_counts.remove(&incompatible_key);
                 remove_variant_key(&mut index.variants, &removed.base_key, &incompatible_key);
                 if removed.hash != entry.hash {
-                    removed_hashes.push(removed.hash);
+                    removed_hashes.insert(removed.hash);
                 }
                 shared_operations
                     .push(SharedIndexOperation::RemoveEntry { key: incompatible_key.clone() });
@@ -183,7 +184,7 @@ pub(in crate::cache) async fn update_index_after_store(
                 index.current_size_bytes.saturating_sub(existing.body_size_bytes);
             remove_variant_key(&mut index.variants, &existing.base_key, &key);
             if existing.hash != entry.hash {
-                removed_hashes.push(existing.hash);
+                removed_hashes.insert(existing.hash);
             }
         }
         index.admission_counts.remove(&key);
@@ -199,7 +200,7 @@ pub(in crate::cache) async fn update_index_after_store(
             index.admission_counts.remove(&evicted_key);
             remove_variant_key(&mut index.variants, &evicted_entry.base_key, &evicted_key);
             if evicted_entry.hash != entry.hash {
-                removed_hashes.push(evicted_entry.hash);
+                removed_hashes.insert(evicted_entry.hash);
             }
             eviction_count += 1;
             shared_operations.push(SharedIndexOperation::RemoveEntry { key: evicted_key.clone() });
@@ -214,11 +215,8 @@ pub(in crate::cache) async fn update_index_after_store(
         zone.record_evictions(eviction_count);
     }
     if !removed_hashes.is_empty() {
-        let _io_guard = zone.io_lock.lock().await;
         for hash in removed_hashes {
-            let paths = cache_paths_for_zone(zone.config.as_ref(), &hash);
-            let _ = fs::remove_file(paths.metadata).await;
-            let _ = fs::remove_file(paths.body).await;
+            remove_cache_files_if_unreferenced(zone.as_ref(), &hash).await;
         }
     }
     zone.notify_changed();

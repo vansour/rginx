@@ -245,7 +245,7 @@ async fn cleanup_inactive_entries_honors_manager_batch_entries() {
     let zone = Arc::new(CacheZoneRuntime {
         config: config.clone(),
         index: Mutex::new(CacheIndex::default()),
-        io_lock: AsyncMutex::new(()),
+        io_locks: CacheIoLockPool::new(),
         shared_index_sync_lock: AsyncMutex::new(()),
         shared_index_store: Some(Arc::new(shared::shared_index_store(config.as_ref()))),
         fill_locks: Arc::new(Mutex::new(HashMap::new())),

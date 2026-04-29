@@ -33,7 +33,7 @@ use helpers::{
 pub(in crate::cache) use helpers::{purge_scope, purge_selector_matches};
 pub(super) use maintenance::{
     cleanup_inactive_entries_in_zone, eviction_candidates, lock_index, purge_zone_entries,
-    record_cache_admission_attempt, remove_zone_index_entry,
+    record_cache_admission_attempt, remove_zone_index_entry_if_matches,
 };
 pub(in crate::cache) use revalidate::refresh_not_modified_response;
 
@@ -116,7 +116,7 @@ pub(super) async fn store_response(
         .map(|entry| entry.hash.clone())
         .unwrap_or_else(|| cache_key_hash(&final_key));
     let paths = cache_paths_for_zone(context.zone.config.as_ref(), &hash);
-    let _io_guard = context.zone.io_lock.lock().await;
+    let _io_guard = context.zone.io_write(&hash).await;
 
     if let Err(error) = write_cache_entry(&paths, &metadata, &collected).await {
         tracing::warn!(
@@ -131,7 +131,6 @@ pub(super) async fn store_response(
         if context.revalidating {
             context.zone.record_revalidated();
         }
-        drop(_io_guard);
         update_index_after_store(
             &context.zone,
             final_key.clone(),

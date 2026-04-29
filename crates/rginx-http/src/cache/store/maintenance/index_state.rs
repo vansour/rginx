@@ -11,6 +11,11 @@ pub(in crate::cache) struct CacheAdmissionDecision {
     pub(in crate::cache) admitted: bool,
 }
 
+pub(in crate::cache) struct RemovedIndexEntry {
+    pub(in crate::cache) hash: String,
+    pub(in crate::cache) delete_files: bool,
+}
+
 pub(in crate::cache) async fn record_cache_admission_attempt(
     zone: &Arc<CacheZoneRuntime>,
     key: &str,
@@ -48,26 +53,34 @@ pub(in crate::cache) async fn record_cache_admission_attempt(
     CacheAdmissionDecision { admitted }
 }
 
-pub(in crate::cache) async fn remove_zone_index_entry(
+pub(in crate::cache) async fn remove_zone_index_entry_if_matches(
     zone: &Arc<CacheZoneRuntime>,
     key: &str,
-) -> bool {
+    expected_entry: &CacheIndexEntry,
+) -> Option<RemovedIndexEntry> {
     let _sync_guard = zone.shared_index_sync_lock.lock().await;
-    let changed = {
+    let removed = {
         let mut index = lock_index(&zone.index);
-        remove_index_entry_locked(&mut index, key)
+        let current = index.entries.get(key)?;
+        if current != expected_entry {
+            return None;
+        }
+        let removed = index.entries.remove(key).expect("matching cache key should still exist");
+        index.current_size_bytes = index.current_size_bytes.saturating_sub(removed.body_size_bytes);
+        index.admission_counts.remove(key);
+        remove_variant_key(&mut index.variants, &removed.base_key, key);
+        let delete_files = !index.entries.values().any(|entry| entry.hash == removed.hash);
+        RemovedIndexEntry { hash: removed.hash, delete_files }
     };
-    if changed {
-        apply_zone_shared_index_operations_locked(
-            zone.as_ref(),
-            &[
-                SharedIndexOperation::RemoveEntry { key: key.to_string() },
-                SharedIndexOperation::RemoveAdmissionCount { key: key.to_string() },
-            ],
-        );
-        zone.notify_changed();
-    }
-    changed
+    apply_zone_shared_index_operations_locked(
+        zone.as_ref(),
+        &[
+            SharedIndexOperation::RemoveEntry { key: key.to_string() },
+            SharedIndexOperation::RemoveAdmissionCount { key: key.to_string() },
+        ],
+    );
+    zone.notify_changed();
+    Some(removed)
 }
 
 pub(in crate::cache) fn eviction_candidates(
@@ -149,15 +162,4 @@ pub(super) fn variant_keys_with_different_dimensions(
             (existing_names != expected_names).then_some(candidate.clone())
         })
         .collect()
-}
-
-fn remove_index_entry_locked(index: &mut CacheIndex, key: &str) -> bool {
-    let mut changed = false;
-    if let Some(entry) = index.entries.remove(key) {
-        index.current_size_bytes = index.current_size_bytes.saturating_sub(entry.body_size_bytes);
-        remove_variant_key(&mut index.variants, &entry.base_key, key);
-        changed = true;
-    }
-    changed |= index.admission_counts.remove(key).is_some();
-    changed
 }
