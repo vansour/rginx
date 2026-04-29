@@ -14,7 +14,7 @@ pub(in crate::cache) async fn remove_cache_entry_if_matches(
         return false;
     };
     if removed.delete_files {
-        remove_cache_files(zone.config.as_ref(), &removed.hash).await;
+        remove_cache_files_locked(zone.config.as_ref(), &removed.hash).await;
     }
     true
 }
@@ -26,12 +26,12 @@ pub(in crate::cache) async fn remove_cache_files_if_unreferenced(
     let _io_guard = zone.io_write(hash).await;
     let referenced = {
         let index = lock_index(&zone.index);
-        index.entries.values().any(|entry| entry.hash == hash)
+        index.hash_is_referenced(hash)
     };
     if referenced {
         return false;
     }
-    remove_cache_files(zone.config.as_ref(), hash).await;
+    remove_cache_files_locked(zone.config.as_ref(), hash).await;
     true
 }
 
@@ -78,8 +78,20 @@ pub(in crate::cache) enum PurgeSelector {
     Prefix(String),
 }
 
-async fn remove_cache_files(zone: &rginx_core::CacheZone, hash: &str) {
+pub(in crate::cache) async fn remove_cache_files_locked(zone: &rginx_core::CacheZone, hash: &str) {
     let paths = cache_paths_for_zone(zone, hash);
-    let _ = fs::remove_file(paths.metadata).await;
-    let _ = fs::remove_file(paths.body).await;
+    remove_cache_file(&paths.metadata, hash).await;
+    remove_cache_file(&paths.body, hash).await;
+}
+
+async fn remove_cache_file(path: &std::path::Path, hash: &str) {
+    match fs::remove_file(path).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            tracing::debug!(key_hash = %hash, path = %path.display(), %error, "cache file already absent during removal");
+        }
+        Err(error) => {
+            tracing::warn!(key_hash = %hash, path = %path.display(), %error, "failed to remove cache file");
+        }
+    }
 }

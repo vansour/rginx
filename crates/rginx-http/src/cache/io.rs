@@ -6,7 +6,7 @@ use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock as AsyncRw
 
 use super::CacheZoneRuntime;
 
-const CACHE_IO_LOCK_STRIPES: usize = 64;
+pub(super) const CACHE_IO_LOCK_STRIPES: usize = 64;
 
 pub(super) struct CacheIoLockPool {
     stripes: Vec<Arc<AsyncRwLock<()>>>,
@@ -48,10 +48,12 @@ impl CacheIoLockPool {
     }
 
     fn stripe(&self, hash: &str) -> usize {
-        let mut hasher = std::hash::DefaultHasher::new();
-        hash.hash(&mut hasher);
-        (hasher.finish() as usize) % self.stripes.len()
+        cache_io_lock_stripe_with_len(hash, self.stripes.len())
     }
+}
+
+pub(super) fn cache_io_lock_stripe(hash: &str) -> usize {
+    cache_io_lock_stripe_with_len(hash, CACHE_IO_LOCK_STRIPES)
 }
 
 impl CacheZoneRuntime {
@@ -62,4 +64,10 @@ impl CacheZoneRuntime {
     pub(super) async fn io_write(&self, hash: &str) -> CacheIoWriteGuards {
         self.io_locks.write(hash).await
     }
+}
+
+fn cache_io_lock_stripe_with_len(hash: &str, stripe_len: usize) -> usize {
+    let mut hasher = std::hash::DefaultHasher::new();
+    hash.hash(&mut hasher);
+    (hasher.finish() as usize) % stripe_len
 }

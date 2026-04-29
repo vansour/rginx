@@ -16,6 +16,7 @@ use tokio::sync::{Mutex as AsyncMutex, Notify};
 use crate::handler::{HttpBody, HttpResponse};
 
 mod entry;
+mod index;
 mod io;
 mod load;
 mod lookup;
@@ -35,6 +36,8 @@ use entry::{
 use entry::{cache_key_hash, cache_metadata, cache_paths, cache_variant_key, write_cache_entry};
 use io::CacheIoLockPool;
 #[cfg(test)]
+use io::cache_io_lock_stripe;
+#[cfg(test)]
 use load::load_index_from_disk;
 use policy::{header_value, request_requires_revalidation};
 #[cfg(test)]
@@ -44,6 +47,7 @@ use runtime::PurgeSelector;
 pub(crate) use runtime::with_cache_status;
 use runtime::{
     build_conditional_headers, remove_cache_entry_if_matches, remove_cache_files_if_unreferenced,
+    remove_cache_files_locked,
 };
 use shared::{SharedIndexStore, bootstrap_shared_index, sync_zone_shared_index_if_needed};
 use store::{
@@ -166,6 +170,7 @@ struct CacheZoneRuntime {
 #[derive(Default, Clone)]
 struct CacheIndex {
     entries: HashMap<String, CacheIndexEntry>,
+    hash_ref_counts: HashMap<String, usize>,
     variants: HashMap<String, Vec<String>>,
     admission_counts: HashMap<String, u64>,
     current_size_bytes: usize,

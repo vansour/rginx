@@ -84,7 +84,7 @@ pub(in crate::cache) async fn refresh_not_modified_response(
     {
         let refreshed = {
             let _io_guard = context.zone.io_write(&cached_entry.hash).await;
-            build_cached_response_for_request(
+            let refreshed = build_cached_response_for_request(
                 &paths.body,
                 &metadata,
                 &context.request,
@@ -92,26 +92,26 @@ pub(in crate::cache) async fn refresh_not_modified_response(
                 context.read_cached_body,
             )
             .await
-            .map_err(|error| CacheStoreError { source: Box::new(error) })?
+            .map_err(|error| CacheStoreError { source: Box::new(error) })?;
+            if let Some(removed) =
+                remove_zone_index_entry_if_matches(&context.zone, &context.key, &cached_entry).await
+                && removed.delete_files
+            {
+                remove_cache_files_locked(context.zone.config.as_ref(), &removed.hash).await;
+            }
+            refreshed
         };
-        if let Some(removed) =
-            remove_zone_index_entry_if_matches(&context.zone, &context.key, &cached_entry).await
-            && removed.delete_files
-        {
-            let _ = fs::remove_file(&paths.metadata).await;
-            let _ = fs::remove_file(&paths.body).await;
-        }
         context.zone.record_revalidated();
         return Ok(with_cache_status(refreshed, CacheStatus::Revalidated));
     }
-    let refreshed = {
+    let (refreshed, removed_hashes) = {
         let _io_guard = context.zone.io_write(&cached_entry.hash).await;
         write_cache_metadata(&paths, &metadata)
             .await
             .map_err(|error| CacheStoreError { source: Box::new(error) })?;
         context.zone.record_write_success();
         context.zone.record_revalidated();
-        update_index_after_store(
+        let removed_hashes = update_index_after_store(
             &context.zone,
             context.key,
             CacheIndexEntry {
@@ -128,7 +128,7 @@ pub(in crate::cache) async fn refresh_not_modified_response(
             None,
         )
         .await;
-        build_cached_response_for_request(
+        let refreshed = build_cached_response_for_request(
             &paths.body,
             &metadata,
             &context.request,
@@ -136,7 +136,13 @@ pub(in crate::cache) async fn refresh_not_modified_response(
             context.read_cached_body,
         )
         .await
-        .map_err(|error| CacheStoreError { source: Box::new(error) })?
+        .map_err(|error| CacheStoreError { source: Box::new(error) })?;
+        (refreshed, removed_hashes)
     };
+    for removed_hash in removed_hashes {
+        if removed_hash != cached_entry.hash {
+            remove_cache_files_if_unreferenced(context.zone.as_ref(), &removed_hash).await;
+        }
+    }
     Ok(with_cache_status(refreshed, CacheStatus::Revalidated))
 }

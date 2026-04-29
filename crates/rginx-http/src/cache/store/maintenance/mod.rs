@@ -50,7 +50,7 @@ pub(in crate::cache) async fn cleanup_inactive_entries_in_zone(zone: &Arc<CacheZ
             let mut removed = Vec::new();
             let mut shared_operations = Vec::new();
             for key in batch {
-                if let Some(entry) = index.entries.remove(key) {
+                if let Some(entry) = index.remove_entry(key) {
                     index.current_size_bytes =
                         index.current_size_bytes.saturating_sub(entry.body_size_bytes);
                     index.admission_counts.remove(key);
@@ -102,7 +102,7 @@ pub(in crate::cache) async fn purge_zone_entries(
         let mut removed = Vec::with_capacity(matching_keys.len());
         let mut shared_operations = Vec::with_capacity(matching_keys.len() * 2);
         for key in matching_keys {
-            if let Some(entry) = index.entries.remove(&key) {
+            if let Some(entry) = index.remove_entry(&key) {
                 index.current_size_bytes =
                     index.current_size_bytes.saturating_sub(entry.body_size_bytes);
                 index.admission_counts.remove(&key);
@@ -138,7 +138,7 @@ pub(in crate::cache) async fn update_index_after_store(
     key: String,
     entry: CacheIndexEntry,
     replaced_entry: Option<(String, CacheIndexEntry)>,
-) {
+) -> std::collections::BTreeSet<String> {
     let (removed_hashes, eviction_count) = {
         let _sync_guard = zone.shared_index_sync_lock.lock().await;
         let mut index = lock_index(&zone.index);
@@ -147,8 +147,11 @@ pub(in crate::cache) async fn update_index_after_store(
         let mut shared_operations = Vec::new();
 
         if let Some((replaced_key, expected_entry)) = replaced_entry
-            && index.entries.get(&replaced_key).is_some_and(|current| current == &expected_entry)
-            && let Some(removed) = index.entries.remove(&replaced_key)
+            && index
+                .entries
+                .get(&replaced_key)
+                .is_some_and(|current| current.stable_eq(&expected_entry))
+            && let Some(removed) = index.remove_entry(&replaced_key)
         {
             index.current_size_bytes =
                 index.current_size_bytes.saturating_sub(removed.body_size_bytes);
@@ -164,7 +167,7 @@ pub(in crate::cache) async fn update_index_after_store(
 
         let incompatible_keys = variant_keys_with_different_dimensions(&index, &entry, &key);
         for incompatible_key in incompatible_keys {
-            if let Some(removed) = index.entries.remove(&incompatible_key) {
+            if let Some(removed) = index.remove_entry(&incompatible_key) {
                 index.current_size_bytes =
                     index.current_size_bytes.saturating_sub(removed.body_size_bytes);
                 index.admission_counts.remove(&incompatible_key);
@@ -179,7 +182,7 @@ pub(in crate::cache) async fn update_index_after_store(
             }
         }
 
-        if let Some(existing) = index.entries.insert(key.clone(), entry.clone()) {
+        if let Some(existing) = index.insert_entry(key.clone(), entry.clone()) {
             index.current_size_bytes =
                 index.current_size_bytes.saturating_sub(existing.body_size_bytes);
             remove_variant_key(&mut index.variants, &existing.base_key, &key);
@@ -214,10 +217,6 @@ pub(in crate::cache) async fn update_index_after_store(
     if eviction_count > 0 {
         zone.record_evictions(eviction_count);
     }
-    if !removed_hashes.is_empty() {
-        for hash in removed_hashes {
-            remove_cache_files_if_unreferenced(zone.as_ref(), &hash).await;
-        }
-    }
     zone.notify_changed();
+    removed_hashes
 }

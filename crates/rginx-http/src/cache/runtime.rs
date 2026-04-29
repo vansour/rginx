@@ -6,6 +6,7 @@ mod support;
 pub(in crate::cache) use support::PurgeSelector;
 pub(in crate::cache) use support::{
     build_conditional_headers, remove_cache_entry_if_matches, remove_cache_files_if_unreferenced,
+    remove_cache_files_locked,
 };
 use support::{stale_if_error_window_open, use_stale_matches_status};
 

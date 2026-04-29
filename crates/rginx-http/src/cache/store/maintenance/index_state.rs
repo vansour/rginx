@@ -62,14 +62,14 @@ pub(in crate::cache) async fn remove_zone_index_entry_if_matches(
     let removed = {
         let mut index = lock_index(&zone.index);
         let current = index.entries.get(key)?;
-        if current != expected_entry {
+        if !current.stable_eq(expected_entry) {
             return None;
         }
-        let removed = index.entries.remove(key).expect("matching cache key should still exist");
+        let removed = index.remove_entry(key).expect("matching cache key should still exist");
         index.current_size_bytes = index.current_size_bytes.saturating_sub(removed.body_size_bytes);
         index.admission_counts.remove(key);
         remove_variant_key(&mut index.variants, &removed.base_key, key);
-        let delete_files = !index.entries.values().any(|entry| entry.hash == removed.hash);
+        let delete_files = !index.hash_is_referenced(&removed.hash);
         RemovedIndexEntry { hash: removed.hash, delete_files }
     };
     apply_zone_shared_index_operations_locked(
@@ -103,7 +103,7 @@ pub(in crate::cache) fn eviction_candidates(
         if index.current_size_bytes <= max_size_bytes {
             break;
         }
-        if index.entries.remove(&key).is_some() {
+        if index.remove_entry(&key).is_some() {
             index.current_size_bytes =
                 index.current_size_bytes.saturating_sub(entry.body_size_bytes);
             index.admission_counts.remove(&key);

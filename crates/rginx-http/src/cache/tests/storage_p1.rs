@@ -269,7 +269,7 @@ async fn cleanup_inactive_entries_honors_manager_batch_entries() {
         let paths = cache_paths_for_zone(zone.config.as_ref(), &hash);
         write_cache_entry(&paths, &metadata, body).await.expect("entry should be written");
         let mut index = lock_index(&zone.index);
-        index.entries.insert(
+        index.insert_entry(
             key.clone(),
             test_index_entry(&key, hash, 3, now.saturating_sub(2_000), now.saturating_sub(5_000)),
         );
@@ -302,7 +302,7 @@ async fn rebucketed_response_still_respects_min_uses_for_new_final_key() {
         test_index_entry(base_key, hash, 6, now.saturating_sub(1_000), now.saturating_sub(5_000));
     {
         let mut index = lock_index(&zone.index);
-        index.entries.insert(base_key.to_string(), cached_entry.clone());
+        index.insert_entry(base_key.to_string(), cached_entry.clone());
         index.current_size_bytes = 6;
     }
 

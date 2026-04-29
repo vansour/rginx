@@ -22,7 +22,7 @@ async fn cache_manager_returns_updating_for_background_refresh() {
     let zone = manager.zones.get("default").expect("zone should exist");
     {
         let mut index = lock_index(&zone.index);
-        index.entries.insert(
+        index.insert_entry(
             key.to_string(),
             test_index_entry(
                 key,
@@ -73,7 +73,7 @@ async fn head_background_refresh_stores_revalidated_body() {
     let zone = manager.zones.get("default").expect("zone should exist");
     {
         let mut index = lock_index(&zone.index);
-        index.entries.insert(
+        index.insert_entry(
             key.to_string(),
             test_index_entry(key, hash, 3, now.saturating_sub(1_000), now.saturating_sub(2_000)),
         );

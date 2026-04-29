@@ -15,7 +15,7 @@ async fn cache_manager_treats_corrupt_metadata_as_miss() {
     let zone = manager.zones.get("default").expect("zone should exist");
     {
         let mut index = lock_index(&zone.index);
-        index.entries.insert(
+        index.insert_entry(
             key.to_string(),
             test_index_entry(
                 key,
@@ -67,7 +67,7 @@ async fn cache_manager_treats_metadata_key_mismatch_as_miss() {
     let zone = manager.zones.get("default").expect("zone should exist");
     {
         let mut index = lock_index(&zone.index);
-        index.entries.insert(
+        index.insert_entry(
             key.to_string(),
             test_index_entry(key, hash, 6, now.saturating_add(60_000), now.saturating_sub(1_000)),
         );
@@ -112,7 +112,7 @@ async fn cache_manager_retains_expired_entries_for_revalidation_on_lookup() {
     let zone = manager.zones.get("default").expect("zone should exist");
     {
         let mut index = lock_index(&zone.index);
-        index.entries.insert(
+        index.insert_entry(
             key.to_string(),
             test_index_entry(
                 key,

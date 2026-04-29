@@ -148,7 +148,7 @@ async fn refresh_not_modified_response_serves_body_and_evicts_uncacheable_entry(
     );
     {
         let mut index = lock_index(&zone.index);
-        index.entries.insert(key.to_string(), cached_entry.clone());
+        index.insert_entry(key.to_string(), cached_entry.clone());
         index.current_size_bytes = 6;
     }
 

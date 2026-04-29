@@ -5,7 +5,6 @@ use bytes::Bytes;
 use http::StatusCode;
 use http::header::HeaderMap;
 use http_body_util::BodyExt;
-use tokio::fs;
 
 use crate::handler::{HttpResponse, full_body};
 
@@ -20,7 +19,8 @@ use super::policy::{
 };
 use super::{
     CacheIndex, CacheIndexEntry, CachePurgeResult, CacheStatus, CacheStoreContext,
-    CacheZoneRuntime, with_cache_status,
+    CacheZoneRuntime, remove_cache_files_if_unreferenced, remove_cache_files_locked,
+    with_cache_status,
 };
 
 mod helpers;
@@ -116,42 +116,49 @@ pub(super) async fn store_response(
         .map(|entry| entry.hash.clone())
         .unwrap_or_else(|| cache_key_hash(&final_key));
     let paths = cache_paths_for_zone(context.zone.config.as_ref(), &hash);
-    let _io_guard = context.zone.io_write(&hash).await;
+    let removed_hashes = {
+        let _io_guard = context.zone.io_write(&hash).await;
 
-    if let Err(error) = write_cache_entry(&paths, &metadata, &collected).await {
-        tracing::warn!(
-            zone = %context.zone.config.name,
-            key_hash = %hash,
-            %error,
-            "failed to write cache entry"
-        );
-        context.zone.record_write_error();
-    } else {
-        context.zone.record_write_success();
-        if context.revalidating {
-            context.zone.record_revalidated();
+        if let Err(error) = write_cache_entry(&paths, &metadata, &collected).await {
+            tracing::warn!(
+                zone = %context.zone.config.name,
+                key_hash = %hash,
+                %error,
+                "failed to write cache entry"
+            );
+            context.zone.record_write_error();
+            std::collections::BTreeSet::new()
+        } else {
+            context.zone.record_write_success();
+            if context.revalidating {
+                context.zone.record_revalidated();
+            }
+            update_index_after_store(
+                &context.zone,
+                final_key.clone(),
+                CacheIndexEntry {
+                    hash,
+                    base_key: context.base_key.clone(),
+                    vary,
+                    body_size_bytes: metadata.body_size_bytes,
+                    expires_at_unix_ms: metadata.expires_at_unix_ms,
+                    stale_if_error_until_unix_ms: metadata.stale_if_error_until_unix_ms,
+                    stale_while_revalidate_until_unix_ms: metadata
+                        .stale_while_revalidate_until_unix_ms,
+                    must_revalidate: metadata.must_revalidate,
+                    last_access_unix_ms: now,
+                },
+                context
+                    .cached_entry
+                    .as_ref()
+                    .filter(|_| context.key != final_key)
+                    .map(|entry| (context.key.clone(), entry.clone())),
+            )
+            .await
         }
-        update_index_after_store(
-            &context.zone,
-            final_key.clone(),
-            CacheIndexEntry {
-                hash,
-                base_key: context.base_key.clone(),
-                vary,
-                body_size_bytes: metadata.body_size_bytes,
-                expires_at_unix_ms: metadata.expires_at_unix_ms,
-                stale_if_error_until_unix_ms: metadata.stale_if_error_until_unix_ms,
-                stale_while_revalidate_until_unix_ms: metadata.stale_while_revalidate_until_unix_ms,
-                must_revalidate: metadata.must_revalidate,
-                last_access_unix_ms: now,
-            },
-            context
-                .cached_entry
-                .as_ref()
-                .filter(|_| context.key != final_key)
-                .map(|entry| (context.key.clone(), entry.clone())),
-        )
-        .await;
+    };
+    for removed_hash in removed_hashes {
+        remove_cache_files_if_unreferenced(context.zone.as_ref(), &removed_hash).await;
     }
 
     downstream_response()
@@ -162,8 +169,8 @@ async fn update_index_after_store(
     key: String,
     entry: CacheIndexEntry,
     replaced_entry: Option<(String, CacheIndexEntry)>,
-) {
-    maintenance::update_index_after_store(zone, key, entry, replaced_entry).await;
+) -> std::collections::BTreeSet<String> {
+    maintenance::update_index_after_store(zone, key, entry, replaced_entry).await
 }
 
 pub(super) fn duration_to_ms(duration: Duration) -> u64 {
