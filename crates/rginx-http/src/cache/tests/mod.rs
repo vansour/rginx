@@ -73,6 +73,7 @@ fn test_index_entry(
         expires_at_unix_ms,
         stale_if_error_until_unix_ms: None,
         stale_while_revalidate_until_unix_ms: None,
+        requires_revalidation: false,
         must_revalidate: false,
         last_access_unix_ms,
     }
@@ -114,6 +115,7 @@ fn test_store_context(zone: Arc<CacheZoneRuntime>, key: &str) -> CacheStoreConte
         cached_metadata: None,
         revalidating: false,
         conditional_headers: None,
+        request_forces_revalidation: false,
         read_cached_body: true,
     }
 }
@@ -160,6 +162,7 @@ fn test_metadata_input(
         expires_at_unix_ms,
         stale_if_error_until_unix_ms: None,
         stale_while_revalidate_until_unix_ms: None,
+        requires_revalidation: false,
         must_revalidate: false,
         body_size_bytes,
     }

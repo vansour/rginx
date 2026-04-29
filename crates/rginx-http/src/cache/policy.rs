@@ -15,9 +15,10 @@ use super::request::{cacheable_range_request, response_content_range_matches_req
 
 mod directives;
 
+pub(super) use directives::cache_control_contains;
 use directives::{
-    cache_control_contains, cache_control_duration, cache_control_max_age, expires_ttl,
-    pragma_contains, x_accel_expires_ttl,
+    cache_control_duration, cache_control_max_age, expires_ttl, pragma_contains,
+    x_accel_expires_ttl,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +26,7 @@ pub(super) struct ResponseFreshness {
     pub(super) ttl: Duration,
     pub(super) stale_if_error: Option<Duration>,
     pub(super) stale_while_revalidate: Option<Duration>,
+    pub(super) requires_revalidation: bool,
     pub(super) must_revalidate: bool,
 }
 
@@ -110,8 +112,10 @@ pub(super) fn response_freshness(
         stale_while_revalidate: (!ignores_header(context, CacheIgnoreHeader::CacheControl))
             .then(|| cache_control_duration(headers, "stale-while-revalidate"))
             .flatten(),
+        requires_revalidation: !ignores_header(context, CacheIgnoreHeader::CacheControl)
+            && cache_control_contains(headers, &["no-cache"]),
         must_revalidate: !ignores_header(context, CacheIgnoreHeader::CacheControl)
-            && cache_control_contains(headers, &["no-cache", "must-revalidate"]),
+            && cache_control_contains(headers, &["must-revalidate", "proxy-revalidate"]),
     }
 }
 

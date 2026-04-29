@@ -55,6 +55,11 @@ pub(super) fn use_stale_matches_status(
     status: StatusCode,
 ) -> bool {
     match status {
+        StatusCode::FORBIDDEN => conditions.contains(&rginx_core::CacheUseStaleCondition::Http403),
+        StatusCode::NOT_FOUND => conditions.contains(&rginx_core::CacheUseStaleCondition::Http404),
+        StatusCode::TOO_MANY_REQUESTS => {
+            conditions.contains(&rginx_core::CacheUseStaleCondition::Http429)
+        }
         StatusCode::INTERNAL_SERVER_ERROR => {
             conditions.contains(&rginx_core::CacheUseStaleCondition::Http500)
         }

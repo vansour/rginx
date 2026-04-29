@@ -49,6 +49,7 @@ impl CacheIndexEntry {
             && self.stale_if_error_until_unix_ms == other.stale_if_error_until_unix_ms
             && self.stale_while_revalidate_until_unix_ms
                 == other.stale_while_revalidate_until_unix_ms
+            && self.requires_revalidation == other.requires_revalidation
             && self.must_revalidate == other.must_revalidate
     }
 }

@@ -39,6 +39,7 @@ pub(in crate::cache) async fn refresh_not_modified_response(
                 stale_if_error_until_unix_ms: cached_metadata.stale_if_error_until_unix_ms,
                 stale_while_revalidate_until_unix_ms: cached_metadata
                     .stale_while_revalidate_until_unix_ms,
+                requires_revalidation: cached_metadata.requires_revalidation,
                 must_revalidate: cached_metadata.must_revalidate,
                 body_size_bytes: cached_metadata.body_size_bytes,
             },
@@ -122,6 +123,7 @@ pub(in crate::cache) async fn refresh_not_modified_response(
                 expires_at_unix_ms: metadata.expires_at_unix_ms,
                 stale_if_error_until_unix_ms: metadata.stale_if_error_until_unix_ms,
                 stale_while_revalidate_until_unix_ms: metadata.stale_while_revalidate_until_unix_ms,
+                requires_revalidation: metadata.requires_revalidation,
                 must_revalidate: metadata.must_revalidate,
                 last_access_unix_ms: now,
             },

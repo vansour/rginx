@@ -1,11 +1,12 @@
 use http::HeaderValue;
-use http::header::{AUTHORIZATION, CONTENT_RANGE, CONTENT_TYPE, HeaderMap, RANGE};
+use http::header::{AUTHORIZATION, CONTENT_RANGE, CONTENT_TYPE, HeaderMap, IF_RANGE, RANGE};
 use http::{Method, Uri};
 use rginx_core::{
     CacheKeyRenderContext, CachePredicateRequestContext, CacheRangeRequestPolicy, RouteCachePolicy,
 };
 
 use super::CacheRequest;
+use super::policy::cache_control_contains;
 use super::vary::normalized_accept_encoding;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,6 +28,17 @@ pub(super) fn cache_request_bypass(request: &CacheRequest, policy: &RouteCachePo
     }
 
     if request.headers.contains_key(AUTHORIZATION) {
+        return true;
+    }
+
+    if cache_control_contains(&request.headers, &["no-store"]) {
+        return true;
+    }
+
+    if request.method == Method::GET
+        && request.headers.contains_key(IF_RANGE)
+        && request.headers.contains_key(RANGE)
+    {
         return true;
     }
 

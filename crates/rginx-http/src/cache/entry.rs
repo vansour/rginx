@@ -40,8 +40,33 @@ pub(super) struct CacheMetadata {
     #[serde(default)]
     pub(super) stale_while_revalidate_until_unix_ms: Option<u64>,
     #[serde(default)]
+    pub(super) requires_revalidation: bool,
+    #[serde(default)]
     pub(super) must_revalidate: bool,
     pub(super) body_size_bytes: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawCacheMetadata {
+    #[serde(default)]
+    key: String,
+    #[serde(default)]
+    base_key: String,
+    #[serde(default)]
+    vary: Vec<CachedVaryHeader>,
+    status: u16,
+    headers: Vec<CachedHeader>,
+    stored_at_unix_ms: u64,
+    expires_at_unix_ms: u64,
+    #[serde(default)]
+    stale_if_error_until_unix_ms: Option<u64>,
+    #[serde(default)]
+    stale_while_revalidate_until_unix_ms: Option<u64>,
+    #[serde(default)]
+    requires_revalidation: Option<bool>,
+    #[serde(default)]
+    must_revalidate: bool,
+    body_size_bytes: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +96,7 @@ pub(super) struct CacheMetadataInput {
     pub(super) expires_at_unix_ms: u64,
     pub(super) stale_if_error_until_unix_ms: Option<u64>,
     pub(super) stale_while_revalidate_until_unix_ms: Option<u64>,
+    pub(super) requires_revalidation: bool,
     pub(super) must_revalidate: bool,
     pub(super) body_size_bytes: usize,
 }
@@ -98,6 +124,7 @@ pub(super) fn cache_metadata(
         expires_at_unix_ms: input.expires_at_unix_ms,
         stale_if_error_until_unix_ms: input.stale_if_error_until_unix_ms,
         stale_while_revalidate_until_unix_ms: input.stale_while_revalidate_until_unix_ms,
+        requires_revalidation: input.requires_revalidation,
         must_revalidate: input.must_revalidate,
         body_size_bytes: input.body_size_bytes,
     }
@@ -148,8 +175,22 @@ pub(super) async fn build_cached_response_for_request(
 
 pub(super) async fn read_cache_metadata(path: &Path) -> std::io::Result<CacheMetadata> {
     let metadata = fs::read(path).await?;
-    serde_json::from_slice(&metadata)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+    let raw: RawCacheMetadata = serde_json::from_slice(&metadata)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    Ok(CacheMetadata {
+        key: raw.key,
+        base_key: raw.base_key,
+        vary: raw.vary,
+        status: raw.status,
+        headers: raw.headers,
+        stored_at_unix_ms: raw.stored_at_unix_ms,
+        expires_at_unix_ms: raw.expires_at_unix_ms,
+        stale_if_error_until_unix_ms: raw.stale_if_error_until_unix_ms,
+        stale_while_revalidate_until_unix_ms: raw.stale_while_revalidate_until_unix_ms,
+        requires_revalidation: raw.requires_revalidation.unwrap_or(raw.must_revalidate),
+        must_revalidate: raw.must_revalidate,
+        body_size_bytes: raw.body_size_bytes,
+    })
 }
 
 pub(super) async fn write_cache_entry(
