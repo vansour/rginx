@@ -52,6 +52,7 @@ impl CacheIoLockPool {
     }
 }
 
+#[cfg(test)]
 pub(super) fn cache_io_lock_stripe(hash: &str) -> usize {
     cache_io_lock_stripe_with_len(hash, CACHE_IO_LOCK_STRIPES)
 }
