@@ -107,7 +107,7 @@ fn scan_cache_dir(
             continue;
         };
 
-        if let Some(existing) = index.entries.insert(key.clone(), index_entry.clone()) {
+        if let Some(existing) = index.insert_entry(key.clone(), index_entry.clone()) {
             index.current_size_bytes =
                 index.current_size_bytes.saturating_sub(existing.body_size_bytes);
             remove_variant_key(&mut index.variants, &existing.base_key, &key);

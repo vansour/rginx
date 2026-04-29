@@ -164,7 +164,7 @@ fn load_entries_into_index(
         let entry = deserialize_entry_record(&entry_json)?;
         index.current_size_bytes = index.current_size_bytes.saturating_add(entry.body_size_bytes);
         index.variants.entry(entry.base_key.clone()).or_default().push(key.clone());
-        index.entries.insert(key, entry);
+        index.insert_entry(key, entry);
     }
     Ok(())
 }

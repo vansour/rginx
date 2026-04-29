@@ -164,7 +164,7 @@ fn index_from_legacy_shared_file(file: LegacySharedIndexFile) -> LoadedSharedInd
         index.current_size_bytes =
             index.current_size_bytes.saturating_add(index_entry.body_size_bytes);
         index.variants.entry(entry.base_key).or_default().push(key.clone());
-        index.entries.insert(key, index_entry);
+        index.insert_entry(key, index_entry);
     }
     for admission in file.admission_counts {
         index.admission_counts.insert(admission.key, admission.uses);

@@ -16,6 +16,8 @@ use tokio::sync::{Mutex as AsyncMutex, Notify};
 use crate::handler::{HttpBody, HttpResponse};
 
 mod entry;
+mod index;
+mod io;
 mod load;
 mod lookup;
 mod manager;
@@ -32,6 +34,9 @@ use entry::{
 };
 #[cfg(test)]
 use entry::{cache_key_hash, cache_metadata, cache_paths, cache_variant_key, write_cache_entry};
+use io::CacheIoLockPool;
+#[cfg(test)]
+use io::cache_io_lock_stripe;
 #[cfg(test)]
 use load::load_index_from_disk;
 use policy::{header_value, request_requires_revalidation};
@@ -40,11 +45,14 @@ use policy::{response_is_storable, response_ttl};
 use request::{cache_request_bypass, render_cache_key};
 use runtime::PurgeSelector;
 pub(crate) use runtime::with_cache_status;
-use runtime::{build_conditional_headers, remove_cache_files_if_unindexed};
+use runtime::{
+    build_conditional_headers, remove_cache_entry_if_matches, remove_cache_files_if_unreferenced,
+    remove_cache_files_locked,
+};
 use shared::{SharedIndexStore, bootstrap_shared_index, sync_zone_shared_index_if_needed};
 use store::{
     CacheStoreError, cleanup_inactive_entries_in_zone, lock_index, purge_zone_entries,
-    refresh_not_modified_response, remove_zone_index_entry, store_response,
+    refresh_not_modified_response, remove_zone_index_entry_if_matches, store_response,
 };
 
 const CACHE_STATUS_HEADER: &str = "x-cache";
@@ -148,7 +156,7 @@ impl CacheStatus {
 struct CacheZoneRuntime {
     config: Arc<CacheZone>,
     index: Mutex<CacheIndex>,
-    io_lock: AsyncMutex<()>,
+    io_locks: CacheIoLockPool,
     shared_index_sync_lock: AsyncMutex<()>,
     shared_index_store: Option<Arc<SharedIndexStore>>,
     fill_locks: Arc<Mutex<HashMap<String, CacheFillLockState>>>,
@@ -162,12 +170,13 @@ struct CacheZoneRuntime {
 #[derive(Default, Clone)]
 struct CacheIndex {
     entries: HashMap<String, CacheIndexEntry>,
+    hash_ref_counts: HashMap<String, usize>,
     variants: HashMap<String, Vec<String>>,
     admission_counts: HashMap<String, u64>,
     current_size_bytes: usize,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct CacheIndexEntry {
     hash: String,
     base_key: String,
@@ -204,7 +213,7 @@ struct CacheFillGuard {
     external_lock_path: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct CachedVaryHeaderValue {
     name: http::header::HeaderName,
     value: Option<String>,

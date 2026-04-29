@@ -57,7 +57,7 @@ async fn cleanup_inactive_entries_notifies_change_listeners() {
     write_cache_entry(&paths, &metadata, b"cached").await.expect("entry should be written");
     {
         let mut index = lock_index(&zone.index);
-        index.entries.insert(
+        index.insert_entry(
             key.to_string(),
             test_index_entry(key, hash, 6, now.saturating_add(60_000), now.saturating_sub(120_000)),
         );
@@ -96,7 +96,7 @@ async fn purge_zone_entries_notifies_change_listeners() {
     write_cache_entry(&paths, &metadata, b"cached").await.expect("entry should be written");
     {
         let mut index = lock_index(&zone.index);
-        index.entries.insert(
+        index.insert_entry(
             key.to_string(),
             test_index_entry(key, hash, 6, now.saturating_add(60_000), now.saturating_sub(1_000)),
         );

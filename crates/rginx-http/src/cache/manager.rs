@@ -30,7 +30,7 @@ impl CacheManager {
                     Arc::new(CacheZoneRuntime {
                         config: zone.clone(),
                         index: Mutex::new(index),
-                        io_lock: AsyncMutex::new(()),
+                        io_locks: CacheIoLockPool::new(),
                         shared_index_sync_lock: AsyncMutex::new(()),
                         shared_index_store,
                         fill_locks: Arc::new(Mutex::new(HashMap::new())),
@@ -90,7 +90,7 @@ impl CacheManager {
             ) {
                 LookupDecision::FreshHit { key, entry } => {
                     let cached_response = {
-                        let _io_guard = zone.io_lock.lock().await;
+                        let _io_guard = zone.io_read(&entry.hash).await;
                         read_cached_response_for_request(
                             &zone,
                             &key,
@@ -116,8 +116,7 @@ impl CacheManager {
                                 %error,
                                 "failed to read cached response; treating as miss"
                             );
-                            remove_zone_index_entry(&zone, &key).await;
-                            remove_cache_files_if_unindexed(&zone, &key, &entry.hash).await;
+                            remove_cache_entry_if_matches(&zone, &key, &entry).await;
                         }
                     }
                 }

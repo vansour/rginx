@@ -4,7 +4,10 @@ mod fill_lock;
 mod support;
 
 pub(in crate::cache) use support::PurgeSelector;
-pub(in crate::cache) use support::{build_conditional_headers, remove_cache_files_if_unindexed};
+pub(in crate::cache) use support::{
+    build_conditional_headers, remove_cache_entry_if_matches, remove_cache_files_if_unreferenced,
+    remove_cache_files_locked,
+};
 use support::{stale_if_error_window_open, use_stale_matches_status};
 
 impl CacheRequest {
@@ -103,7 +106,7 @@ impl CacheStoreContext {
             return None;
         };
         let response = {
-            let _io_guard = self.zone.io_lock.lock().await;
+            let _io_guard = self.zone.io_read(&entry.hash).await;
             let paths = cache_paths_for_zone(self.zone.config.as_ref(), &entry.hash);
             build_cached_response_for_request(
                 &paths.body,
@@ -130,8 +133,7 @@ impl CacheStoreContext {
                     %error,
                     "failed to serve stale cache entry"
                 );
-                remove_zone_index_entry(&self.zone, &self.key).await;
-                remove_cache_files_if_unindexed(&self.zone, &self.key, &entry.hash).await;
+                remove_cache_entry_if_matches(&self.zone, &self.key, entry).await;
                 None
             }
         }
