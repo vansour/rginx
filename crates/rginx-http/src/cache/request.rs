@@ -6,6 +6,7 @@ use rginx_core::{
 };
 
 use super::CacheRequest;
+use super::policy::cache_control_contains;
 use super::vary::normalized_accept_encoding;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,11 +31,14 @@ pub(super) fn cache_request_bypass(request: &CacheRequest, policy: &RouteCachePo
         return true;
     }
 
-    if request_cache_control_contains(&request.headers, &["no-store"]) {
+    if cache_control_contains(&request.headers, &["no-store"]) {
         return true;
     }
 
-    if request.headers.contains_key(IF_RANGE) {
+    if request.method == Method::GET
+        && request.headers.contains_key(IF_RANGE)
+        && request.headers.contains_key(RANGE)
+    {
         return true;
     }
 
@@ -228,15 +232,4 @@ impl CacheableRangeRequest {
     pub(super) fn needs_downstream_trimming(self) -> bool {
         self.request_start != self.cache_start || self.request_end != self.cache_end
     }
-}
-
-fn request_cache_control_contains(headers: &HeaderMap, directives: &[&str]) -> bool {
-    headers.get_all(http::header::CACHE_CONTROL).iter().any(|value| {
-        value.to_str().ok().is_some_and(|value| {
-            value.split(',').any(|directive| {
-                let name = directive.split_once('=').map_or(directive, |(name, _)| name).trim();
-                directives.iter().any(|expected| name.eq_ignore_ascii_case(expected))
-            })
-        })
-    })
 }

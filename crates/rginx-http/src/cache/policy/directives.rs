@@ -2,7 +2,7 @@ use std::time::{Duration, SystemTime};
 
 use http::header::{CACHE_CONTROL, EXPIRES, HeaderMap, PRAGMA};
 
-pub(super) fn cache_control_max_age(headers: &HeaderMap) -> Option<Duration> {
+pub(in crate::cache) fn cache_control_max_age(headers: &HeaderMap) -> Option<Duration> {
     let mut max_age = None;
     for value in headers.get_all(CACHE_CONTROL) {
         let Ok(value) = value.to_str() else {
@@ -31,13 +31,13 @@ pub(super) fn cache_control_max_age(headers: &HeaderMap) -> Option<Duration> {
     max_age
 }
 
-pub(super) fn expires_ttl(headers: &HeaderMap) -> Option<Duration> {
+pub(in crate::cache) fn expires_ttl(headers: &HeaderMap) -> Option<Duration> {
     let expires = headers.get(EXPIRES)?.to_str().ok()?;
     let expires = httpdate::parse_http_date(expires).ok()?;
     Some(expires.duration_since(SystemTime::now()).unwrap_or(Duration::ZERO))
 }
 
-pub(super) fn cache_control_contains(headers: &HeaderMap, directives: &[&str]) -> bool {
+pub(in crate::cache) fn cache_control_contains(headers: &HeaderMap, directives: &[&str]) -> bool {
     headers.get_all(CACHE_CONTROL).iter().any(|value| {
         value.to_str().ok().is_some_and(|value| {
             value.split(',').any(|directive| {
@@ -48,7 +48,7 @@ pub(super) fn cache_control_contains(headers: &HeaderMap, directives: &[&str]) -
     })
 }
 
-pub(super) fn pragma_contains(headers: &HeaderMap, directive: &str) -> bool {
+pub(in crate::cache) fn pragma_contains(headers: &HeaderMap, directive: &str) -> bool {
     headers.get_all(PRAGMA).iter().any(|value| {
         value.to_str().ok().is_some_and(|value| {
             value.split(',').map(str::trim).any(|token| token.eq_ignore_ascii_case(directive))
@@ -56,7 +56,7 @@ pub(super) fn pragma_contains(headers: &HeaderMap, directive: &str) -> bool {
     })
 }
 
-pub(super) fn cache_control_duration(
+pub(in crate::cache) fn cache_control_duration(
     headers: &HeaderMap,
     directive_name: &str,
 ) -> Option<Duration> {
@@ -80,7 +80,7 @@ pub(super) fn cache_control_duration(
     None
 }
 
-pub(super) fn x_accel_expires_ttl(headers: &HeaderMap) -> Option<Duration> {
+pub(in crate::cache) fn x_accel_expires_ttl(headers: &HeaderMap) -> Option<Duration> {
     let value = headers.get("x-accel-expires")?.to_str().ok()?.trim();
     if value == "0" {
         return Some(Duration::ZERO);

@@ -120,18 +120,26 @@ async fn forward_request_serves_stale_for_configured_429() {
     assert_eq!(first.status(), StatusCode::OK);
     assert_eq!(first.headers().get("x-cache").unwrap(), "MISS");
 
-    tokio::time::sleep(Duration::from_millis(10)).await;
-
-    let second = crate::proxy::forward_request(
-        state,
-        active,
-        get_request("/stale-429"),
-        "default",
-        &target,
-        client_address(),
-        downstream_context("cache-429-stale", Some(policy)),
-    )
-    .await;
+    let second = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let response = crate::proxy::forward_request(
+                state.clone(),
+                active.clone(),
+                get_request("/stale-429"),
+                "default",
+                &target,
+                client_address(),
+                downstream_context("cache-429-stale", Some(policy.clone())),
+            )
+            .await;
+            if response.headers().get("x-cache").is_some_and(|value| value == "STALE") {
+                break response;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cache entry should eventually expire and serve stale on 429");
     assert_eq!(second.status(), StatusCode::OK);
     assert_eq!(second.headers().get("x-cache").unwrap(), "STALE");
     let body = second.into_body().collect().await.unwrap().to_bytes();

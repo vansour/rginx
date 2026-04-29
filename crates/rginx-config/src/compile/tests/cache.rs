@@ -288,6 +288,7 @@ fn compile_cache_policy_supports_p0_controls() {
                 use_stale: Some(vec![
                     crate::model::CacheUseStaleConditionConfig::Updating,
                     crate::model::CacheUseStaleConditionConfig::Timeout,
+                    crate::model::CacheUseStaleConditionConfig::Http403,
                     crate::model::CacheUseStaleConditionConfig::Http404,
                     crate::model::CacheUseStaleConditionConfig::Http429,
                 ]),
@@ -338,6 +339,7 @@ fn compile_cache_policy_supports_p0_controls() {
         vec![
             rginx_core::CacheUseStaleCondition::Updating,
             rginx_core::CacheUseStaleCondition::Timeout,
+            rginx_core::CacheUseStaleCondition::Http403,
             rginx_core::CacheUseStaleCondition::Http404,
             rginx_core::CacheUseStaleCondition::Http429,
         ]

@@ -15,9 +15,10 @@ use super::request::{cacheable_range_request, response_content_range_matches_req
 
 mod directives;
 
+pub(super) use directives::cache_control_contains;
 use directives::{
-    cache_control_contains, cache_control_duration, cache_control_max_age, expires_ttl,
-    pragma_contains, x_accel_expires_ttl,
+    cache_control_duration, cache_control_max_age, expires_ttl, pragma_contains,
+    x_accel_expires_ttl,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
