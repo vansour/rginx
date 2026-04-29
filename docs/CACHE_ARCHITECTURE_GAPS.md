@@ -46,6 +46,24 @@
   - range cache 对条件化 range 请求的安全边界更明确
   - route 级 stale 控制面覆盖了更多现网常见降级状态
 
+### 已完成：建立第一轮缓存专项 benchmark、压力测试与故障注入体系
+
+该项已于 2026-04-29 完成第一轮落地。
+
+- 当前实现：
+  - 新增 `scripts/run-cache-benchmark.py`，对真实 `rginx` 进程和真实 upstream 路径执行 `fill` / `hit` / `revalidate` / `slice-hit` 专项 benchmark
+  - 新增 `scripts/run-cache-stress.sh`，驱动大 key 数、 大对象持续命中、reload 并发下热点缓存保持的专项 stress / soak 用例
+  - 新增缓存故障注入回归，覆盖 body 文件缺失清理、shared index SQLite 损坏降级、本地索引保活等失败路径
+- 运行入口：
+  - `python3 scripts/run-cache-benchmark.py`
+  - `./scripts/run-cache-stress.sh --iterations 3`
+  - `cargo test -p rginx-http --lib shared_index_sync_keeps_local_hits_when_shared_metadata_db_is_corrupted`
+  - `cargo test -p rginx-http --lib cache_manager_treats_missing_body_file_as_miss_and_cleans_index`
+- 收敛效果：
+  - cache 主路径第一次具备了可重复执行的专项性能基线
+  - 高并发、大 key 数、大对象、reload 并发不再只靠零散功能测试间接覆盖
+  - shared index 损坏和文件缺失这类缓存失败模式现在有了稳定的回归入口
+
 ## 长期差距
 
 ### 1. 将缓存写入路径从“全量收集后落盘”升级为流式写入路径

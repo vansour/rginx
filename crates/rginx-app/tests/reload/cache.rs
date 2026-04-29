@@ -2,7 +2,8 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::*;
 
@@ -43,6 +44,95 @@ fn reload_preserves_cache_entries_when_zone_path_is_reused() {
     )
     .expect("third request should succeed");
     assert_eq!(response_header_value(&third, "x-cache").as_deref(), Some("HIT"));
+    assert_eq!(upstream_hits.load(Ordering::Relaxed), 1);
+
+    server.shutdown_and_wait(Duration::from_secs(5));
+}
+
+#[test]
+#[ignore = "cache stress suite; run via scripts/run-cache-stress.sh"]
+fn reload_keeps_hot_cache_hits_available_under_concurrent_traffic() {
+    let _guard = test_lock().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let listen_addr = reserve_loopback_addr();
+    let (upstream_addr, upstream_hits) = spawn_counting_response_server("reload cache stress\n");
+    let mut server = TestServer::spawn_with_setup("rginx-reload-cache-stress", |temp_dir| {
+        cached_proxy_config(listen_addr, upstream_addr, &temp_dir.join("cache"), 3)
+    });
+
+    server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
+
+    let request =
+        format!("GET /api/demo HTTP/1.1\r\nHost: {listen_addr}\r\nConnection: close\r\n\r\n");
+    let first = send_raw_request(listen_addr, &request).expect("warm miss should succeed");
+    assert_eq!(response_header_value(&first, "x-cache").as_deref(), Some("MISS"));
+
+    let second = send_raw_request(listen_addr, &request).expect("warm hit should succeed");
+    assert_eq!(response_header_value(&second, "x-cache").as_deref(), Some("HIT"));
+    assert_eq!(upstream_hits.load(Ordering::Relaxed), 1);
+
+    let failures = Arc::new(Mutex::new(Vec::new()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let workers = (0..4)
+        .map(|worker_id| {
+            let request = request.clone();
+            let failures = failures.clone();
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    match send_raw_request(listen_addr, &request) {
+                        Ok(response) => {
+                            let status = response
+                                .lines()
+                                .next()
+                                .and_then(|line| line.split_whitespace().nth(1))
+                                .unwrap_or("<missing>");
+                            let x_cache = response_header_value(&response, "x-cache");
+                            if status != "200" || x_cache.as_deref() != Some("HIT") {
+                                failures
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                    .push(format!(
+                                        "worker {worker_id} observed status={status} x-cache={x_cache:?}"
+                                    ));
+                                break;
+                            }
+                        }
+                        Err(error) => {
+                            failures
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                                .push(format!("worker {worker_id} request failed: {error}"));
+                            break;
+                        }
+                    }
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let cache_dir = server.temp_dir().join("cache");
+    for (revision, timeout_secs) in [4_u64, 5, 6, 7].into_iter().enumerate() {
+        server.write_config(cached_proxy_config(
+            listen_addr,
+            upstream_addr,
+            &cache_dir,
+            timeout_secs,
+        ));
+        server.send_signal(libc::SIGHUP);
+        server.wait_for_status_output(
+            |output| output.contains(&format!("revision={}", revision + 1)),
+            Duration::from_secs(5),
+        );
+        std::thread::sleep(Duration::from_millis(150));
+    }
+
+    stop.store(true, Ordering::Relaxed);
+    for worker in workers {
+        worker.join().expect("cache stress worker should join cleanly");
+    }
+
+    let failures = failures.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    assert!(failures.is_empty(), "concurrent reload cache traffic should stay hot: {failures:?}");
     assert_eq!(upstream_hits.load(Ordering::Relaxed), 1);
 
     server.shutdown_and_wait(Duration::from_secs(5));
