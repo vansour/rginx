@@ -25,6 +25,18 @@ fn stress_request(path: &str) -> Request<crate::handler::HttpBody> {
         .expect("stress request should build")
 }
 
+async fn response_body_len(response: crate::handler::HttpResponse) -> usize {
+    let mut body = response.into_body();
+    let mut len = 0usize;
+    while let Some(frame) = body.frame().await {
+        let frame = frame.expect("response body frame should be readable");
+        if let Some(data) = frame.data_ref() {
+            len = len.saturating_add(data.len());
+        }
+    }
+    len
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "cache stress suite; run via scripts/run-cache-stress.sh"]
 async fn cache_manager_handles_large_keysets_under_parallel_fill_and_hit_load() {
@@ -136,8 +148,7 @@ async fn cache_manager_serves_large_cached_body_under_sustained_parallel_hits() 
                 match manager.lookup(CacheRequest::from_request(&request), "https", &policy).await {
                     CacheLookup::Hit(response) => {
                         assert_eq!(response.headers().get(CACHE_STATUS_HEADER).unwrap(), "HIT");
-                        let hit_body = response.into_body().collect().await.unwrap().to_bytes();
-                        assert_eq!(hit_body.len(), expected_len);
+                        assert_eq!(response_body_len(response).await, expected_len);
                     }
                     CacheLookup::Miss(_) => panic!("large cached body unexpectedly missed"),
                     CacheLookup::Updating(_, _) => {

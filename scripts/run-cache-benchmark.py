@@ -5,7 +5,6 @@ import argparse
 import concurrent.futures
 import http.client
 import http.server
-import os
 import socket
 import socketserver
 import statistics
@@ -31,6 +30,7 @@ READY_ROUTE_CONFIG = """        LocationConfig(
 """
 
 REVALIDATE_ETAG = '"cache-bench-etag"'
+STARTUP_RETRY_LIMIT = 8
 
 
 @dataclass(frozen=True)
@@ -155,16 +155,30 @@ def parse_single_range(header_value: str, payload_len: int) -> tuple[int, int] |
     if "," in raw_range or "-" not in raw_range:
         return None
     raw_start, raw_end = raw_range.split("-", 1)
-    if not raw_start or not raw_end:
+    raw_start = raw_start.strip()
+    raw_end = raw_end.strip()
+    if not raw_start and not raw_end:
         return None
     try:
-        start = int(raw_start)
-        end = int(raw_end)
+        if raw_start:
+            start = int(raw_start)
+            if start < 0 or start >= payload_len:
+                return None
+            if raw_end:
+                end = int(raw_end)
+                if end < start:
+                    return None
+            else:
+                end = payload_len - 1
+            return start, min(end, payload_len - 1)
+
+        suffix_len = int(raw_end)
     except ValueError:
         return None
-    if start < 0 or end < start or start >= payload_len:
+    if suffix_len <= 0:
         return None
-    return start, min(end, payload_len - 1)
+    suffix_len = min(suffix_len, payload_len)
+    return payload_len - suffix_len, payload_len - 1
 
 
 def reserve_loopback_port() -> int:
@@ -192,6 +206,7 @@ def write_proxy_config(
     listen_port: int,
     upstream_port: int,
     cache_dir: Path,
+    cache_max_size_bytes: int,
     max_entry_bytes: int,
     slice_size_bytes: int,
 ) -> None:
@@ -203,7 +218,7 @@ def write_proxy_config(
         CacheZoneConfig(
             name: "default",
             path: "{cache_dir.as_posix()}",
-            max_size_bytes: Some({max_entry_bytes * 16}),
+            max_size_bytes: Some({cache_max_size_bytes}),
             inactive_secs: Some(600),
             default_ttl_secs: Some(60),
             max_entry_bytes: Some({max_entry_bytes}),
@@ -284,12 +299,34 @@ def write_proxy_config(
     path.write_text(config, encoding="utf-8")
 
 
-def wait_for_ready(port: int, timeout: float, process: subprocess.Popen[str]) -> None:
+def read_process_log(log_path: Path) -> str:
+    if not log_path.exists():
+        return ""
+    return log_path.read_text(encoding="utf-8", errors="replace")
+
+
+def should_retry_startup(log_output: str) -> bool:
+    lowered = log_output.lower()
+    return (
+        "address already in use" in lowered
+        or "os error 98" in lowered
+        or "addrinuse" in lowered
+    )
+
+
+def wait_for_ready(
+    port: int,
+    timeout: float,
+    process: subprocess.Popen[str],
+    log_path: Path,
+) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            output = process.stdout.read() if process.stdout else ""
-            raise RuntimeError(f"rginx exited before becoming ready:\n{output}")
+            output = read_process_log(log_path)
+            raise RuntimeError(
+                f"rginx exited before becoming ready on 127.0.0.1:{port}:\n{output}"
+            )
         try:
             conn = http.client.HTTPConnection("127.0.0.1", port, timeout=0.5)
             conn.request("GET", "/-/ready", headers={"Host": f"127.0.0.1:{port}"})
@@ -303,6 +340,65 @@ def wait_for_ready(port: int, timeout: float, process: subprocess.Popen[str]) ->
         else:
             time.sleep(0.1)
     raise TimeoutError(f"timed out waiting for rginx to listen on 127.0.0.1:{port}")
+
+
+def estimate_cache_max_size_bytes(
+    max_entry_bytes: int,
+    fill_keys: int,
+    hit_keys: int,
+) -> int:
+    expected_cached_entries = fill_keys + hit_keys + 2
+    return max_entry_bytes * max(expected_cached_entries * 4, 128)
+
+
+def start_rginx(
+    root: Path,
+    binary: Path,
+    config_path: Path,
+    log_path: Path,
+    origin_port: int,
+    cache_dir: Path,
+    cache_max_size_bytes: int,
+    max_entry_bytes: int,
+    slice_size_bytes: int,
+    ready_timeout: float,
+) -> tuple[subprocess.Popen[str], int]:
+    last_error: Exception | None = None
+    for attempt in range(1, STARTUP_RETRY_LIMIT + 1):
+        listen_port = reserve_loopback_port()
+        write_proxy_config(
+            config_path,
+            listen_port,
+            origin_port,
+            cache_dir,
+            cache_max_size_bytes,
+            max_entry_bytes,
+            slice_size_bytes,
+        )
+        with log_path.open("w", encoding="utf-8") as log_file:
+            process = subprocess.Popen(
+                [str(binary), "--config", str(config_path)],
+                cwd=root,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+        try:
+            wait_for_ready(listen_port, ready_timeout, process, log_path)
+            return process, listen_port
+        except RuntimeError as error:
+            last_error = error
+            output = read_process_log(log_path)
+            terminate_process(process)
+            if attempt < STARTUP_RETRY_LIMIT and should_retry_startup(output):
+                continue
+            raise
+        except Exception as error:
+            last_error = error
+            terminate_process(process)
+            raise
+    assert last_error is not None
+    raise last_error
 
 
 def run_request(port: int, bench_request: BenchRequest, timeout: float) -> float:
@@ -511,29 +607,28 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="rginx-cache-bench-") as temp_dir:
         temp_root = Path(temp_dir)
         config_path = temp_root / "rginx.ron"
+        log_path = temp_root / "rginx.log"
         cache_dir = temp_root / "cache"
         cache_dir.mkdir(parents=True, exist_ok=True)
-        listen_port = reserve_loopback_port()
         max_entry_bytes = max(args.body_bytes, args.slice_payload_bytes) + 4096
-        write_proxy_config(
+        cache_max_size_bytes = estimate_cache_max_size_bytes(
+            max_entry_bytes,
+            args.fill_keys,
+            args.hit_keys,
+        )
+        process, listen_port = start_rginx(
+            root,
+            binary,
             config_path,
-            listen_port,
+            log_path,
             origin_port,
             cache_dir,
+            cache_max_size_bytes,
             max_entry_bytes,
             args.slice_size_bytes,
-        )
-
-        process = subprocess.Popen(
-            [str(binary), "--config", str(config_path)],
-            cwd=root,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
+            args.ready_timeout,
         )
         try:
-            wait_for_ready(listen_port, args.ready_timeout, process)
-
             rows: list[ScenarioRow] = []
 
             before_fill = origin_state.count("fill")
