@@ -53,6 +53,7 @@ use crate::client_ip::{ClientAddress, ClientIpSource};
 use tempfile::TempDir;
 
 mod cache;
+mod cache_stale;
 mod client_profiles;
 mod grpc;
 mod peer_recovery;

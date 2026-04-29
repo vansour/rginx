@@ -1,5 +1,5 @@
 use http::HeaderValue;
-use http::header::{AUTHORIZATION, CONTENT_RANGE, CONTENT_TYPE, HeaderMap, RANGE};
+use http::header::{AUTHORIZATION, CONTENT_RANGE, CONTENT_TYPE, HeaderMap, IF_RANGE, RANGE};
 use http::{Method, Uri};
 use rginx_core::{
     CacheKeyRenderContext, CachePredicateRequestContext, CacheRangeRequestPolicy, RouteCachePolicy,
@@ -27,6 +27,14 @@ pub(super) fn cache_request_bypass(request: &CacheRequest, policy: &RouteCachePo
     }
 
     if request.headers.contains_key(AUTHORIZATION) {
+        return true;
+    }
+
+    if request_cache_control_contains(&request.headers, &["no-store"]) {
+        return true;
+    }
+
+    if request.headers.contains_key(IF_RANGE) {
         return true;
     }
 
@@ -220,4 +228,15 @@ impl CacheableRangeRequest {
     pub(super) fn needs_downstream_trimming(self) -> bool {
         self.request_start != self.cache_start || self.request_end != self.cache_end
     }
+}
+
+fn request_cache_control_contains(headers: &HeaderMap, directives: &[&str]) -> bool {
+    headers.get_all(http::header::CACHE_CONTROL).iter().any(|value| {
+        value.to_str().ok().is_some_and(|value| {
+            value.split(',').any(|directive| {
+                let name = directive.split_once('=').map_or(directive, |(name, _)| name).trim();
+                directives.iter().any(|expected| name.eq_ignore_ascii_case(expected))
+            })
+        })
+    })
 }

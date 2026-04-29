@@ -31,6 +31,21 @@
   - 命中、回填、重验证、清理之间的冲突面收敛到 hash/stripe 级别
   - 修复了“旧 entry 删除误删并发新写入文件”的竞态窗口
 
+### 已完成：补齐一轮 `range` / `stale` / `revalidate` / `policy` 长尾控制项
+
+该项已于 2026-04-29 完成第一轮收敛。
+
+- 当前实现：
+  - 区分响应 `no-cache` 与 `must-revalidate` / `proxy-revalidate`，不再把两者混成同一语义
+  - 客户端显式强制 revalidate 时，不再走 stale serve 或 `UPDATING` 背景刷新
+  - 请求带 `Cache-Control: no-store` 或 `If-Range` 时显式 bypass cache，避免落入不完整 range 语义
+  - `use_stale` 扩展支持 `403` / `404` / `429`
+- 收敛效果：
+  - fresh 命中、expired stale、conditional revalidate 之间的边界更接近专业代理缓存语义
+  - stale serve 不再错误覆盖客户端显式刷新意图
+  - range cache 对条件化 range 请求的安全边界更明确
+  - route 级 stale 控制面覆盖了更多现网常见降级状态
+
 ## 长期差距
 
 ### 1. 将缓存写入路径从“全量收集后落盘”升级为流式写入路径
@@ -66,7 +81,6 @@
 - 当前问题：
   - cache method 仍局限于 `GET` / `HEAD`
   - range cache 仍以 single-range、bounded byte-range 为主
-  - `use_stale`、revalidate、header ignore、range 相关控制项仍偏 MVP
   - 复杂缓存策略的表达力仍弱于成熟变量系统和规则系统
 - 长期目标：
   - 补齐更完整的缓存策略控制面

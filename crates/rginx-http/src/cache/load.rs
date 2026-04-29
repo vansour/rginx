@@ -26,6 +26,8 @@ struct ScannedCacheMetadata {
     #[serde(default)]
     stale_while_revalidate_until_unix_ms: Option<u64>,
     #[serde(default)]
+    requires_revalidation: Option<bool>,
+    #[serde(default)]
     must_revalidate: bool,
     body_size_bytes: usize,
 }
@@ -152,6 +154,7 @@ fn load_cache_index_entry(zone: &CacheZone, hash: &str) -> Option<(String, Cache
         expires_at_unix_ms,
         stale_if_error_until_unix_ms,
         stale_while_revalidate_until_unix_ms,
+        requires_revalidation,
         must_revalidate,
         body_size_bytes,
     } = metadata;
@@ -170,6 +173,7 @@ fn load_cache_index_entry(zone: &CacheZone, hash: &str) -> Option<(String, Cache
             expires_at_unix_ms,
             stale_if_error_until_unix_ms,
             stale_while_revalidate_until_unix_ms,
+            requires_revalidation: requires_revalidation.unwrap_or(must_revalidate),
             must_revalidate,
             last_access_unix_ms: stored_at_unix_ms,
         },

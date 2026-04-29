@@ -25,6 +25,7 @@ pub(super) struct ResponseFreshness {
     pub(super) ttl: Duration,
     pub(super) stale_if_error: Option<Duration>,
     pub(super) stale_while_revalidate: Option<Duration>,
+    pub(super) requires_revalidation: bool,
     pub(super) must_revalidate: bool,
 }
 
@@ -110,8 +111,10 @@ pub(super) fn response_freshness(
         stale_while_revalidate: (!ignores_header(context, CacheIgnoreHeader::CacheControl))
             .then(|| cache_control_duration(headers, "stale-while-revalidate"))
             .flatten(),
+        requires_revalidation: !ignores_header(context, CacheIgnoreHeader::CacheControl)
+            && cache_control_contains(headers, &["no-cache"]),
         must_revalidate: !ignores_header(context, CacheIgnoreHeader::CacheControl)
-            && cache_control_contains(headers, &["no-cache", "must-revalidate"]),
+            && cache_control_contains(headers, &["must-revalidate", "proxy-revalidate"]),
     }
 }
 

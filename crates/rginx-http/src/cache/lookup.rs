@@ -23,7 +23,7 @@ impl CacheManager {
                 entry.last_access_unix_ms = now;
 
                 if now <= entry.expires_at_unix_ms
-                    && !entry.must_revalidate
+                    && !entry.requires_revalidation
                     && !request_forces_revalidation
                 {
                     return LookupDecision::FreshHit { key, entry: entry.clone() };
@@ -33,7 +33,12 @@ impl CacheManager {
                 match zone.fill_lock_decision(&key, now, policy.lock_age) {
                     FillLockDecision::Acquired(fill_guard) => {
                         if expired
-                            && stale_allowed_for_entry(policy, entry, now)
+                            && stale_allowed_for_entry(
+                                policy,
+                                entry,
+                                now,
+                                request_forces_revalidation,
+                            )
                             && policy.background_update
                         {
                             LookupDecision::BackgroundUpdate {
@@ -56,7 +61,13 @@ impl CacheManager {
                         }
                     }
                     FillLockDecision::WaitLocal { waiter: _waiter }
-                        if expired && stale_allowed_for_entry(policy, entry, now) =>
+                        if expired
+                            && stale_allowed_for_entry(
+                                policy,
+                                entry,
+                                now,
+                                request_forces_revalidation,
+                            ) =>
                     {
                         LookupDecision::Stale {
                             key,
@@ -65,7 +76,13 @@ impl CacheManager {
                         }
                     }
                     FillLockDecision::WaitExternal { key: _external_key }
-                        if expired && stale_allowed_for_entry(policy, entry, now) =>
+                        if expired
+                            && stale_allowed_for_entry(
+                                policy,
+                                entry,
+                                now,
+                                request_forces_revalidation,
+                            ) =>
                     {
                         LookupDecision::Stale {
                             key,
@@ -253,7 +270,15 @@ fn matching_variant_key(
         .cloned()
 }
 
-fn stale_allowed_for_entry(policy: &RouteCachePolicy, entry: &CacheIndexEntry, now: u64) -> bool {
-    policy.use_stale.contains(&rginx_core::CacheUseStaleCondition::Updating)
-        || entry.stale_while_revalidate_until_unix_ms.is_some_and(|until| now <= until)
+fn stale_allowed_for_entry(
+    policy: &RouteCachePolicy,
+    entry: &CacheIndexEntry,
+    now: u64,
+    request_forces_revalidation: bool,
+) -> bool {
+    !request_forces_revalidation
+        && !entry.requires_revalidation
+        && !entry.must_revalidate
+        && (policy.use_stale.contains(&rginx_core::CacheUseStaleCondition::Updating)
+            || entry.stale_while_revalidate_until_unix_ms.is_some_and(|until| now <= until))
 }

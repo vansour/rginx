@@ -80,6 +80,10 @@ impl CacheStoreContext {
         if self.cached_metadata.is_none() {
             return false;
         }
+        if self.request_forces_revalidation || entry.requires_revalidation || entry.must_revalidate
+        {
+            return false;
+        }
 
         let now = unix_time_ms(SystemTime::now());
         match reason {

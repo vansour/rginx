@@ -145,6 +145,7 @@ pub(super) async fn store_response(
                     stale_if_error_until_unix_ms: metadata.stale_if_error_until_unix_ms,
                     stale_while_revalidate_until_unix_ms: metadata
                         .stale_while_revalidate_until_unix_ms,
+                    requires_revalidation: metadata.requires_revalidation,
                     must_revalidate: metadata.must_revalidate,
                     last_access_unix_ms: now,
                 },

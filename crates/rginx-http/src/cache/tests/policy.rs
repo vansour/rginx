@@ -3,6 +3,8 @@ use std::time::Duration;
 use http::StatusCode;
 use http::header::{CACHE_CONTROL, EXPIRES, HeaderMap, HeaderValue, PRAGMA};
 
+use crate::cache::policy::response_freshness;
+
 use super::*;
 
 #[test]
@@ -43,6 +45,26 @@ fn request_requires_revalidation_honors_pragma_no_cache() {
     headers.insert(PRAGMA, HeaderValue::from_static("no-cache"));
 
     assert!(request_requires_revalidation(&headers));
+}
+
+#[test]
+fn response_freshness_separates_no_cache_from_must_revalidate() {
+    let temp = tempfile::tempdir().expect("cache temp dir should exist");
+    let zone = test_zone(temp.path().to_path_buf(), 1024);
+    let context = test_store_context(zone, "/ttl");
+
+    let mut no_cache_headers = HeaderMap::new();
+    no_cache_headers.insert(CACHE_CONTROL, HeaderValue::from_static("max-age=60, no-cache"));
+    let no_cache = response_freshness(&context, StatusCode::OK, &no_cache_headers);
+    assert!(no_cache.requires_revalidation);
+    assert!(!no_cache.must_revalidate);
+
+    let mut must_revalidate_headers = HeaderMap::new();
+    must_revalidate_headers
+        .insert(CACHE_CONTROL, HeaderValue::from_static("max-age=60, proxy-revalidate"));
+    let must_revalidate = response_freshness(&context, StatusCode::OK, &must_revalidate_headers);
+    assert!(!must_revalidate.requires_revalidation);
+    assert!(must_revalidate.must_revalidate);
 }
 
 #[test]

@@ -52,6 +52,105 @@ async fn cache_manager_returns_updating_for_background_refresh() {
 }
 
 #[tokio::test]
+async fn cache_manager_does_not_background_update_when_request_forces_revalidation() {
+    let temp = tempfile::tempdir().expect("cache temp dir should exist");
+    let manager = test_manager(temp.path().to_path_buf(), 1024);
+    let mut policy = test_policy();
+    policy.background_update = true;
+    policy.use_stale = vec![rginx_core::CacheUseStaleCondition::Updating];
+
+    let key = "https:example.com:/background-no-cache";
+    let hash = cache_key_hash(key);
+    let paths = cache_paths(temp.path(), &hash);
+    let now = unix_time_ms(SystemTime::now());
+    let metadata = cache_metadata(
+        key.to_string(),
+        StatusCode::OK,
+        &http::HeaderMap::new(),
+        test_metadata_input(key, now.saturating_sub(2_000), now.saturating_sub(1_000), 7),
+    );
+    write_cache_entry(&paths, &metadata, b"cached!").await.expect("entry should be written");
+    let zone = manager.zones.get("default").expect("zone should exist");
+    {
+        let mut index = lock_index(&zone.index);
+        index.insert_entry(
+            key.to_string(),
+            test_index_entry(key, hash, 7, now.saturating_sub(1_000), now.saturating_sub(2_000)),
+        );
+        index.current_size_bytes = 7;
+    }
+
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/background-no-cache")
+        .header("host", "example.com")
+        .header(CACHE_CONTROL, "no-cache")
+        .body(full_body(Bytes::new()))
+        .expect("request should build");
+
+    match manager.lookup(CacheRequest::from_request(&request), "https", &policy).await {
+        CacheLookup::Miss(context) => assert_eq!(context.cache_status(), CacheStatus::Expired),
+        _ => panic!("forced revalidation should not be converted into background stale serve"),
+    }
+}
+
+#[tokio::test]
+async fn cache_manager_does_not_background_update_must_revalidate_entries() {
+    let temp = tempfile::tempdir().expect("cache temp dir should exist");
+    let manager = test_manager(temp.path().to_path_buf(), 1024);
+    let mut policy = test_policy();
+    policy.background_update = true;
+    policy.use_stale = vec![rginx_core::CacheUseStaleCondition::Updating];
+
+    let key = "https:example.com:/background-must-revalidate";
+    let hash = cache_key_hash(key);
+    let paths = cache_paths(temp.path(), &hash);
+    let now = unix_time_ms(SystemTime::now());
+    let metadata = cache_metadata(
+        key.to_string(),
+        StatusCode::OK,
+        &http::HeaderMap::new(),
+        CacheMetadataInput {
+            stale_while_revalidate_until_unix_ms: Some(now.saturating_add(60_000)),
+            must_revalidate: true,
+            ..test_metadata_input(key, now.saturating_sub(2_000), now.saturating_sub(1_000), 7)
+        },
+    );
+    write_cache_entry(&paths, &metadata, b"cached!").await.expect("entry should be written");
+    let zone = manager.zones.get("default").expect("zone should exist");
+    {
+        let mut index = lock_index(&zone.index);
+        index.insert_entry(
+            key.to_string(),
+            CacheIndexEntry {
+                stale_while_revalidate_until_unix_ms: Some(now.saturating_add(60_000)),
+                must_revalidate: true,
+                ..test_index_entry(
+                    key,
+                    hash,
+                    7,
+                    now.saturating_sub(1_000),
+                    now.saturating_sub(2_000),
+                )
+            },
+        );
+        index.current_size_bytes = 7;
+    }
+
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/background-must-revalidate")
+        .header("host", "example.com")
+        .body(full_body(Bytes::new()))
+        .expect("request should build");
+
+    match manager.lookup(CacheRequest::from_request(&request), "https", &policy).await {
+        CacheLookup::Miss(context) => assert_eq!(context.cache_status(), CacheStatus::Expired),
+        _ => panic!("must-revalidate entries should not be served stale while updating"),
+    }
+}
+
+#[tokio::test]
 async fn head_background_refresh_stores_revalidated_body() {
     let temp = tempfile::tempdir().expect("cache temp dir should exist");
     let manager = test_manager(temp.path().to_path_buf(), 1024);

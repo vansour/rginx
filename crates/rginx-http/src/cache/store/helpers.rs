@@ -24,6 +24,7 @@ pub(super) fn cache_metadata_input(
         stale_while_revalidate_until_unix_ms: freshness
             .stale_while_revalidate
             .map(|duration| now.saturating_add(duration_to_ms(duration))),
+        requires_revalidation: freshness.requires_revalidation,
         must_revalidate: freshness.must_revalidate,
         body_size_bytes,
     }
@@ -56,6 +57,7 @@ pub(super) fn cache_vary_values(
 
 pub(super) fn freshness_is_cacheable(freshness: &ResponseFreshness) -> bool {
     !freshness.ttl.is_zero()
+        || freshness.requires_revalidation
         || freshness.must_revalidate
         || freshness.stale_if_error.is_some()
         || freshness.stale_while_revalidate.is_some()

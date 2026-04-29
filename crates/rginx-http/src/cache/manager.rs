@@ -169,6 +169,7 @@ impl CacheManager {
                         cached_metadata: None,
                         revalidating: false,
                         conditional_headers: None,
+                        request_forces_revalidation,
                         read_cached_body,
                     }));
                 }
@@ -197,6 +198,7 @@ impl CacheManager {
                         cached_metadata,
                         revalidating: true,
                         conditional_headers,
+                        request_forces_revalidation,
                         read_cached_body,
                     });
                     let Some(response) = self
@@ -256,6 +258,7 @@ impl CacheManager {
                         cached_metadata,
                         revalidating: cache_status == CacheStatus::Revalidated,
                         conditional_headers,
+                        request_forces_revalidation,
                         read_cached_body,
                     }));
                 }

@@ -18,6 +18,8 @@ struct SharedIndexEntryRecord {
     #[serde(default)]
     stale_while_revalidate_until_unix_ms: Option<u64>,
     #[serde(default)]
+    requires_revalidation: Option<bool>,
+    #[serde(default)]
     must_revalidate: bool,
     last_access_unix_ms: u64,
 }
@@ -50,6 +52,8 @@ struct LegacySharedIndexEntry {
     stale_if_error_until_unix_ms: Option<u64>,
     #[serde(default)]
     stale_while_revalidate_until_unix_ms: Option<u64>,
+    #[serde(default)]
+    requires_revalidation: Option<bool>,
     #[serde(default)]
     must_revalidate: bool,
     last_access_unix_ms: u64,
@@ -96,6 +100,7 @@ pub(super) fn serialize_entry_record(entry: &CacheIndexEntry) -> io::Result<Vec<
         expires_at_unix_ms: entry.expires_at_unix_ms,
         stale_if_error_until_unix_ms: entry.stale_if_error_until_unix_ms,
         stale_while_revalidate_until_unix_ms: entry.stale_while_revalidate_until_unix_ms,
+        requires_revalidation: Some(entry.requires_revalidation),
         must_revalidate: entry.must_revalidate,
         last_access_unix_ms: entry.last_access_unix_ms,
     })
@@ -131,6 +136,7 @@ fn cache_index_entry_from_record(record: SharedIndexEntryRecord) -> io::Result<C
         expires_at_unix_ms: record.expires_at_unix_ms,
         stale_if_error_until_unix_ms: record.stale_if_error_until_unix_ms,
         stale_while_revalidate_until_unix_ms: record.stale_while_revalidate_until_unix_ms,
+        requires_revalidation: record.requires_revalidation.unwrap_or(record.must_revalidate),
         must_revalidate: record.must_revalidate,
         last_access_unix_ms: record.last_access_unix_ms,
     })
@@ -158,6 +164,7 @@ fn index_from_legacy_shared_file(file: LegacySharedIndexFile) -> LoadedSharedInd
             expires_at_unix_ms: entry.expires_at_unix_ms,
             stale_if_error_until_unix_ms: entry.stale_if_error_until_unix_ms,
             stale_while_revalidate_until_unix_ms: entry.stale_while_revalidate_until_unix_ms,
+            requires_revalidation: entry.requires_revalidation.unwrap_or(entry.must_revalidate),
             must_revalidate: entry.must_revalidate,
             last_access_unix_ms: entry.last_access_unix_ms,
         };

@@ -77,6 +77,7 @@ pub(crate) struct CacheStoreContext {
     cached_metadata: Option<CacheMetadata>,
     revalidating: bool,
     conditional_headers: Option<CacheConditionalHeaders>,
+    request_forces_revalidation: bool,
     read_cached_body: bool,
 }
 
@@ -185,6 +186,7 @@ struct CacheIndexEntry {
     expires_at_unix_ms: u64,
     stale_if_error_until_unix_ms: Option<u64>,
     stale_while_revalidate_until_unix_ms: Option<u64>,
+    requires_revalidation: bool,
     must_revalidate: bool,
     last_access_unix_ms: u64,
 }

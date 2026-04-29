@@ -222,3 +222,95 @@ fn no_store_headers_remain_non_storable_during_revalidation() {
 
     assert!(!response_is_storable(&context, &response));
 }
+
+#[tokio::test]
+async fn fresh_no_cache_entry_revalidates_before_hit() {
+    let temp = tempfile::tempdir().expect("cache temp dir should exist");
+    let manager = test_manager(temp.path().to_path_buf(), 1024);
+    let policy = test_policy();
+    let key = "https:example.com:/fresh-no-cache";
+    let hash = cache_key_hash(key);
+    let paths = cache_paths(temp.path(), &hash);
+    let now = unix_time_ms(SystemTime::now());
+    let metadata = cache_metadata(
+        key.to_string(),
+        StatusCode::OK,
+        &http::HeaderMap::new(),
+        CacheMetadataInput {
+            requires_revalidation: true,
+            ..test_metadata_input(key, now.saturating_sub(2_000), now.saturating_add(60_000), 6)
+        },
+    );
+    write_cache_entry(&paths, &metadata, b"cached").await.expect("entry should be written");
+
+    let zone = manager.zones.get("default").expect("zone should exist");
+    {
+        let mut index = lock_index(&zone.index);
+        index.insert_entry(
+            key.to_string(),
+            CacheIndexEntry {
+                requires_revalidation: true,
+                ..test_index_entry(key, hash, 6, now.saturating_add(60_000), now)
+            },
+        );
+        index.current_size_bytes = 6;
+    }
+
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/fresh-no-cache")
+        .header("host", "example.com")
+        .body(full_body(Bytes::new()))
+        .expect("request should build");
+
+    match manager.lookup(CacheRequest::from_request(&request), "https", &policy).await {
+        CacheLookup::Miss(context) => assert_eq!(context.cache_status(), CacheStatus::Revalidated),
+        _ => panic!("fresh no-cache entry should revalidate before it can hit"),
+    }
+}
+
+#[tokio::test]
+async fn fresh_must_revalidate_entry_still_hits_until_expiry() {
+    let temp = tempfile::tempdir().expect("cache temp dir should exist");
+    let manager = test_manager(temp.path().to_path_buf(), 1024);
+    let policy = test_policy();
+    let key = "https:example.com:/fresh-must-revalidate";
+    let hash = cache_key_hash(key);
+    let paths = cache_paths(temp.path(), &hash);
+    let now = unix_time_ms(SystemTime::now());
+    let metadata = cache_metadata(
+        key.to_string(),
+        StatusCode::OK,
+        &http::HeaderMap::new(),
+        CacheMetadataInput {
+            must_revalidate: true,
+            ..test_metadata_input(key, now.saturating_sub(2_000), now.saturating_add(60_000), 6)
+        },
+    );
+    write_cache_entry(&paths, &metadata, b"cached").await.expect("entry should be written");
+
+    let zone = manager.zones.get("default").expect("zone should exist");
+    {
+        let mut index = lock_index(&zone.index);
+        index.insert_entry(
+            key.to_string(),
+            CacheIndexEntry {
+                must_revalidate: true,
+                ..test_index_entry(key, hash, 6, now.saturating_add(60_000), now)
+            },
+        );
+        index.current_size_bytes = 6;
+    }
+
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/fresh-must-revalidate")
+        .header("host", "example.com")
+        .body(full_body(Bytes::new()))
+        .expect("request should build");
+
+    match manager.lookup(CacheRequest::from_request(&request), "https", &policy).await {
+        CacheLookup::Hit(_) => {}
+        _ => panic!("fresh must-revalidate entry should remain cacheable until it expires"),
+    }
+}
