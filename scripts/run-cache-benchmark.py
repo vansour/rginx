@@ -662,6 +662,9 @@ def main() -> int:
             before_hit = origin_state.count("hit")
             run_warmup(listen_port, hit_warmup(args.hit_keys, args.body_bytes), args.timeout)
             warmed_hit = origin_state.count("hit") - before_hit
+            if warmed_hit != args.hit_keys:
+                raise RuntimeError("hit warmup did not populate every cache key")
+            before_hit_benchmark = origin_state.count("hit")
             hit = hit_requests(args.requests, args.hit_keys, args.body_bytes)
             elapsed, req_per_sec, avg_ms, p95_ms = benchmark(
                 listen_port,
@@ -675,18 +678,21 @@ def main() -> int:
                     requests=len(hit),
                     concurrency=min(args.concurrency, len(hit)),
                     expected_cache="HIT",
-                    upstream_requests=origin_state.count("hit") - before_hit,
+                    upstream_requests=origin_state.count("hit") - before_hit_benchmark,
                     elapsed_s=elapsed,
                     req_per_sec=req_per_sec,
                     avg_ms=avg_ms,
                     p95_ms=p95_ms,
                 )
             )
-            if origin_state.count("hit") - before_hit != warmed_hit:
+            if origin_state.count("hit") - before_hit_benchmark != 0:
                 raise RuntimeError("hit benchmark unexpectedly forwarded requests upstream")
 
             before_revalidate = origin_state.count("revalidate")
             run_warmup(listen_port, revalidate_warmup(args.body_bytes), args.timeout)
+            if origin_state.count("revalidate") - before_revalidate != 1:
+                raise RuntimeError("revalidate warmup did not seed the cached response")
+            before_revalidate_benchmark = origin_state.count("revalidate")
             revalidate = revalidate_requests(args.requests, args.body_bytes)
             elapsed, req_per_sec, avg_ms, p95_ms = benchmark(
                 listen_port,
@@ -700,7 +706,8 @@ def main() -> int:
                     requests=len(revalidate),
                     concurrency=min(args.concurrency, len(revalidate)),
                     expected_cache="REVALIDATED",
-                    upstream_requests=origin_state.count("revalidate") - before_revalidate,
+                    upstream_requests=origin_state.count("revalidate")
+                    - before_revalidate_benchmark,
                     elapsed_s=elapsed,
                     req_per_sec=req_per_sec,
                     avg_ms=avg_ms,
@@ -711,6 +718,9 @@ def main() -> int:
             before_slice = origin_state.count("slice")
             run_warmup(listen_port, slice_warmup(), args.timeout)
             warmed_slice = origin_state.count("slice") - before_slice
+            if warmed_slice != 1:
+                raise RuntimeError("slice warmup did not seed the cached range entry")
+            before_slice_benchmark = origin_state.count("slice")
             slice_hit_requests = slice_requests(args.requests)
             elapsed, req_per_sec, avg_ms, p95_ms = benchmark(
                 listen_port,
@@ -724,14 +734,14 @@ def main() -> int:
                     requests=len(slice_hit_requests),
                     concurrency=min(args.concurrency, len(slice_hit_requests)),
                     expected_cache="HIT",
-                    upstream_requests=origin_state.count("slice") - before_slice,
+                    upstream_requests=origin_state.count("slice") - before_slice_benchmark,
                     elapsed_s=elapsed,
                     req_per_sec=req_per_sec,
                     avg_ms=avg_ms,
                     p95_ms=p95_ms,
                 )
             )
-            if origin_state.count("slice") - before_slice != warmed_slice:
+            if origin_state.count("slice") - before_slice_benchmark != 0:
                 raise RuntimeError("slice-hit benchmark unexpectedly forwarded requests upstream")
 
             print_table(rows)
