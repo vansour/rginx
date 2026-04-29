@@ -1,3 +1,4 @@
+use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 
 use bytes::Bytes;
@@ -92,6 +93,62 @@ async fn shared_index_sync_shares_admission_counts_between_managers() {
         }
         _ => panic!("shared admission counts should allow the second manager to populate"),
     }
+}
+
+#[tokio::test]
+async fn shared_index_sync_keeps_local_hits_when_shared_metadata_db_is_corrupted() {
+    let temp = tempfile::tempdir().expect("cache temp dir should exist");
+    let manager_a = test_manager(temp.path().to_path_buf(), 1024);
+    let manager_b = test_manager(temp.path().to_path_buf(), 1024);
+    let policy = test_policy();
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/shared-corrupt")
+        .header("host", "example.com")
+        .body(full_body(Bytes::new()))
+        .expect("request should build");
+
+    let context =
+        match manager_a.lookup(CacheRequest::from_request(&request), "https", &policy).await {
+            CacheLookup::Miss(context) => *context,
+            _ => panic!("first manager should miss before storing"),
+        };
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(CACHE_CONTROL, "max-age=60")
+        .body(full_body("shared"))
+        .expect("response should build");
+    let _ = manager_a.store_response(context, response).await;
+
+    match manager_b.lookup(CacheRequest::from_request(&request), "https", &policy).await {
+        CacheLookup::Hit(response) => {
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(body.as_ref(), b"shared");
+        }
+        _ => panic!("second manager should sync the shared cache entry before corruption"),
+    }
+
+    let zone = manager_b.zones.get("default").expect("zone should exist");
+    let shared_generation = zone.shared_index_generation.load(Ordering::Relaxed);
+    let shared_path = zone
+        .shared_index_store
+        .as_ref()
+        .expect("shared metadata store should exist")
+        .path()
+        .to_path_buf();
+    std::fs::write(&shared_path, b"corrupt sqlite bytes")
+        .expect("shared metadata db should be corrupted on disk");
+
+    match manager_b.lookup(CacheRequest::from_request(&request), "https", &policy).await {
+        CacheLookup::Hit(response) => {
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(body.as_ref(), b"shared");
+        }
+        _ => panic!("corrupt shared metadata must not evict an already-synced local hit"),
+    }
+
+    assert_eq!(zone.shared_index_generation.load(Ordering::Relaxed), shared_generation);
+    assert!(lock_index(&zone.index).entries.contains_key("https:example.com:/shared-corrupt"));
 }
 
 #[tokio::test]

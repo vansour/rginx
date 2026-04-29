@@ -196,6 +196,59 @@ async fn cache_manager_serves_head_hit_without_reading_body_file() {
     }
 }
 
+#[tokio::test]
+async fn cache_manager_treats_missing_body_file_as_miss_and_cleans_index() {
+    let temp = tempfile::tempdir().expect("cache temp dir should exist");
+    let manager = test_manager(temp.path().to_path_buf(), 1024);
+    let policy = test_policy();
+    let key = "https:example.com:/missing-body";
+    let hash = cache_key_hash(key);
+    let paths = cache_paths(temp.path(), &hash);
+    let now = unix_time_ms(SystemTime::now());
+    let metadata = cache_metadata(
+        key.to_string(),
+        StatusCode::OK,
+        &http::HeaderMap::new(),
+        test_metadata_input(key, now.saturating_sub(2_000), now.saturating_add(60_000), 6),
+    );
+    write_cache_entry(&paths, &metadata, b"cached").await.expect("entry should be written");
+
+    let zone = manager.zones.get("default").expect("zone should exist");
+    {
+        let mut index = lock_index(&zone.index);
+        index.insert_entry(
+            key.to_string(),
+            test_index_entry(key, hash, 6, now.saturating_add(60_000), now),
+        );
+        index.current_size_bytes = 6;
+    }
+
+    tokio::fs::remove_file(&paths.body).await.expect("body file should be removable");
+
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/missing-body")
+        .header("host", "example.com")
+        .body(full_body(Bytes::new()))
+        .expect("request should build");
+
+    match manager.lookup(CacheRequest::from_request(&request), "https", &policy).await {
+        CacheLookup::Miss(_) => {}
+        CacheLookup::Hit(_) => panic!("missing body file must not be served"),
+        CacheLookup::Updating(_, _) => {
+            panic!("missing body file must not trigger background update")
+        }
+        CacheLookup::Bypass(status) => panic!("cacheable request should not bypass: {status:?}"),
+    }
+
+    let index = lock_index(&zone.index);
+    assert!(!index.entries.contains_key(key));
+    assert_eq!(index.current_size_bytes, 0);
+    drop(index);
+    assert!(!paths.metadata.exists());
+    assert!(!paths.body.exists());
+}
+
 #[test]
 fn should_refresh_from_not_modified_requires_cached_entry() {
     let temp = tempfile::tempdir().expect("cache temp dir should exist");

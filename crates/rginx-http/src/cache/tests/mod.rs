@@ -18,6 +18,7 @@ mod storage_p1;
 mod storage_p2;
 mod storage_p3;
 mod storage_regressions;
+mod stress;
 
 fn test_zone(path: PathBuf, max_entry_bytes: usize) -> Arc<CacheZoneRuntime> {
     test_zone_with_notifier(path, max_entry_bytes, None)
