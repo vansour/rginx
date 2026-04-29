@@ -1,6 +1,5 @@
 use http::StatusCode;
 
-use super::super::remove_zone_shared_index_entry;
 use super::*;
 
 pub(in crate::cache) async fn refresh_not_modified_response(
@@ -95,13 +94,12 @@ pub(in crate::cache) async fn refresh_not_modified_response(
             .await
             .map_err(|error| CacheStoreError { source: Box::new(error) })
         };
-        remove_index_entry(&context.zone, &context.key);
+        remove_zone_index_entry(&context.zone, &context.key).await;
         {
             let _io_guard = context.zone.io_lock.lock().await;
             let _ = fs::remove_file(&paths.metadata).await;
             let _ = fs::remove_file(&paths.body).await;
         }
-        remove_zone_shared_index_entry(&context.zone, &context.key).await;
         context.zone.record_revalidated();
         return refreshed.map(|response| with_cache_status(response, CacheStatus::Revalidated));
     }

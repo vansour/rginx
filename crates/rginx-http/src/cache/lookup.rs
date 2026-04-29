@@ -119,9 +119,8 @@ impl CacheManager {
                     %error,
                     "failed to read cache metadata; removing entry"
                 );
-                remove_index_entry(zone, key);
+                remove_zone_index_entry(zone, key).await;
                 remove_cache_files_if_unindexed(zone, key, &entry.hash).await;
-                remove_zone_shared_index_entry(zone, key).await;
                 return None;
             }
         };
@@ -133,9 +132,8 @@ impl CacheManager {
                 key_hash = %entry.hash,
                 "cache metadata key mismatch; removing entry"
             );
-            remove_index_entry(zone, key);
+            remove_zone_index_entry(zone, key).await;
             remove_cache_files_if_unindexed(zone, key, &entry.hash).await;
-            remove_zone_shared_index_entry(zone, key).await;
             return None;
         }
         let headers = match metadata.headers_map() {
@@ -147,9 +145,8 @@ impl CacheManager {
                     %error,
                     "failed to decode cached response headers; removing entry"
                 );
-                remove_index_entry(zone, key);
+                remove_zone_index_entry(zone, key).await;
                 remove_cache_files_if_unindexed(zone, key, &entry.hash).await;
-                remove_zone_shared_index_entry(zone, key).await;
                 return None;
             }
         };
@@ -193,9 +190,8 @@ impl CacheManager {
                         %error,
                         "failed to build stale cached response; removing entry"
                     );
-                    remove_index_entry(zone, key);
+                    remove_zone_index_entry(zone, key).await;
                     remove_cache_files_if_unindexed(zone, key, &entry.hash).await;
-                    remove_zone_shared_index_entry(zone, key).await;
                     return None;
                 }
             }
@@ -208,9 +204,8 @@ impl CacheManager {
                 key_hash = %entry.hash,
                 "cache metadata key mismatch while serving stale entry; removing entry"
             );
-            remove_index_entry(zone, key);
+            remove_zone_index_entry(zone, key).await;
             remove_cache_files_if_unindexed(zone, key, &entry.hash).await;
-            remove_zone_shared_index_entry(zone, key).await;
             return None;
         }
         if status == CacheStatus::Updating {

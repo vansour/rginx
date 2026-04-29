@@ -116,9 +116,8 @@ impl CacheManager {
                                 %error,
                                 "failed to read cached response; treating as miss"
                             );
-                            remove_index_entry(&zone, &key);
+                            remove_zone_index_entry(&zone, &key).await;
                             remove_cache_files_if_unindexed(&zone, &key, &entry.hash).await;
-                            remove_zone_shared_index_entry(&zone, &key).await;
                         }
                     }
                 }

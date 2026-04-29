@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
@@ -18,7 +18,6 @@ use super::policy::{
     ResponseBodySize, response_freshness, response_is_storable, response_is_storable_with_size,
     response_no_cache,
 };
-use super::shared::apply_zone_shared_index_operations;
 use super::{
     CacheIndex, CacheIndexEntry, CachePurgeResult, CacheStatus, CacheStoreContext,
     CacheZoneRuntime, with_cache_status,
@@ -34,7 +33,7 @@ use helpers::{
 pub(in crate::cache) use helpers::{purge_scope, purge_selector_matches};
 pub(super) use maintenance::{
     cleanup_inactive_entries_in_zone, eviction_candidates, lock_index, purge_zone_entries,
-    record_cache_admission_attempt, remove_index_entry,
+    record_cache_admission_attempt, remove_zone_index_entry,
 };
 pub(in crate::cache) use revalidate::refresh_not_modified_response;
 
@@ -100,8 +99,7 @@ pub(super) async fn store_response(
     let vary = cache_vary_values(&context, &context.request, &parts.headers);
     let final_key = cache_variant_key(&context.base_key, &vary);
     let admission =
-        record_cache_admission_attempt(context.zone.as_ref(), &final_key, context.policy.min_uses);
-    apply_zone_shared_index_operations(&context.zone, admission.shared_operations).await;
+        record_cache_admission_attempt(&context.zone, &final_key, context.policy.min_uses).await;
     if !admission.admitted {
         return downstream_response();
     }
@@ -133,6 +131,7 @@ pub(super) async fn store_response(
         if context.revalidating {
             context.zone.record_revalidated();
         }
+        drop(_io_guard);
         update_index_after_store(
             &context.zone,
             final_key.clone(),

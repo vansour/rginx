@@ -110,20 +110,17 @@ pub(super) async fn sync_zone_shared_index_if_needed(zone: &Arc<CacheZoneRuntime
     zone.shared_index_generation.store(loaded.generation, Ordering::Relaxed);
 }
 
-pub(super) async fn apply_zone_shared_index_operations(
-    zone: &Arc<CacheZoneRuntime>,
-    operations: Vec<SharedIndexOperation>,
+pub(super) fn apply_zone_shared_index_operations_locked(
+    zone: &CacheZoneRuntime,
+    operations: &[SharedIndexOperation],
 ) {
     if operations.is_empty() {
         return;
     }
-
     let Some(store) = zone.shared_index_store.as_ref() else {
         return;
     };
-
-    let _sync_guard = zone.shared_index_sync_lock.lock().await;
-    match run_blocking(|| apply_shared_index_operations(store.as_ref(), &operations)) {
+    match run_blocking(|| apply_shared_index_operations(store.as_ref(), operations)) {
         Ok(generation) => {
             zone.shared_index_generation.store(generation, Ordering::Relaxed);
         }
@@ -138,26 +135,26 @@ pub(super) async fn apply_zone_shared_index_operations(
     }
 }
 
-pub(super) async fn remove_zone_shared_index_entry(zone: &Arc<CacheZoneRuntime>, key: &str) {
-    apply_zone_shared_index_operations(
-        zone,
-        vec![
-            SharedIndexOperation::RemoveEntry { key: key.to_string() },
-            SharedIndexOperation::RemoveAdmissionCount { key: key.to_string() },
-        ],
-    )
-    .await;
-}
-
 fn bootstrap_shared_index_from_cache_files(
     zone: &rginx_core::CacheZone,
     store: Arc<SharedIndexStore>,
 ) -> io::Result<(CacheIndex, Option<Arc<SharedIndexStore>>, u64)> {
-    if let Some(legacy) = load_legacy_shared_index_from_disk(zone)? {
-        let generation = legacy.generation.max(1);
-        rebuild_shared_index_store(store.as_ref(), &legacy.index, generation)?;
-        let _ = delete_legacy_shared_index_file(zone);
-        return Ok((legacy.index, Some(store), generation));
+    match load_legacy_shared_index_from_disk(zone) {
+        Ok(Some(legacy)) => {
+            let generation = legacy.generation.max(1);
+            rebuild_shared_index_store(store.as_ref(), &legacy.index, generation)?;
+            let _ = delete_legacy_shared_index_file(zone);
+            return Ok((legacy.index, Some(store), generation));
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(
+                zone = %zone.name,
+                path = %shared_index_path(zone).display(),
+                %error,
+                "failed to import legacy shared cache index; rebuilding from cache files"
+            );
+        }
     }
 
     let index = load_index_from_disk(zone)?;

@@ -1,8 +1,13 @@
-use super::super::shared::{SharedIndexOperation, apply_zone_shared_index_operations};
+use super::super::shared::{SharedIndexOperation, apply_zone_shared_index_operations_locked};
 use super::*;
 use crate::cache::PurgeSelector;
-use crate::cache::vary::sorted_vary_dimension_names;
-use std::collections::HashMap;
+
+mod index_state;
+
+use index_state::{add_variant_key, remove_variant_key, variant_keys_with_different_dimensions};
+pub(in crate::cache) use index_state::{
+    eviction_candidates, lock_index, record_cache_admission_attempt, remove_zone_index_entry,
+};
 
 pub(in crate::cache) async fn cleanup_inactive_entries_in_zone(zone: &Arc<CacheZoneRuntime>) {
     let now = unix_time_ms(SystemTime::now());
@@ -35,36 +40,37 @@ pub(in crate::cache) async fn cleanup_inactive_entries_in_zone(zone: &Arc<CacheZ
 
     let mut total_removed = 0usize;
     let mut changed = false;
-    let mut shared_operations = Vec::new();
     let mut batches = inactive_keys.chunks(batch_size).peekable();
     while let Some(batch) = batches.next() {
         let removed = {
+            let _sync_guard = zone.shared_index_sync_lock.lock().await;
             let mut index = lock_index(&zone.index);
             let mut removed = Vec::new();
+            let mut shared_operations = Vec::new();
             for key in batch {
                 if let Some(entry) = index.entries.remove(key) {
                     index.current_size_bytes =
                         index.current_size_bytes.saturating_sub(entry.body_size_bytes);
                     index.admission_counts.remove(key);
                     remove_variant_key(&mut index.variants, &entry.base_key, key);
+                    shared_operations.push(SharedIndexOperation::RemoveEntry { key: key.clone() });
+                    shared_operations
+                        .push(SharedIndexOperation::RemoveAdmissionCount { key: key.clone() });
                     removed.push((key.clone(), entry));
                 }
             }
+            apply_zone_shared_index_operations_locked(zone.as_ref(), &shared_operations);
             removed
         };
         if !removed.is_empty() {
             changed = true;
             total_removed += removed.len();
-            let io_guard = zone.io_lock.lock().await;
-            for (key, entry) in &removed {
+            let _io_guard = zone.io_lock.lock().await;
+            for (_, entry) in &removed {
                 let paths = cache_paths_for_zone(zone.config.as_ref(), &entry.hash);
                 let _ = fs::remove_file(paths.metadata).await;
                 let _ = fs::remove_file(paths.body).await;
-                shared_operations.push(SharedIndexOperation::RemoveEntry { key: key.clone() });
-                shared_operations
-                    .push(SharedIndexOperation::RemoveAdmissionCount { key: key.clone() });
             }
-            drop(io_guard);
         }
         if batches.peek().is_some() && !zone.config.manager_sleep.is_zero() {
             tokio::time::sleep(zone.config.manager_sleep).await;
@@ -72,7 +78,6 @@ pub(in crate::cache) async fn cleanup_inactive_entries_in_zone(zone: &Arc<CacheZ
     }
 
     if changed {
-        apply_zone_shared_index_operations(zone, shared_operations).await;
         zone.record_inactive_cleanup(total_removed);
         zone.notify_changed();
     }
@@ -84,6 +89,7 @@ pub(in crate::cache) async fn purge_zone_entries(
 ) -> CachePurgeResult {
     let scope = purge_scope(&selector);
     let removed = {
+        let _sync_guard = zone.shared_index_sync_lock.lock().await;
         let mut index = lock_index(&zone.index);
         let matching_keys = index
             .entries
@@ -91,31 +97,32 @@ pub(in crate::cache) async fn purge_zone_entries(
             .filter_map(|key| purge_selector_matches(&selector, key).then_some(key.clone()))
             .collect::<Vec<_>>();
         let mut removed = Vec::with_capacity(matching_keys.len());
+        let mut shared_operations = Vec::with_capacity(matching_keys.len() * 2);
         for key in matching_keys {
             if let Some(entry) = index.entries.remove(&key) {
                 index.current_size_bytes =
                     index.current_size_bytes.saturating_sub(entry.body_size_bytes);
                 index.admission_counts.remove(&key);
                 remove_variant_key(&mut index.variants, &entry.base_key, &key);
+                shared_operations.push(SharedIndexOperation::RemoveEntry { key: key.clone() });
+                shared_operations
+                    .push(SharedIndexOperation::RemoveAdmissionCount { key: key.clone() });
                 removed.push((key, entry));
             }
         }
+        apply_zone_shared_index_operations_locked(zone.as_ref(), &shared_operations);
         removed
     };
+
     let removed_bytes = removed.iter().map(|(_, entry)| entry.body_size_bytes).sum::<usize>();
     if !removed.is_empty() {
         zone.record_purge(removed.len());
-        let mut shared_operations = Vec::with_capacity(removed.len() * 2);
         let _io_guard = zone.io_lock.lock().await;
-        for (key, entry) in &removed {
+        for (_, entry) in &removed {
             let paths = cache_paths_for_zone(zone.config.as_ref(), &entry.hash);
             let _ = fs::remove_file(paths.metadata).await;
             let _ = fs::remove_file(paths.body).await;
-            shared_operations.push(SharedIndexOperation::RemoveEntry { key: key.clone() });
-            shared_operations.push(SharedIndexOperation::RemoveAdmissionCount { key: key.clone() });
         }
-        drop(_io_guard);
-        apply_zone_shared_index_operations(&zone, shared_operations).await;
         zone.notify_changed();
     }
     CachePurgeResult {
@@ -132,11 +139,13 @@ pub(in crate::cache) async fn update_index_after_store(
     entry: CacheIndexEntry,
     replaced_entry: Option<(String, CacheIndexEntry)>,
 ) {
-    let (removed_hashes, eviction_count, shared_operations) = {
+    let (removed_hashes, eviction_count) = {
+        let _sync_guard = zone.shared_index_sync_lock.lock().await;
         let mut index = lock_index(&zone.index);
         let mut removed_hashes = Vec::new();
         let mut eviction_count = 0usize;
         let mut shared_operations = Vec::new();
+
         if let Some((replaced_key, _)) = replaced_entry
             && let Some(removed) = index.entries.remove(&replaced_key)
         {
@@ -151,6 +160,7 @@ pub(in crate::cache) async fn update_index_after_store(
             shared_operations
                 .push(SharedIndexOperation::RemoveAdmissionCount { key: replaced_key });
         }
+
         let incompatible_keys = variant_keys_with_different_dimensions(&index, &entry, &key);
         for incompatible_key in incompatible_keys {
             if let Some(removed) = index.entries.remove(&incompatible_key) {
@@ -182,6 +192,7 @@ pub(in crate::cache) async fn update_index_after_store(
         shared_operations
             .push(SharedIndexOperation::UpsertEntry { key: key.clone(), entry: entry.clone() });
         shared_operations.push(SharedIndexOperation::RemoveAdmissionCount { key: key.clone() });
+
         for (evicted_key, evicted_entry) in
             eviction_candidates(&mut index, zone.config.max_size_bytes)
         {
@@ -194,147 +205,21 @@ pub(in crate::cache) async fn update_index_after_store(
             shared_operations.push(SharedIndexOperation::RemoveEntry { key: evicted_key.clone() });
             shared_operations.push(SharedIndexOperation::RemoveAdmissionCount { key: evicted_key });
         }
-        (removed_hashes, eviction_count, shared_operations)
+
+        apply_zone_shared_index_operations_locked(zone.as_ref(), &shared_operations);
+        (removed_hashes, eviction_count)
     };
 
     if eviction_count > 0 {
         zone.record_evictions(eviction_count);
     }
-    for hash in removed_hashes {
-        let paths = cache_paths_for_zone(zone.config.as_ref(), &hash);
-        let _ = fs::remove_file(paths.metadata).await;
-        let _ = fs::remove_file(paths.body).await;
+    if !removed_hashes.is_empty() {
+        let _io_guard = zone.io_lock.lock().await;
+        for hash in removed_hashes {
+            let paths = cache_paths_for_zone(zone.config.as_ref(), &hash);
+            let _ = fs::remove_file(paths.metadata).await;
+            let _ = fs::remove_file(paths.body).await;
+        }
     }
-    apply_zone_shared_index_operations(zone, shared_operations).await;
     zone.notify_changed();
-}
-
-pub(in crate::cache) fn eviction_candidates(
-    index: &mut CacheIndex,
-    max_size_bytes: Option<usize>,
-) -> Vec<(String, CacheIndexEntry)> {
-    let Some(max_size_bytes) = max_size_bytes else {
-        return Vec::new();
-    };
-    if index.current_size_bytes <= max_size_bytes {
-        return Vec::new();
-    }
-
-    let mut entries =
-        index.entries.iter().map(|(key, entry)| (key.clone(), entry.clone())).collect::<Vec<_>>();
-    entries.sort_by_key(|(_, entry)| entry.last_access_unix_ms);
-
-    let mut evicted = Vec::new();
-    for (key, entry) in entries {
-        if index.current_size_bytes <= max_size_bytes {
-            break;
-        }
-        if index.entries.remove(&key).is_some() {
-            index.current_size_bytes =
-                index.current_size_bytes.saturating_sub(entry.body_size_bytes);
-            index.admission_counts.remove(&key);
-            evicted.push((key, entry));
-        }
-    }
-    evicted
-}
-
-pub(in crate::cache) fn remove_index_entry(zone: &CacheZoneRuntime, key: &str) -> bool {
-    let mut index = lock_index(&zone.index);
-    let mut changed = false;
-    if let Some(entry) = index.entries.remove(key) {
-        index.current_size_bytes = index.current_size_bytes.saturating_sub(entry.body_size_bytes);
-        remove_variant_key(&mut index.variants, &entry.base_key, key);
-        changed = true;
-    }
-    changed |= index.admission_counts.remove(key).is_some();
-    if changed {
-        zone.notify_changed();
-    }
-    changed
-}
-
-pub(in crate::cache) fn lock_index(
-    mutex: &Mutex<CacheIndex>,
-) -> std::sync::MutexGuard<'_, CacheIndex> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-pub(in crate::cache) fn record_cache_admission_attempt(
-    zone: &CacheZoneRuntime,
-    key: &str,
-    min_uses: u64,
-) -> CacheAdmissionDecision {
-    let mut index = lock_index(&zone.index);
-    if min_uses <= 1 || index.entries.contains_key(key) {
-        let shared_operations = index
-            .admission_counts
-            .remove(key)
-            .map(|_| SharedIndexOperation::RemoveAdmissionCount { key: key.to_string() })
-            .into_iter()
-            .collect();
-        return CacheAdmissionDecision { admitted: true, shared_operations };
-    }
-
-    let uses = index.admission_counts.entry(key.to_string()).or_insert(0);
-    *uses = uses.saturating_add(1);
-    if *uses >= min_uses {
-        index.admission_counts.remove(key);
-        CacheAdmissionDecision {
-            admitted: true,
-            shared_operations: vec![SharedIndexOperation::RemoveAdmissionCount {
-                key: key.to_string(),
-            }],
-        }
-    } else {
-        CacheAdmissionDecision {
-            admitted: false,
-            shared_operations: vec![SharedIndexOperation::SetAdmissionCount {
-                key: key.to_string(),
-                uses: *uses,
-            }],
-        }
-    }
-}
-
-pub(in crate::cache) struct CacheAdmissionDecision {
-    pub(in crate::cache) admitted: bool,
-    pub(in crate::cache) shared_operations: Vec<SharedIndexOperation>,
-}
-
-fn add_variant_key(variants: &mut HashMap<String, Vec<String>>, base_key: String, key: String) {
-    let entry = variants.entry(base_key).or_default();
-    if !entry.contains(&key) {
-        entry.push(key);
-    }
-}
-
-fn remove_variant_key(variants: &mut HashMap<String, Vec<String>>, base_key: &str, key: &str) {
-    let Some(keys) = variants.get_mut(base_key) else {
-        return;
-    };
-    keys.retain(|candidate| candidate != key);
-    if keys.is_empty() {
-        variants.remove(base_key);
-    }
-}
-
-fn variant_keys_with_different_dimensions(
-    index: &CacheIndex,
-    entry: &CacheIndexEntry,
-    key: &str,
-) -> Vec<String> {
-    let expected_names = sorted_vary_dimension_names(&entry.vary);
-    index
-        .variants
-        .get(&entry.base_key)
-        .into_iter()
-        .flatten()
-        .filter(|candidate| candidate.as_str() != key)
-        .filter_map(|candidate| {
-            let existing = index.entries.get(candidate)?;
-            let existing_names = sorted_vary_dimension_names(&existing.vary);
-            (existing_names != expected_names).then_some(candidate.clone())
-        })
-        .collect()
 }

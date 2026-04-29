@@ -193,6 +193,43 @@ fn bootstrap_shared_index_imports_legacy_sidecar_into_shared_metadata_db() {
 }
 
 #[test]
+fn bootstrap_shared_index_skips_unreadable_legacy_sidecar_and_rebuilds_from_cache_files() {
+    let temp = tempfile::tempdir().expect("cache temp dir should exist");
+    let zone = test_zone(temp.path().to_path_buf(), 1024);
+    let key = "https:example.com:/legacy-shared-corrupt";
+    let hash = cache_key_hash(key);
+    let now = unix_time_ms(SystemTime::now());
+    let legacy_path = zone.config.path.join(".rginx-index.json");
+    let shared_db_path = zone.config.path.join(".rginx-index.sqlite3");
+    let paths = cache_paths_for_zone(zone.config.as_ref(), &hash);
+
+    std::fs::create_dir_all(&paths.dir).expect("cache dir should be created");
+    std::fs::write(&legacy_path, b"{not-json").expect("corrupt legacy sidecar should be written");
+    std::fs::write(
+        &paths.metadata,
+        serde_json::to_vec(&cache_metadata(
+            key.to_string(),
+            StatusCode::OK,
+            &http::HeaderMap::new(),
+            test_metadata_input(key, now, now.saturating_add(60_000), 6),
+        ))
+        .expect("cache metadata should serialize"),
+    )
+    .expect("cache metadata should be written");
+    std::fs::write(&paths.body, b"cached").expect("cache body should be written");
+
+    let (index, store, generation) = shared::bootstrap_shared_index(zone.config.as_ref())
+        .expect("bootstrap should fall back to cache files");
+    assert!(store.is_some(), "shared metadata store should still be initialized");
+    assert_eq!(generation, 1);
+    assert!(legacy_path.exists(), "corrupt legacy sidecar should be left in place");
+    assert!(shared_db_path.exists(), "shared metadata db should be created");
+    let entry = index.entries.get(key).expect("cache file entry should be loaded");
+    assert_eq!(entry.hash, hash);
+    assert_eq!(entry.body_size_bytes, 6);
+}
+
+#[test]
 fn shared_fill_locks_coordinate_across_zone_instances() {
     let temp = tempfile::tempdir().expect("cache temp dir should exist");
     let zone_a = test_zone(temp.path().to_path_buf(), 1024);
