@@ -18,9 +18,10 @@ use super::policy::{
     ResponseBodySize, response_freshness, response_is_storable, response_is_storable_with_size,
     response_no_cache,
 };
+use super::shared::apply_zone_shared_index_operations;
 use super::{
     CacheIndex, CacheIndexEntry, CachePurgeResult, CacheStatus, CacheStoreContext,
-    CacheZoneRuntime, persist_zone_shared_index, with_cache_status,
+    CacheZoneRuntime, with_cache_status,
 };
 
 mod helpers;
@@ -98,10 +99,10 @@ pub(super) async fn store_response(
 
     let vary = cache_vary_values(&context, &context.request, &parts.headers);
     let final_key = cache_variant_key(&context.base_key, &vary);
-    let admitted =
+    let admission =
         record_cache_admission_attempt(context.zone.as_ref(), &final_key, context.policy.min_uses);
-    persist_zone_shared_index(&context.zone).await;
-    if !admitted {
+    apply_zone_shared_index_operations(&context.zone, admission.shared_operations).await;
+    if !admission.admitted {
         return downstream_response();
     }
     let metadata = cache_metadata(

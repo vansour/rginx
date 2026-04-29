@@ -132,7 +132,7 @@ impl CacheStoreContext {
                 );
                 remove_index_entry(&self.zone, &self.key);
                 remove_cache_files_if_unindexed(&self.zone, &self.key, &entry.hash).await;
-                persist_zone_shared_index(&self.zone).await;
+                remove_zone_shared_index_entry(&self.zone, &self.key).await;
                 None
             }
         }

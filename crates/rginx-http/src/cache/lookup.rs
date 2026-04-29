@@ -121,7 +121,7 @@ impl CacheManager {
                 );
                 remove_index_entry(zone, key);
                 remove_cache_files_if_unindexed(zone, key, &entry.hash).await;
-                persist_zone_shared_index(zone).await;
+                remove_zone_shared_index_entry(zone, key).await;
                 return None;
             }
         };
@@ -135,7 +135,7 @@ impl CacheManager {
             );
             remove_index_entry(zone, key);
             remove_cache_files_if_unindexed(zone, key, &entry.hash).await;
-            persist_zone_shared_index(zone).await;
+            remove_zone_shared_index_entry(zone, key).await;
             return None;
         }
         let headers = match metadata.headers_map() {
@@ -149,7 +149,7 @@ impl CacheManager {
                 );
                 remove_index_entry(zone, key);
                 remove_cache_files_if_unindexed(zone, key, &entry.hash).await;
-                persist_zone_shared_index(zone).await;
+                remove_zone_shared_index_entry(zone, key).await;
                 return None;
             }
         };
@@ -195,7 +195,7 @@ impl CacheManager {
                     );
                     remove_index_entry(zone, key);
                     remove_cache_files_if_unindexed(zone, key, &entry.hash).await;
-                    persist_zone_shared_index(zone).await;
+                    remove_zone_shared_index_entry(zone, key).await;
                     return None;
                 }
             }
@@ -210,7 +210,7 @@ impl CacheManager {
             );
             remove_index_entry(zone, key);
             remove_cache_files_if_unindexed(zone, key, &entry.hash).await;
-            persist_zone_shared_index(zone).await;
+            remove_zone_shared_index_entry(zone, key).await;
             return None;
         }
         if status == CacheStatus::Updating {

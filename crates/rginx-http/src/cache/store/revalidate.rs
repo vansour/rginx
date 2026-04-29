@@ -1,5 +1,6 @@
 use http::StatusCode;
 
+use super::super::remove_zone_shared_index_entry;
 use super::*;
 
 pub(in crate::cache) async fn refresh_not_modified_response(
@@ -100,7 +101,7 @@ pub(in crate::cache) async fn refresh_not_modified_response(
             let _ = fs::remove_file(&paths.metadata).await;
             let _ = fs::remove_file(&paths.body).await;
         }
-        persist_zone_shared_index(&context.zone).await;
+        remove_zone_shared_index_entry(&context.zone, &context.key).await;
         context.zone.record_revalidated();
         return refreshed.map(|response| with_cache_status(response, CacheStatus::Revalidated));
     }
