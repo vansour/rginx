@@ -83,7 +83,7 @@ class OriginState:
 class OriginHandler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
-    def log_message(self, format: str, *args: object) -> None:
+    def log_message(self, _format: str, *_args: object) -> None:
         return
 
     def do_GET(self) -> None:  # noqa: N802
@@ -430,13 +430,19 @@ def run_request(port: int, bench_request: BenchRequest, timeout: float) -> float
     return time.perf_counter() - started
 
 
-def benchmark(port: int, requests: list[BenchRequest], concurrency: int, timeout: float) -> tuple[float, float, float, float]:
+def benchmark(
+    port: int,
+    requests: list[BenchRequest],
+    concurrency: int,
+    timeout: float,
+) -> tuple[float, float, float, float]:
     started = time.perf_counter()
     durations: list[float] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
         futures = [executor.submit(run_request, port, request, timeout) for request in requests]
-        for future in concurrent.futures.as_completed(futures):
-            durations.append(future.result())
+        durations.extend(
+            future.result() for future in concurrent.futures.as_completed(futures)
+        )
     elapsed = time.perf_counter() - started
     avg_ms = statistics.mean(durations) * 1000 if durations else 0.0
     req_per_sec = len(requests) / elapsed if elapsed else 0.0
@@ -705,18 +711,18 @@ def main() -> int:
             before_slice = origin_state.count("slice")
             run_warmup(listen_port, slice_warmup(), args.timeout)
             warmed_slice = origin_state.count("slice") - before_slice
-            slice = slice_requests(args.requests)
+            slice_hit_requests = slice_requests(args.requests)
             elapsed, req_per_sec, avg_ms, p95_ms = benchmark(
                 listen_port,
-                slice,
-                min(args.concurrency, len(slice)),
+                slice_hit_requests,
+                min(args.concurrency, len(slice_hit_requests)),
                 args.timeout,
             )
             rows.append(
                 ScenarioRow(
                     name="slice_hit",
-                    requests=len(slice),
-                    concurrency=min(args.concurrency, len(slice)),
+                    requests=len(slice_hit_requests),
+                    concurrency=min(args.concurrency, len(slice_hit_requests)),
                     expected_cache="HIT",
                     upstream_requests=origin_state.count("slice") - before_slice,
                     elapsed_s=elapsed,
