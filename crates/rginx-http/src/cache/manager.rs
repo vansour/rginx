@@ -18,7 +18,7 @@ impl CacheManager {
                         zone.path.display()
                     ))
                 })?;
-                let (index, shared_index_generation, shared_index_last_modified_unix_ms) =
+                let (index, shared_index_store, shared_index_generation) =
                     bootstrap_shared_index(zone.as_ref()).map_err(|error| {
                         Error::Server(format!(
                             "failed to load cache zone `{name}` index from `{}`: {error}",
@@ -32,13 +32,11 @@ impl CacheManager {
                         index: Mutex::new(index),
                         io_lock: AsyncMutex::new(()),
                         shared_index_sync_lock: AsyncMutex::new(()),
+                        shared_index_store,
                         fill_locks: Arc::new(Mutex::new(HashMap::new())),
                         fill_lock_generation: AtomicU64::new(0),
                         last_inactive_cleanup_unix_ms: AtomicU64::new(0),
                         shared_index_generation: AtomicU64::new(shared_index_generation),
-                        shared_index_last_modified_unix_ms: AtomicU64::new(
-                            shared_index_last_modified_unix_ms,
-                        ),
                         stats: CacheZoneStats::default(),
                         change_notifier: change_notifier.clone(),
                     }),
@@ -118,9 +116,8 @@ impl CacheManager {
                                 %error,
                                 "failed to read cached response; treating as miss"
                             );
-                            remove_index_entry(&zone, &key);
+                            remove_zone_index_entry(&zone, &key).await;
                             remove_cache_files_if_unindexed(&zone, &key, &entry.hash).await;
-                            persist_zone_shared_index(&zone).await;
                         }
                     }
                 }

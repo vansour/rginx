@@ -1,80 +1,104 @@
 use std::io;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use super::load::load_index_from_disk;
 use super::store::lock_index;
-use super::{CacheIndex, CacheZoneRuntime};
+use super::{CacheIndex, CacheIndexEntry, CacheZoneRuntime};
 
 mod index_file;
 
+pub(super) use index_file::SharedIndexStore;
 pub(in crate::cache) use index_file::shared_fill_lock_path;
+pub(super) use index_file::shared_index_store;
 use index_file::{
-    load_shared_index_from_disk, persist_shared_index_to_disk, run_blocking,
-    shared_index_modified_unix_ms, shared_index_path,
+    apply_shared_index_operations, delete_legacy_shared_index_file,
+    load_legacy_shared_index_from_disk, load_shared_index_from_disk, recreate_shared_index_on_disk,
+    run_blocking, shared_index_generation, shared_index_path,
 };
+
+#[derive(Clone)]
+pub(super) enum SharedIndexOperation {
+    UpsertEntry { key: String, entry: CacheIndexEntry },
+    RemoveEntry { key: String },
+    SetAdmissionCount { key: String, uses: u64 },
+    RemoveAdmissionCount { key: String },
+}
 
 pub(super) fn bootstrap_shared_index(
     zone: &rginx_core::CacheZone,
-) -> io::Result<(CacheIndex, u64, u64)> {
+) -> io::Result<(CacheIndex, Option<Arc<SharedIndexStore>>, u64)> {
     if !zone.shared_index {
-        return Ok((load_index_from_disk(zone)?, 0, 0));
+        return Ok((load_index_from_disk(zone)?, None, 0));
     }
 
-    match load_shared_index_from_disk(zone) {
-        Ok(Some(loaded)) => Ok((loaded.index, loaded.generation, loaded.modified_unix_ms)),
-        Ok(None) => {
-            let index = load_index_from_disk(zone)?;
-            let modified_unix_ms = persist_shared_index_to_disk(zone, &index, 1, 0)?;
-            Ok((index, 1, modified_unix_ms))
+    let store = Arc::new(shared_index_store(zone));
+    match run_blocking(|| load_shared_index_from_disk(store.as_ref())) {
+        Ok(loaded) if shared_index_loaded(&loaded.index, loaded.generation) => {
+            let _ = delete_legacy_shared_index_file(zone);
+            Ok((loaded.index, Some(store), loaded.generation))
         }
+        Ok(_) => bootstrap_shared_index_from_cache_files(zone, store),
         Err(error) => {
             tracing::warn!(
                 zone = %zone.name,
                 path = %shared_index_path(zone).display(),
                 %error,
-                "failed to load shared cache index; rebuilding from cache files"
+                "failed to load shared cache index metadata; rebuilding from cache files"
             );
-            let index = load_index_from_disk(zone)?;
-            let modified_unix_ms = persist_shared_index_to_disk(zone, &index, 1, 0)?;
-            Ok((index, 1, modified_unix_ms))
+            bootstrap_shared_index_from_cache_files(zone, store)
         }
     }
 }
 
-pub(super) async fn sync_zone_shared_index_if_needed(zone: &std::sync::Arc<CacheZoneRuntime>) {
-    if !zone.config.shared_index {
-        return;
-    }
-
-    let Some(disk_modified_unix_ms) = read_shared_index_modified_unix_ms(zone.config.as_ref())
-    else {
+pub(super) async fn sync_zone_shared_index_if_needed(zone: &Arc<CacheZoneRuntime>) {
+    let Some(store) = zone.shared_index_store.as_ref() else {
         return;
     };
-    if disk_modified_unix_ms
-        <= zone.shared_index_last_modified_unix_ms.load(std::sync::atomic::Ordering::Relaxed)
-    {
+
+    let local_generation = zone.shared_index_generation.load(Ordering::Relaxed);
+    let shared_generation = match run_blocking(|| shared_index_generation(store.as_ref())) {
+        Ok(generation) => generation,
+        Err(error) => {
+            tracing::warn!(
+                zone = %zone.config.name,
+                path = %store.path().display(),
+                %error,
+                "failed to read shared cache index generation; keeping local index"
+            );
+            return;
+        }
+    };
+    if shared_generation <= local_generation {
         return;
     }
 
     let _sync_guard = zone.shared_index_sync_lock.lock().await;
-    let Some(disk_modified_unix_ms) = read_shared_index_modified_unix_ms(zone.config.as_ref())
-    else {
-        return;
-    };
-    if disk_modified_unix_ms
-        <= zone.shared_index_last_modified_unix_ms.load(std::sync::atomic::Ordering::Relaxed)
-    {
-        return;
-    }
-
-    let loaded = match run_blocking(|| load_shared_index_from_disk(zone.config.as_ref())) {
-        Ok(Some(loaded)) => loaded,
-        Ok(None) => return,
+    let local_generation = zone.shared_index_generation.load(Ordering::Relaxed);
+    let shared_generation = match run_blocking(|| shared_index_generation(store.as_ref())) {
+        Ok(generation) => generation,
         Err(error) => {
             tracing::warn!(
                 zone = %zone.config.name,
-                path = %shared_index_path(zone.config.as_ref()).display(),
+                path = %store.path().display(),
                 %error,
-                "failed to reload shared cache index; keeping local index"
+                "failed to re-read shared cache index generation; keeping local index"
+            );
+            return;
+        }
+    };
+    if shared_generation <= local_generation {
+        return;
+    }
+
+    let loaded = match run_blocking(|| load_shared_index_from_disk(store.as_ref())) {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            tracing::warn!(
+                zone = %zone.config.name,
+                path = %store.path().display(),
+                %error,
+                "failed to reload shared cache index metadata; keeping local index"
             );
             return;
         }
@@ -83,52 +107,71 @@ pub(super) async fn sync_zone_shared_index_if_needed(zone: &std::sync::Arc<Cache
     let mut index = lock_index(&zone.index);
     *index = loaded.index;
     drop(index);
-    zone.shared_index_generation.store(loaded.generation, std::sync::atomic::Ordering::Relaxed);
-    zone.shared_index_last_modified_unix_ms
-        .store(loaded.modified_unix_ms, std::sync::atomic::Ordering::Relaxed);
+    zone.shared_index_generation.store(loaded.generation, Ordering::Relaxed);
 }
 
-pub(super) async fn persist_zone_shared_index(zone: &std::sync::Arc<CacheZoneRuntime>) {
-    if !zone.config.shared_index {
+pub(super) fn apply_zone_shared_index_operations_locked(
+    zone: &CacheZoneRuntime,
+    operations: &[SharedIndexOperation],
+) {
+    if operations.is_empty() {
         return;
     }
-
-    let _sync_guard = zone.shared_index_sync_lock.lock().await;
-    let next_generation =
-        zone.shared_index_generation.load(std::sync::atomic::Ordering::Relaxed) + 1;
-    let minimum_modified_unix_ms = zone
-        .shared_index_last_modified_unix_ms
-        .load(std::sync::atomic::Ordering::Relaxed)
-        .saturating_add(1);
-    let snapshot = {
-        let index = lock_index(&zone.index);
-        index.clone()
+    let Some(store) = zone.shared_index_store.as_ref() else {
+        return;
     };
-    match run_blocking(|| {
-        persist_shared_index_to_disk(
-            zone.config.as_ref(),
-            &snapshot,
-            next_generation,
-            minimum_modified_unix_ms,
-        )
-    }) {
-        Ok(modified_unix_ms) => {
-            zone.shared_index_generation
-                .store(next_generation, std::sync::atomic::Ordering::Relaxed);
-            zone.shared_index_last_modified_unix_ms
-                .store(modified_unix_ms, std::sync::atomic::Ordering::Relaxed);
+    match run_blocking(|| apply_shared_index_operations(store.as_ref(), operations)) {
+        Ok(generation) => {
+            zone.shared_index_generation.store(generation, Ordering::Relaxed);
         }
         Err(error) => {
             tracing::warn!(
                 zone = %zone.config.name,
-                path = %shared_index_path(zone.config.as_ref()).display(),
+                path = %store.path().display(),
                 %error,
-                "failed to persist shared cache index"
+                "failed to apply shared cache index metadata update"
             );
         }
     }
 }
 
-fn read_shared_index_modified_unix_ms(zone: &rginx_core::CacheZone) -> Option<u64> {
-    run_blocking(|| Ok(shared_index_modified_unix_ms(zone))).ok().flatten()
+fn bootstrap_shared_index_from_cache_files(
+    zone: &rginx_core::CacheZone,
+    store: Arc<SharedIndexStore>,
+) -> io::Result<(CacheIndex, Option<Arc<SharedIndexStore>>, u64)> {
+    match load_legacy_shared_index_from_disk(zone) {
+        Ok(Some(legacy)) => {
+            let generation = legacy.generation.max(1);
+            rebuild_shared_index_store(store.as_ref(), &legacy.index, generation)?;
+            let _ = delete_legacy_shared_index_file(zone);
+            return Ok((legacy.index, Some(store), generation));
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(
+                zone = %zone.name,
+                path = %shared_index_path(zone).display(),
+                %error,
+                "failed to import legacy shared cache index; rebuilding from cache files"
+            );
+        }
+    }
+
+    let index = load_index_from_disk(zone)?;
+    let generation = 1;
+    rebuild_shared_index_store(store.as_ref(), &index, generation)?;
+    Ok((index, Some(store), generation))
+}
+
+fn rebuild_shared_index_store(
+    store: &SharedIndexStore,
+    index: &CacheIndex,
+    generation: u64,
+) -> io::Result<()> {
+    recreate_shared_index_on_disk(store, index, generation)?;
+    Ok(())
+}
+
+fn shared_index_loaded(index: &CacheIndex, generation: u64) -> bool {
+    generation > 0 || !index.entries.is_empty() || !index.admission_counts.is_empty()
 }

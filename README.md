@@ -144,6 +144,7 @@ scripts/run-fuzz-coverage.sh --target certificate_inspect
 ## 文档
 
 - [docs/README.md](docs/README.md) 汇总当前生效的仓库治理文档
+- [docs/CACHE_ARCHITECTURE_GAPS.md](docs/CACHE_ARCHITECTURE_GAPS.md) 记录缓存当前长期架构差距与演进方向
 - [docs/NEZHA_DASHBOARD.md](docs/NEZHA_DASHBOARD.md) 提供 Nezha Dashboard 反向代理完整示例
 - [fuzz/README.md](fuzz/README.md) 说明 fuzz target、seed、smoke 和 coverage 流程
 

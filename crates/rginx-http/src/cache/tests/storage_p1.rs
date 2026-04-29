@@ -227,30 +227,31 @@ fn load_index_from_disk_supports_nested_path_levels() {
 async fn cleanup_inactive_entries_honors_manager_batch_entries() {
     let temp = tempfile::tempdir().expect("cache temp dir should exist");
     let manager_sleep = Duration::from_millis(20);
+    let config = Arc::new(CacheZone {
+        name: "default".to_string(),
+        path: temp.path().to_path_buf(),
+        max_size_bytes: Some(1024 * 1024),
+        inactive: Duration::from_secs(1),
+        default_ttl: Duration::from_secs(60),
+        max_entry_bytes: 1024,
+        path_levels: vec![2],
+        loader_batch_entries: 100,
+        loader_sleep: Duration::ZERO,
+        manager_batch_entries: 1,
+        manager_sleep,
+        inactive_cleanup_interval: Duration::ZERO,
+        shared_index: true,
+    });
     let zone = Arc::new(CacheZoneRuntime {
-        config: Arc::new(CacheZone {
-            name: "default".to_string(),
-            path: temp.path().to_path_buf(),
-            max_size_bytes: Some(1024 * 1024),
-            inactive: Duration::from_secs(1),
-            default_ttl: Duration::from_secs(60),
-            max_entry_bytes: 1024,
-            path_levels: vec![2],
-            loader_batch_entries: 100,
-            loader_sleep: Duration::ZERO,
-            manager_batch_entries: 1,
-            manager_sleep,
-            inactive_cleanup_interval: Duration::ZERO,
-            shared_index: true,
-        }),
+        config: config.clone(),
         index: Mutex::new(CacheIndex::default()),
         io_lock: AsyncMutex::new(()),
         shared_index_sync_lock: AsyncMutex::new(()),
+        shared_index_store: Some(Arc::new(shared::shared_index_store(config.as_ref()))),
         fill_locks: Arc::new(Mutex::new(HashMap::new())),
         fill_lock_generation: AtomicU64::new(0),
         last_inactive_cleanup_unix_ms: AtomicU64::new(0),
-        shared_index_generation: AtomicU64::new(1),
-        shared_index_last_modified_unix_ms: AtomicU64::new(0),
+        shared_index_generation: AtomicU64::new(0),
         stats: CacheZoneStats::default(),
         change_notifier: None,
     });

@@ -41,10 +41,10 @@ use request::{cache_request_bypass, render_cache_key};
 use runtime::PurgeSelector;
 pub(crate) use runtime::with_cache_status;
 use runtime::{build_conditional_headers, remove_cache_files_if_unindexed};
-use shared::{bootstrap_shared_index, persist_zone_shared_index, sync_zone_shared_index_if_needed};
+use shared::{SharedIndexStore, bootstrap_shared_index, sync_zone_shared_index_if_needed};
 use store::{
     CacheStoreError, cleanup_inactive_entries_in_zone, lock_index, purge_zone_entries,
-    refresh_not_modified_response, remove_index_entry, store_response,
+    refresh_not_modified_response, remove_zone_index_entry, store_response,
 };
 
 const CACHE_STATUS_HEADER: &str = "x-cache";
@@ -150,11 +150,11 @@ struct CacheZoneRuntime {
     index: Mutex<CacheIndex>,
     io_lock: AsyncMutex<()>,
     shared_index_sync_lock: AsyncMutex<()>,
+    shared_index_store: Option<Arc<SharedIndexStore>>,
     fill_locks: Arc<Mutex<HashMap<String, CacheFillLockState>>>,
     fill_lock_generation: AtomicU64,
     last_inactive_cleanup_unix_ms: AtomicU64,
     shared_index_generation: AtomicU64,
-    shared_index_last_modified_unix_ms: AtomicU64,
     stats: CacheZoneStats,
     change_notifier: Option<CacheChangeNotifier>,
 }

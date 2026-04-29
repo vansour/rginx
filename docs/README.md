@@ -4,6 +4,8 @@
 
 ## 当前文档
 
+- `CACHE_ARCHITECTURE_GAPS.md`
+  - `rginx` 响应缓存当前长期架构差距与默认演进方向
 - `ARCHITECTURE_CODEBASE_MODULARIZATION_POLICY.md`
   - Rust 源文件的单文件单职责规则、文件大小阈值和 modularization gate
 - `ARCHITECTURE_MODULE_LAYOUT_GUIDE.md`

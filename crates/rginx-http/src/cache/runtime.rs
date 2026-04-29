@@ -130,9 +130,8 @@ impl CacheStoreContext {
                     %error,
                     "failed to serve stale cache entry"
                 );
-                remove_index_entry(&self.zone, &self.key);
+                remove_zone_index_entry(&self.zone, &self.key).await;
                 remove_cache_files_if_unindexed(&self.zone, &self.key, &entry.hash).await;
-                persist_zone_shared_index(&self.zone).await;
                 None
             }
         }
