@@ -1,5 +1,6 @@
 use serde::Deserialize;
 
+mod acme;
 mod cache;
 mod listener;
 mod route;
@@ -9,6 +10,7 @@ mod tls;
 mod upstream;
 mod vhost;
 
+pub use acme::{AcmeChallengeConfig, AcmeConfig, VirtualHostAcmeConfig};
 pub use cache::{
     CacheIgnoreHeaderConfig, CachePredicateConfig, CacheRangeRequestPolicyConfig, CacheRouteConfig,
     CacheStatusTtlConfig, CacheUseStaleConditionConfig, CacheZoneConfig,
@@ -34,6 +36,8 @@ pub use vhost::VirtualHostConfig;
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub runtime: RuntimeConfig,
+    #[serde(default)]
+    pub acme: Option<AcmeConfig>,
     #[serde(default)]
     pub listeners: Vec<ListenerConfig>,
     #[serde(default)]

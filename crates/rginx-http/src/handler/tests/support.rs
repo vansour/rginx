@@ -30,6 +30,8 @@ pub(crate) fn test_config(default_vhost: VirtualHost, vhosts: Vec<VirtualHost>) 
         tls: None,
     };
     ConfigSnapshot {
+        acme: None,
+        managed_certificates: Vec::new(),
         cache_zones: HashMap::new(),
         runtime: RuntimeSettings {
             shutdown_timeout: Duration::from_secs(1),

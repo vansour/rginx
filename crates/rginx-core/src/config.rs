@@ -1,4 +1,5 @@
 mod access_log;
+mod acme;
 mod cache;
 mod listener;
 mod route;
@@ -10,6 +11,7 @@ mod upstream;
 mod virtual_host;
 
 pub use access_log::{AccessLogFormat, AccessLogValues};
+pub use acme::{AcmeChallengeType, AcmeSettings, ManagedCertificateSpec};
 pub use cache::{
     CacheIgnoreHeader, CacheKeyRenderContext, CacheKeyTemplate, CacheKeyTemplateError,
     CachePredicate, CachePredicateRequestContext, CacheRangeRequestPolicy, CacheStatusTtlRule,

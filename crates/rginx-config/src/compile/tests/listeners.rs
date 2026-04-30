@@ -3,6 +3,7 @@ use super::*;
 #[test]
 fn compile_supports_explicit_multi_listener_configs() {
     let config = Config {
+        acme: None,
         cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,

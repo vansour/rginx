@@ -3,6 +3,7 @@ use super::*;
 #[test]
 fn compile_attaches_regex_matcher_and_dynamic_proxy_headers() {
     let config = Config {
+        acme: None,
         cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
@@ -119,6 +120,7 @@ fn compile_attaches_regex_matcher_and_dynamic_proxy_headers() {
 #[test]
 fn compile_preserves_declaration_order_for_overlapping_regex_routes() {
     let config = Config {
+        acme: None,
         cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,

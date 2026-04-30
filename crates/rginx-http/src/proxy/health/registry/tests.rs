@@ -122,6 +122,8 @@ fn snapshot_reports_passive_and_active_health_state() {
         tls: None,
     };
     let config = rginx_core::ConfigSnapshot {
+        acme: None,
+        managed_certificates: Vec::new(),
         cache_zones: HashMap::new(),
         runtime: rginx_core::RuntimeSettings {
             shutdown_timeout: Duration::from_secs(1),

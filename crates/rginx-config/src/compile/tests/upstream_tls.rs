@@ -7,6 +7,7 @@ fn compile_resolves_custom_ca_relative_to_config_base() {
     fs::write(&ca_path, b"placeholder").expect("temp CA file should be written");
 
     let config = Config {
+        acme: None,
         cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
@@ -136,6 +137,7 @@ fn compile_resolves_custom_ca_relative_to_config_base() {
 #[test]
 fn compile_accepts_https_http3_upstreams() {
     let config = Config {
+        acme: None,
         cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
@@ -242,6 +244,7 @@ fn compile_resolves_upstream_mtls_identity_and_tls_versions_relative_to_config_b
     fs::write(&client_key_path, b"placeholder").expect("temp client key file should be written");
 
     let config = Config {
+        acme: None,
         cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,

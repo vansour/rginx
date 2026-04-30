@@ -59,6 +59,7 @@ fn validate_rejects_tls_vhost_without_server_name() {
     let mut config = base_config();
     let mut vhost = sample_vhost(Vec::new());
     vhost.tls = Some(VirtualHostTlsConfig {
+        acme: None,
         cert_path: "server.crt".to_string(),
         key_path: "server.key".to_string(),
         additional_certificates: None,
@@ -166,6 +167,7 @@ fn validate_rejects_vhost_tls_without_any_tls_listener() {
             streaming_response_idle_timeout_secs: None,
         }],
         tls: Some(VirtualHostTlsConfig {
+            acme: None,
             cert_path: "server.crt".to_string(),
             key_path: "server.key".to_string(),
             additional_certificates: None,
@@ -201,6 +203,7 @@ fn validate_accepts_server_tls_defaults_with_vhost_listen() {
     let mut vhost = sample_vhost(vec!["api.example.com"]);
     vhost.listen = vec!["127.0.0.1:8443 ssl http2".to_string()];
     vhost.tls = Some(VirtualHostTlsConfig {
+        acme: None,
         cert_path: "api.crt".to_string(),
         key_path: "api.key".to_string(),
         additional_certificates: None,
@@ -276,6 +279,7 @@ fn validate_rejects_inconsistent_http3_on_shared_vhost_listen() {
     let mut first = sample_vhost(vec!["api.example.com"]);
     first.listen = vec!["127.0.0.1:8443 ssl http2 http3".to_string()];
     first.tls = Some(VirtualHostTlsConfig {
+        acme: None,
         cert_path: "api.crt".to_string(),
         key_path: "api.key".to_string(),
         additional_certificates: None,
@@ -286,6 +290,7 @@ fn validate_rejects_inconsistent_http3_on_shared_vhost_listen() {
     let mut second = sample_vhost(vec!["www.example.com"]);
     second.listen = vec!["127.0.0.1:8443 ssl http2 http3".to_string()];
     second.tls = Some(VirtualHostTlsConfig {
+        acme: None,
         cert_path: "www.crt".to_string(),
         key_path: "www.key".to_string(),
         additional_certificates: None,
@@ -310,6 +315,7 @@ fn validate_rejects_vhost_http3_when_server_tls_policy_disables_tls13() {
     let mut vhost = sample_vhost(vec!["api.example.com"]);
     vhost.listen = vec!["127.0.0.1:8443 ssl http2 http3".to_string()];
     vhost.tls = Some(VirtualHostTlsConfig {
+        acme: None,
         cert_path: "api.crt".to_string(),
         key_path: "api.key".to_string(),
         additional_certificates: None,

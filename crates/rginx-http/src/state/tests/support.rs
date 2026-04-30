@@ -18,6 +18,8 @@ pub(crate) fn snapshot(listen: &str) -> ConfigSnapshot {
         tls: None,
     };
     ConfigSnapshot {
+        acme: None,
+        managed_certificates: Vec::new(),
         cache_zones: HashMap::new(),
         runtime: RuntimeSettings {
             shutdown_timeout: Duration::from_secs(10),

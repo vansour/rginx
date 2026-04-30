@@ -9,6 +9,7 @@ fn compile_resolves_server_tls_paths_relative_to_config_base() {
     fs::write(&key_path, b"placeholder").expect("temp key file should be written");
 
     let config = Config {
+        acme: None,
         cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
@@ -94,6 +95,7 @@ fn compile_preserves_server_tls_policy_fields() {
     fs::write(&key_path, b"placeholder").expect("temp key file should be written");
 
     let config = Config {
+        acme: None,
         cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
@@ -185,6 +187,7 @@ fn compile_preserves_server_tls_ocsp_policy_fields() {
     fs::write(&ocsp_path, b"").expect("temp ocsp file should be written");
 
     let config = Config {
+        acme: None,
         cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,

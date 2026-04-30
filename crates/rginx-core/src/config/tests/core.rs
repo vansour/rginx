@@ -72,6 +72,8 @@ fn config_snapshot_counts_routes_across_all_vhosts() {
         tls: None,
     };
     let snapshot = ConfigSnapshot {
+        acme: None,
+        managed_certificates: Vec::new(),
         runtime: RuntimeSettings {
             shutdown_timeout: Duration::from_secs(1),
             worker_threads: None,

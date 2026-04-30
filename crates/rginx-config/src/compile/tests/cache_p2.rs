@@ -4,6 +4,7 @@ use super::*;
 fn compile_cache_policy_supports_disabling_p2_defaults() {
     let base_dir = temp_base_dir("rginx-cache-compile-p2-disable");
     let config = Config {
+        acme: None,
         cache_zones: vec![CacheZoneConfig {
             name: "default".to_string(),
             path: "cache/default".to_string(),

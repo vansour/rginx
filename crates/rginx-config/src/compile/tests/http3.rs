@@ -9,6 +9,7 @@ fn compile_http3_listener_defaults_to_tcp_listen_addr_and_default_alt_svc_policy
     fs::write(&key_path, "placeholder key").expect("key file should be written");
 
     let config = Config {
+        acme: None,
         cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
@@ -114,6 +115,7 @@ fn compile_http3_applies_transport_settings_and_resolves_host_key_path() {
     fs::write(&key_path, b"placeholder").expect("server key should be written");
 
     let config = Config {
+        acme: None,
         cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 2,

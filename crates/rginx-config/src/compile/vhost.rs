@@ -2,13 +2,14 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use rginx_core::{Result, Upstream, VirtualHost};
+use rginx_core::{ManagedCertificateSpec, Result, Upstream, VirtualHost};
 
 use crate::model::VirtualHostConfig;
 
 pub(super) struct CompiledVirtualHost {
     pub(super) vhost: VirtualHost,
     pub(super) upstreams: HashMap<String, Arc<Upstream>>,
+    pub(super) managed_certificate: Option<ManagedCertificateSpec>,
 }
 
 pub(super) fn compile_virtual_host(
@@ -25,6 +26,7 @@ pub(super) fn compile_virtual_host(
         tls,
         http3: _,
     } = config;
+    let acme = tls.as_ref().and_then(|tls| tls.acme.clone());
     let local_upstream_names = raw_upstreams
         .iter()
         .map(|upstream| {
@@ -48,9 +50,13 @@ pub(super) fn compile_virtual_host(
         &vhost_id,
     )?;
     let tls = super::server::compile_virtual_host_tls(tls, base_dir)?;
+    let managed_certificate = tls
+        .as_ref()
+        .and_then(|tls| super::acme::compile_managed_certificate_spec(vhost_id.clone(), tls, acme));
 
     Ok(CompiledVirtualHost {
         vhost: VirtualHost { id: vhost_id, server_names, routes, tls },
         upstreams: local_upstreams,
+        managed_certificate,
     })
 }

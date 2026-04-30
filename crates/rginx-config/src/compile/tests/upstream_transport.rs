@@ -3,6 +3,7 @@ use super::*;
 #[test]
 fn compile_applies_granular_upstream_transport_settings() {
     let config = Config {
+        acme: None,
         cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
@@ -98,6 +99,7 @@ fn compile_applies_granular_upstream_transport_settings() {
 #[test]
 fn compile_accepts_least_conn_load_balance() {
     let config = Config {
+        acme: None,
         cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
@@ -205,6 +207,7 @@ fn compile_accepts_least_conn_load_balance() {
 #[test]
 fn compile_applies_peer_weights() {
     let config = Config {
+        acme: None,
         cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,

@@ -25,6 +25,7 @@ fn compile_supports_nezha_dashboard_native_vhost_shape() {
     dashboard_http.write_timeout_secs = Some(3600);
 
     let config = Config {
+        acme: None,
         cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
@@ -114,6 +115,7 @@ fn compile_supports_nezha_dashboard_native_vhost_shape() {
                 ),
             ],
             tls: Some(crate::model::VirtualHostTlsConfig {
+                acme: None,
                 cert_path: "dashboard.crt".to_string(),
                 key_path: "dashboard.key".to_string(),
                 additional_certificates: None,

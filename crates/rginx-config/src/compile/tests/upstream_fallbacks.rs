@@ -3,6 +3,7 @@ use super::*;
 #[test]
 fn compile_accepts_backup_peers() {
     let config = Config {
+        acme: None,
         cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
@@ -125,6 +126,7 @@ fn compile_accepts_backup_peers() {
 #[test]
 fn compile_uses_legacy_request_timeout_fallbacks_and_disables_pool_idle_timeout() {
     let config = Config {
+        acme: None,
         cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
@@ -234,6 +236,7 @@ fn compile_uses_legacy_request_timeout_fallbacks_and_disables_pool_idle_timeout(
 #[test]
 fn compile_uses_default_pool_idle_timeout() {
     let config = Config {
+        acme: None,
         cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,

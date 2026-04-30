@@ -5,6 +5,7 @@ mod regex;
 #[test]
 fn compile_attaches_route_access_control() {
     let config = Config {
+        acme: None,
         cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
@@ -67,6 +68,7 @@ fn compile_attaches_route_access_control() {
 #[test]
 fn compile_attaches_route_rate_limit() {
     let config = Config {
+        acme: None,
         cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
@@ -131,6 +133,7 @@ fn compile_attaches_route_rate_limit() {
 #[test]
 fn compile_applies_route_transport_policy_defaults_and_overrides() {
     let config = Config {
+        acme: None,
         cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
@@ -230,6 +233,7 @@ fn compile_applies_route_transport_policy_defaults_and_overrides() {
 #[test]
 fn compile_generates_distinct_route_and_vhost_ids() {
     let config = Config {
+        acme: None,
         cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
@@ -295,6 +299,7 @@ fn compile_generates_distinct_route_and_vhost_ids() {
 #[test]
 fn compile_prioritizes_grpc_constrained_routes_with_same_path_matcher() {
     let config = Config {
+        acme: None,
         cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,

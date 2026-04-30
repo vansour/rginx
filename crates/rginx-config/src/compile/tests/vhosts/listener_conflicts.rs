@@ -44,6 +44,7 @@ fn compile_rejects_conflicting_shared_vhost_listener_flags() {
 
     for (servers, expected) in cases {
         let config = Config {
+            acme: None,
             cache_zones: Vec::new(),
             runtime: RuntimeConfig {
                 shutdown_timeout_secs: 10,
@@ -74,6 +75,7 @@ fn listen_vhost(
         upstreams: Vec::new(),
         locations: vec![return_location("ok\n")],
         tls: tls.then(|| crate::model::VirtualHostTlsConfig {
+            acme: None,
             cert_path: format!("{server_name}.crt"),
             key_path: format!("{server_name}.key"),
             additional_certificates: None,
