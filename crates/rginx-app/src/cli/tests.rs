@@ -3,8 +3,9 @@ use std::path::{Path, PathBuf};
 use clap::Parser;
 
 use super::{
-    Cli, Command, DeltaArgs, PurgeCacheArgs, SignalCommand, SnapshotArgs, SnapshotModuleArg,
-    WaitArgs, WindowArgs, installed_config_path, pid_path_for_config,
+    AcmeArgs, AcmeCommand, AcmeIssueArgs, Cli, Command, DeltaArgs, PurgeCacheArgs, SignalCommand,
+    SnapshotArgs, SnapshotModuleArg, WaitArgs, WindowArgs, installed_config_path,
+    pid_path_for_config,
 };
 
 #[test]
@@ -71,6 +72,16 @@ fn cli_accepts_status_subcommand() {
     let cli = Cli::try_parse_from(["rginx", "status"]).expect("cli should parse");
 
     assert!(matches!(cli.command, Some(Command::Status)));
+}
+
+#[test]
+fn cli_accepts_one_shot_acme_issue_subcommand() {
+    let cli = Cli::try_parse_from(["rginx", "acme", "issue", "--once"]).expect("cli should parse");
+
+    assert!(matches!(
+        cli.command,
+        Some(Command::Acme(AcmeArgs { command: AcmeCommand::Issue(AcmeIssueArgs { once: true }) }))
+    ));
 }
 
 #[test]

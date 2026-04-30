@@ -17,6 +17,7 @@ pub(super) fn compile_virtual_host(
     config: VirtualHostConfig,
     upstreams: &HashMap<String, Arc<Upstream>>,
     base_dir: &Path,
+    allow_missing_managed_tls_identity: bool,
 ) -> Result<CompiledVirtualHost> {
     let VirtualHostConfig {
         listen: _,
@@ -49,7 +50,11 @@ pub(super) fn compile_virtual_host(
         &local_upstream_names,
         &vhost_id,
     )?;
-    let tls = super::server::compile_virtual_host_tls(tls, base_dir)?;
+    let tls = super::server::compile_virtual_host_tls(
+        tls.clone(),
+        base_dir,
+        allow_missing_managed_tls_identity && acme.is_some(),
+    )?;
     let managed_certificate = tls
         .as_ref()
         .and_then(|tls| super::acme::compile_managed_certificate_spec(vhost_id.clone(), tls, acme));

@@ -16,6 +16,7 @@ use policy::{
 pub(super) fn compile_server_tls(
     tls: Option<ServerTlsConfig>,
     base_dir: &Path,
+    allow_missing_identity: bool,
 ) -> Result<Option<ServerTls>> {
     let Some(ServerTlsConfig {
         cert_path,
@@ -45,6 +46,7 @@ pub(super) fn compile_server_tls(
         ocsp_staple_path,
         ocsp,
         "server TLS",
+        allow_missing_identity,
     )?;
 
     let client_auth = match client_auth {
@@ -73,6 +75,7 @@ pub(super) fn compile_server_tls(
 pub(super) fn compile_virtual_host_tls(
     tls: Option<VirtualHostTlsConfig>,
     base_dir: &Path,
+    allow_missing_identity: bool,
 ) -> Result<Option<VirtualHostTls>> {
     let Some(VirtualHostTlsConfig {
         cert_path,
@@ -94,6 +97,7 @@ pub(super) fn compile_virtual_host_tls(
         ocsp_staple_path,
         ocsp,
         "vhost TLS",
+        allow_missing_identity,
     )?;
 
     Ok(Some(VirtualHostTls {

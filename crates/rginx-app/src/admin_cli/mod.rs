@@ -68,6 +68,6 @@ pub(crate) fn run_admin_command(config_path: &Path, command: &Command) -> anyhow
             upstreams::print_admin_upstreams(config_path, args)?;
             Ok(true)
         }
-        Command::Check => Ok(false),
+        Command::Acme(_) | Command::Check => Ok(false),
     }
 }

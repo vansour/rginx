@@ -12,7 +12,7 @@ use anyhow::{Context, anyhow};
 use clap::Parser;
 
 use crate::check::{build_check_summary, print_check_success};
-use crate::cli::{Cli, Command, pid_path_for_config};
+use crate::cli::{AcmeCommand, Cli, Command, pid_path_for_config};
 use crate::pid_file::PidFileGuard;
 use crate::runtime::build_runtime;
 use crate::signal::send_signal_from_pid_file;
@@ -43,6 +43,13 @@ fn main() -> anyhow::Result<()> {
     rginx_observability::init_logging()
         .map_err(|error| anyhow!("failed to initialize logging: {error}"))?;
 
+    if let Some(Command::Acme(args)) = cli.command.as_ref() {
+        return match &args.command {
+            AcmeCommand::Issue(issue) if issue.once => run_acme_issue_once(&cli.config),
+            _ => unreachable!("clap enforces the one-shot ACME command shape"),
+        };
+    }
+
     let config = rginx_config::load_and_compile(&cli.config)
         .with_context(|| format!("failed to load {}", cli.config.display()))?;
 
@@ -57,6 +64,9 @@ fn main() -> anyhow::Result<()> {
             runtime
                 .block_on(rginx_runtime::run(cli.config, config))
                 .context("runtime exited with an error")
+        }
+        Some(Command::Acme(_)) => {
+            unreachable!("ACME subcommands return before standard config initialization")
         }
         Some(Command::Check) => unreachable!("`check` subcommand and `-t` conflict at clap level"),
         Some(
@@ -86,4 +96,32 @@ fn run_check_only(
 
     print_check_success(config_path, build_check_summary(config));
     Ok(())
+}
+
+fn run_acme_issue_once(config_path: &std::path::Path) -> anyhow::Result<()> {
+    let config = rginx_config::load_and_compile_for_acme_issue(config_path)
+        .with_context(|| format!("failed to load {}", config_path.display()))?;
+    let runtime = build_runtime(config.runtime.worker_threads)
+        .context("failed to construct tokio runtime")?;
+    let summary = runtime
+        .block_on(rginx_runtime::acme::issue_once(&config))
+        .context("one-shot ACME issuance failed")?;
+
+    if summary.is_success() {
+        println!(
+            "acme issue completed: total={} issued={} skipped={}",
+            summary.total, summary.issued, summary.skipped
+        );
+        return Ok(());
+    }
+
+    Err(anyhow!(
+        "acme issue completed with failures: {}",
+        summary
+            .failures
+            .iter()
+            .map(|failure| format!("{} ({})", failure.scope, failure.error))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
 }

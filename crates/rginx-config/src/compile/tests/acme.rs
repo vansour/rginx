@@ -194,3 +194,28 @@ fn compile_emits_managed_certificate_specs_for_acme_vhosts() {
     assert_eq!(spec.key_path, base_dir.path().join("managed.key"));
     assert_eq!(spec.challenge, rginx_core::AcmeChallengeType::Http01);
 }
+
+#[test]
+fn compile_allows_missing_managed_identity_files_for_acme_issue_mode() {
+    let base_dir = temp_base_dir("rginx-acme-missing-identity-");
+    let config = managed_acme_config(
+        "https://acme-staging-v02.api.letsencrypt.org/directory",
+        "state/acme",
+        None,
+        None,
+        vec!["api.example.com"],
+        vec!["api.example.com"],
+    );
+
+    let snapshot = crate::compile::compile_with_base_and_options(
+        config,
+        base_dir.path(),
+        crate::compile::CompileOptions { allow_missing_managed_tls_identity: true },
+    )
+    .expect("ACME issue mode should compile without existing managed certificate files");
+
+    assert_eq!(snapshot.managed_certificates.len(), 1);
+    let spec = &snapshot.managed_certificates[0];
+    assert_eq!(spec.cert_path, base_dir.path().join("managed.crt"));
+    assert_eq!(spec.key_path, base_dir.path().join("managed.key"));
+}

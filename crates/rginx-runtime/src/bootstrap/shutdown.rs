@@ -15,6 +15,7 @@ pub(super) struct ShutdownTasks<'a> {
     pub(super) admin_task: &'a mut Option<JoinHandle<std::io::Result<()>>>,
     pub(super) cache_task: &'a mut Option<JoinHandle<()>>,
     pub(super) health_task: &'a mut Option<JoinHandle<()>>,
+    pub(super) acme_task: &'a mut Option<JoinHandle<()>>,
     pub(super) ocsp_task: &'a mut Option<JoinHandle<()>>,
 }
 
@@ -26,7 +27,7 @@ pub(super) async fn graceful_shutdown(
     draining_listener_groups: &mut Vec<ListenerWorkerGroup>,
     tasks: ShutdownTasks<'_>,
 ) -> Result<()> {
-    let ShutdownTasks { admin_task, cache_task, health_task, ocsp_task } = tasks;
+    let ShutdownTasks { admin_task, cache_task, health_task, acme_task, ocsp_task } = tasks;
     let _ = shutdown_tx.send(true);
     initiate_shutdown_for_groups(active_listener_groups.values());
     initiate_shutdown_for_groups(draining_listener_groups.iter());
@@ -37,6 +38,7 @@ pub(super) async fn graceful_shutdown(
         join_admin_task(admin_task).await?;
         join_unit_task(cache_task, "cache cleanup").await?;
         join_unit_task(health_task, "active health").await?;
+        join_unit_task(acme_task, "managed ACME").await?;
         join_unit_task(ocsp_task, "OCSP refresh").await?;
         state.http.drain_background_tasks().await;
         Ok::<(), Error>(())
@@ -53,6 +55,7 @@ pub(super) async fn graceful_shutdown(
             abort_task(admin_task.as_ref());
             abort_task(cache_task.as_ref());
             abort_task(health_task.as_ref());
+            abort_task(acme_task.as_ref());
             abort_task(ocsp_task.as_ref());
 
             join_aborted_listener_worker_groups(
@@ -65,6 +68,7 @@ pub(super) async fn graceful_shutdown(
             join_admin_task_after_abort(admin_task).await;
             join_unit_task_after_abort(cache_task, "cache cleanup").await;
             join_unit_task_after_abort(health_task, "active health").await;
+            join_unit_task_after_abort(acme_task, "managed ACME").await;
             join_unit_task_after_abort(ocsp_task, "OCSP refresh").await;
 
             state.http.abort_background_tasks().await;

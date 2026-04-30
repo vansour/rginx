@@ -1,6 +1,6 @@
-use std::collections::{BTreeMap, btree_map::Entry};
+use std::collections::{BTreeMap, HashSet, btree_map::Entry};
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rginx_core::{Error, Listener, Result};
 
@@ -9,11 +9,14 @@ use crate::model::{Http3Config, ListenerConfig, ServerConfig, VirtualHostConfig}
 use super::CompiledServer;
 use super::fields::{ServerFieldConfig, compile_server_fields};
 use super::http3::compile_http3;
+use super::listener_managed_identity::tls_identity_is_managed;
 
 pub(super) fn compile_legacy_server(
     server: ServerConfig,
     base_dir: &Path,
     any_vhost_tls: bool,
+    allow_missing_managed_tls_identity: bool,
+    managed_identity_pairs: &HashSet<(PathBuf, PathBuf)>,
 ) -> Result<CompiledServer> {
     let ServerConfig {
         listen,
@@ -36,6 +39,10 @@ pub(super) fn compile_legacy_server(
     } = server;
 
     let listen = listen.expect("legacy server listen should be validated before compile");
+    let allow_missing_tls_identity = allow_missing_managed_tls_identity
+        && tls
+            .as_ref()
+            .is_some_and(|tls| tls_identity_is_managed(tls, base_dir, managed_identity_pairs));
     let compiled = compile_server_fields(
         ServerFieldConfig {
             listen,
@@ -52,6 +59,7 @@ pub(super) fn compile_legacy_server(
             response_write_timeout_secs,
             access_log_format,
             tls,
+            allow_missing_tls_identity,
         },
         base_dir,
     )?;
@@ -79,6 +87,8 @@ pub(super) fn compile_listeners(
     listeners: Vec<ListenerConfig>,
     default_server_header: Option<String>,
     base_dir: &Path,
+    allow_missing_managed_tls_identity: bool,
+    managed_identity_pairs: &HashSet<(PathBuf, PathBuf)>,
 ) -> Result<Vec<Listener>> {
     listeners
         .into_iter()
@@ -103,6 +113,10 @@ pub(super) fn compile_listeners(
                 http3,
             } = listener;
 
+            let allow_missing_tls_identity = allow_missing_managed_tls_identity
+                && tls.as_ref().is_some_and(|tls| {
+                    tls_identity_is_managed(tls, base_dir, managed_identity_pairs)
+                });
             let compiled = compile_server_fields(
                 ServerFieldConfig {
                     listen,
@@ -119,6 +133,7 @@ pub(super) fn compile_listeners(
                     response_write_timeout_secs,
                     access_log_format,
                     tls,
+                    allow_missing_tls_identity,
                 },
                 base_dir,
             )?;
@@ -145,6 +160,8 @@ pub(super) fn compile_vhost_listeners(
     vhosts: &[VirtualHostConfig],
     server_defaults: &ServerConfig,
     base_dir: &Path,
+    allow_missing_managed_tls_identity: bool,
+    managed_identity_pairs: &HashSet<(PathBuf, PathBuf)>,
 ) -> Result<Vec<Listener>> {
     let mut bindings = BTreeMap::<SocketAddr, VhostListenerBinding>::new();
 
@@ -213,6 +230,10 @@ pub(super) fn compile_vhost_listeners(
                     response_write_timeout_secs: server_defaults.response_write_timeout_secs,
                     access_log_format: server_defaults.access_log_format.clone(),
                     tls,
+                    allow_missing_tls_identity: allow_missing_managed_tls_identity
+                        && server_defaults.tls.as_ref().is_some_and(|tls| {
+                            tls_identity_is_managed(tls, base_dir, managed_identity_pairs)
+                        }),
                 },
                 base_dir,
             )?;

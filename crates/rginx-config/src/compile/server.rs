@@ -1,4 +1,5 @@
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 use rginx_core::{Listener, Result, VirtualHostTls};
 
@@ -7,6 +8,7 @@ use crate::model::{ListenerConfig, ServerConfig, VirtualHostConfig, VirtualHostT
 mod fields;
 mod http3;
 mod listener;
+mod listener_managed_identity;
 mod tls;
 
 #[cfg(test)]
@@ -33,8 +35,16 @@ pub(super) fn compile_legacy_server(
     server: ServerConfig,
     base_dir: &Path,
     any_vhost_tls: bool,
+    allow_missing_managed_tls_identity: bool,
+    managed_identity_pairs: &HashSet<(PathBuf, PathBuf)>,
 ) -> Result<CompiledServer> {
-    listener::compile_legacy_server(server, base_dir, any_vhost_tls)
+    listener::compile_legacy_server(
+        server,
+        base_dir,
+        any_vhost_tls,
+        allow_missing_managed_tls_identity,
+        managed_identity_pairs,
+    )
 }
 
 /// Compiles explicit listener blocks into runtime listener definitions.
@@ -42,8 +52,16 @@ pub(super) fn compile_listeners(
     listeners: Vec<ListenerConfig>,
     default_server_header: Option<String>,
     base_dir: &Path,
+    allow_missing_managed_tls_identity: bool,
+    managed_identity_pairs: &HashSet<(PathBuf, PathBuf)>,
 ) -> Result<Vec<Listener>> {
-    listener::compile_listeners(listeners, default_server_header, base_dir)
+    listener::compile_listeners(
+        listeners,
+        default_server_header,
+        base_dir,
+        allow_missing_managed_tls_identity,
+        managed_identity_pairs,
+    )
 }
 
 /// Compiles nginx-style `servers[].listen` entries into deduplicated runtime listeners.
@@ -51,14 +69,23 @@ pub(super) fn compile_vhost_listeners(
     vhosts: &[VirtualHostConfig],
     server_defaults: &ServerConfig,
     base_dir: &Path,
+    allow_missing_managed_tls_identity: bool,
+    managed_identity_pairs: &HashSet<(PathBuf, PathBuf)>,
 ) -> Result<Vec<Listener>> {
-    listener::compile_vhost_listeners(vhosts, server_defaults, base_dir)
+    listener::compile_vhost_listeners(
+        vhosts,
+        server_defaults,
+        base_dir,
+        allow_missing_managed_tls_identity,
+        managed_identity_pairs,
+    )
 }
 
 /// Compiles per-vhost TLS overrides into the runtime vhost TLS structure.
 pub(super) fn compile_virtual_host_tls(
     tls: Option<VirtualHostTlsConfig>,
     base_dir: &Path,
+    allow_missing_identity: bool,
 ) -> Result<Option<VirtualHostTls>> {
-    tls::compile_virtual_host_tls(tls, base_dir)
+    tls::compile_virtual_host_tls(tls, base_dir, allow_missing_identity)
 }

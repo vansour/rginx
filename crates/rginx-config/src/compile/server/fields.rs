@@ -30,6 +30,7 @@ pub(super) struct ServerFieldConfig {
     pub(super) response_write_timeout_secs: Option<u64>,
     pub(super) access_log_format: Option<String>,
     pub(super) tls: Option<ServerTlsConfig>,
+    pub(super) allow_missing_tls_identity: bool,
 }
 
 pub(super) fn compile_server_fields(
@@ -51,9 +52,10 @@ pub(super) fn compile_server_fields(
         response_write_timeout_secs,
         access_log_format,
         tls,
+        allow_missing_tls_identity,
     } = config;
 
-    let server_tls = compile_server_tls(tls, base_dir)?;
+    let server_tls = compile_server_tls(tls, base_dir, allow_missing_tls_identity)?;
     Ok(CompiledServerFields {
         server: Server {
             listen_addr: listen.parse()?,

@@ -25,6 +25,7 @@ pub struct Cli {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum Command {
+    Acme(AcmeArgs),
     Check,
     Snapshot(SnapshotArgs),
     SnapshotVersion,
@@ -37,6 +38,24 @@ pub enum Command {
     Traffic(WindowArgs),
     Peers,
     Upstreams(WindowArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct AcmeArgs {
+    #[command(subcommand)]
+    pub command: AcmeCommand,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum AcmeCommand {
+    Issue(AcmeIssueArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+#[command(group = ArgGroup::new("mode").required(true).args(["once"]))]
+pub struct AcmeIssueArgs {
+    #[arg(long, action = ArgAction::SetTrue)]
+    pub once: bool,
 }
 
 #[derive(Debug, Clone, Args)]
