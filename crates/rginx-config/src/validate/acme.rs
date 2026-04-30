@@ -140,14 +140,21 @@ fn normalize_unique_domains(
 
 fn has_http01_listener(config: &Config) -> Result<bool> {
     if !config.listeners.is_empty() {
-        return Ok(config.listeners.iter().any(|listener| {
-            listener.tls.is_none()
-                && listener
-                    .listen
-                    .parse::<std::net::SocketAddr>()
-                    .map(|addr| addr.port() == 80)
-                    .unwrap_or(false)
-        }));
+        for (listener_index, listener) in config.listeners.iter().enumerate() {
+            if listener.tls.is_some() {
+                continue;
+            }
+
+            let owner = format!("listeners[{listener_index}].listen");
+            let listen_addr = listener.listen.parse::<std::net::SocketAddr>().map_err(|error| {
+                Error::Config(format!("{owner} `{}` is invalid: {error}", listener.listen))
+            })?;
+            if listen_addr.port() == 80 {
+                return Ok(true);
+            }
+        }
+
+        return Ok(false);
     }
 
     let any_vhost_listen = config.servers.iter().any(|vhost| !vhost.listen.is_empty());
