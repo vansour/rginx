@@ -11,6 +11,8 @@ use rcgen::{
     KeyPair,
 };
 
+#[path = "check/acme.rs"]
+mod acme;
 #[path = "check/basic.rs"]
 mod basic;
 #[path = "check/helpers.rs"]

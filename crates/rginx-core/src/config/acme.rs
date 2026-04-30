@@ -6,6 +6,14 @@ pub enum AcmeChallengeType {
     Http01,
 }
 
+impl AcmeChallengeType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Http01 => "http-01",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcmeSettings {
     pub directory_url: String,

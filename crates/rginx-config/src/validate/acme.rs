@@ -12,6 +12,7 @@ pub(super) fn validate_acme(config: &Config) -> Result<()> {
     }
 
     let mut any_managed_vhost = false;
+    let mut managed_vhost_indexes = Vec::new();
     for (index, vhost) in config.servers.iter().enumerate() {
         let Some(tls) = vhost.tls.as_ref() else {
             continue;
@@ -21,6 +22,7 @@ pub(super) fn validate_acme(config: &Config) -> Result<()> {
         };
 
         any_managed_vhost = true;
+        managed_vhost_indexes.push(index);
         validate_vhost_acme(&format!("servers[{index}]"), vhost, tls, acme, config.acme.as_ref())?;
     }
 
@@ -29,6 +31,8 @@ pub(super) fn validate_acme(config: &Config) -> Result<()> {
             "ACME HTTP-01 requires at least one plain HTTP listener bound to port 80".to_string(),
         ));
     }
+
+    validate_managed_acme_http3_compatibility(config, &managed_vhost_indexes)?;
 
     Ok(())
 }
@@ -175,4 +179,43 @@ fn has_http01_listener(config: &Config) -> Result<bool> {
     // listener into a TLS termination point for that bind, so it cannot satisfy HTTP-01's
     // requirement for a plain HTTP listener on port 80.
     Ok(false)
+}
+
+fn validate_managed_acme_http3_compatibility(
+    config: &Config,
+    managed_vhost_indexes: &[usize],
+) -> Result<()> {
+    if managed_vhost_indexes.is_empty() {
+        return Ok(());
+    }
+
+    let any_vhost_listen = config.servers.iter().any(|vhost| !vhost.listen.is_empty());
+    if any_vhost_listen {
+        for vhost_index in managed_vhost_indexes {
+            let vhost = &config.servers[*vhost_index];
+            for (listen_index, listen) in vhost.listen.iter().enumerate() {
+                let owner = format!("servers[{vhost_index}].listen[{listen_index}]");
+                let parsed = crate::listen::parse_vhost_listen(&owner, listen)?;
+                if parsed.ssl && parsed.http3 {
+                    return Err(Error::Config(format!(
+                        "{owner} ACME-managed TLS does not support http3 hot certificate rotation yet"
+                    )));
+                }
+            }
+        }
+        return Ok(());
+    }
+
+    if let Some((listener_index, _)) = config
+        .listeners
+        .iter()
+        .enumerate()
+        .find(|(_, listener)| listener.tls.is_some() && listener.http3.is_some())
+    {
+        return Err(Error::Config(format!(
+            "listeners[{listener_index}] enables http3, which is not supported together with ACME-managed certificates yet"
+        )));
+    }
+
+    Ok(())
 }

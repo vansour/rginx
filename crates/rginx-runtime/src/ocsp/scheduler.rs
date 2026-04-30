@@ -18,7 +18,7 @@ pub(super) async fn run(state: SharedState, mut shutdown: watch::Receiver<bool>)
         }
     };
 
-    if let Err(error) = refresh_ocsp_staples(&state, &client).await {
+    if let Err(error) = refresh_ocsp_staples_and_reload(&state, &client).await {
         tracing::warn!(%error, "initial OCSP refresh failed");
     }
 
@@ -39,12 +39,12 @@ pub(super) async fn run(state: SharedState, mut shutdown: watch::Receiver<bool>)
                 if changed.is_err() {
                     break;
                 }
-                if let Err(error) = refresh_ocsp_staples(&state, &client).await {
+                if let Err(error) = refresh_ocsp_staples_and_reload(&state, &client).await {
                     tracing::warn!(%error, "OCSP refresh after reload failed");
                 }
             }
             _ = interval.tick() => {
-                if let Err(error) = refresh_ocsp_staples(&state, &client).await {
+                if let Err(error) = refresh_ocsp_staples_and_reload(&state, &client).await {
                     tracing::warn!(%error, "periodic OCSP refresh failed");
                 }
             }
@@ -54,7 +54,24 @@ pub(super) async fn run(state: SharedState, mut shutdown: watch::Receiver<bool>)
     tracing::info!("dynamic OCSP refresher stopped");
 }
 
-async fn refresh_ocsp_staples(state: &SharedState, client: &OcspClient) -> Result<(), String> {
+pub(super) async fn refresh_now(state: &SharedState) -> Result<bool, String> {
+    let client = build_ocsp_client()?;
+    refresh_ocsp_staples(state, &client).await
+}
+
+async fn refresh_ocsp_staples_and_reload(
+    state: &SharedState,
+    client: &OcspClient,
+) -> Result<(), String> {
+    let tls_acceptors_changed = refresh_ocsp_staples(state, client).await?;
+    refresh_tls_acceptors_if_needed(state, tls_acceptors_changed).await?;
+    Ok(())
+}
+
+pub(super) async fn refresh_ocsp_staples(
+    state: &SharedState,
+    client: &OcspClient,
+) -> Result<bool, String> {
     let config = state.current_config().await;
     let mut tls_acceptors_changed = false;
 
@@ -138,6 +155,5 @@ async fn refresh_ocsp_staples(state: &SharedState, client: &OcspClient) -> Resul
         }
     }
 
-    refresh_tls_acceptors_if_needed(state, tls_acceptors_changed).await?;
-    Ok(())
+    Ok(tls_acceptors_changed)
 }

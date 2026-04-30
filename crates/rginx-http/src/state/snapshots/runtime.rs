@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    CacheStatsSnapshot, MtlsStatusSnapshot, ReloadStatusSnapshot, TlsRuntimeSnapshot,
-    UpstreamTlsStatusSnapshot,
+    AcmeRuntimeSnapshot, CacheStatsSnapshot, MtlsStatusSnapshot, ReloadStatusSnapshot,
+    TlsRuntimeSnapshot, UpstreamTlsStatusSnapshot,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,6 +29,7 @@ pub struct RuntimeStatusSnapshot {
     pub http3_early_data_enabled_listeners: usize,
     pub http3_early_data_accepted_requests: u64,
     pub http3_early_data_rejected_requests: u64,
+    pub acme: AcmeRuntimeSnapshot,
     pub tls: TlsRuntimeSnapshot,
     pub mtls: MtlsStatusSnapshot,
     pub upstream_tls: Vec<UpstreamTlsStatusSnapshot>,

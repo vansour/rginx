@@ -28,6 +28,9 @@ fn status_command_reads_local_admin_socket() {
     assert!(stdout.contains("http3_retry_issued_total=0"));
     assert!(stdout.contains("http3_request_body_stream_errors_total=0"));
     assert!(stdout.contains("active_connections=0"));
+    assert!(stdout.contains("acme=disabled"));
+    assert!(stdout.contains("acme_managed_certificates=0"));
+    assert!(stdout.contains("kind=status_acme enabled=false"));
     assert!(stdout.contains("mtls_listeners=0"));
     assert!(stdout.contains("reload_attempts=0"));
     assert!(stdout.contains("last_reload=-"));

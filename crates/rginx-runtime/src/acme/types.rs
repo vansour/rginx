@@ -71,11 +71,14 @@ impl ReconcilePlan {
 pub(crate) fn certificate_status_index(
     config: &ConfigSnapshot,
 ) -> HashMap<String, TlsCertificateStatusSnapshot> {
-    tls_runtime_snapshot_for_config(config)
-        .certificates
-        .into_iter()
-        .map(|status| (status.scope.clone(), status))
-        .collect()
+    let mut index = HashMap::new();
+    for status in tls_runtime_snapshot_for_config(config).certificates {
+        if let Some(scope) = status.scope.strip_prefix("vhost:") {
+            index.insert(scope.to_string(), status.clone());
+        }
+        index.insert(status.scope.clone(), status);
+    }
+    index
 }
 
 pub(crate) fn http01_listener_addrs(config: &ConfigSnapshot) -> Vec<SocketAddr> {

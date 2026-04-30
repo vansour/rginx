@@ -24,3 +24,7 @@ const OCSP_FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 pub async fn run(state: SharedState, shutdown: watch::Receiver<bool>) {
     scheduler::run(state, shutdown).await;
 }
+
+pub async fn refresh_now(state: &SharedState) -> Result<bool, String> {
+    scheduler::refresh_now(state).await
+}
