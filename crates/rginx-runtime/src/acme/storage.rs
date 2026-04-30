@@ -85,16 +85,17 @@ fn create_temp_file(path: &Path, mode: u32) -> Result<File> {
     {
         use std::os::unix::fs::OpenOptionsExt;
 
-        return OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .mode(mode)
-            .open(path)
-            .map_err(Error::from);
+        OpenOptions::new().create_new(true).write(true).mode(mode).open(path).map_err(Error::from)
     }
 
-    #[allow(unreachable_code)]
-    OpenOptions::new().create_new(true).write(true).open(path).map_err(Error::from)
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+        Err(Error::Server(
+            "managed ACME certificate persistence requires Unix file permission semantics"
+                .to_string(),
+        ))
+    }
 }
 
 fn temporary_path(path: &Path) -> PathBuf {
