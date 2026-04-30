@@ -4,6 +4,7 @@ use std::sync::Arc;
 use rginx_core::{ConfigSnapshot, Result};
 use tokio::sync::{Notify, watch};
 
+use crate::acme;
 use crate::admin;
 use crate::cache;
 use crate::health;
@@ -54,6 +55,7 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
         Some(tokio::spawn(cache::run(state.http.clone(), shutdown_tx.subscribe())));
     let mut health_task =
         Some(tokio::spawn(health::run(state.http.clone(), shutdown_tx.subscribe())));
+    let mut acme_task = Some(tokio::spawn(acme::run(state.http.clone(), shutdown_tx.subscribe())));
     let mut ocsp_task = Some(tokio::spawn(ocsp::run(state.http.clone(), shutdown_tx.subscribe())));
     crate::restart::notify_ready_if_requested()?;
 
@@ -109,6 +111,7 @@ pub async fn run(config_path: PathBuf, config: ConfigSnapshot) -> Result<()> {
             admin_task: &mut admin_task,
             cache_task: &mut cache_task,
             health_task: &mut health_task,
+            acme_task: &mut acme_task,
             ocsp_task: &mut ocsp_task,
         },
     )

@@ -26,9 +26,10 @@ pub(super) fn compile_certificate_material(
     ocsp_staple_path: Option<String>,
     ocsp: Option<RawOcspConfig>,
     label: &str,
+    allow_missing_identity: bool,
 ) -> Result<CompiledCertificateMaterial> {
     let cert_path = super::super::super::resolve_path(base_dir, cert_path);
-    if !cert_path.is_file() {
+    if !allow_missing_identity && !cert_path.is_file() {
         return Err(Error::Config(format!(
             "{label} certificate file `{}` does not exist or is not a file",
             cert_path.display()
@@ -36,14 +37,15 @@ pub(super) fn compile_certificate_material(
     }
 
     let key_path = super::super::super::resolve_path(base_dir, key_path);
-    if !key_path.is_file() {
+    if !allow_missing_identity && !key_path.is_file() {
         return Err(Error::Config(format!(
             "{label} private key file `{}` does not exist or is not a file",
             key_path.display()
         )));
     }
 
-    let ocsp_staple_path = compile_ocsp_staple_path(base_dir, ocsp_staple_path, label)?;
+    let ocsp_staple_path =
+        compile_ocsp_staple_path(base_dir, ocsp_staple_path, label, allow_missing_identity)?;
     let ocsp = compile_ocsp_config(ocsp);
     let additional_certificates = additional_certificates
         .unwrap_or_default()
@@ -120,7 +122,8 @@ fn compile_certificate_bundle(
         )));
     }
 
-    let ocsp_staple_path = compile_ocsp_staple_path(base_dir, bundle.ocsp_staple_path, label)?;
+    let ocsp_staple_path =
+        compile_ocsp_staple_path(base_dir, bundle.ocsp_staple_path, label, false)?;
     let ocsp = compile_ocsp_config(bundle.ocsp);
 
     Ok(ServerCertificateBundle { cert_path, key_path, ocsp_staple_path, ocsp })
@@ -130,11 +133,12 @@ fn compile_ocsp_staple_path(
     base_dir: &Path,
     path: Option<String>,
     label: &str,
+    allow_missing_path: bool,
 ) -> Result<Option<PathBuf>> {
     match path {
         Some(path) => {
             let resolved = super::super::super::resolve_path(base_dir, path);
-            if !resolved.is_file() {
+            if !allow_missing_path && !resolved.is_file() {
                 return Err(Error::Config(format!(
                     "{label} OCSP staple file `{}` does not exist or is not a file",
                     resolved.display()

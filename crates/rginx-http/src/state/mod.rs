@@ -93,6 +93,7 @@ pub struct SharedState {
     cache_component_versions: Arc<StdRwLock<HashMap<String, u64>>>,
     reload_history: Arc<Mutex<ReloadHistory>>,
     ocsp_statuses: Arc<StdRwLock<HashMap<String, OcspRuntimeStatusEntry>>>,
+    acme_http01_challenges: Arc<StdRwLock<HashMap<String, String>>>,
     config_path: Option<Arc<PathBuf>>,
 }
 
@@ -158,6 +159,7 @@ impl SharedState {
         *cache_component_versions.write().unwrap_or_else(|poisoned| poisoned.into_inner()) =
             cache::build_cache_zone_versions(prepared.config.as_ref(), None);
         let ocsp_statuses = Arc::new(StdRwLock::new(HashMap::new()));
+        let acme_http01_challenges = Arc::new(StdRwLock::new(HashMap::new()));
 
         Ok(Self {
             inner: Arc::new(RwLock::new(ActiveState {
@@ -185,6 +187,7 @@ impl SharedState {
             cache_component_versions,
             reload_history: Arc::new(Mutex::new(ReloadHistory::default())),
             ocsp_statuses,
+            acme_http01_challenges,
             config_path: config_path.map(Arc::new),
         })
     }

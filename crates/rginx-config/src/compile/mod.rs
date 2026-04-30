@@ -1,6 +1,8 @@
 use std::path::Path;
+use std::{collections::HashSet, path::PathBuf};
 
 use crate::model::Config;
+use crate::model::VirtualHostConfig;
 use rginx_core::{ConfigSnapshot, Result, VirtualHost};
 
 use crate::validate::validate;
@@ -37,13 +39,27 @@ const DEFAULT_GRPC_HEALTH_CHECK_PATH: &str = "/grpc.health.v1.Health/Check";
 
 use path::resolve_path;
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CompileOptions {
+    pub allow_missing_managed_tls_identity: bool,
+}
+
 pub fn compile(raw: Config) -> Result<ConfigSnapshot> {
     compile_with_base(raw, Path::new("."))
 }
 
 pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<ConfigSnapshot> {
+    compile_with_base_and_options(raw, base_dir, CompileOptions::default())
+}
+
+pub fn compile_with_base_and_options(
+    raw: Config,
+    base_dir: impl AsRef<Path>,
+    options: CompileOptions,
+) -> Result<ConfigSnapshot> {
     validate(&raw)?;
     let base_dir = base_dir.as_ref();
+    let managed_identity_pairs = collect_managed_identity_pairs(&raw.servers, base_dir);
 
     let Config {
         runtime,
@@ -61,15 +77,33 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
     let any_vhost_tls = raw_servers.iter().any(|vhost| vhost.tls.is_some());
     let any_vhost_listen = raw_servers.iter().any(|vhost| !vhost.listen.is_empty());
     let (listeners, default_server_names) = if any_vhost_listen {
-        let listeners = server::compile_vhost_listeners(&raw_servers, &server, base_dir)?;
+        let listeners = server::compile_vhost_listeners(
+            &raw_servers,
+            &server,
+            base_dir,
+            options.allow_missing_managed_tls_identity,
+            &managed_identity_pairs,
+        )?;
         (listeners, server.server_names.clone())
     } else if raw_listeners.is_empty() {
-        let compiled_server = server::compile_legacy_server(server, base_dir, any_vhost_tls)?;
+        let compiled_server = server::compile_legacy_server(
+            server,
+            base_dir,
+            any_vhost_tls,
+            options.allow_missing_managed_tls_identity,
+            &managed_identity_pairs,
+        )?;
         (vec![compiled_server.listener.clone()], compiled_server.server_names)
     } else {
         let default_server_header = server.server_header;
         let default_server_names = server.server_names;
-        let listeners = server::compile_listeners(raw_listeners, default_server_header, base_dir)?;
+        let listeners = server::compile_listeners(
+            raw_listeners,
+            default_server_header,
+            base_dir,
+            options.allow_missing_managed_tls_identity,
+            &managed_identity_pairs,
+        )?;
         (listeners, default_server_names)
     };
     let mut upstreams = upstream::compile_upstreams(raw_upstreams, base_dir)?;
@@ -91,6 +125,8 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
                 vhost_config,
                 &upstreams,
                 base_dir,
+                options.allow_missing_managed_tls_identity,
+                &managed_identity_pairs,
             )
         })
         .collect::<Result<Vec<_>>>()?;
@@ -113,6 +149,23 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
         cache_zones,
         upstreams,
     })
+}
+
+fn collect_managed_identity_pairs(
+    raw_servers: &[VirtualHostConfig],
+    base_dir: &Path,
+) -> HashSet<(PathBuf, PathBuf)> {
+    raw_servers
+        .iter()
+        .filter_map(|vhost| {
+            let tls = vhost.tls.as_ref()?;
+            tls.acme.as_ref()?;
+            Some((
+                resolve_path(base_dir, tls.cert_path.clone()),
+                resolve_path(base_dir, tls.key_path.clone()),
+            ))
+        })
+        .collect()
 }
 #[cfg(test)]
 mod tests;

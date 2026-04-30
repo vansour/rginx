@@ -74,6 +74,31 @@ fn managed_vhost(
     }
 }
 
+fn shared_tls_vhost(server_names: Vec<&str>, cert_path: &str, key_path: &str) -> VirtualHostConfig {
+    VirtualHostConfig {
+        listen: Vec::new(),
+        server_names: server_names.into_iter().map(str::to_string).collect(),
+        upstreams: Vec::new(),
+        locations: vec![test_location(
+            MatcherConfig::Exact("/".to_string()),
+            HandlerConfig::Return {
+                status: 200,
+                location: String::new(),
+                body: Some("shared\n".to_string()),
+            },
+        )],
+        tls: Some(crate::model::VirtualHostTlsConfig {
+            acme: None,
+            cert_path: cert_path.to_string(),
+            key_path: key_path.to_string(),
+            additional_certificates: None,
+            ocsp_staple_path: None,
+            ocsp: None,
+        }),
+        http3: None,
+    }
+}
+
 fn managed_acme_config(
     directory_url: &str,
     state_dir: &str,
@@ -193,4 +218,56 @@ fn compile_emits_managed_certificate_specs_for_acme_vhosts() {
     assert_eq!(spec.cert_path, base_dir.path().join("managed.crt"));
     assert_eq!(spec.key_path, base_dir.path().join("managed.key"));
     assert_eq!(spec.challenge, rginx_core::AcmeChallengeType::Http01);
+}
+
+#[test]
+fn compile_allows_missing_managed_identity_files_for_acme_issue_mode() {
+    let base_dir = temp_base_dir("rginx-acme-missing-identity-");
+    let config = managed_acme_config(
+        "https://acme-staging-v02.api.letsencrypt.org/directory",
+        "state/acme",
+        None,
+        None,
+        vec!["api.example.com"],
+        vec!["api.example.com"],
+    );
+
+    let snapshot = crate::compile::compile_with_base_and_options(
+        config,
+        base_dir.path(),
+        crate::compile::CompileOptions { allow_missing_managed_tls_identity: true },
+    )
+    .expect("ACME issue mode should compile without existing managed certificate files");
+
+    assert_eq!(snapshot.managed_certificates.len(), 1);
+    let spec = &snapshot.managed_certificates[0];
+    assert_eq!(spec.cert_path, base_dir.path().join("managed.crt"));
+    assert_eq!(spec.key_path, base_dir.path().join("managed.key"));
+}
+
+#[test]
+fn compile_allows_shared_managed_identity_files_for_acme_issue_mode() {
+    let base_dir = temp_base_dir("rginx-acme-shared-identity-");
+    let mut config = managed_acme_config(
+        "https://acme-staging-v02.api.letsencrypt.org/directory",
+        "state/acme",
+        None,
+        None,
+        vec!["api.example.com"],
+        vec!["api.example.com"],
+    );
+    config.servers.push(shared_tls_vhost(vec!["www.example.com"], "managed.crt", "managed.key"));
+
+    let snapshot = crate::compile::compile_with_base_and_options(
+        config,
+        base_dir.path(),
+        crate::compile::CompileOptions { allow_missing_managed_tls_identity: true },
+    )
+    .expect("shared managed identities should compile in ACME issue mode");
+
+    assert_eq!(snapshot.managed_certificates.len(), 1);
+    assert_eq!(
+        snapshot.vhosts[1].tls.as_ref().expect("shared vhost should keep TLS").cert_path,
+        base_dir.path().join("managed.crt")
+    );
 }

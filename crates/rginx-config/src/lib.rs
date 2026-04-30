@@ -18,6 +18,17 @@ pub fn load_and_compile(path: impl AsRef<Path>) -> Result<ConfigSnapshot> {
     compile::compile_with_base(raw, base_dir)
 }
 
+pub fn load_and_compile_for_acme_issue(path: impl AsRef<Path>) -> Result<ConfigSnapshot> {
+    let path = path.as_ref();
+    let raw = load::load_from_path(path)?;
+    let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    compile::compile_with_base_and_options(
+        raw,
+        base_dir,
+        compile::CompileOptions { allow_missing_managed_tls_identity: true },
+    )
+}
+
 pub fn load_and_compile_from_str(
     contents: &str,
     config_path: impl AsRef<Path>,

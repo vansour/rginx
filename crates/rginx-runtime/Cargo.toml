@@ -13,10 +13,12 @@ description = "Runtime orchestration, reload, shutdown, and health checks for rg
 
 [dependencies]
 bytes.workspace = true
+http.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-rustls.workspace = true
 hyper-util.workspace = true
+instant-acme.workspace = true
 libc = "0.2"
 quinn.workspace = true
 rginx-config = { path = "../rginx-config" }
@@ -32,3 +34,4 @@ tracing.workspace = true
 
 [dev-dependencies]
 ctor.workspace = true
+tempfile = "3.27"

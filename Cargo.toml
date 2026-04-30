@@ -40,6 +40,7 @@ hickory-resolver = "0.26.0"
 hyper = { version = "1.9", features = ["client", "http1", "http2", "server"] }
 hyper-rustls = { version = "0.27.9", default-features = false, features = ["aws-lc-rs", "http1", "http2", "native-tokio", "tls12"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "http2", "tokio"] }
+instant-acme = { version = "0.8.5", default-features = false, features = ["aws-lc-rs", "hyper-rustls", "rcgen"] }
 ipnet = "2.12"
 pin-project-lite = "0.2"
 proptest = "1"

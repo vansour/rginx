@@ -1,3 +1,4 @@
+mod acme;
 mod mtls;
 mod reload;
 mod status;

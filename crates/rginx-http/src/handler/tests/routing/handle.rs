@@ -84,3 +84,49 @@ async fn handle_return_route_uses_numeric_body_and_ignores_non_redirect_location
     let body = response.into_body().collect().await.expect("body should collect").to_bytes();
     assert_eq!(body.as_ref(), b"299\n");
 }
+
+#[tokio::test]
+async fn handle_short_circuits_acme_http01_requests() {
+    let route = Route {
+        cache: None,
+        id: "server/routes[0]|exact:/.well-known/acme-challenge/demo-token".to_string(),
+        matcher: RouteMatcher::Exact("/.well-known/acme-challenge/demo-token".to_string()),
+        grpc_match: None,
+        action: RouteAction::Return(ReturnAction {
+            status: StatusCode::MOVED_PERMANENTLY,
+            location: "https://example.com/redirected".to_string(),
+            body: None,
+        }),
+        access_control: RouteAccessControl::default(),
+        rate_limit: None,
+        allow_early_data: false,
+        request_buffering: rginx_core::RouteBufferingPolicy::Auto,
+        response_buffering: rginx_core::RouteBufferingPolicy::Auto,
+        compression: rginx_core::RouteCompressionPolicy::Off,
+        compression_min_bytes: None,
+        compression_content_types: Vec::new(),
+        streaming_response_idle_timeout: None,
+    };
+    let config = test_config(test_vhost("server", Vec::new(), vec![route]), Vec::new());
+    let shared = crate::state::SharedState::from_config(config).expect("shared state should build");
+    shared.register_acme_http01_challenge("demo-token", "demo-key-authorization");
+
+    let request = Request::builder()
+        .uri("/.well-known/acme-challenge/demo-token")
+        .body(crate::handler::full_body(""))
+        .expect("request should build");
+    let connection = std::sync::Arc::new(ConnectionPeerAddrs {
+        socket_peer_addr: "192.0.2.10:44323".parse().unwrap(),
+        proxy_protocol_source_addr: None,
+        tls_client_identity: None,
+        tls_version: None,
+        tls_alpn: None,
+        early_data: false,
+    });
+
+    let response = crate::handler::handle(request, shared, connection, "default").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response.headers().get(http::header::LOCATION).is_none());
+    let body = response.into_body().collect().await.expect("body should collect").to_bytes();
+    assert_eq!(body.as_ref(), b"demo-key-authorization");
+}

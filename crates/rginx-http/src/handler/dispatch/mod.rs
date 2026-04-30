@@ -18,6 +18,7 @@ use super::grpc::{
 use super::response::{full_body, text_response};
 use super::*;
 
+mod acme;
 mod authorize;
 mod date;
 mod response;
@@ -108,6 +109,20 @@ pub async fn handle(
     let client_address =
         resolve_client_address(request.headers(), &listener.server, connection.as_ref());
     let downstream_scheme = if listener.tls_enabled() { "https" } else { "http" };
+    if let Some(challenge_response) = acme::http01_response(&state, &request_path) {
+        let finalized = finalize_downstream_response(
+            &method,
+            &request_headers,
+            &ResponseCompressionOptions::default(),
+            request_id_header,
+            text_response(StatusCode::OK, "text/plain; charset=utf-8", challenge_response),
+            grpc_request,
+            alt_svc_header,
+            server_header,
+        )
+        .await;
+        return finalized.response;
+    }
     let (selected_vhost_id, selected_route) = {
         let selected_vhost =
             select_vhost_for_request(config.as_ref(), request.headers(), request.uri());

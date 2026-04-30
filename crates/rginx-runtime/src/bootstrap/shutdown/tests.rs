@@ -94,6 +94,7 @@ async fn graceful_shutdown_waits_for_background_tasks_and_signals_shutdown() {
     let mut admin_task = Some(tokio::spawn(async { Ok::<(), std::io::Error>(()) }));
     let mut cache_task = Some(tokio::spawn(async {}));
     let mut health_task = Some(tokio::spawn(async {}));
+    let mut acme_task = Some(tokio::spawn(async {}));
     let mut ocsp_task = Some(tokio::spawn(async {}));
 
     graceful_shutdown(
@@ -106,6 +107,7 @@ async fn graceful_shutdown_waits_for_background_tasks_and_signals_shutdown() {
             admin_task: &mut admin_task,
             cache_task: &mut cache_task,
             health_task: &mut health_task,
+            acme_task: &mut acme_task,
             ocsp_task: &mut ocsp_task,
         },
     )
@@ -117,6 +119,7 @@ async fn graceful_shutdown_waits_for_background_tasks_and_signals_shutdown() {
     assert!(admin_task.is_none());
     assert!(cache_task.is_none());
     assert!(health_task.is_none());
+    assert!(acme_task.is_none());
     assert!(ocsp_task.is_none());
     assert!(active_listener_groups.is_empty());
     assert!(draining_listener_groups.is_empty());
@@ -139,6 +142,7 @@ async fn graceful_shutdown_aborts_pending_tasks_after_timeout() {
     let mut admin_task = Some(tokio::spawn(async { pending::<std::io::Result<()>>().await }));
     let mut cache_task = Some(tokio::spawn(async { pending::<()>().await }));
     let mut health_task = Some(tokio::spawn(async { pending::<()>().await }));
+    let mut acme_task = Some(tokio::spawn(async { pending::<()>().await }));
     let mut ocsp_task = Some(tokio::spawn(async { pending::<()>().await }));
 
     tokio::task::yield_now().await;
@@ -152,6 +156,7 @@ async fn graceful_shutdown_aborts_pending_tasks_after_timeout() {
             admin_task: &mut admin_task,
             cache_task: &mut cache_task,
             health_task: &mut health_task,
+            acme_task: &mut acme_task,
             ocsp_task: &mut ocsp_task,
         },
     )
@@ -163,6 +168,7 @@ async fn graceful_shutdown_aborts_pending_tasks_after_timeout() {
     assert!(admin_task.is_none());
     assert!(cache_task.is_none());
     assert!(health_task.is_none());
+    assert!(acme_task.is_none());
     assert!(ocsp_task.is_none());
     assert!(active_listener_groups.is_empty());
     assert!(draining_listener_groups.is_empty());
