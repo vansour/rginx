@@ -37,6 +37,7 @@ impl IssueSummary {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ReconcileReason {
     MissingCertificate,
+    MissingPrivateKey,
     MissingCertificateMetadata,
     SanMismatch { expected: Vec<String>, actual: Vec<String> },
     Expiring { remaining_days: i64, renew_before_days: i64 },
@@ -51,6 +52,7 @@ impl ReconcilePlan {
     pub(crate) fn describe(&self) -> String {
         match &self.reason {
             ReconcileReason::MissingCertificate => "certificate file is missing".to_string(),
+            ReconcileReason::MissingPrivateKey => "private key file is missing".to_string(),
             ReconcileReason::MissingCertificateMetadata => {
                 "certificate metadata could not be inspected".to_string()
             }
@@ -96,6 +98,10 @@ pub(crate) fn plan_reconcile(
         Some(status) => status,
         None => return Some(ReconcilePlan { reason: ReconcileReason::MissingCertificate }),
     };
+
+    if !spec.key_path.is_file() {
+        return Some(ReconcilePlan { reason: ReconcileReason::MissingPrivateKey });
+    }
 
     if status.fingerprint_sha256.is_none() {
         return Some(ReconcilePlan {

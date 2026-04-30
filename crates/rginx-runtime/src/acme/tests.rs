@@ -1,7 +1,12 @@
 use std::collections::HashMap;
+use std::fs;
+use std::io::{Error as IoError, ErrorKind};
+use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use super::challenge::is_transient_accept_error;
+use super::storage::parent_directory;
 use rginx_core::{
     AcmeChallengeType, AcmeSettings, ConfigSnapshot, Listener, ManagedCertificateSpec,
     RuntimeSettings, Server, VirtualHost,
@@ -87,9 +92,31 @@ fn http01_listener_addrs_only_returns_plain_http_port_80_bindings() {
 }
 
 #[test]
+fn transient_accept_errors_are_retried() {
+    assert!(is_transient_accept_error(&IoError::from(ErrorKind::ConnectionAborted)));
+    assert!(is_transient_accept_error(&IoError::from(ErrorKind::OutOfMemory)));
+}
+
+#[test]
+fn permanent_accept_errors_stop_the_listener() {
+    assert!(!is_transient_accept_error(&IoError::from(ErrorKind::AddrInUse)));
+}
+
+#[test]
+fn bare_relative_paths_use_current_directory_as_parent() {
+    assert_eq!(parent_directory(Path::new("issued.crt")), Path::new("."));
+}
+
+#[test]
 fn plan_reconcile_detects_san_mismatch() {
     let settings = test_config(Vec::new()).acme.unwrap();
-    let spec = managed_spec();
+    let temp_dir = tempfile::tempdir().expect("tempdir should build");
+    let spec = ManagedCertificateSpec {
+        cert_path: temp_dir.path().join("issued.crt"),
+        key_path: temp_dir.path().join("issued.key"),
+        ..managed_spec()
+    };
+    fs::write(&spec.key_path, b"private-key").expect("private key should be written");
     let status = TlsCertificateStatusSnapshot {
         scope: spec.scope.clone(),
         cert_path: spec.cert_path.clone(),
@@ -124,7 +151,13 @@ fn plan_reconcile_detects_san_mismatch() {
 #[test]
 fn plan_reconcile_skips_healthy_certificate() {
     let settings = test_config(Vec::new()).acme.unwrap();
-    let spec = managed_spec();
+    let temp_dir = tempfile::tempdir().expect("tempdir should build");
+    let spec = ManagedCertificateSpec {
+        cert_path: temp_dir.path().join("issued.crt"),
+        key_path: temp_dir.path().join("issued.key"),
+        ..managed_spec()
+    };
+    fs::write(&spec.key_path, b"private-key").expect("private key should be written");
     let status = TlsCertificateStatusSnapshot {
         scope: spec.scope.clone(),
         cert_path: spec.cert_path.clone(),
@@ -155,6 +188,47 @@ fn plan_reconcile_skips_healthy_certificate() {
 }
 
 #[test]
+fn plan_reconcile_detects_missing_private_key() {
+    let settings = test_config(Vec::new()).acme.unwrap();
+    let temp_dir = tempfile::tempdir().expect("tempdir should build");
+    let spec = ManagedCertificateSpec {
+        cert_path: temp_dir.path().join("issued.crt"),
+        key_path: temp_dir.path().join("issued.key"),
+        ..managed_spec()
+    };
+    fs::write(&spec.cert_path, b"certificate-chain").expect("certificate should be written");
+    let status = TlsCertificateStatusSnapshot {
+        scope: spec.scope.clone(),
+        cert_path: spec.cert_path.clone(),
+        server_names: spec.domains.clone(),
+        subject: None,
+        issuer: None,
+        serial_number: None,
+        san_dns_names: spec.domains.clone(),
+        fingerprint_sha256: Some("fingerprint".to_string()),
+        subject_key_identifier: None,
+        authority_key_identifier: None,
+        is_ca: Some(false),
+        path_len_constraint: None,
+        key_usage: None,
+        extended_key_usage: Vec::new(),
+        not_before_unix_ms: None,
+        not_after_unix_ms: None,
+        expires_in_days: Some(90),
+        chain_length: 1,
+        chain_subjects: Vec::new(),
+        chain_diagnostics: Vec::new(),
+        selected_as_default_for_listeners: Vec::new(),
+        ocsp_staple_configured: false,
+        additional_certificate_count: 0,
+    };
+
+    let plan = plan_reconcile(&spec, Some(&status), &settings)
+        .expect("missing private key should trigger reconcile");
+    assert!(plan.describe().contains("private key file is missing"));
+}
+
+#[test]
 fn write_certificate_pair_persists_both_outputs() {
     let temp_dir = tempfile::tempdir().expect("tempdir should build");
     let spec = ManagedCertificateSpec {
@@ -176,4 +250,34 @@ fn write_certificate_pair_persists_both_outputs() {
         std::fs::read_to_string(&spec.key_path).expect("private key should read"),
         "private-key"
     );
+}
+
+#[test]
+fn write_certificate_pair_rolls_back_certificate_when_key_write_fails() {
+    let temp_dir = tempfile::tempdir().expect("tempdir should build");
+    let blocked_parent = temp_dir.path().join("blocked-parent");
+    fs::write(&blocked_parent, b"not-a-directory").expect("blocking file should be written");
+
+    let spec = ManagedCertificateSpec {
+        scope: "servers[0]".to_string(),
+        domains: vec!["api.example.com".to_string()],
+        cert_path: temp_dir.path().join("issued.crt"),
+        key_path: blocked_parent.join("issued.key"),
+        challenge: AcmeChallengeType::Http01,
+    };
+    fs::write(&spec.cert_path, b"old-certificate").expect("existing certificate should be written");
+
+    let error = write_certificate_pair(&spec, "new-certificate", "private-key")
+        .expect_err("key write should fail");
+
+    assert!(
+        error.to_string().contains("Not a directory")
+            || error.to_string().contains("not a directory")
+            || error.to_string().contains("File exists")
+    );
+    assert_eq!(
+        fs::read_to_string(&spec.cert_path).expect("certificate should read"),
+        "old-certificate"
+    );
+    assert!(!spec.key_path.exists());
 }

@@ -126,6 +126,7 @@ pub fn compile_with_base_and_options(
                 &upstreams,
                 base_dir,
                 options.allow_missing_managed_tls_identity,
+                &managed_identity_pairs,
             )
         })
         .collect::<Result<Vec<_>>>()?;

@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use rginx_core::{ManagedCertificateSpec, Result, Upstream, VirtualHost};
@@ -18,6 +20,7 @@ pub(super) fn compile_virtual_host(
     upstreams: &HashMap<String, Arc<Upstream>>,
     base_dir: &Path,
     allow_missing_managed_tls_identity: bool,
+    managed_identity_pairs: &HashSet<(PathBuf, PathBuf)>,
 ) -> Result<CompiledVirtualHost> {
     let VirtualHostConfig {
         listen: _,
@@ -28,6 +31,10 @@ pub(super) fn compile_virtual_host(
         http3: _,
     } = config;
     let acme = tls.as_ref().and_then(|tls| tls.acme.clone());
+    let allow_missing_tls_identity = allow_missing_managed_tls_identity
+        && tls
+            .as_ref()
+            .is_some_and(|tls| tls_identity_is_managed(tls, base_dir, managed_identity_pairs));
     let local_upstream_names = raw_upstreams
         .iter()
         .map(|upstream| {
@@ -50,11 +57,7 @@ pub(super) fn compile_virtual_host(
         &local_upstream_names,
         &vhost_id,
     )?;
-    let tls = super::server::compile_virtual_host_tls(
-        tls.clone(),
-        base_dir,
-        allow_missing_managed_tls_identity && acme.is_some(),
-    )?;
+    let tls = super::server::compile_virtual_host_tls(tls, base_dir, allow_missing_tls_identity)?;
     let managed_certificate = tls
         .as_ref()
         .and_then(|tls| super::acme::compile_managed_certificate_spec(vhost_id.clone(), tls, acme));
@@ -64,4 +67,15 @@ pub(super) fn compile_virtual_host(
         upstreams: local_upstreams,
         managed_certificate,
     })
+}
+
+fn tls_identity_is_managed(
+    tls: &crate::model::VirtualHostTlsConfig,
+    base_dir: &Path,
+    managed_identity_pairs: &HashSet<(PathBuf, PathBuf)>,
+) -> bool {
+    managed_identity_pairs.contains(&(
+        super::resolve_path(base_dir, tls.cert_path.clone()),
+        super::resolve_path(base_dir, tls.key_path.clone()),
+    ))
 }

@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::io::ErrorKind;
 use std::sync::{Arc, RwLock as StdRwLock};
+use std::time::Duration;
 
 use bytes::Bytes;
 use http::header::CONTENT_TYPE;
@@ -155,6 +157,23 @@ async fn run_listener(
                         });
                     }
                     Err(error) => {
+                        if is_transient_accept_error(&error) {
+                            if let Some(listen_addr) = listen_addr {
+                                tracing::warn!(
+                                    %error,
+                                    %listen_addr,
+                                    "temporary ACME HTTP-01 listener accept failed transiently; retrying"
+                                );
+                            } else {
+                                tracing::warn!(
+                                    %error,
+                                    "temporary ACME HTTP-01 listener accept failed transiently; retrying"
+                                );
+                            }
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            continue;
+                        }
+
                         if let Some(listen_addr) = listen_addr {
                             tracing::warn!(%error, %listen_addr, "temporary ACME HTTP-01 listener stopped accepting");
                         } else {
@@ -166,6 +185,30 @@ async fn run_listener(
             }
         }
     }
+}
+
+pub(super) fn is_transient_accept_error(error: &std::io::Error) -> bool {
+    if matches!(
+        error.kind(),
+        ErrorKind::ConnectionAborted
+            | ErrorKind::ConnectionReset
+            | ErrorKind::Interrupted
+            | ErrorKind::TimedOut
+            | ErrorKind::WouldBlock
+            | ErrorKind::OutOfMemory
+    ) {
+        return true;
+    }
+
+    #[cfg(unix)]
+    if let Some(code) = error.raw_os_error() {
+        return matches!(
+            code,
+            libc::ECONNABORTED | libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM
+        );
+    }
+
+    false
 }
 
 fn build_response(

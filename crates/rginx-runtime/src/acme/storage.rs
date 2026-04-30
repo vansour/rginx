@@ -50,8 +50,25 @@ pub(crate) fn write_certificate_pair(
     certificate_chain_pem: &str,
     private_key_pem: &str,
 ) -> Result<()> {
+    let previous_certificate = read_existing_file(&spec.cert_path)?;
     atomic_write(&spec.cert_path, certificate_chain_pem.as_bytes(), CERT_FILE_MODE)?;
-    atomic_write(&spec.key_path, private_key_pem.as_bytes(), PRIVATE_KEY_FILE_MODE)
+    if let Err(error) =
+        atomic_write(&spec.key_path, private_key_pem.as_bytes(), PRIVATE_KEY_FILE_MODE)
+    {
+        rollback_file(&spec.cert_path, previous_certificate.as_deref(), CERT_FILE_MODE).map_err(
+            |rollback_error| {
+                Error::Server(format!(
+                    "failed to persist private key for managed certificate `{}`: {error}; \
+                     failed to roll back certificate `{}`: {rollback_error}",
+                    spec.scope,
+                    spec.cert_path.display()
+                ))
+            },
+        )?;
+        return Err(error);
+    }
+
+    Ok(())
 }
 
 fn account_credentials_path(settings: &AcmeSettings) -> PathBuf {
@@ -59,7 +76,7 @@ fn account_credentials_path(settings: &AcmeSettings) -> PathBuf {
 }
 
 fn atomic_write(path: &Path, contents: &[u8], mode: u32) -> Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let parent = parent_directory(path);
     fs::create_dir_all(parent)?;
 
     let temp_path = temporary_path(path);
@@ -78,6 +95,21 @@ fn atomic_write(path: &Path, contents: &[u8], mode: u32) -> Result<()> {
     }
 
     write_result
+}
+
+fn read_existing_file(path: &Path) -> Result<Option<Vec<u8>>> {
+    match fs::read(path) {
+        Ok(contents) => Ok(Some(contents)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(Error::Io(error)),
+    }
+}
+
+fn rollback_file(path: &Path, previous_contents: Option<&[u8]>, mode: u32) -> Result<()> {
+    match previous_contents {
+        Some(contents) => atomic_write(path, contents, mode),
+        None => remove_file_if_exists(path),
+    }
 }
 
 fn create_temp_file(path: &Path, mode: u32) -> Result<File> {
@@ -106,6 +138,21 @@ fn temporary_path(path: &Path) -> PathBuf {
     let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let file_name = path.file_name().and_then(|value| value.to_str()).unwrap_or("acme-material");
     path.with_file_name(format!("{file_name}.tmp-{timestamp_nanos}-{sequence}"))
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => {
+            sync_directory(parent_directory(path))?;
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(Error::Io(error)),
+    }
+}
+
+pub(super) fn parent_directory(path: &Path) -> &Path {
+    path.parent().filter(|parent| !parent.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."))
 }
 
 fn sync_directory(path: &Path) -> Result<()> {
