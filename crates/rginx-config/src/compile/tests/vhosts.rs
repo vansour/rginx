@@ -10,6 +10,7 @@ fn compile_generates_deduplicated_listeners_from_vhost_listen() {
     fs::write(base_dir.path().join("api.key"), b"placeholder").expect("key should be written");
 
     let config = Config {
+        acme: None,
         cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
@@ -30,6 +31,7 @@ fn compile_generates_deduplicated_listeners_from_vhost_listen() {
                 upstreams: Vec::new(),
                 locations: vec![return_location("api\n")],
                 tls: Some(crate::model::VirtualHostTlsConfig {
+                    acme: None,
                     cert_path: "api.crt".to_string(),
                     key_path: "api.key".to_string(),
                     additional_certificates: None,
@@ -76,6 +78,7 @@ fn compile_generates_deduplicated_listeners_from_vhost_listen() {
 #[test]
 fn compile_uses_vhost_local_upstream_before_global_upstream() {
     let config = Config {
+        acme: None,
         cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
@@ -131,6 +134,7 @@ fn compile_applies_server_tls_defaults_only_to_vhost_ssl_listeners() {
     server.tls = Some(server_tls("default.crt", "default.key"));
 
     let config = Config {
+        acme: None,
         cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
@@ -147,6 +151,7 @@ fn compile_applies_server_tls_defaults_only_to_vhost_ssl_listeners() {
             upstreams: Vec::new(),
             locations: vec![return_location("api\n")],
             tls: Some(crate::model::VirtualHostTlsConfig {
+                acme: None,
                 cert_path: "api.crt".to_string(),
                 key_path: "api.key".to_string(),
                 additional_certificates: None,
@@ -183,6 +188,7 @@ fn compile_uses_first_tls_vhost_as_implicit_default_certificate() {
     }
 
     let config = Config {
+        acme: None,
         cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
@@ -212,6 +218,7 @@ fn compile_uses_first_tls_vhost_as_implicit_default_certificate() {
 #[test]
 fn compile_preserves_ipv6_vhost_listener_ids() {
     let config = Config {
+        acme: None,
         cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
@@ -288,6 +295,7 @@ fn tls_vhost(server_name: &str, cert_path: &str, key_path: &str) -> VirtualHostC
         upstreams: Vec::new(),
         locations: vec![return_location("ok\n")],
         tls: Some(crate::model::VirtualHostTlsConfig {
+            acme: None,
             cert_path: cert_path.to_string(),
             key_path: key_path.to_string(),
             additional_certificates: None,

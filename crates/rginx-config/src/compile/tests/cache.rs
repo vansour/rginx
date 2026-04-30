@@ -4,6 +4,7 @@ use super::*;
 fn compile_attaches_cache_zones_and_route_policy() {
     let base_dir = temp_base_dir("rginx-cache-compile");
     let mut config = Config {
+        acme: None,
         cache_zones: vec![CacheZoneConfig {
             name: "default".to_string(),
             path: "cache/default".to_string(),
@@ -194,6 +195,7 @@ fn compile_attaches_cache_zones_and_route_policy() {
 fn compile_cache_policy_supports_p0_controls() {
     let base_dir = temp_base_dir("rginx-cache-compile-p0");
     let config = Config {
+        acme: None,
         cache_zones: vec![CacheZoneConfig {
             name: "default".to_string(),
             path: "cache/default".to_string(),

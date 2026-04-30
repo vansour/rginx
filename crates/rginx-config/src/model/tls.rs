@@ -1,3 +1,4 @@
+use super::VirtualHostAcmeConfig;
 use serde::{Deserialize, Deserializer, de};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -37,6 +38,7 @@ pub struct VirtualHostTlsConfig {
     pub additional_certificates: Option<Vec<ServerCertificateBundleConfig>>,
     pub ocsp_staple_path: Option<String>,
     pub ocsp: Option<OcspConfig>,
+    pub acme: Option<VirtualHostAcmeConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -132,6 +134,8 @@ impl<'de> Deserialize<'de> for VirtualHostTlsConfig {
                 ocsp_staple_path: Option<String>,
                 #[serde(default)]
                 ocsp: Option<OcspConfig>,
+                #[serde(default)]
+                acme: Option<VirtualHostAcmeConfig>,
             },
             ServerTlsConfig {
                 cert_path: String,
@@ -160,6 +164,8 @@ impl<'de> Deserialize<'de> for VirtualHostTlsConfig {
                 session_ticket_count: Option<u64>,
                 #[serde(default)]
                 client_auth: Option<ServerClientAuthConfig>,
+                #[serde(default)]
+                acme: Option<VirtualHostAcmeConfig>,
             },
         }
 
@@ -170,7 +176,15 @@ impl<'de> Deserialize<'de> for VirtualHostTlsConfig {
                 additional_certificates,
                 ocsp_staple_path,
                 ocsp,
-            } => Ok(Self { cert_path, key_path, additional_certificates, ocsp_staple_path, ocsp }),
+                acme,
+            } => Ok(Self {
+                cert_path,
+                key_path,
+                additional_certificates,
+                ocsp_staple_path,
+                ocsp,
+                acme,
+            }),
             VirtualHostTlsConfigDe::ServerTlsConfig {
                 cert_path,
                 key_path,
@@ -186,6 +200,7 @@ impl<'de> Deserialize<'de> for VirtualHostTlsConfig {
                 session_cache_size,
                 session_ticket_count,
                 client_auth,
+                acme,
             } => {
                 if versions.is_some()
                     || cipher_suites.is_some()
@@ -196,13 +211,21 @@ impl<'de> Deserialize<'de> for VirtualHostTlsConfig {
                     || session_cache_size.is_some()
                     || session_ticket_count.is_some()
                     || client_auth.is_some()
+                    || acme.is_some()
                 {
                     return Err(de::Error::custom(
-                        "vhost TLS policy fields are not supported in legacy `ServerTlsConfig(...)`; use `VirtualHostTlsConfig(...)` for certificate overrides and keep versions, cipher_suites, key_exchange_groups, ALPN, session settings, session cache settings, and client_auth on server.tls or listeners[].tls",
+                        "vhost TLS policy fields are not supported in legacy `ServerTlsConfig(...)`; use `VirtualHostTlsConfig(...)` for certificate overrides, ACME-managed certificates, and keep versions, cipher_suites, key_exchange_groups, ALPN, session settings, session cache settings, and client_auth on server.tls or listeners[].tls",
                     ));
                 }
 
-                Ok(Self { cert_path, key_path, additional_certificates, ocsp_staple_path, ocsp })
+                Ok(Self {
+                    cert_path,
+                    key_path,
+                    additional_certificates,
+                    ocsp_staple_path,
+                    ocsp,
+                    acme: None,
+                })
             }
         }
     }

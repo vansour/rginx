@@ -3,6 +3,7 @@ use super::*;
 #[test]
 fn compile_applies_custom_server_header() {
     let config = Config {
+        acme: None,
         cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
@@ -48,6 +49,7 @@ fn compile_applies_custom_server_header() {
 #[test]
 fn compile_normalizes_trusted_proxy_ips_and_cidrs() {
     let config = Config {
+        acme: None,
         cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
@@ -115,6 +117,7 @@ fn compile_normalizes_trusted_proxy_ips_and_cidrs() {
 #[test]
 fn compile_attaches_server_hardening_settings() {
     let config = Config {
+        acme: None,
         cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
@@ -198,6 +201,7 @@ fn compile_attaches_server_hardening_settings() {
 #[test]
 fn compile_rejects_invalid_server_access_log_format() {
     let config = Config {
+        acme: None,
         cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,

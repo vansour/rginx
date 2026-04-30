@@ -4,6 +4,7 @@ use rginx_core::{Error, Result};
 
 use crate::model::{Config, LocationConfig, RouteBufferingPolicyConfig};
 
+mod acme;
 mod cache;
 mod route;
 mod runtime;
@@ -37,6 +38,7 @@ pub fn validate(config: &Config) -> Result<()> {
         config.server.tls.as_ref(),
         &cache_zone_names,
     )?;
+    acme::validate_acme(config)?;
     validate_request_buffering_limits(config)?;
 
     Ok(())

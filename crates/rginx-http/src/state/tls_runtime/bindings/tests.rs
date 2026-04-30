@@ -98,6 +98,8 @@ fn certificates(scopes: &[&str]) -> Vec<TlsCertificateStatusSnapshot> {
 #[test]
 fn listener_certificate_is_default_when_no_explicit_default_is_configured() {
     let config = ConfigSnapshot {
+        acme: None,
+        managed_certificates: Vec::new(),
         cache_zones: HashMap::new(),
         runtime: rginx_core::RuntimeSettings {
             shutdown_timeout: Duration::from_secs(1),
@@ -137,6 +139,8 @@ fn listener_certificate_is_default_when_no_explicit_default_is_configured() {
 #[test]
 fn single_named_vhost_certificate_becomes_implicit_default_without_listener_tls() {
     let config = ConfigSnapshot {
+        acme: None,
+        managed_certificates: Vec::new(),
         cache_zones: HashMap::new(),
         runtime: rginx_core::RuntimeSettings {
             shutdown_timeout: Duration::from_secs(1),

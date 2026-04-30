@@ -104,6 +104,8 @@ async fn peer_health_snapshot_delegates_to_registry() {
         tls: None,
     };
     let snapshot = ConfigSnapshot {
+        acme: None,
+        managed_certificates: Vec::new(),
         cache_zones: HashMap::new(),
         runtime: RuntimeSettings {
             shutdown_timeout: Duration::from_secs(1),

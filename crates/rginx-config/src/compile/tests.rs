@@ -53,6 +53,7 @@ fn test_location(matcher: MatcherConfig, handler: HandlerConfig) -> LocationConf
     }
 }
 
+mod acme;
 mod cache;
 mod cache_p1;
 mod cache_p2;

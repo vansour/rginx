@@ -9,6 +9,7 @@ use crate::model::{
 
 use super::{DEFAULT_GRPC_HEALTH_CHECK_PATH, validate};
 
+mod acme;
 mod cache;
 mod listeners;
 mod route;
@@ -24,6 +25,7 @@ mod vhosts;
 
 fn base_config() -> Config {
     Config {
+        acme: None,
         cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,

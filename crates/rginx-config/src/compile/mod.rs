@@ -5,6 +5,7 @@ use rginx_core::{ConfigSnapshot, Result, VirtualHost};
 
 use crate::validate::validate;
 
+mod acme;
 mod cache;
 mod path;
 mod route;
@@ -46,6 +47,7 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
 
     let Config {
         runtime,
+        acme: raw_acme,
         listeners: raw_listeners,
         cache_zones: raw_cache_zones,
         server,
@@ -54,6 +56,7 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
         servers: raw_servers,
     } = raw;
     let runtime = runtime::compile_runtime_settings(runtime)?;
+    let acme = acme::compile_global_acme(raw_acme, base_dir);
     let cache_zones = cache::compile_cache_zones(raw_cache_zones, base_dir)?;
     let any_vhost_tls = raw_servers.iter().any(|vhost| vhost.tls.is_some());
     let any_vhost_listen = raw_servers.iter().any(|vhost| !vhost.listen.is_empty());
@@ -78,6 +81,7 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
         tls: None,
     };
 
+    let mut managed_certificates = Vec::new();
     let compiled_vhosts = raw_servers
         .into_iter()
         .enumerate()
@@ -93,10 +97,22 @@ pub fn compile_with_base(raw: Config, base_dir: impl AsRef<Path>) -> Result<Conf
     let mut vhosts = Vec::with_capacity(compiled_vhosts.len());
     for compiled in compiled_vhosts {
         upstreams.extend(compiled.upstreams);
+        if let Some(spec) = compiled.managed_certificate {
+            managed_certificates.push(spec);
+        }
         vhosts.push(compiled.vhost);
     }
 
-    Ok(ConfigSnapshot { runtime, listeners, default_vhost, vhosts, cache_zones, upstreams })
+    Ok(ConfigSnapshot {
+        runtime,
+        acme,
+        managed_certificates,
+        listeners,
+        default_vhost,
+        vhosts,
+        cache_zones,
+        upstreams,
+    })
 }
 #[cfg(test)]
 mod tests;

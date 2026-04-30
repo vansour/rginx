@@ -203,6 +203,8 @@ fn snapshot_with_upstreams_map(
 ) -> rginx_core::ConfigSnapshot {
     let server = default_server();
     rginx_core::ConfigSnapshot {
+        acme: None,
+        managed_certificates: Vec::new(),
         cache_zones: HashMap::new(),
         runtime: rginx_core::RuntimeSettings {
             shutdown_timeout: Duration::from_secs(1),

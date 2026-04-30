@@ -52,6 +52,8 @@ async fn collect_probe_targets_only_includes_enabled_upstreams() {
         tls: None,
     };
     let snapshot = ConfigSnapshot {
+        acme: None,
+        managed_certificates: Vec::new(),
         cache_zones: HashMap::new(),
         runtime: RuntimeSettings {
             shutdown_timeout: Duration::from_secs(1),

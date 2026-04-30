@@ -1,11 +1,16 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::{CacheZone, Listener, RuntimeSettings, Upstream, VirtualHost};
+use super::{
+    AcmeSettings, CacheZone, Listener, ManagedCertificateSpec, RuntimeSettings, Upstream,
+    VirtualHost,
+};
 
 #[derive(Debug, Clone)]
 pub struct ConfigSnapshot {
     pub runtime: RuntimeSettings,
+    pub acme: Option<AcmeSettings>,
+    pub managed_certificates: Vec<ManagedCertificateSpec>,
     pub listeners: Vec<Listener>,
     pub default_vhost: VirtualHost,
     pub vhosts: Vec<VirtualHost>,

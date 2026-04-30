@@ -3,6 +3,7 @@ use super::*;
 #[test]
 fn compile_normalizes_server_name_override() {
     let config = Config {
+        acme: None,
         cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
@@ -103,6 +104,7 @@ fn compile_normalizes_server_name_override() {
 #[test]
 fn compile_preserves_upstream_server_name_toggle() {
     let config = Config {
+        acme: None,
         cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,
@@ -209,6 +211,7 @@ fn compile_preserves_upstream_server_name_toggle() {
 #[test]
 fn compile_rejects_invalid_server_name_override() {
     let config = Config {
+        acme: None,
         cache_zones: Vec::new(),
         runtime: RuntimeConfig {
             shutdown_timeout_secs: 10,

@@ -80,6 +80,7 @@ pub(super) fn compile_virtual_host_tls(
         additional_certificates,
         ocsp_staple_path,
         ocsp,
+        acme: _,
     }) = tls
     else {
         return Ok(None);
