@@ -1,15 +1,18 @@
+mod acme;
 mod listeners;
 mod tls;
 
 use std::path::Path;
 
 use super::summary::CheckSummary;
+use acme::print_acme_details;
 
 pub(crate) fn print_check_success(config_path: &Path, summary: CheckSummary) {
     print_configuration_summary(config_path, &summary);
     listeners::print_listener_details(&summary);
     print_route_transport_details(&summary);
     print_cache_zone_details(&summary);
+    print_acme_details(&summary);
     tls::print_tls_details(&summary);
 }
 

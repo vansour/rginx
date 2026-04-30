@@ -269,6 +269,65 @@ fn validate_rejects_managed_vhost_with_legacy_server_listen_only() {
 }
 
 #[test]
+fn validate_rejects_managed_vhost_with_http3_enabled_explicit_listener() {
+    let mut config = base_config();
+    config.acme = Some(valid_global_acme());
+    enable_acme_listeners(&mut config);
+    config.listeners[1].http3 = Some(crate::model::Http3Config::default());
+    config.servers = vec![managed_vhost(vec!["api.example.com"], vec!["api.example.com"])];
+
+    let error = validate(&config)
+        .expect_err("managed ACME should reject explicit listeners with http3 enabled");
+    assert!(error.to_string().contains("listeners[1] enables http3"));
+}
+
+#[test]
+fn validate_rejects_managed_vhost_with_http3_enabled_vhost_binding() {
+    let mut config = base_config();
+    config.acme = Some(valid_global_acme());
+    config.server.listen = None;
+
+    let mut vhost = managed_vhost(vec!["api.example.com"], vec!["api.example.com"]);
+    vhost.listen = vec!["127.0.0.1:80".to_string(), "127.0.0.1:443 ssl http2 http3".to_string()];
+    vhost.http3 = Some(crate::model::Http3Config::default());
+    config.servers = vec![vhost];
+
+    let error = validate(&config)
+        .expect_err("managed ACME should reject vhost listeners with http3 enabled");
+    assert!(
+        error.to_string().contains("servers[0].listen[1] ACME-managed TLS does not support http3")
+    );
+}
+
+#[test]
+fn validate_accepts_managed_vhost_when_unmanaged_http3_uses_separate_binding() {
+    let mut config = base_config();
+    config.acme = Some(valid_global_acme());
+    config.server.listen = None;
+
+    let mut managed = managed_vhost(vec!["api.example.com"], vec!["api.example.com"]);
+    managed.listen = vec!["127.0.0.1:80".to_string(), "127.0.0.1:443 ssl http2".to_string()];
+
+    let mut static_http3 = sample_vhost(vec!["static.example.com"]);
+    static_http3.listen =
+        vec!["127.0.0.1:8443 ssl http2 http3".to_string(), "127.0.0.1:8080".to_string()];
+    static_http3.http3 = Some(crate::model::Http3Config::default());
+    static_http3.tls = Some(VirtualHostTlsConfig {
+        acme: None,
+        cert_path: "static.crt".to_string(),
+        key_path: "static.key".to_string(),
+        additional_certificates: None,
+        ocsp_staple_path: None,
+        ocsp: None,
+    });
+
+    config.servers = vec![managed, static_http3];
+
+    validate(&config)
+        .expect("managed ACME should allow separate unmanaged http3 bindings in vhost mode");
+}
+
+#[test]
 fn validate_accepts_phase1_managed_vhost_configuration() {
     let mut config = base_config();
     config.acme = Some(valid_global_acme());

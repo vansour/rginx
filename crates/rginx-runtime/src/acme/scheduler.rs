@@ -7,6 +7,7 @@ use tokio::sync::watch;
 
 use super::account::load_or_create_account;
 use super::challenge::{ChallengeBackend, RuntimeChallengeBackend};
+use super::lock::AcmeStateLock;
 use super::order::issue_and_store_managed_certificate;
 use super::types::{certificate_status_index, http01_listener_addrs, plan_reconcile};
 
@@ -145,11 +146,7 @@ async fn reconcile_managed_certificates(
         return Ok(());
     }
 
-    let account = load_or_create_account(settings).await.map_err(|error| error.to_string())?;
-    let challenge_backend: Arc<dyn ChallengeBackend> =
-        Arc::new(RuntimeChallengeBackend::new(state.clone()));
-    let mut tls_acceptors_changed = false;
-
+    let mut work_items = Vec::new();
     for (spec, plan) in pending {
         if let Some(delay) = retry_backoff.remaining_delay(&spec.scope) {
             tracing::debug!(
@@ -159,7 +156,44 @@ async fn reconcile_managed_certificates(
             );
             continue;
         }
+        work_items.push((spec, plan));
+    }
+    if work_items.is_empty() {
+        return Ok(());
+    }
 
+    let _lock = match AcmeStateLock::acquire(settings) {
+        Ok(lock) => lock,
+        Err(error) => {
+            let message = error.to_string();
+            for (spec, _) in &work_items {
+                state.record_acme_refresh_failure(
+                    &spec.scope,
+                    message.clone(),
+                    Some(settings.poll_interval),
+                );
+                tracing::warn!(scope = %spec.scope, %message, "managed ACME reconcile skipped");
+            }
+            return Ok(());
+        }
+    };
+
+    let account = match load_or_create_account(settings).await {
+        Ok(account) => account,
+        Err(error) => {
+            let message = error.to_string();
+            for (spec, _) in &work_items {
+                let retry_delay = retry_backoff.record_failure(&spec.scope);
+                state.record_acme_refresh_failure(&spec.scope, message.clone(), Some(retry_delay));
+            }
+            return Err(message);
+        }
+    };
+    let challenge_backend: Arc<dyn ChallengeBackend> =
+        Arc::new(RuntimeChallengeBackend::new(state.clone()));
+    let mut certificates_changed = false;
+
+    for (spec, plan) in work_items {
         tracing::info!(
             scope = %spec.scope,
             reason = %plan.describe(),
@@ -168,11 +202,17 @@ async fn reconcile_managed_certificates(
         match issue_and_store_managed_certificate(spec, &account, challenge_backend.clone()).await {
             Ok(()) => {
                 retry_backoff.record_success(&spec.scope);
-                tls_acceptors_changed = true;
+                state.record_acme_refresh_success(&spec.scope);
+                certificates_changed = true;
                 tracing::info!(scope = %spec.scope, "managed ACME certificate refreshed");
             }
             Err(error) => {
                 let retry_delay = retry_backoff.record_failure(&spec.scope);
+                state.record_acme_refresh_failure(
+                    &spec.scope,
+                    error.to_string(),
+                    Some(retry_delay),
+                );
                 tracing::warn!(
                     scope = %spec.scope,
                     %error,
@@ -183,7 +223,11 @@ async fn reconcile_managed_certificates(
         }
     }
 
-    if tls_acceptors_changed {
+    if certificates_changed {
+        if let Err(error) = crate::ocsp::refresh_now(state).await {
+            tracing::warn!(%error, "managed ACME OCSP refresh failed");
+        }
+
         state.refresh_tls_acceptors_from_current_config().await.map_err(|error| {
             format!("failed to rebuild TLS acceptors after ACME certificate refresh: {error}")
         })?;

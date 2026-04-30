@@ -4,6 +4,7 @@ use tokio::sync::watch;
 
 mod account;
 mod challenge;
+mod lock;
 mod order;
 mod scheduler;
 mod storage;
@@ -15,6 +16,7 @@ pub use types::{CertificateFailure, IssueSummary};
 
 use account::load_or_create_account;
 use challenge::{ChallengeBackend, TemporaryChallengeServer};
+use lock::AcmeStateLock;
 use order::issue_and_store_managed_certificate;
 use types::{certificate_status_index, plan_reconcile};
 
@@ -50,6 +52,7 @@ pub async fn issue_once(config: &ConfigSnapshot) -> Result<IssueSummary> {
         return Ok(summary);
     }
 
+    let _lock = AcmeStateLock::acquire(settings)?;
     let challenge_server = TemporaryChallengeServer::bind_for_config(config).await?;
     let issue_result = async {
         let account = load_or_create_account(settings).await?;

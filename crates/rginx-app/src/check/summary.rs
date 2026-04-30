@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use super::acme::{AcmeCheckDetails, acme_check_details};
 use super::routes::{RouteTransportCheckDetails, route_transport_check_details};
 use super::tls::{TlsCheckDetails, tls_check_details};
 
@@ -20,6 +21,7 @@ pub(crate) struct CheckSummary {
     pub(super) worker_threads: Option<usize>,
     pub(super) accept_workers: usize,
     pub(super) route_transport: RouteTransportCheckDetails,
+    pub(super) acme: AcmeCheckDetails,
     pub(super) tls: TlsCheckDetails,
 }
 
@@ -67,6 +69,8 @@ pub(super) struct CheckListenerBindingSummary {
 
 pub(crate) fn build_check_summary(config: &rginx_config::ConfigSnapshot) -> CheckSummary {
     let route_transport = route_transport_check_details(config);
+    let tls = tls_check_details(config);
+    let acme = acme_check_details(config, &tls);
 
     CheckSummary {
         listener_model: listener_model(
@@ -96,7 +100,8 @@ pub(crate) fn build_check_summary(config: &rginx_config::ConfigSnapshot) -> Chec
         worker_threads: config.runtime.worker_threads,
         accept_workers: config.runtime.accept_workers,
         route_transport,
-        tls: tls_check_details(config),
+        acme,
+        tls,
     }
 }
 

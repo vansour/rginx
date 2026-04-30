@@ -43,15 +43,16 @@ pub(super) struct PreparedState {
 pub use crate::cache::{CachePurgeResult, CacheZoneRuntimeSnapshot};
 pub use snapshots::ActiveState;
 pub use snapshots::{
-    CacheStatsSnapshot, GrpcTrafficSnapshot, Http3ListenerRuntimeSnapshot, HttpCountersSnapshot,
-    ListenerStatsSnapshot, MtlsStatusSnapshot, RecentTrafficStatsSnapshot,
-    RecentUpstreamStatsSnapshot, ReloadOutcomeSnapshot, ReloadResultSnapshot, ReloadStatusSnapshot,
-    RouteStatsSnapshot, RuntimeListenerBindingSnapshot, RuntimeListenerSnapshot,
-    RuntimeStatusSnapshot, SnapshotDeltaSnapshot, SnapshotModule, TlsCertificateStatusSnapshot,
-    TlsDefaultCertificateBindingSnapshot, TlsListenerStatusSnapshot, TlsOcspRefreshSpec,
-    TlsOcspStatusSnapshot, TlsReloadBoundarySnapshot, TlsRuntimeSnapshot, TlsSniBindingSnapshot,
-    TlsVhostBindingSnapshot, TrafficStatsSnapshot, UpstreamPeerStatsSnapshot,
-    UpstreamStatsSnapshot, UpstreamTlsStatusSnapshot, VhostStatsSnapshot,
+    AcmeManagedCertificateSnapshot, AcmeRuntimeSnapshot, CacheStatsSnapshot, GrpcTrafficSnapshot,
+    Http3ListenerRuntimeSnapshot, HttpCountersSnapshot, ListenerStatsSnapshot, MtlsStatusSnapshot,
+    RecentTrafficStatsSnapshot, RecentUpstreamStatsSnapshot, ReloadOutcomeSnapshot,
+    ReloadResultSnapshot, ReloadStatusSnapshot, RouteStatsSnapshot, RuntimeListenerBindingSnapshot,
+    RuntimeListenerSnapshot, RuntimeStatusSnapshot, SnapshotDeltaSnapshot, SnapshotModule,
+    TlsCertificateStatusSnapshot, TlsDefaultCertificateBindingSnapshot, TlsListenerStatusSnapshot,
+    TlsOcspRefreshSpec, TlsOcspStatusSnapshot, TlsReloadBoundarySnapshot, TlsRuntimeSnapshot,
+    TlsSniBindingSnapshot, TlsVhostBindingSnapshot, TrafficStatsSnapshot,
+    UpstreamPeerStatsSnapshot, UpstreamStatsSnapshot, UpstreamTlsStatusSnapshot,
+    VhostStatsSnapshot,
 };
 include!("counters/http.rs");
 include!("counters/rolling.rs");
@@ -93,6 +94,7 @@ pub struct SharedState {
     cache_component_versions: Arc<StdRwLock<HashMap<String, u64>>>,
     reload_history: Arc<Mutex<ReloadHistory>>,
     ocsp_statuses: Arc<StdRwLock<HashMap<String, OcspRuntimeStatusEntry>>>,
+    acme_statuses: Arc<StdRwLock<HashMap<String, AcmeRuntimeStatusEntry>>>,
     acme_http01_challenges: Arc<StdRwLock<HashMap<String, String>>>,
     config_path: Option<Arc<PathBuf>>,
 }
@@ -102,6 +104,15 @@ struct OcspRuntimeStatusEntry {
     last_refresh_unix_ms: Option<u64>,
     refreshes_total: u64,
     failures_total: u64,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct AcmeRuntimeStatusEntry {
+    last_success_unix_ms: Option<u64>,
+    refreshes_total: u64,
+    failures_total: u64,
+    retry_after_unix_ms: Option<u64>,
     last_error: Option<String>,
 }
 
@@ -159,6 +170,7 @@ impl SharedState {
         *cache_component_versions.write().unwrap_or_else(|poisoned| poisoned.into_inner()) =
             cache::build_cache_zone_versions(prepared.config.as_ref(), None);
         let ocsp_statuses = Arc::new(StdRwLock::new(HashMap::new()));
+        let acme_statuses = Arc::new(StdRwLock::new(HashMap::new()));
         let acme_http01_challenges = Arc::new(StdRwLock::new(HashMap::new()));
 
         Ok(Self {
@@ -187,6 +199,7 @@ impl SharedState {
             cache_component_versions,
             reload_history: Arc::new(Mutex::new(ReloadHistory::default())),
             ocsp_statuses,
+            acme_statuses,
             acme_http01_challenges,
             config_path: config_path.map(Arc::new),
         })

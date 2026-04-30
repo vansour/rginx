@@ -1,3 +1,4 @@
+mod acme;
 mod render;
 mod routes;
 mod summary;

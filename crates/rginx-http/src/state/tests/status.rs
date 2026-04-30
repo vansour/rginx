@@ -7,6 +7,37 @@ use tempfile::tempdir;
 use crate::cache::{CacheLookup, CacheRequest};
 use crate::handler::full_body;
 
+fn managed_acme_status_config(cert_path: PathBuf, key_path: PathBuf) -> ConfigSnapshot {
+    let mut config = snapshot("127.0.0.1:8080");
+    config.acme = Some(rginx_core::AcmeSettings {
+        directory_url: "https://acme-staging-v02.api.letsencrypt.org/directory".to_string(),
+        contacts: vec!["mailto:ops@example.com".to_string()],
+        state_dir: PathBuf::from("/tmp/rginx-acme-status"),
+        renew_before: Duration::from_secs(30 * 86_400),
+        poll_interval: Duration::from_secs(3600),
+    });
+    config.managed_certificates = vec![rginx_core::ManagedCertificateSpec {
+        scope: "servers[0]".to_string(),
+        domains: vec!["api.example.com".to_string()],
+        cert_path: cert_path.clone(),
+        key_path: key_path.clone(),
+        challenge: rginx_core::AcmeChallengeType::Http01,
+    }];
+    config.vhosts = vec![VirtualHost {
+        id: "servers[0]".to_string(),
+        server_names: vec!["api.example.com".to_string()],
+        routes: Vec::new(),
+        tls: Some(rginx_core::VirtualHostTls {
+            cert_path,
+            key_path,
+            additional_certificates: Vec::new(),
+            ocsp_staple_path: None,
+            ocsp: rginx_core::OcspConfig::default(),
+        }),
+    }];
+    config
+}
+
 #[tokio::test]
 async fn status_snapshot_reports_runtime_summary() {
     let shared = SharedState::from_config_path(
@@ -54,10 +85,72 @@ async fn status_snapshot_reports_runtime_summary() {
     assert_eq!(status.tls.listeners[0].session_ticket_count, None);
     assert_eq!(status.tls.certificates.len(), 0);
     assert_eq!(status.tls.expiring_certificate_count, 0);
+    assert!(!status.acme.enabled);
+    assert!(status.acme.managed_certificates.is_empty());
     assert_eq!(status.mtls.configured_listeners, 0);
     assert_eq!(status.mtls.authenticated_requests, 0);
     assert_eq!(status.active_connections, 0);
     assert_eq!(status.reload.attempts_total, 0);
+}
+
+#[tokio::test]
+async fn status_snapshot_reports_acme_runtime_state() {
+    let temp = tempdir().expect("tempdir should build");
+    let cert_path = temp.path().join("managed.crt");
+    let key_path = temp.path().join("managed.key");
+
+    let mut params =
+        CertificateParams::new(vec!["api.example.com".to_string()]).expect("certificate params");
+    params.distinguished_name.push(DnType::CommonName, "api.example.com");
+    params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+    let key_pair = KeyPair::generate().expect("key pair should generate");
+    let certificate = params.self_signed(&key_pair).expect("certificate should self-sign");
+    fs::write(&cert_path, certificate.pem()).expect("certificate should be written");
+    fs::write(&key_path, key_pair.serialize_pem()).expect("private key should be written");
+
+    let shared =
+        SharedState::from_config(managed_acme_status_config(cert_path.clone(), key_path.clone()))
+            .expect("shared state should build");
+
+    shared.record_acme_refresh_failure(
+        "servers[0]",
+        "order pending",
+        Some(Duration::from_secs(90)),
+    );
+    shared.record_acme_refresh_success("servers[0]");
+
+    let status = shared.status_snapshot().await;
+    assert!(status.acme.enabled);
+    assert_eq!(
+        status.acme.directory_url.as_deref(),
+        Some("https://acme-staging-v02.api.letsencrypt.org/directory")
+    );
+    assert_eq!(status.acme.managed_certificates.len(), 1);
+    let managed = &status.acme.managed_certificates[0];
+    assert_eq!(managed.scope, "servers[0]");
+    assert_eq!(managed.domains, vec!["api.example.com".to_string()]);
+    assert!(managed.managed);
+    assert_eq!(managed.challenge_type, "http-01");
+    assert_eq!(managed.cert_path, cert_path);
+    assert_eq!(managed.key_path, key_path);
+    assert!(managed.last_success_unix_ms.is_some());
+    assert!(managed.next_renewal_unix_ms.is_some());
+    assert_eq!(managed.refreshes_total, 1);
+    assert_eq!(managed.failures_total, 1);
+    assert_eq!(managed.retry_after_unix_ms, None);
+    assert_eq!(managed.last_error, None);
+
+    let certificate = status
+        .tls
+        .certificates
+        .iter()
+        .find(|certificate| certificate.scope == "vhost:servers[0]")
+        .expect("managed vhost certificate should be present");
+    let expected_renewal = certificate
+        .not_after_unix_ms
+        .expect("certificate expiry should be present")
+        .saturating_sub(30_u64 * 86_400 * 1000);
+    assert_eq!(managed.next_renewal_unix_ms, Some(expected_renewal));
 }
 
 #[tokio::test]

@@ -120,6 +120,7 @@ impl SharedState {
         self.sync_peer_health_versions(prepared.config.as_ref());
         self.sync_upstream_stats(prepared.config.as_ref());
         self.sync_cache_versions(prepared.config.as_ref());
+        self.sync_acme_statuses(prepared.config.as_ref());
 
         let next_revision = {
             let mut state = self.inner.write().await;

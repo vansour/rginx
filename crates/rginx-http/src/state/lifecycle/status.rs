@@ -20,11 +20,14 @@ impl SharedState {
         let cache = CacheStatsSnapshot { zones: cache_manager.snapshot_with_shared_sync().await };
         let ocsp_statuses =
             self.ocsp_statuses.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+        let acme_statuses =
+            self.acme_statuses.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
         let mtls = self.mtls_status_snapshot(config.as_ref());
         let tls = tls_runtime_snapshot_for_config_with_ocsp_statuses(
             config.as_ref(),
             Some(&ocsp_statuses),
         );
+        let acme = acme_runtime_snapshot(config.as_ref(), &tls.certificates, &acme_statuses);
         let listener_traffic =
             self.traffic_stats.read().unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut http3_active_connections = 0;
@@ -147,6 +150,7 @@ impl SharedState {
                 .counters
                 .downstream_http3_early_data_rejected_requests
                 .load(Ordering::Relaxed),
+            acme,
             tls,
             mtls,
             upstream_tls: upstream_tls_status_snapshots(config.as_ref()),
@@ -197,4 +201,59 @@ impl SharedState {
             active.entry(listener.id.clone()).or_insert_with(|| Arc::new(AtomicUsize::new(0)));
         }
     }
+}
+
+fn acme_runtime_snapshot(
+    config: &ConfigSnapshot,
+    certificates: &[TlsCertificateStatusSnapshot],
+    runtime_statuses: &HashMap<String, AcmeRuntimeStatusEntry>,
+) -> AcmeRuntimeSnapshot {
+    let certificate_statuses = certificates
+        .iter()
+        .flat_map(|status| {
+            let mut entries = vec![(status.scope.as_str(), status)];
+            if let Some(scope) = status.scope.strip_prefix("vhost:") {
+                entries.push((scope, status));
+            }
+            entries
+        })
+        .collect::<HashMap<_, _>>();
+
+    AcmeRuntimeSnapshot {
+        enabled: config.acme.is_some(),
+        directory_url: config.acme.as_ref().map(|settings| settings.directory_url.clone()),
+        managed_certificates: config
+            .managed_certificates
+            .iter()
+            .map(|spec| {
+                let certificate = certificate_statuses.get(spec.scope.as_str()).copied();
+                let runtime = runtime_statuses.get(spec.scope.as_str());
+                AcmeManagedCertificateSnapshot {
+                    scope: spec.scope.clone(),
+                    domains: spec.domains.clone(),
+                    managed: true,
+                    challenge_type: spec.challenge.as_str().to_string(),
+                    cert_path: spec.cert_path.clone(),
+                    key_path: spec.key_path.clone(),
+                    last_success_unix_ms: runtime.and_then(|entry| entry.last_success_unix_ms),
+                    next_renewal_unix_ms: next_renewal_unix_ms(certificate, config.acme.as_ref()),
+                    refreshes_total: runtime.map(|entry| entry.refreshes_total).unwrap_or(0),
+                    failures_total: runtime.map(|entry| entry.failures_total).unwrap_or(0),
+                    retry_after_unix_ms: runtime.and_then(|entry| entry.retry_after_unix_ms),
+                    last_error: runtime.and_then(|entry| entry.last_error.clone()),
+                }
+            })
+            .collect(),
+    }
+}
+
+fn next_renewal_unix_ms(
+    certificate: Option<&TlsCertificateStatusSnapshot>,
+    settings: Option<&rginx_core::AcmeSettings>,
+) -> Option<u64> {
+    let certificate = certificate?;
+    let settings = settings?;
+    let not_after_unix_ms = certificate.not_after_unix_ms?;
+    let renew_before_unix_ms = u64::try_from(settings.renew_before.as_millis()).unwrap_or(u64::MAX);
+    Some(not_after_unix_ms.saturating_sub(renew_before_unix_ms))
 }

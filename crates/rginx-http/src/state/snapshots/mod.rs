@@ -1,3 +1,4 @@
+mod acme;
 mod active;
 mod cache;
 mod delta;
@@ -8,6 +9,7 @@ mod tls;
 mod traffic;
 mod upstreams;
 
+pub use acme::{AcmeManagedCertificateSnapshot, AcmeRuntimeSnapshot};
 pub use active::ActiveState;
 pub use cache::CacheStatsSnapshot;
 pub use delta::{SnapshotDeltaSnapshot, SnapshotModule};

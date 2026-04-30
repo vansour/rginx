@@ -108,6 +108,28 @@ pub(super) fn print_status_summary(status: &rginx_http::RuntimeStatusSnapshot) {
                 "http3_early_data_rejected_requests",
                 status.http3_early_data_rejected_requests.to_string(),
             ),
+            ("acme", if status.acme.enabled { "enabled" } else { "disabled" }.to_string()),
+            ("acme_managed_certificates", status.acme.managed_certificates.len().to_string()),
+            (
+                "acme_last_errors",
+                status
+                    .acme
+                    .managed_certificates
+                    .iter()
+                    .filter(|certificate| certificate.last_error.is_some())
+                    .count()
+                    .to_string(),
+            ),
+            (
+                "acme_retry_pending",
+                status
+                    .acme
+                    .managed_certificates
+                    .iter()
+                    .filter(|certificate| certificate.retry_after_unix_ms.is_some())
+                    .count()
+                    .to_string(),
+            ),
             ("tls_listeners", status.tls.listeners.len().to_string()),
             ("tls_certificates", status.tls.certificates.len().to_string()),
             ("tls_ocsp_entries", status.tls.ocsp.len().to_string()),

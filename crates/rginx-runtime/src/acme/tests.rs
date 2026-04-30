@@ -6,15 +6,16 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use super::challenge::is_transient_accept_error;
+use super::lock::AcmeStateLock;
 use super::storage::parent_directory;
 use rginx_core::{
     AcmeChallengeType, AcmeSettings, ConfigSnapshot, Listener, ManagedCertificateSpec,
-    RuntimeSettings, Server, VirtualHost,
+    RuntimeSettings, Server, VirtualHost, VirtualHostTls,
 };
 use rginx_http::TlsCertificateStatusSnapshot;
 
 use super::storage::write_certificate_pair;
-use super::types::{http01_listener_addrs, plan_reconcile};
+use super::types::{certificate_status_index, http01_listener_addrs, plan_reconcile};
 
 fn test_config(listeners: Vec<Listener>) -> ConfigSnapshot {
     ConfigSnapshot {
@@ -103,8 +104,48 @@ fn permanent_accept_errors_stop_the_listener() {
 }
 
 #[test]
+fn acme_state_lock_rejects_concurrent_acquirers() {
+    let temp_dir = tempfile::tempdir().expect("tempdir should build");
+    let settings = AcmeSettings {
+        directory_url: "https://acme-staging-v02.api.letsencrypt.org/directory".to_string(),
+        contacts: Vec::new(),
+        state_dir: temp_dir.path().join("state"),
+        renew_before: Duration::from_secs(30 * 86_400),
+        poll_interval: Duration::from_secs(3600),
+    };
+
+    let first = AcmeStateLock::acquire(&settings).expect("first lock should succeed");
+    assert!(first.path().ends_with(".acme.lock"));
+
+    let error = AcmeStateLock::acquire(&settings).expect_err("second lock should fail");
+    assert!(error.to_string().contains("already held by another process"));
+}
+
+#[test]
 fn bare_relative_paths_use_current_directory_as_parent() {
     assert_eq!(parent_directory(Path::new("issued.crt")), Path::new("."));
+}
+
+#[test]
+fn certificate_status_index_maps_vhost_scope_to_managed_scope() {
+    let temp_dir = tempfile::tempdir().expect("tempdir should build");
+    let mut config = test_config(Vec::new());
+    config.vhosts = vec![VirtualHost {
+        id: "servers[0]".to_string(),
+        server_names: vec!["api.example.com".to_string()],
+        routes: Vec::new(),
+        tls: Some(VirtualHostTls {
+            cert_path: temp_dir.path().join("managed.crt"),
+            key_path: temp_dir.path().join("managed.key"),
+            additional_certificates: Vec::new(),
+            ocsp_staple_path: None,
+            ocsp: rginx_core::OcspConfig::default(),
+        }),
+    }];
+
+    let index = certificate_status_index(&config);
+    assert!(index.contains_key("servers[0]"));
+    assert!(index.contains_key("vhost:servers[0]"));
 }
 
 #[test]

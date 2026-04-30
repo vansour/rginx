@@ -274,7 +274,7 @@
 实现方向：
 
 - 短期策略二选一：
-  - 限制 ACME 托管 listener 暂不启用 `http3`
+  - V1 采用：限制 ACME 托管 listener 暂不启用 `http3`
   - 或者补一条 HTTP/3 endpoint 的 server config 更新路径
 - ACME 成功后补一次 OCSP refresh，避免新证书刚切换时 staple 缺失
 
