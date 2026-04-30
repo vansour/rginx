@@ -144,6 +144,14 @@ fn validate_rejects_zero_global_acme_poll_interval_secs() {
 }
 
 #[test]
+fn validate_accepts_global_acme_without_contacts() {
+    let mut config = base_config();
+    config.acme = Some(crate::model::AcmeConfig { contacts: Vec::new(), ..valid_global_acme() });
+
+    validate(&config).expect("phase 1 should allow ACME accounts without explicit contacts");
+}
+
+#[test]
 fn validate_rejects_managed_vhost_without_global_acme() {
     let mut config = base_config();
     enable_acme_listeners(&mut config);
@@ -236,6 +244,23 @@ fn validate_rejects_managed_vhost_without_plain_http_80_listener() {
     config.servers = vec![managed_vhost(vec!["api.example.com"], vec!["api.example.com"])];
 
     let error = validate(&config).expect_err("HTTP-01 should require a plain HTTP :80 listener");
+    assert!(
+        error
+            .to_string()
+            .contains("ACME HTTP-01 requires at least one plain HTTP listener bound to port 80")
+    );
+}
+
+#[test]
+fn validate_rejects_managed_vhost_with_legacy_server_listen_only() {
+    let mut config = base_config();
+    config.acme = Some(valid_global_acme());
+    config.server.listen = Some("127.0.0.1:80".to_string());
+    config.servers = vec![managed_vhost(vec!["api.example.com"], vec!["api.example.com"])];
+
+    let error = validate(&config).expect_err(
+        "legacy server.listen should not count as plain HTTP once vhost TLS is managed",
+    );
     assert!(
         error
             .to_string()

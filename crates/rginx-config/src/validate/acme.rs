@@ -139,6 +139,20 @@ fn normalize_unique_domains(
 }
 
 fn has_http01_listener(config: &Config) -> Result<bool> {
+    let any_vhost_listen = config.servers.iter().any(|vhost| !vhost.listen.is_empty());
+    if any_vhost_listen {
+        for (vhost_index, vhost) in config.servers.iter().enumerate() {
+            for (listen_index, listen) in vhost.listen.iter().enumerate() {
+                let owner = format!("servers[{vhost_index}].listen[{listen_index}]");
+                let parsed = crate::listen::parse_vhost_listen(&owner, listen)?;
+                if parsed.addr.port() == 80 && !parsed.ssl {
+                    return Ok(true);
+                }
+            }
+        }
+        return Ok(false);
+    }
+
     if !config.listeners.is_empty() {
         for (listener_index, listener) in config.listeners.iter().enumerate() {
             if listener.tls.is_some() {
@@ -157,19 +171,8 @@ fn has_http01_listener(config: &Config) -> Result<bool> {
         return Ok(false);
     }
 
-    let any_vhost_listen = config.servers.iter().any(|vhost| !vhost.listen.is_empty());
-    if any_vhost_listen {
-        for (vhost_index, vhost) in config.servers.iter().enumerate() {
-            for (listen_index, listen) in vhost.listen.iter().enumerate() {
-                let owner = format!("servers[{vhost_index}].listen[{listen_index}]");
-                let parsed = crate::listen::parse_vhost_listen(&owner, listen)?;
-                if parsed.addr.port() == 80 && !parsed.ssl {
-                    return Ok(true);
-                }
-            }
-        }
-        return Ok(false);
-    }
-
+    // In legacy server.listen mode, any managed vhost certificate turns the single generated
+    // listener into a TLS termination point for that bind, so it cannot satisfy HTTP-01's
+    // requirement for a plain HTTP listener on port 80.
     Ok(false)
 }
