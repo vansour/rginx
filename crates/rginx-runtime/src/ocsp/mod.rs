@@ -25,6 +25,8 @@ pub async fn run(state: SharedState, shutdown: watch::Receiver<bool>) {
     scheduler::run(state, shutdown).await;
 }
 
+/// Refreshes OCSP staples immediately and returns whether callers should rebuild TLS acceptors
+/// to pick up changed staple files. This helper does not rebuild TLS acceptors by itself.
 pub async fn refresh_now(state: &SharedState) -> Result<bool, String> {
     scheduler::refresh_now(state).await
 }

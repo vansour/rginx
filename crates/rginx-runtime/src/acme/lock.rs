@@ -49,6 +49,12 @@ impl AcmeStateLock {
     }
 }
 
+impl Drop for AcmeStateLock {
+    fn drop(&mut self) {
+        let _ = unsafe { libc::flock(self._file.as_raw_fd(), libc::LOCK_UN) };
+    }
+}
+
 fn lock_path(state_dir: &Path) -> PathBuf {
     state_dir.join(ACME_STATE_LOCK_FILE)
 }

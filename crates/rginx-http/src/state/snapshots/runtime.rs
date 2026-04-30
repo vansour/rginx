@@ -29,6 +29,7 @@ pub struct RuntimeStatusSnapshot {
     pub http3_early_data_enabled_listeners: usize,
     pub http3_early_data_accepted_requests: u64,
     pub http3_early_data_rejected_requests: u64,
+    #[serde(default)]
     pub acme: AcmeRuntimeSnapshot,
     pub tls: TlsRuntimeSnapshot,
     pub mtls: MtlsStatusSnapshot,
