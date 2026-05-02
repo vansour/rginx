@@ -1,7 +1,6 @@
 use super::*;
 
 mod listener_conflicts;
-mod nezha;
 
 #[test]
 fn compile_generates_deduplicated_listeners_from_vhost_listen() {

@@ -36,8 +36,8 @@ fn spawn_single_use_response_server(
     listen_addr: SocketAddr,
     body: &'static str,
 ) -> thread::JoinHandle<()> {
+    let listener = TcpListener::bind(listen_addr).expect("single-use upstream should bind");
     thread::spawn(move || {
-        let listener = TcpListener::bind(listen_addr).expect("single-use upstream should bind");
         let (mut stream, _) = listener.accept().expect("upstream should accept a client");
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))

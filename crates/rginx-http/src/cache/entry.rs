@@ -17,11 +17,15 @@ use super::{
 mod response;
 mod signature;
 mod temp;
+mod write;
 
 use response::cached_headers;
 pub(in crate::cache) use response::finalize_response_for_request;
 pub(in crate::cache) use signature::{cache_key_hash, cache_variant_key, unix_time_ms};
-use temp::{cleanup_failed_write, next_temp_suffix, sibling_temp_path};
+pub(in crate::cache) use write::{
+    cache_entry_temp_body_path, commit_cache_entry_temp_body, write_cache_entry,
+    write_cache_metadata,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct CacheMetadata {
@@ -191,57 +195,6 @@ pub(super) async fn read_cache_metadata(path: &Path) -> std::io::Result<CacheMet
         must_revalidate: raw.must_revalidate,
         body_size_bytes: raw.body_size_bytes,
     })
-}
-
-pub(super) async fn write_cache_entry(
-    paths: &CachePaths,
-    metadata: &CacheMetadata,
-    body: &[u8],
-) -> std::io::Result<()> {
-    fs::create_dir_all(&paths.dir).await?;
-    let suffix = next_temp_suffix();
-    let metadata_tmp = sibling_temp_path(&paths.metadata, &suffix);
-    let body_tmp = sibling_temp_path(&paths.body, &suffix);
-    let metadata_bytes =
-        serde_json::to_vec(metadata).map_err(|error| std::io::Error::other(error.to_string()))?;
-
-    if let Err(error) = fs::write(&body_tmp, body).await {
-        cleanup_failed_write(paths, &body_tmp, &metadata_tmp, false).await;
-        return Err(error);
-    }
-    if let Err(error) = fs::write(&metadata_tmp, metadata_bytes).await {
-        cleanup_failed_write(paths, &body_tmp, &metadata_tmp, false).await;
-        return Err(error);
-    }
-    if let Err(error) = fs::rename(&body_tmp, &paths.body).await {
-        cleanup_failed_write(paths, &body_tmp, &metadata_tmp, false).await;
-        return Err(error);
-    }
-    if let Err(error) = fs::rename(&metadata_tmp, &paths.metadata).await {
-        cleanup_failed_write(paths, &body_tmp, &metadata_tmp, true).await;
-        return Err(error);
-    }
-    Ok(())
-}
-
-pub(super) async fn write_cache_metadata(
-    paths: &CachePaths,
-    metadata: &CacheMetadata,
-) -> std::io::Result<()> {
-    fs::create_dir_all(&paths.dir).await?;
-    let suffix = next_temp_suffix();
-    let metadata_tmp = sibling_temp_path(&paths.metadata, &suffix);
-    let metadata_bytes =
-        serde_json::to_vec(metadata).map_err(|error| std::io::Error::other(error.to_string()))?;
-    if let Err(error) = fs::write(&metadata_tmp, metadata_bytes).await {
-        let _ = fs::remove_file(&metadata_tmp).await;
-        return Err(error);
-    }
-    if let Err(error) = fs::rename(&metadata_tmp, &paths.metadata).await {
-        let _ = fs::remove_file(&metadata_tmp).await;
-        return Err(error);
-    }
-    Ok(())
 }
 
 #[cfg(test)]

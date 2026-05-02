@@ -36,7 +36,7 @@ async fn cache_manager_requires_min_uses_before_storing() {
         .header(CACHE_CONTROL, "max-age=60")
         .body(full_body("first"))
         .expect("response should build");
-    let _ = manager.store_response(first_context, first_response).await;
+    let _ = drain_response(manager.store_response(first_context, first_response).await).await;
 
     match manager.lookup(CacheRequest::from_request(&request), "https", &policy).await {
         CacheLookup::Miss(context) => {
@@ -45,7 +45,7 @@ async fn cache_manager_requires_min_uses_before_storing() {
                 .header(CACHE_CONTROL, "max-age=60")
                 .body(full_body("second"))
                 .expect("response should build");
-            let _ = manager.store_response(*context, second_response).await;
+            let _ = drain_response(manager.store_response(*context, second_response).await).await;
         }
         _ => panic!("second request should still miss before admission threshold is met"),
     }
@@ -88,7 +88,7 @@ async fn cache_manager_can_ignore_cache_control_set_cookie_and_vary() {
         .header("vary", "*")
         .body(full_body("shared"))
         .expect("response should build");
-    let _ = manager.store_response(context, response).await;
+    let _ = drain_response(manager.store_response(context, response).await).await;
 
     match manager.lookup(CacheRequest::from_request(&request), "https", &policy).await {
         CacheLookup::Hit(response) => {
@@ -122,7 +122,7 @@ async fn cache_manager_can_ignore_x_accel_expires() {
         .header("x-accel-expires", "0")
         .body(full_body("cached anyway"))
         .expect("response should build");
-    let _ = manager.store_response(context, response).await;
+    let _ = drain_response(manager.store_response(context, response).await).await;
 
     match manager.lookup(CacheRequest::from_request(&request), "https", &policy).await {
         CacheLookup::Hit(response) => {
@@ -158,7 +158,7 @@ async fn cache_manager_caches_configured_single_range_response() {
         .header(CACHE_CONTROL, "max-age=60")
         .body(full_body("data"))
         .expect("response should build");
-    let _ = manager.store_response(context, response).await;
+    let _ = drain_response(manager.store_response(context, response).await).await;
 
     match manager.lookup(CacheRequest::from_request(&range_request), "https", &policy).await {
         CacheLookup::Hit(response) => {
@@ -325,9 +325,20 @@ async fn rebucketed_response_still_respects_min_uses_for_new_final_key() {
             .header("vary", "accept-language")
             .body(full_body("rebucketed"))
             .expect("response should build");
-        let _ = manager.store_response(context, response).await;
+        let _ = drain_response(manager.store_response(context, response).await).await;
 
-        let has_final_key = lock_index(&zone.index).entries.contains_key(&expected_final_key);
+        let has_final_key = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let has_final_key =
+                    lock_index(&zone.index).entries.contains_key(&expected_final_key);
+                if has_final_key == (attempt == 2) {
+                    break has_final_key;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("rebucketed cache admission state should settle");
         assert_eq!(
             has_final_key,
             attempt == 2,

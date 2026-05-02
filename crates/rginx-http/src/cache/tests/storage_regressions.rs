@@ -36,7 +36,7 @@ async fn cache_manager_matches_accept_encoding_vary_after_normalization() {
         .header("vary", "accept-encoding")
         .body(full_body("compressed"))
         .expect("response should build");
-    let _ = manager.store_response(context, response).await;
+    let _ = drain_response(manager.store_response(context, response).await).await;
 
     let normalized_request = Request::builder()
         .method(Method::GET)
@@ -217,13 +217,23 @@ async fn rebucket_store_replaces_entry_after_last_access_update() {
 
     let stored = manager.store_response(context, response).await;
     assert_eq!(stored.headers().get(CACHE_STATUS_HEADER).unwrap(), "MISS");
+    let _ = drain_response(stored).await;
 
-    let index = lock_index(&zone.index);
-    assert!(!index.entries.contains_key(base_key));
-    assert!(index.entries.contains_key(&expected_final_key));
-    drop(index);
-    assert!(!old_paths.metadata.exists());
-    assert!(!old_paths.body.exists());
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let rebucketed = {
+                let index = lock_index(&zone.index);
+                !index.entries.contains_key(base_key)
+                    && index.entries.contains_key(&expected_final_key)
+            };
+            if rebucketed && !old_paths.metadata.exists() && !old_paths.body.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("rebucketed cache entry should replace the old index entry and files");
 }
 
 #[tokio::test]

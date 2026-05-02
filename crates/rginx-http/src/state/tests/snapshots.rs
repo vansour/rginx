@@ -158,9 +158,27 @@ async fn cache_snapshot_and_delta_report_zone_changes() {
         .header(CACHE_CONTROL, "max-age=60")
         .body(full_body("cached"))
         .expect("response should build");
-    let _ = active.cache.store_response(context, response).await;
+    let _ = http_body_util::BodyExt::collect(
+        active.cache.store_response(context, response).await.into_body(),
+    )
+    .await
+    .expect("stored response body should collect");
 
-    let cache = shared.cache_stats_snapshot().await;
+    let cache = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let cache = shared.cache_stats_snapshot().await;
+            if cache
+                .zones
+                .first()
+                .is_some_and(|zone| zone.entry_count == 1 && zone.write_success_total == 1)
+            {
+                break cache;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("cache snapshot should reflect the committed store");
     assert_eq!(cache.zones.len(), 1);
     assert_eq!(cache.zones[0].zone_name, "default");
     assert_eq!(cache.zones[0].entry_count, 1);

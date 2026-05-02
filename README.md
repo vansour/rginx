@@ -2,7 +2,7 @@
 
 `rginx` 是一个面向 Linux 的 Rust 边缘反向代理单二进制项目。
 
-当前版本：`0.1.4-rc.1`
+当前版本：`0.1.4-rc.2`
 
 ## 能力概览
 
@@ -144,9 +144,7 @@ scripts/run-fuzz-coverage.sh --target certificate_inspect
 ## 文档
 
 - [docs/README.md](docs/README.md) 汇总当前生效的仓库治理文档
-- [ACME_SUPPORT_PLAN.md](ACME_SUPPORT_PLAN.md) 记录 `instant-acme` 接入、HTTP-01、续期和运行时刷新阶段计划
 - [docs/CACHE_ARCHITECTURE_GAPS.md](docs/CACHE_ARCHITECTURE_GAPS.md) 记录缓存当前长期架构差距与演进方向
-- [docs/NEZHA_DASHBOARD.md](docs/NEZHA_DASHBOARD.md) 提供 Nezha Dashboard 反向代理完整示例
 - [fuzz/README.md](fuzz/README.md) 说明 fuzz target、seed、smoke 和 coverage 流程
 
 ## 许可证

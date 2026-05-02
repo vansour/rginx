@@ -161,7 +161,13 @@ async fn run_background_cache_refresh(
                     grpc_web_mode.as_ref(),
                     Some(active_peer),
                 );
-                let _ = cache_manager.store_response(cache_store, response).await;
+                drain_background_cache_refresh_response(
+                    cache_manager.store_response(cache_store, response).await,
+                    &target.upstream_name,
+                    &peer.display_url,
+                    &downstream,
+                )
+                .await;
                 return;
             }
             Ok(Err(error))
@@ -209,6 +215,27 @@ async fn run_background_cache_refresh(
                 );
                 return;
             }
+        }
+    }
+}
+
+async fn drain_background_cache_refresh_response(
+    response: HttpResponse,
+    upstream_name: &str,
+    peer_url: &str,
+    downstream: &DownstreamRequestContext<'_>,
+) {
+    let mut body = response.into_body();
+    while let Some(frame) = body.frame().await {
+        if let Err(error) = frame {
+            tracing::warn!(
+                request_id = %downstream.request_id,
+                upstream = %upstream_name,
+                peer = %peer_url,
+                %error,
+                "background cache refresh response body failed while draining"
+            );
+            return;
         }
     }
 }

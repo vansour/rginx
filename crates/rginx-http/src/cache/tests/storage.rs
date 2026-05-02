@@ -1,13 +1,12 @@
 use std::time::SystemTime;
 
+use crate::handler::{BoxError, boxed_body, full_body};
 use bytes::Bytes;
 use futures_util::stream;
 use http::header::{CACHE_CONTROL, CONTENT_TYPE};
-use http::{Request, Response, StatusCode};
+use http::{Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, StreamBody};
 use hyper::body::Frame;
-
-use crate::handler::{BoxError, boxed_body, full_body};
 
 use super::*;
 
@@ -39,17 +38,12 @@ async fn cache_manager_returns_miss_then_hit_for_cacheable_get() {
         .expect("response should build");
     let stored = manager.store_response(context, response).await;
     assert_eq!(stored.headers().get(CACHE_STATUS_HEADER).unwrap(), "MISS");
+    let _ = drain_response(stored).await;
 
-    match manager.lookup(CacheRequest::from_request(&request), "https", &policy).await {
-        CacheLookup::Hit(response) => {
-            assert_eq!(response.headers().get(CACHE_STATUS_HEADER).unwrap(), "HIT");
-            let body = response.into_body().collect().await.unwrap().to_bytes();
-            assert_eq!(body.as_ref(), b"cached body");
-        }
-        CacheLookup::Miss(_) => panic!("stored response should hit"),
-        CacheLookup::Updating(_, _) => panic!("stored response should hit directly"),
-        CacheLookup::Bypass(status) => panic!("cacheable request should not bypass: {status:?}"),
-    }
+    let response = wait_for_hit(&manager, &request, &policy).await;
+    assert_eq!(response.headers().get(CACHE_STATUS_HEADER).unwrap(), "HIT");
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body.as_ref(), b"cached body");
 }
 
 #[tokio::test]
@@ -87,13 +81,13 @@ async fn cache_manager_does_not_store_entries_over_max_entry_size() {
 }
 
 #[tokio::test]
-async fn cache_manager_skips_unknown_size_response_without_consuming_body() {
+async fn cache_manager_serves_oversized_unknown_size_response_without_caching_it() {
     let temp = tempfile::tempdir().expect("cache temp dir should exist");
-    let manager = test_manager(temp.path().to_path_buf(), 1024);
+    let manager = test_manager(temp.path().to_path_buf(), 8);
     let policy = test_policy();
     let request = Request::builder()
         .method(Method::GET)
-        .uri("/streamed")
+        .uri("/streamed-oversized")
         .header("host", "example.com")
         .body(full_body(Bytes::new()))
         .expect("request should build");
@@ -105,21 +99,23 @@ async fn cache_manager_skips_unknown_size_response_without_consuming_body() {
         CacheLookup::Bypass(status) => panic!("cacheable request should not bypass: {status:?}"),
     };
 
-    let stream = stream::iter([Ok::<Frame<Bytes>, BoxError>(Frame::data(Bytes::from_static(
-        b"streamed body",
-    )))]);
+    let stream = stream::iter([
+        Ok::<Frame<Bytes>, BoxError>(Frame::data(Bytes::from_static(b"chunk"))),
+        Ok::<Frame<Bytes>, BoxError>(Frame::data(Bytes::from_static(b"-overflow"))),
+    ]);
     let response = Response::builder()
         .status(StatusCode::OK)
+        .header(CACHE_CONTROL, "max-age=60")
         .body(boxed_body(StreamBody::new(stream)))
         .expect("response should build");
     let stored = manager.store_response(context, response).await;
-    let body = stored.into_body().collect().await.unwrap().to_bytes();
-    assert_eq!(body.as_ref(), b"streamed body");
+    let body = drain_response(stored).await;
+    assert_eq!(body.as_ref(), b"chunk-overflow");
 
     match manager.lookup(CacheRequest::from_request(&request), "https", &policy).await {
         CacheLookup::Miss(_) => {}
-        CacheLookup::Hit(_) => panic!("unknown-size response should not be cached"),
-        CacheLookup::Updating(_, _) => panic!("unknown-size response should not update"),
+        CacheLookup::Hit(_) => panic!("oversized streamed response should not be cached"),
+        CacheLookup::Updating(_, _) => panic!("oversized streamed response should not update"),
         CacheLookup::Bypass(status) => panic!("cacheable request should not bypass: {status:?}"),
     }
 }
@@ -241,7 +237,7 @@ async fn cache_manager_partitions_variants_by_vary_header() {
         .header("vary", "accept-language")
         .body(full_body("zh"))
         .expect("response should build");
-    let _ = manager.store_response(zh_context, zh_response).await;
+    let _ = drain_response(manager.store_response(zh_context, zh_response).await).await;
 
     let en_request = Request::builder()
         .method(Method::GET)
@@ -258,26 +254,18 @@ async fn cache_manager_partitions_variants_by_vary_header() {
                 .header("vary", "accept-language")
                 .body(full_body("en"))
                 .expect("response should build");
-            let _ = manager.store_response(*context, en_response).await;
+            let _ = drain_response(manager.store_response(*context, en_response).await).await;
         }
         _ => panic!("different vary value should miss"),
     }
 
-    match manager.lookup(CacheRequest::from_request(&zh_request), "https", &policy).await {
-        CacheLookup::Hit(response) => {
-            let body = response.into_body().collect().await.unwrap().to_bytes();
-            assert_eq!(body.as_ref(), b"zh");
-        }
-        _ => panic!("original vary bucket should hit"),
-    }
+    let zh_response = wait_for_hit(&manager, &zh_request, &policy).await;
+    let zh_body = zh_response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(zh_body.as_ref(), b"zh");
 
-    match manager.lookup(CacheRequest::from_request(&en_request), "https", &policy).await {
-        CacheLookup::Hit(response) => {
-            let body = response.into_body().collect().await.unwrap().to_bytes();
-            assert_eq!(body.as_ref(), b"en");
-        }
-        _ => panic!("second vary bucket should hit"),
-    }
+    let en_response = wait_for_hit(&manager, &en_request, &policy).await;
+    let en_body = en_response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(en_body.as_ref(), b"en");
 }
 
 #[test]

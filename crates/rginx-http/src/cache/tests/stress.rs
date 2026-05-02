@@ -73,6 +73,7 @@ async fn cache_manager_handles_large_keysets_under_parallel_fill_and_hit_load() 
                 .expect("stress fill response should build");
             let stored = manager.store_response(context, response).await;
             assert_eq!(stored.headers().get(CACHE_STATUS_HEADER).unwrap(), "MISS");
+            let _ = response_body_len(stored).await;
         });
     }
     while let Some(result) = fill_tasks.join_next().await {
@@ -135,7 +136,7 @@ async fn cache_manager_serves_large_cached_body_under_sustained_parallel_hits() 
         .header(CACHE_CONTROL, "max-age=60")
         .body(full_body(body.clone()))
         .expect("large body response should build");
-    let _ = manager.store_response(context, response).await;
+    let _ = response_body_len(manager.store_response(context, response).await).await;
 
     for _round in 0..LARGE_BODY_ROUNDS {
         let mut hit_tasks = JoinSet::new();
