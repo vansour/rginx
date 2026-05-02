@@ -6,6 +6,13 @@ struct CachedContentRange {
     total: Option<u64>,
 }
 
+#[derive(Debug, Clone)]
+pub(in crate::cache) struct DownstreamRangeTrimPlan {
+    headers: HeaderMap,
+    skip_bytes: usize,
+    emit_bytes: usize,
+}
+
 pub(in crate::cache) fn finalize_response_for_request(
     status: StatusCode,
     headers: &HeaderMap,
@@ -13,14 +20,30 @@ pub(in crate::cache) fn finalize_response_for_request(
     request: &CacheRequest,
     policy: &rginx_core::RouteCachePolicy,
 ) -> std::io::Result<HttpResponse> {
+    let Some(plan) = downstream_range_trim_plan(status, headers, request, policy)? else {
+        return build_response(status, headers, body.to_vec());
+    };
+    build_response(StatusCode::PARTIAL_CONTENT, plan.headers(), plan.trim_body(body)?)
+}
+
+pub(in crate::cache) fn downstream_range_trim_plan(
+    status: StatusCode,
+    headers: &HeaderMap,
+    request: &CacheRequest,
+    policy: &rginx_core::RouteCachePolicy,
+) -> std::io::Result<Option<DownstreamRangeTrimPlan>> {
     let Some(request_range) = super::super::request::cacheable_range_request(request, policy)
         .filter(|range| range.needs_downstream_trimming())
     else {
-        return build_response(status, headers, body.to_vec());
+        return Ok(None);
     };
+    if status != StatusCode::PARTIAL_CONTENT
+        || !super::super::request::response_content_range_matches_request(request, policy, headers)
+    {
+        return Ok(None);
+    }
 
-    let mut headers = headers.clone();
-    let cached_range = parse_cached_content_range(&headers)?;
+    let cached_range = parse_cached_content_range(headers)?;
     if cached_range.start != request_range.cache_start {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -47,41 +70,20 @@ pub(in crate::cache) fn finalize_response_for_request(
         ));
     }
 
-    let body = if body.is_empty() {
-        Vec::new()
-    } else {
-        let start_offset = usize::try_from(request_range.request_start - cached_range.start)
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-        let end_offset = usize::try_from(response_end - cached_range.start + 1)
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-        body.get(start_offset..end_offset)
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "requested range exceeds cached slice body bounds",
-                )
-            })?
-            .to_vec()
-    };
-
-    let response_len = usize::try_from(response_end - request_range.request_start + 1)
+    let skip_bytes = usize::try_from(request_range.request_start - cached_range.start)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-    headers.insert(
-        CONTENT_LENGTH,
-        HeaderValue::from_str(&response_len.to_string())
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
-    );
-    headers.insert(
-        CONTENT_RANGE,
-        HeaderValue::from_str(&format!(
-            "bytes {}-{}/{}",
-            request_range.request_start,
-            response_end,
-            cached_range.total.map(|total| total.to_string()).unwrap_or_else(|| "*".to_string())
-        ))
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
-    );
-    build_response(StatusCode::PARTIAL_CONTENT, &headers, body)
+    let emit_bytes = usize::try_from(response_end - request_range.request_start + 1)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let mut trimmed_headers = headers.clone();
+    update_downstream_range_headers(
+        &mut trimmed_headers,
+        request_range.request_start,
+        response_end,
+        cached_range.total,
+        emit_bytes,
+    )?;
+
+    Ok(Some(DownstreamRangeTrimPlan { headers: trimmed_headers, skip_bytes, emit_bytes }))
 }
 
 pub(super) fn cached_headers(headers: &HeaderMap, body_size_bytes: usize) -> Vec<CachedHeader> {
@@ -154,6 +156,31 @@ fn parse_cached_content_range(headers: &HeaderMap) -> std::io::Result<CachedCont
     Ok(CachedContentRange { start, end, total })
 }
 
+fn update_downstream_range_headers(
+    headers: &mut HeaderMap,
+    response_start: u64,
+    response_end: u64,
+    total: Option<u64>,
+    response_len: usize,
+) -> std::io::Result<()> {
+    headers.insert(
+        CONTENT_LENGTH,
+        HeaderValue::from_str(&response_len.to_string())
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
+    );
+    headers.insert(
+        CONTENT_RANGE,
+        HeaderValue::from_str(&format!(
+            "bytes {}-{}/{}",
+            response_start,
+            response_end,
+            total.map(|value| value.to_string()).unwrap_or_else(|| "*".to_string())
+        ))
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
+    );
+    Ok(())
+}
+
 fn build_response(
     status: StatusCode,
     headers: &HeaderMap,
@@ -195,4 +222,35 @@ fn remove_cache_hop_by_hop_headers(headers: &mut HeaderMap) {
     }
     headers.remove("keep-alive");
     headers.remove("proxy-connection");
+}
+
+impl DownstreamRangeTrimPlan {
+    pub(in crate::cache) fn headers(&self) -> &HeaderMap {
+        &self.headers
+    }
+
+    pub(in crate::cache) fn skip_bytes(&self) -> usize {
+        self.skip_bytes
+    }
+
+    pub(in crate::cache) fn emit_bytes(&self) -> usize {
+        self.emit_bytes
+    }
+
+    fn trim_body(&self, body: &[u8]) -> std::io::Result<Vec<u8>> {
+        let end = self.skip_bytes.checked_add(self.emit_bytes).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "requested range exceeds cached slice body bounds",
+            )
+        })?;
+        body.get(self.skip_bytes..end)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "requested range exceeds cached slice body bounds",
+                )
+            })
+            .map(|trimmed| trimmed.to_vec())
+    }
 }

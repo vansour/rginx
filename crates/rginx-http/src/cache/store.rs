@@ -1,16 +1,12 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use http::StatusCode;
-use http::header::HeaderMap;
-
 use crate::handler::{HttpBody, HttpResponse};
 
 use super::entry::{
     CacheMetadataInput, build_cached_response_for_request, cache_entry_temp_body_path,
     cache_key_hash, cache_metadata, cache_paths_for_zone, cache_variant_key,
-    commit_cache_entry_temp_body, finalize_response_for_request, unix_time_ms, write_cache_entry,
-    write_cache_metadata,
+    commit_cache_entry_temp_body, downstream_range_trim_plan, unix_time_ms, write_cache_metadata,
 };
 use super::policy::{
     ResponseBodySize, response_freshness, response_is_storable, response_is_storable_with_size,
@@ -22,13 +18,12 @@ use super::{
     with_cache_status,
 };
 
-mod buffered;
 mod helpers;
 mod maintenance;
+pub(in crate::cache) mod range;
 mod revalidate;
 mod streaming;
 
-use buffered::store_buffered_response;
 use helpers::{
     cache_metadata_input, cache_vary_values, freshness_is_cacheable, merge_not_modified_headers,
 };
@@ -66,21 +61,22 @@ pub(super) async fn store_response(
     context: CacheStoreContext,
     response: HttpResponse,
 ) -> std::result::Result<HttpResponse, CacheStoreError> {
-    let needs_downstream_range_trim =
-        super::request::cacheable_range_request(&context.request, &context.policy)
-            .is_some_and(|range| range.needs_downstream_trimming());
+    let downstream_range_trim = downstream_range_trim_plan(
+        response.status(),
+        response.headers(),
+        &context.request,
+        &context.policy,
+    )
+    .map_err(|error| CacheStoreError { source: Box::new(error) })?;
     let storable = response_is_storable(&context, &response);
     let no_cache = response_no_cache(&context, response.status());
-    if !needs_downstream_range_trim && (!storable || no_cache) {
+    if downstream_range_trim.is_none() && (!storable || no_cache) {
         return Ok(response);
     }
 
     let (parts, body) = response.into_parts();
-    if needs_downstream_range_trim {
-        return store_buffered_response(context, parts, body, storable, no_cache).await;
-    }
-
-    Ok(store_streaming_response(context, parts, body).await)
+    Ok(store_streaming_response(context, parts, body, storable, no_cache, downstream_range_trim)
+        .await)
 }
 
 async fn update_index_after_store(

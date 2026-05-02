@@ -22,22 +22,61 @@ impl CacheZoneRuntime {
         if let Some(lock) = fill_locks.get(key).cloned()
             && now.saturating_sub(lock.acquired_at_unix_ms) <= lock_age.as_millis() as u64
         {
+            if let Some(state) = lock.reader_state.filter(|state| state.can_share()) {
+                return FillLockDecision::ReadLocal { state };
+            }
             return FillLockDecision::WaitLocal { waiter: lock.notify.notified_owned() };
         }
 
         let external_lock_path = if self.config.shared_index {
-            match self.try_acquire_shared_fill_lock(key, now, lock_age) {
+            match self.try_acquire_shared_fill_lock(key, lock_age) {
                 Some(path) => Some(path),
-                None => return FillLockDecision::WaitExternal { key: key.to_string() },
+                None => {
+                    if let Some(state) =
+                        super::super::fill::load_external_fill_state(self.config.as_ref(), key)
+                    {
+                        return FillLockDecision::ReadExternal { state };
+                    }
+                    return FillLockDecision::WaitExternal { key: key.to_string() };
+                }
             }
         } else {
             None
         };
+        let external_state = external_lock_path.as_ref().and_then(|lock_path| {
+            match super::super::fill::create_shared_external_fill_handle(
+                self.config.as_ref(),
+                key,
+                lock_path,
+                now,
+            ) {
+                Ok(state) => Some(state),
+                Err(error) => {
+                    tracing::warn!(
+                        zone = %self.config.name,
+                        key = %key,
+                        path = %lock_path.display(),
+                        %error,
+                        "failed to initialize external shared fill state"
+                    );
+                    let _ = std::fs::remove_file(lock_path);
+                    None
+                }
+            }
+        });
+        if external_lock_path.is_some() && external_state.is_none() {
+            return FillLockDecision::WaitExternal { key: key.to_string() };
+        }
         let notify = Arc::new(Notify::new());
         let generation = self.fill_lock_generation.fetch_add(1, Ordering::Relaxed) + 1;
         fill_locks.insert(
             key.to_string(),
-            CacheFillLockState { notify: notify.clone(), acquired_at_unix_ms: now, generation },
+            CacheFillLockState {
+                notify: notify.clone(),
+                acquired_at_unix_ms: now,
+                generation,
+                reader_state: None,
+            },
         );
         FillLockDecision::Acquired(CacheFillGuard {
             key: key.to_string(),
@@ -45,6 +84,7 @@ impl CacheZoneRuntime {
             fill_locks: Arc::downgrade(&self.fill_locks),
             notify,
             external_lock_path,
+            external_state,
         })
     }
 
@@ -80,16 +120,12 @@ impl CacheZoneRuntime {
     fn try_acquire_shared_fill_lock(
         &self,
         key: &str,
-        now: u64,
         lock_age: std::time::Duration,
     ) -> Option<PathBuf> {
         let lock_path = shared::shared_fill_lock_path(self.config.as_ref(), key);
         loop {
             match std::fs::OpenOptions::new().write(true).create_new(true).open(&lock_path) {
-                Ok(mut file) => {
-                    let _ = std::io::Write::write_all(&mut file, now.to_string().as_bytes());
-                    return Some(lock_path);
-                }
+                Ok(_) => return Some(lock_path),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                     match self.shared_fill_lock_state(&lock_path, lock_age) {
                         SharedFillLockState::Missing | SharedFillLockState::Stale => {
@@ -107,6 +143,23 @@ impl CacheZoneRuntime {
                 Err(_) => return None,
             }
         }
+    }
+
+    pub(in crate::cache) fn attach_fill_read_state(
+        &self,
+        key: &str,
+        generation: u64,
+        state: Arc<CacheFillReadState>,
+    ) -> Option<Arc<CacheFillReadState>> {
+        let mut fill_locks =
+            self.fill_locks.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let lock = fill_locks.get_mut(key)?;
+        if lock.generation != generation {
+            return None;
+        }
+        lock.reader_state = Some(state.clone());
+        lock.notify.notify_waiters();
+        Some(state)
     }
 
     fn shared_fill_lock_state(

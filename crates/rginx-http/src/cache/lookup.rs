@@ -90,6 +90,42 @@ impl CacheManager {
                             status: CacheStatus::Updating,
                         }
                     }
+                    FillLockDecision::ReadLocal { state: _state }
+                        if expired
+                            && stale_allowed_for_entry(
+                                policy,
+                                entry,
+                                now,
+                                request_forces_revalidation,
+                            ) =>
+                    {
+                        LookupDecision::Stale {
+                            key,
+                            entry: entry.clone(),
+                            status: CacheStatus::Updating,
+                        }
+                    }
+                    FillLockDecision::ReadExternal { state: _state }
+                        if expired
+                            && stale_allowed_for_entry(
+                                policy,
+                                entry,
+                                now,
+                                request_forces_revalidation,
+                            ) =>
+                    {
+                        LookupDecision::Stale {
+                            key,
+                            entry: entry.clone(),
+                            status: CacheStatus::Updating,
+                        }
+                    }
+                    FillLockDecision::ReadLocal { state } => {
+                        LookupDecision::ReadWhileFillLocal { state }
+                    }
+                    FillLockDecision::ReadExternal { state } => {
+                        LookupDecision::ReadWhileFillExternal { state }
+                    }
                     FillLockDecision::WaitLocal { waiter } => {
                         LookupDecision::Wait { strategy: LookupWait::Local { waiter } }
                     }
@@ -106,6 +142,12 @@ impl CacheManager {
                     fill_guard: Some(fill_guard),
                     cache_status: CacheStatus::Miss,
                 },
+                FillLockDecision::ReadLocal { state } => {
+                    LookupDecision::ReadWhileFillLocal { state }
+                }
+                FillLockDecision::ReadExternal { state } => {
+                    LookupDecision::ReadWhileFillExternal { state }
+                }
                 FillLockDecision::WaitLocal { waiter } => {
                     LookupDecision::Wait { strategy: LookupWait::Local { waiter } }
                 }

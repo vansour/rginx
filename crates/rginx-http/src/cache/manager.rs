@@ -262,6 +262,58 @@ impl CacheManager {
                         read_cached_body,
                     }));
                 }
+                LookupDecision::ReadWhileFillLocal { state } => {
+                    match super::fill::build_inflight_fill_response(
+                        state,
+                        &request,
+                        policy,
+                        read_cached_body,
+                    ) {
+                        Ok(response) => {
+                            zone.record_miss();
+                            return CacheLookup::Hit(with_cache_status(
+                                response,
+                                CacheStatus::Miss,
+                            ));
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                zone = %zone.config.name,
+                                request_uri = %request.request_uri(),
+                                %error,
+                                "failed to serve response from in-flight cache fill"
+                            );
+                            tokio::task::yield_now().await;
+                            continue;
+                        }
+                    }
+                }
+                LookupDecision::ReadWhileFillExternal { state } => {
+                    match super::fill::build_external_inflight_fill_response(
+                        state,
+                        &request,
+                        policy,
+                        read_cached_body,
+                    ) {
+                        Ok(response) => {
+                            zone.record_miss();
+                            return CacheLookup::Hit(with_cache_status(
+                                response,
+                                CacheStatus::Miss,
+                            ));
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                zone = %zone.config.name,
+                                request_uri = %request.request_uri(),
+                                %error,
+                                "failed to serve response from external in-flight cache fill"
+                            );
+                            tokio::task::yield_now().await;
+                            continue;
+                        }
+                    }
+                }
             }
         }
     }

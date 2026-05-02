@@ -16,6 +16,7 @@ use tokio::sync::{Mutex as AsyncMutex, Notify};
 use crate::handler::{HttpBody, HttpResponse};
 
 mod entry;
+mod fill;
 mod index;
 mod io;
 mod load;
@@ -34,6 +35,7 @@ use entry::{
 };
 #[cfg(test)]
 use entry::{cache_key_hash, cache_metadata, cache_paths, cache_variant_key, write_cache_entry};
+use fill::{CacheFillReadState, ExternalCacheFillReadState, SharedFillExternalStateHandle};
 use io::CacheIoLockPool;
 #[cfg(test)]
 use io::cache_io_lock_stripe;
@@ -213,6 +215,7 @@ struct CacheFillGuard {
     fill_locks: Weak<Mutex<HashMap<String, CacheFillLockState>>>,
     notify: Arc<Notify>,
     external_lock_path: Option<PathBuf>,
+    external_state: Option<SharedFillExternalStateHandle>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -226,6 +229,7 @@ struct CacheFillLockState {
     notify: Arc<Notify>,
     acquired_at_unix_ms: u64,
     generation: u64,
+    reader_state: Option<Arc<CacheFillReadState>>,
 }
 
 #[derive(Clone)]
@@ -256,6 +260,12 @@ enum LookupDecision {
         fill_guard: Option<CacheFillGuard>,
         cache_status: CacheStatus,
     },
+    ReadWhileFillLocal {
+        state: Arc<CacheFillReadState>,
+    },
+    ReadWhileFillExternal {
+        state: ExternalCacheFillReadState,
+    },
     Wait {
         strategy: LookupWait,
     },
@@ -268,6 +278,8 @@ enum LookupWait {
 
 enum FillLockDecision {
     Acquired(CacheFillGuard),
+    ReadLocal { state: Arc<CacheFillReadState> },
+    ReadExternal { state: ExternalCacheFillReadState },
     WaitLocal { waiter: OwnedNotified },
     WaitExternal { key: String },
 }

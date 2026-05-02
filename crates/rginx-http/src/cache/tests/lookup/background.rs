@@ -252,6 +252,7 @@ async fn cache_manager_lock_timeout_falls_back_to_bypass() {
             notify: Arc::new(Notify::new()),
             acquired_at_unix_ms: unix_time_ms(SystemTime::now()),
             generation: 1,
+            reader_state: None,
         },
     );
 
@@ -284,6 +285,7 @@ async fn cache_manager_lock_age_allows_second_fill() {
             notify: Arc::new(Notify::new()),
             acquired_at_unix_ms: unix_time_ms(SystemTime::now()).saturating_sub(5_000),
             generation: 1,
+            reader_state: None,
         },
     );
 

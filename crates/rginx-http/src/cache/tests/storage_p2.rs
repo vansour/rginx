@@ -2,11 +2,14 @@ use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 
 use bytes::Bytes;
+use futures_util::stream;
 use http::header::CACHE_CONTROL;
 use http::{Method, Request, Response, StatusCode};
-use http_body_util::BodyExt;
+use http_body_util::{BodyExt, StreamBody};
+use hyper::body::Frame;
+use tokio::time::timeout;
 
-use crate::handler::full_body;
+use crate::handler::{BoxError, boxed_body, full_body};
 
 use super::*;
 
@@ -310,6 +313,82 @@ fn shared_fill_locks_coordinate_across_zone_instances() {
         FillLockDecision::Acquired(_) => {}
         _ => panic!("second zone should acquire the shared fill lock after release"),
     }
+}
+
+#[tokio::test]
+async fn shared_fill_locks_stream_from_external_inflight_fill() {
+    let temp = tempfile::tempdir().expect("cache temp dir should exist");
+    let manager_a = test_manager(temp.path().to_path_buf(), 1024);
+    let manager_b = test_manager(temp.path().to_path_buf(), 1024);
+    let policy = test_policy();
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/shared-stream")
+        .header("host", "example.com")
+        .body(full_body(Bytes::new()))
+        .expect("request should build");
+
+    let context =
+        match manager_a.lookup(CacheRequest::from_request(&request), "https", &policy).await {
+            CacheLookup::Miss(context) => *context,
+            _ => panic!("first manager should miss before shared stream fill"),
+        };
+
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    let stream =
+        stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|frame| (frame, rx)) });
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(CACHE_CONTROL, "max-age=60")
+        .body(boxed_body(StreamBody::new(stream)))
+        .expect("streaming response should build");
+    let owner = timeout(Duration::from_millis(200), manager_a.store_response(context, response))
+        .await
+        .expect("shared streaming cache store should start immediately");
+    assert_eq!(owner.headers().get(CACHE_STATUS_HEADER).unwrap(), "MISS");
+    drop(owner);
+
+    tx.send(Ok::<Frame<Bytes>, BoxError>(Frame::data(Bytes::from_static(b"chunk-1"))))
+        .await
+        .expect("first shared stream chunk should send");
+
+    let shared = match manager_b
+        .lookup(CacheRequest::from_request(&request), "https", &policy)
+        .await
+    {
+        CacheLookup::Hit(response) => response,
+        CacheLookup::Miss(_) => panic!("second manager should reuse the external in-flight fill"),
+        CacheLookup::Updating(_, _) => {
+            panic!("second manager should stream from the external in-flight fill")
+        }
+        CacheLookup::Bypass(status) => {
+            panic!("shared stream request should not bypass cache: {status:?}")
+        }
+    };
+    assert_eq!(shared.headers().get(CACHE_STATUS_HEADER).unwrap(), "MISS");
+    let mut shared_body = shared.into_body();
+    let first_frame = timeout(Duration::from_millis(200), shared_body.frame())
+        .await
+        .expect("external shared fill frame should arrive")
+        .expect("external shared fill body should yield a frame")
+        .expect("external shared fill frame should read");
+    assert_eq!(first_frame.data_ref().unwrap().as_ref(), b"chunk-1");
+
+    tx.send(Ok::<Frame<Bytes>, BoxError>(Frame::data(Bytes::from_static(b"chunk-2"))))
+        .await
+        .expect("second shared stream chunk should send");
+    drop(tx);
+
+    let remaining = shared_body.collect().await.unwrap().to_bytes();
+    assert_eq!(
+        [first_frame.data_ref().unwrap().as_ref(), remaining.as_ref()].concat(),
+        b"chunk-1chunk-2"
+    );
+
+    let response = wait_for_hit(&manager_b, &request, &policy).await;
+    assert_eq!(response.headers().get(CACHE_STATUS_HEADER).unwrap(), "HIT");
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body.as_ref(), b"chunk-1chunk-2");
 }
 
 #[tokio::test]
