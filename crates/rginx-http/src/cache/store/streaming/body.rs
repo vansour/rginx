@@ -85,7 +85,6 @@ pub(super) struct StreamingCacheBody {
     inner: HttpBody,
     size_hint: SizeHint,
     cache: Option<StreamingCacheWriter>,
-    fill_state: Option<Arc<CacheFillReadState>>,
     cached_body_bytes: usize,
     max_entry_bytes: usize,
     done: bool,
@@ -96,14 +95,12 @@ impl StreamingCacheBody {
         inner: HttpBody,
         size_hint: SizeHint,
         cache: StreamingCacheWriter,
-        fill_state: Option<Arc<CacheFillReadState>>,
         max_entry_bytes: usize,
     ) -> Self {
         Self {
             inner,
             size_hint,
             cache: Some(cache),
-            fill_state,
             cached_body_bytes: 0,
             max_entry_bytes,
             done: false,
@@ -111,9 +108,6 @@ impl StreamingCacheBody {
     }
 
     fn disable_cache(&mut self) {
-        if let Some(fill_state) = self.fill_state.as_ref() {
-            fill_state.fail("streaming cache fill disabled before completion");
-        }
         self.cache.take();
     }
 
@@ -121,9 +115,7 @@ impl StreamingCacheBody {
         let Some(cache) = self.cache.take() else {
             return;
         };
-        if !cache.try_finish(trailers) {
-            drop(cache);
-        }
+        let _ = cache.try_finish(trailers);
     }
 
     fn cache_frame_data(&mut self, data: &Bytes) {

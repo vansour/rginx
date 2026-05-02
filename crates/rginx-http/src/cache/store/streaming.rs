@@ -62,10 +62,11 @@ impl StreamingCacheWriter {
     }
 
     fn try_finish(&self, trailers: Option<HeaderMap>) -> bool {
-        if let Some(fill_state) = self.fill_state.as_ref() {
+        let sent = self.tx.try_send(StreamingCacheWriteMessage::Finish { trailers }).is_ok();
+        if sent && let Some(fill_state) = self.fill_state.as_ref() {
             fill_state.mark_upstream_complete();
         }
-        self.tx.try_send(StreamingCacheWriteMessage::Finish { trailers }).is_ok()
+        sent
     }
 
     async fn send_data(&self, bytes: Bytes) -> bool {
@@ -73,10 +74,11 @@ impl StreamingCacheWriter {
     }
 
     async fn finish(self, trailers: Option<HeaderMap>) -> bool {
-        if let Some(fill_state) = self.fill_state.as_ref() {
+        let sent = self.tx.send(StreamingCacheWriteMessage::Finish { trailers }).await.is_ok();
+        if sent && let Some(fill_state) = self.fill_state.as_ref() {
             fill_state.mark_upstream_complete();
         }
-        self.tx.send(StreamingCacheWriteMessage::Finish { trailers }).await.is_ok()
+        sent
     }
 }
 
@@ -200,7 +202,7 @@ pub(super) async fn store_streaming_response(
         }
         None => build_downstream_response(
             parts,
-            StreamingCacheBody::new(body, size_hint, writer, None, max_entry_bytes),
+            StreamingCacheBody::new(body, size_hint, writer, max_entry_bytes),
             downstream_range_trim,
         ),
     }

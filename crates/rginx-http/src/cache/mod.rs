@@ -229,6 +229,7 @@ struct CacheFillLockState {
     notify: Arc<Notify>,
     acquired_at_unix_ms: u64,
     generation: u64,
+    share_fingerprint: String,
     reader_state: Option<Arc<CacheFillReadState>>,
 }
 

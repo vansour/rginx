@@ -16,13 +16,16 @@ impl CacheZoneRuntime {
         key: &str,
         now: u64,
         lock_age: std::time::Duration,
+        share_fingerprint: Option<&str>,
     ) -> FillLockDecision {
         let mut fill_locks =
             self.fill_locks.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(lock) = fill_locks.get(key).cloned()
             && now.saturating_sub(lock.acquired_at_unix_ms) <= lock_age.as_millis() as u64
         {
-            if let Some(state) = lock.reader_state.filter(|state| state.can_share()) {
+            if share_fingerprint.is_none_or(|fingerprint| lock.share_fingerprint == fingerprint)
+                && let Some(state) = lock.reader_state.filter(|state| state.can_share())
+            {
                 return FillLockDecision::ReadLocal { state };
             }
             return FillLockDecision::WaitLocal { waiter: lock.notify.notified_owned() };
@@ -32,9 +35,11 @@ impl CacheZoneRuntime {
             match self.try_acquire_shared_fill_lock(key, lock_age) {
                 Some(path) => Some(path),
                 None => {
-                    if let Some(state) =
-                        super::super::fill::load_external_fill_state(self.config.as_ref(), key)
-                    {
+                    if let Some(state) = super::super::fill::load_external_fill_state(
+                        self.config.as_ref(),
+                        key,
+                        share_fingerprint,
+                    ) {
                         return FillLockDecision::ReadExternal { state };
                     }
                     return FillLockDecision::WaitExternal { key: key.to_string() };
@@ -49,6 +54,7 @@ impl CacheZoneRuntime {
                 key,
                 lock_path,
                 now,
+                share_fingerprint,
             ) {
                 Ok(state) => Some(state),
                 Err(error) => {
@@ -75,6 +81,7 @@ impl CacheZoneRuntime {
                 notify: notify.clone(),
                 acquired_at_unix_ms: now,
                 generation,
+                share_fingerprint: share_fingerprint.unwrap_or_default().to_string(),
                 reader_state: None,
             },
         );
