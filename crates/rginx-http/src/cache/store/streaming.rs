@@ -42,6 +42,7 @@ struct StreamingCachePlan {
 pub(super) enum StreamingCacheWriteMessage {
     Data(Bytes),
     Finish { trailers: Option<HeaderMap> },
+    Abort,
 }
 
 pub(super) struct StreamingCacheWriter {
@@ -59,6 +60,13 @@ impl StreamingCacheWriter {
 
     fn try_send_data(&self, bytes: Bytes) -> bool {
         self.tx.try_send(StreamingCacheWriteMessage::Data(bytes)).is_ok()
+    }
+
+    fn abort(&self, reason: &str) {
+        if let Some(fill_state) = self.fill_state.as_ref() {
+            fill_state.fail(reason);
+        }
+        let _ = self.tx.try_send(StreamingCacheWriteMessage::Abort);
     }
 
     fn try_finish(&self, trailers: Option<HeaderMap>) -> bool {
@@ -191,19 +199,19 @@ pub(super) async fn store_streaming_response(
         body_file,
         STREAMING_CACHE_WRITE_QUEUE_DEPTH,
     );
-    match fill_state {
-        Some(fill_state_for_body) => {
+    match (fill_state, downstream_range_trim) {
+        (Some(fill_state_for_body), Some(trim_plan)) => {
             spawn_streaming_origin_fill(body, writer, Some(fill_state_for_body.clone()));
             build_downstream_response(
                 parts,
                 inflight_fill_body(fill_state_for_body),
-                downstream_range_trim,
+                Some(trim_plan),
             )
         }
-        None => build_downstream_response(
+        (_, trim_plan) => build_downstream_response(
             parts,
             StreamingCacheBody::new(body, size_hint, writer, max_entry_bytes),
-            downstream_range_trim,
+            trim_plan,
         ),
     }
 }

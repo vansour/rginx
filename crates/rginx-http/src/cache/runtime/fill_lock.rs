@@ -31,9 +31,28 @@ impl CacheZoneRuntime {
             return FillLockDecision::WaitLocal { waiter: lock.notify.notified_owned() };
         }
 
-        let external_lock_path = if self.config.shared_index {
+        let (external_lock_path, external_state) = if self.config.shared_index {
             match self.try_acquire_shared_fill_lock(key, lock_age) {
-                Some(path) => Some(path),
+                Some(lock_path) => match super::super::fill::create_shared_external_fill_handle(
+                    self.config.as_ref(),
+                    key,
+                    &lock_path,
+                    now,
+                    share_fingerprint,
+                ) {
+                    Ok(state) => (Some(lock_path), Some(state)),
+                    Err(error) => {
+                        tracing::warn!(
+                            zone = %self.config.name,
+                            key = %key,
+                            path = %lock_path.display(),
+                            %error,
+                            "failed to initialize external shared fill state; falling back to local fill coordination"
+                        );
+                        let _ = std::fs::remove_file(&lock_path);
+                        (None, None)
+                    }
+                },
                 None => {
                     if let Some(state) = super::super::fill::load_external_fill_state(
                         self.config.as_ref(),
@@ -46,33 +65,8 @@ impl CacheZoneRuntime {
                 }
             }
         } else {
-            None
+            (None, None)
         };
-        let external_state = external_lock_path.as_ref().and_then(|lock_path| {
-            match super::super::fill::create_shared_external_fill_handle(
-                self.config.as_ref(),
-                key,
-                lock_path,
-                now,
-                share_fingerprint,
-            ) {
-                Ok(state) => Some(state),
-                Err(error) => {
-                    tracing::warn!(
-                        zone = %self.config.name,
-                        key = %key,
-                        path = %lock_path.display(),
-                        %error,
-                        "failed to initialize external shared fill state"
-                    );
-                    let _ = std::fs::remove_file(lock_path);
-                    None
-                }
-            }
-        });
-        if external_lock_path.is_some() && external_state.is_none() {
-            return FillLockDecision::WaitExternal { key: key.to_string() };
-        }
         let notify = Arc::new(Notify::new());
         let generation = self.fill_lock_generation.fetch_add(1, Ordering::Relaxed) + 1;
         fill_locks.insert(

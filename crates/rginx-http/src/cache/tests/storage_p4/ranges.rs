@@ -183,3 +183,46 @@ async fn sliced_range_requests_share_inflight_fill_for_subranges() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     assert_eq!(body.as_ref(), b"fg");
 }
+
+#[tokio::test]
+async fn sliced_range_requests_reject_truncated_streamed_subranges() {
+    let temp = tempfile::tempdir().expect("cache temp dir should exist");
+    let manager = test_manager(temp.path().to_path_buf(), 1024);
+    let mut policy = test_policy();
+    policy.range_requests = rginx_core::CacheRangeRequestPolicy::Cache;
+    policy.slice_size_bytes = Some(8);
+
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/truncated-slice")
+        .header("host", "example.com")
+        .header(RANGE, "bytes=2-6")
+        .body(full_body(Bytes::new()))
+        .expect("request should build");
+    let context = match manager.lookup(CacheRequest::from_request(&request), "https", &policy).await
+    {
+        CacheLookup::Miss(context) => *context,
+        _ => panic!("empty cache should miss"),
+    };
+
+    let stream =
+        stream::iter([Ok::<Frame<Bytes>, BoxError>(Frame::data(Bytes::from_static(b"abcd")))]);
+    let response = Response::builder()
+        .status(StatusCode::PARTIAL_CONTENT)
+        .header(CACHE_CONTROL, "max-age=60")
+        .header(CONTENT_RANGE, "bytes 0-7/26")
+        .header(CONTENT_LENGTH, "8")
+        .body(boxed_body(StreamBody::new(stream)))
+        .expect("response should build");
+    let stored = manager.store_response(context, response).await;
+
+    let error = stored
+        .into_body()
+        .collect()
+        .await
+        .expect_err("truncated streamed slice should surface an error");
+    assert!(
+        error.to_string().contains("requested subrange"),
+        "unexpected truncated subrange error: {error}"
+    );
+}

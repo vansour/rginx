@@ -37,6 +37,32 @@ fn shared_fill_locks_coordinate_across_zone_instances() {
     }
 }
 
+#[test]
+fn shared_fill_state_init_failure_falls_back_to_local_fill_lock() {
+    let temp = tempfile::tempdir().expect("cache temp dir should exist");
+    let zone = test_zone(temp.path().to_path_buf(), 1024);
+    let key = "shared-key";
+    let state_path = super::super::shared::shared_fill_state_path(zone.config.as_ref(), key);
+    std::fs::create_dir(&state_path).expect("state path blocker should be creatable");
+
+    let now = unix_time_ms(SystemTime::now());
+    let guard = match zone.fill_lock_decision(key, now, Duration::from_secs(5), None) {
+        FillLockDecision::Acquired(guard) => guard,
+        _ => panic!("shared fill init failure should fall back to a local fill lock"),
+    };
+    assert!(
+        guard.external_lock_path.is_none(),
+        "fallback lock should not retain a broken external coordination file"
+    );
+
+    match zone.fill_lock_decision(key, now, Duration::from_secs(5), None) {
+        FillLockDecision::WaitLocal { .. } => {}
+        _ => panic!(
+            "subsequent lookups should wait on the local fill lock, not spin on external coordination"
+        ),
+    }
+}
+
 #[tokio::test]
 async fn shared_fill_locks_stream_from_external_inflight_fill() {
     let temp = tempfile::tempdir().expect("cache temp dir should exist");

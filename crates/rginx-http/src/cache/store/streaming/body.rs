@@ -108,14 +108,24 @@ impl StreamingCacheBody {
     }
 
     fn disable_cache(&mut self) {
-        self.cache.take();
+        let Some(cache) = self.cache.take() else {
+            return;
+        };
+        cache.abort("streaming cache entry exceeded maximum entry bytes");
     }
 
     fn finish_cache(&mut self, trailers: Option<http::HeaderMap>) {
         let Some(cache) = self.cache.take() else {
             return;
         };
-        let _ = cache.try_finish(trailers);
+        if cache.try_finish(trailers.clone()) {
+            return;
+        }
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let _ = cache.finish(trailers).await;
+            });
+        }
     }
 
     fn cache_frame_data(&mut self, data: &Bytes) {

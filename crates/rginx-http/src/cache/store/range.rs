@@ -26,9 +26,10 @@ impl<B> DownstreamRangeTrimBody<B> {
 impl<B> Body for DownstreamRangeTrimBody<B>
 where
     B: Body<Data = Bytes>,
+    B::Error: Into<BoxError> + 'static,
 {
     type Data = Bytes;
-    type Error = B::Error;
+    type Error = BoxError;
 
     fn poll_frame(
         self: std::pin::Pin<&mut Self>,
@@ -74,6 +75,9 @@ where
                     Err(frame) => match frame.into_trailers() {
                         Ok(trailers) => {
                             *this.done = true;
+                            if *this.skip_bytes > 0 || *this.emit_bytes > 0 {
+                                return std::task::Poll::Ready(Some(Err(truncated_range_error())));
+                            }
                             return std::task::Poll::Ready(Some(Ok(Frame::trailers(trailers))));
                         }
                         Err(frame) => return std::task::Poll::Ready(Some(Ok(frame))),
@@ -81,10 +85,13 @@ where
                 },
                 std::task::Poll::Ready(Some(Err(error))) => {
                     *this.done = true;
-                    return std::task::Poll::Ready(Some(Err(error)));
+                    return std::task::Poll::Ready(Some(Err(error.into())));
                 }
                 std::task::Poll::Ready(None) => {
                     *this.done = true;
+                    if *this.skip_bytes > 0 || *this.emit_bytes > 0 {
+                        return std::task::Poll::Ready(Some(Err(truncated_range_error())));
+                    }
                     return std::task::Poll::Ready(None);
                 }
                 std::task::Poll::Pending => return std::task::Poll::Pending,
@@ -101,6 +108,14 @@ where
         hint.set_exact(self.emit_bytes as u64);
         hint
     }
+}
+
+fn truncated_range_error() -> BoxError {
+    std::io::Error::new(
+        std::io::ErrorKind::UnexpectedEof,
+        "streamed range response ended before the requested subrange was fully produced",
+    )
+    .into()
 }
 
 pub(in crate::cache) fn build_downstream_response<B>(

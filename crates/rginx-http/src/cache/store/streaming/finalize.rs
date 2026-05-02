@@ -32,7 +32,14 @@ pub(super) fn record_streaming_cache_write_error(
 fn spawn_cache_task(task: impl std::future::Future<Output = ()> + Send + 'static) {
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         handle.spawn(task);
+        return;
     }
+    std::thread::spawn(move || {
+        let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+            return;
+        };
+        runtime.block_on(task);
+    });
 }
 
 async fn finalize_streaming_cache(plan: StreamingCachePlan, body_size_bytes: usize) {
@@ -152,6 +159,12 @@ async fn complete_streaming_cache(
                 }
                 drop(file);
                 finalize_streaming_cache(plan, body_size_bytes).await;
+                return;
+            }
+            StreamingCacheWriteMessage::Abort => {
+                let _ = file.flush().await;
+                drop(file);
+                let _ = fs::remove_file(&plan.body_tmp).await;
                 return;
             }
         }
