@@ -18,7 +18,7 @@
 
 但当前实现仍然有三个非常明确的边界：
 
-- `store_response()` 仍会先对 upstream body 做 `collect()`，再决定是否落盘缓存
+- 常规可缓存响应已经支持边向下游转发、边把 body 渐进式写入临时缓存文件；但需要下游 range trim 的路径仍会走 buffered `collect()`，而且命中对外可见仍要等对象完整提交
 - `response_buffering = Off` 时，代理路径会直接 bypass cache
 - `shared_index` 是共享磁盘元数据库，不是 NGINX `keys_zone` 那种 shared memory，也不是 ATS 的 RAM cache
 
@@ -37,7 +37,7 @@
 
 - NGINX 的 `proxy_cache_path` 以 `keys_zone` 共享内存维护热索引，而 `rginx` 的 `shared_index` 仍是 SQLite 共享元数据库加本地内存索引同步
 - NGINX 的 cache loader、manager、purger 是专门围绕磁盘缓存设计的后台维护模型，而 `rginx` 的 inactive cleanup 和 eviction 仍要从整个内存索引中筛选、排序、再批量删除
-- `rginx` 的写入路径仍是“先完整收集 body 再写缓存文件”；如果要对齐 NGINX 这一档的大对象缓存能力，流式写入仍是绕不过去的核心工程
+- `rginx` 已经具备“边转发边落盘”的基础流式写入，但还没有 read-while-fill，也还没把这条能力扩展到所有缓存分支；距离 NGINX 那种可长期承载大对象的成熟数据路径还有明显差距
 
 结论：相对 NGINX，`rginx` 最明显的差距已不在配置面，而在数据路径和后台维护模型。
 
@@ -50,7 +50,7 @@
 
 当前仍落后于 Varnish 的点：
 
-- 缺少 `beresp.do_stream` 这一类“边从后端读取、边向客户端发送、同时把对象写进缓存”的主路径能力
+- `rginx` 已经能边从后端读取、边向客户端发送、边把对象写入临时缓存文件，但还缺少 Varnish `do_stream` 之后那种更成熟的对象生命周期配套，尤其是 read-while-fill 和更细的对象可见性控制
 - 缺少 `grace + keep` 这种更细的 stale / revalidate 生命周期拆分；当前更多还是 `ttl + stale-if-error + stale-while-revalidate`
 - 缺少 `beresp.uncacheable` / hit-for-miss / hit-for-pass 一类的“短期记住这个 key 不值得反复填充”的对象模型
 - 缺少 BAN 这种逻辑失效层；当前 `rginx` 的 `purge` 还是直接按 zone/key/prefix 删除对象
@@ -94,17 +94,18 @@
 
 下面这些才是 `rginx` 缓存下一阶段真正值得投入的长期差距，按优先级排序。
 
-### 1. 流式写入与 read-while-fill 数据路径
+### 1. read-while-fill 与大对象缓存成熟度
 
 这是当前最核心的差距。
 
-- 现在的 `store_response()` 仍先 `collect()` 全量 body，再决定是否写缓存
-- 这会直接放大大对象内存占用，并把 unknown-size / streaming body 挡在缓存外
-- 也意味着 `rginx` 还不能像 Varnish `do_stream` 或 ATS Read-While-Writer 那样，把缓存作为长响应和大响应的主路径
+- 现在的常规可缓存响应已经能把 upstream body 渐进式写入临时缓存文件，不再需要先把全量 body 收进内存
+- 但命中仍要等对象完整提交，后续请求还不能像 ATS Read-While-Writer 那样跟读正在填充的对象
+- 需要下游 range trim 的路径仍会退回 buffered `collect()`，`response_buffering = Off` 也仍会直接绕过缓存
+- 这说明 `rginx` 虽然已经跨过“完全不能流式写入”的门槛，但还没有把缓存变成大对象和长响应的成熟主路径
 
 长期目标：
 
-- 把缓存写入改成渐进式落盘，而不是“完整收集后再写”
+- 让更多缓存分支都走统一的渐进式落盘路径，而不是保留 buffered 特例
 - 支持首请求写入过程中后续请求跟读，或者至少提供更接近 read-while-fill 的能力
 - 让 `response_buffering` 与缓存的关系从“关闭就完全绕过”逐步走向“按能力降级”
 
