@@ -17,6 +17,7 @@ mod storage;
 mod storage_p1;
 mod storage_p2;
 mod storage_p3;
+mod storage_p4;
 mod storage_regressions;
 mod stress;
 

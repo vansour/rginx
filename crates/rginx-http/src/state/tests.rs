@@ -22,6 +22,7 @@ use super::{
 mod counters;
 mod snapshots;
 mod status;
+mod status_cache;
 mod support;
 mod tls;
 mod traffic;
