@@ -1,47 +1,165 @@
-use bytes::Bytes;
-use hyper::body::{Frame, SizeHint};
-use tokio::io::AsyncWrite;
-
-use super::finalize::{
-    abandon_streaming_cache, record_streaming_cache_write_error, start_streaming_cache_finalize,
-};
+use super::super::super::fill::CacheFillReadState;
 use super::*;
-use crate::handler::BoxError;
+use crate::handler::{BoxError, full_body};
+use bytes::Bytes;
+use http_body_util::BodyExt;
+use hyper::body::{Frame, SizeHint};
+
+pub(super) fn spawn_streaming_origin_fill(
+    mut inner: HttpBody,
+    writer: StreamingCacheWriter,
+    fill_state: Option<Arc<CacheFillReadState>>,
+) {
+    let Some(handle) = tokio::runtime::Handle::try_current().ok() else {
+        if let Some(fill_state) = fill_state.as_ref() {
+            fill_state.fail("streaming cache fill requires an active Tokio runtime");
+        }
+        return;
+    };
+
+    handle.spawn(async move {
+        drive_streaming_origin_fill(&mut inner, writer, fill_state).await;
+    });
+}
+
+async fn drive_streaming_origin_fill(
+    inner: &mut HttpBody,
+    writer: StreamingCacheWriter,
+    fill_state: Option<Arc<CacheFillReadState>>,
+) {
+    let mut writer = Some(writer);
+
+    while let Some(frame) = inner.frame().await {
+        let Ok(frame) = frame else {
+            if let Some(fill_state) = fill_state.as_ref() {
+                fill_state.fail("upstream body read failed while filling cache");
+            }
+            return;
+        };
+
+        let stream_completed = frame.is_trailers() || inner.is_end_stream();
+        let trailers = frame.trailers_ref().cloned();
+
+        if let Some(data) = frame.data_ref() {
+            if data.is_empty() {
+                if !stream_completed {
+                    continue;
+                }
+            } else {
+                let Some(cache_writer) = writer.as_ref() else {
+                    return;
+                };
+                if !cache_writer.send_data(data.clone()).await {
+                    if let Some(fill_state) = fill_state.as_ref() {
+                        fill_state.fail("streaming cache writer channel closed before EOF");
+                    }
+                    return;
+                }
+            }
+        }
+
+        if stream_completed {
+            let Some(cache_writer) = writer.take() else {
+                return;
+            };
+            if !cache_writer.finish(trailers).await
+                && let Some(fill_state) = fill_state.as_ref()
+            {
+                fill_state.fail("streaming cache writer channel closed before end-of-stream");
+            }
+            return;
+        }
+    }
+
+    let Some(cache_writer) = writer.take() else {
+        return;
+    };
+    if !cache_writer.finish(None).await
+        && let Some(fill_state) = fill_state.as_ref()
+    {
+        fill_state.fail("streaming cache writer channel closed before end-of-stream");
+    }
+}
 
 pub(super) struct StreamingCacheBody {
     inner: HttpBody,
     size_hint: SizeHint,
-    expected_body_bytes: Option<usize>,
-    pending_frame: Option<Frame<Bytes>>,
-    cache: Option<ActiveStreamingCache>,
-    finalizing: Option<StreamingCacheFinalize>,
+    cache: Option<StreamingCacheWriter>,
+    cached_body_bytes: usize,
+    max_entry_bytes: usize,
     done: bool,
 }
 
 impl StreamingCacheBody {
-    pub(super) fn new(inner: HttpBody, size_hint: SizeHint, cache: ActiveStreamingCache) -> Self {
+    pub(super) fn new(
+        inner: HttpBody,
+        size_hint: SizeHint,
+        cache: StreamingCacheWriter,
+        max_entry_bytes: usize,
+    ) -> Self {
         Self {
             inner,
-            expected_body_bytes: size_hint.exact().and_then(|exact| usize::try_from(exact).ok()),
             size_hint,
-            pending_frame: None,
             cache: Some(cache),
-            finalizing: None,
+            cached_body_bytes: 0,
+            max_entry_bytes,
             done: false,
         }
+    }
+
+    fn disable_cache(&mut self) {
+        let Some(cache) = self.cache.take() else {
+            return;
+        };
+        cache.abort("streaming cache entry exceeded maximum entry bytes");
+    }
+
+    fn finish_cache(&mut self, trailers: Option<http::HeaderMap>) {
+        let Some(cache) = self.cache.take() else {
+            return;
+        };
+        if cache.try_finish(trailers.clone()) {
+            return;
+        }
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let _ = cache.finish(trailers).await;
+            });
+        }
+    }
+
+    fn cache_frame_data(&mut self, data: &Bytes) {
+        if data.is_empty() {
+            return;
+        }
+
+        let Some(cache) = self.cache.as_ref() else {
+            return;
+        };
+        let next_body_size = self.cached_body_bytes.saturating_add(data.len());
+        if next_body_size > self.max_entry_bytes || !cache.try_send_data(data.clone()) {
+            self.disable_cache();
+            return;
+        }
+        self.cached_body_bytes = next_body_size;
     }
 }
 
 impl Drop for StreamingCacheBody {
     fn drop(&mut self) {
-        if let Some(finalizing) = self.finalizing.take() {
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                handle.spawn(finalizing);
-            }
+        if self.done {
             return;
         }
-        if let Some(cache) = self.cache.take() {
-            abandon_streaming_cache(cache);
+        let Some(cache) = self.cache.take() else {
+            return;
+        };
+        let inner = std::mem::replace(&mut self.inner, full_body(Bytes::new()));
+        let cached_body_bytes = self.cached_body_bytes;
+        let max_entry_bytes = self.max_entry_bytes;
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                drain_remaining_frames(inner, cache, cached_body_bytes, max_entry_bytes).await;
+            });
         }
     }
 }
@@ -55,160 +173,75 @@ impl hyper::body::Body for StreamingCacheBody {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         let this = self.get_mut();
+        if this.done {
+            return std::task::Poll::Ready(None);
+        }
 
-        loop {
-            if let Some(finalizing) = this.finalizing.as_mut() {
-                match finalizing.as_mut().poll(cx) {
-                    std::task::Poll::Ready(()) => {
-                        this.finalizing = None;
-                        if let Some(frame) = this.pending_frame.take() {
-                            return std::task::Poll::Ready(Some(Ok(frame)));
-                        }
-                        return std::task::Poll::Ready(None);
-                    }
-                    std::task::Poll::Pending => return std::task::Poll::Pending,
+        match std::pin::Pin::new(&mut this.inner).poll_frame(cx) {
+            std::task::Poll::Ready(Some(Ok(frame))) => {
+                let stream_completed = frame.is_trailers() || this.inner.is_end_stream();
+                let trailers = frame.trailers_ref().cloned();
+                if let Some(data) = frame.data_ref() {
+                    this.cache_frame_data(data);
                 }
-            }
-
-            let mut should_return_pending_frame = false;
-            let mut disable_cache: Option<(std::io::Error, bool)> = None;
-            if let Some(cache) = this.cache.as_mut()
-                && let Some(pending_write) = cache.pending_write.as_mut()
-            {
-                match std::pin::Pin::new(&mut cache.file).poll_write(cx, pending_write.remaining())
-                {
-                    std::task::Poll::Ready(Ok(0)) => {
-                        disable_cache = Some((
-                            std::io::Error::new(
-                                std::io::ErrorKind::WriteZero,
-                                "cache body write returned zero bytes",
-                            ),
-                            true,
-                        ));
-                    }
-                    std::task::Poll::Ready(Ok(written)) => {
-                        pending_write.written += written;
-                        if pending_write.written == pending_write.bytes.len() {
-                            cache.plan.body_size_bytes = cache
-                                .plan
-                                .body_size_bytes
-                                .saturating_add(pending_write.bytes.len());
-                            cache.pending_write = None;
-                            if cache.finalize_after_pending_frame {
-                                cache.finalize_after_pending_frame = false;
-                                if let Some(cache) = this.cache.take() {
-                                    this.finalizing = Some(start_streaming_cache_finalize(cache));
-                                    continue;
-                                }
-                            } else {
-                                should_return_pending_frame = true;
-                            }
-                        }
-                    }
-                    std::task::Poll::Ready(Err(error)) => disable_cache = Some((error, true)),
-                    std::task::Poll::Pending => return std::task::Poll::Pending,
-                }
-            }
-
-            if let Some((error, record_write_error)) = disable_cache.take() {
-                let frame =
-                    this.pending_frame.take().expect("pending frame should accompany writes");
-                if let Some(cache) = this.cache.take() {
-                    if record_write_error {
-                        record_streaming_cache_write_error(&cache.plan, &error);
-                    }
-                    abandon_streaming_cache(cache);
-                }
-                return std::task::Poll::Ready(Some(Ok(frame)));
-            }
-            if should_return_pending_frame {
-                let frame = this.pending_frame.take().expect("pending frame should be available");
-                return std::task::Poll::Ready(Some(Ok(frame)));
-            }
-            if this.done {
-                return std::task::Poll::Ready(None);
-            }
-
-            match std::pin::Pin::new(&mut this.inner).poll_frame(cx) {
-                std::task::Poll::Ready(Some(Ok(frame))) => {
-                    if let Some(data) = frame.data_ref() {
-                        let data = data.clone();
-                        let stream_completed = frame.is_trailers()
-                            || this.inner.is_end_stream()
-                            || this.expected_body_bytes.is_some_and(|expected| {
-                                expected
-                                    <= this.cache.as_ref().map_or(data.len(), |cache| {
-                                        cache.plan.body_size_bytes.saturating_add(data.len())
-                                    })
-                            });
-                        this.done = stream_completed;
-                        let mut overflowed = false;
-                        if let Some(cache) = this.cache.as_mut() {
-                            let body_len = cache.plan.body_size_bytes.saturating_add(data.len());
-                            if body_len > cache.plan.zone.config.max_entry_bytes {
-                                overflowed = true;
-                            } else if !data.is_empty() {
-                                this.pending_frame = Some(frame);
-                                cache.pending_write = Some(PendingCacheWrite::new(data));
-                                cache.finalize_after_pending_frame = stream_completed;
-                                continue;
-                            } else if stream_completed {
-                                this.pending_frame = Some(frame);
-                                if let Some(cache) = this.cache.take() {
-                                    this.finalizing = Some(start_streaming_cache_finalize(cache));
-                                    continue;
-                                }
-                                let frame = this
-                                    .pending_frame
-                                    .take()
-                                    .expect("terminal empty frame should be available");
-                                return std::task::Poll::Ready(Some(Ok(frame)));
-                            }
-                        }
-                        if overflowed && let Some(cache) = this.cache.take() {
-                            abandon_streaming_cache(cache);
-                        }
-                        return std::task::Poll::Ready(Some(Ok(frame)));
-                    }
-
-                    let stream_completed = frame.is_trailers() || this.inner.is_end_stream();
-                    this.done = stream_completed;
-                    if stream_completed && let Some(cache) = this.cache.take() {
-                        this.pending_frame = Some(frame);
-                        this.finalizing = Some(start_streaming_cache_finalize(cache));
-                        continue;
-                    }
-                    return std::task::Poll::Ready(Some(Ok(frame)));
-                }
-                std::task::Poll::Ready(Some(Err(error))) => {
+                if stream_completed {
                     this.done = true;
-                    if let Some(cache) = this.cache.take() {
-                        cache.plan.zone.record_write_error();
-                        abandon_streaming_cache(cache);
-                    }
-                    return std::task::Poll::Ready(Some(Err(error)));
+                    this.finish_cache(trailers);
                 }
-                std::task::Poll::Ready(None) => {
-                    this.done = true;
-                    if let Some(cache) = this.cache.take() {
-                        this.finalizing = Some(start_streaming_cache_finalize(cache));
-                        continue;
-                    }
-                    return std::task::Poll::Ready(None);
-                }
-                std::task::Poll::Pending => return std::task::Poll::Pending,
+                std::task::Poll::Ready(Some(Ok(frame)))
             }
+            std::task::Poll::Ready(Some(Err(error))) => {
+                this.done = true;
+                this.disable_cache();
+                std::task::Poll::Ready(Some(Err(error)))
+            }
+            std::task::Poll::Ready(None) => {
+                this.done = true;
+                this.finish_cache(None);
+                std::task::Poll::Ready(None)
+            }
+            std::task::Poll::Pending => std::task::Poll::Pending,
         }
     }
 
     fn is_end_stream(&self) -> bool {
-        self.pending_frame.is_none()
-            && self.cache.is_none()
-            && self.finalizing.is_none()
-            && (self.done || self.inner.is_end_stream())
+        self.done
     }
 
     fn size_hint(&self) -> SizeHint {
         self.size_hint.clone()
     }
+}
+
+async fn drain_remaining_frames(
+    mut inner: HttpBody,
+    cache: StreamingCacheWriter,
+    mut cached_body_bytes: usize,
+    max_entry_bytes: usize,
+) {
+    while let Some(frame) = inner.frame().await {
+        let Ok(frame) = frame else {
+            return;
+        };
+        match frame.into_data() {
+            Ok(data) => {
+                if data.is_empty() {
+                    continue;
+                }
+                let next_body_size = cached_body_bytes.saturating_add(data.len());
+                if next_body_size > max_entry_bytes || !cache.send_data(data).await {
+                    return;
+                }
+                cached_body_bytes = next_body_size;
+            }
+            Err(frame) => match frame.into_trailers() {
+                Ok(trailers) => {
+                    let _ = cache.finish(Some(trailers)).await;
+                    return;
+                }
+                Err(_) => continue,
+            },
+        }
+    }
+    let _ = cache.finish(None).await;
 }

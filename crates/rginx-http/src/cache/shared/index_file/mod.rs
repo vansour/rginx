@@ -17,6 +17,7 @@ const SHARED_INDEX_FILENAME: &str = ".rginx-index.sqlite3";
 const LEGACY_SHARED_INDEX_FILENAME: &str = ".rginx-index.json";
 const SHARED_FILL_LOCK_PREFIX: &str = ".rginx-fill-";
 const SHARED_FILL_LOCK_SUFFIX: &str = ".lock";
+const SHARED_FILL_STATE_SUFFIX: &str = ".state.json";
 const META_SCHEMA_VERSION_KEY: &str = "schema_version";
 const META_GENERATION_KEY: &str = "generation";
 
@@ -28,6 +29,11 @@ pub(super) struct LoadedSharedIndex {
 pub(in crate::cache) fn shared_fill_lock_path(zone: &rginx_core::CacheZone, key: &str) -> PathBuf {
     zone.path
         .join(format!("{SHARED_FILL_LOCK_PREFIX}{}{SHARED_FILL_LOCK_SUFFIX}", cache_key_hash(key)))
+}
+
+pub(in crate::cache) fn shared_fill_state_path(zone: &rginx_core::CacheZone, key: &str) -> PathBuf {
+    zone.path
+        .join(format!("{SHARED_FILL_LOCK_PREFIX}{}{SHARED_FILL_STATE_SUFFIX}", cache_key_hash(key)))
 }
 
 pub(super) fn shared_index_path(zone: &rginx_core::CacheZone) -> PathBuf {
@@ -88,7 +94,9 @@ pub(super) fn apply_shared_index_operations(
     store.apply_operations(operations)
 }
 
-pub(super) fn run_blocking<T>(operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+pub(in crate::cache) fn run_blocking<T>(
+    operation: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
     if let Ok(handle) = tokio::runtime::Handle::try_current()
         && handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
     {

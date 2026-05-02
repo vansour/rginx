@@ -9,12 +9,14 @@ use super::{CacheIndex, CacheIndexEntry, CacheZoneRuntime};
 mod index_file;
 
 pub(super) use index_file::SharedIndexStore;
-pub(in crate::cache) use index_file::shared_fill_lock_path;
 pub(super) use index_file::shared_index_store;
 use index_file::{
     apply_shared_index_operations, delete_legacy_shared_index_file,
     load_legacy_shared_index_from_disk, load_shared_index_from_disk, recreate_shared_index_on_disk,
-    run_blocking, shared_index_generation, shared_index_path,
+    shared_index_generation, shared_index_path,
+};
+pub(in crate::cache) use index_file::{
+    run_blocking, shared_fill_lock_path, shared_fill_state_path,
 };
 
 #[derive(Clone)]

@@ -1,5 +1,8 @@
-use super::vary::matches_vary_headers;
 use super::*;
+
+mod helpers;
+
+use helpers::{fill_share_fingerprint, matching_variant_key, stale_allowed_for_entry};
 
 impl CacheManager {
     pub(super) fn lookup_decision(
@@ -13,6 +16,7 @@ impl CacheManager {
     ) -> LookupDecision {
         let mut index = lock_index(&zone.index);
         let matching_key = matching_variant_key(&index, base_key, request);
+        let share_fingerprint = fill_share_fingerprint(request);
 
         match matching_key {
             Some(key) => {
@@ -30,7 +34,7 @@ impl CacheManager {
                 }
 
                 let expired = now > entry.expires_at_unix_ms;
-                match zone.fill_lock_decision(&key, now, policy.lock_age) {
+                match zone.fill_lock_decision(&key, now, policy.lock_age, None) {
                     FillLockDecision::Acquired(fill_guard) => {
                         if expired
                             && stale_allowed_for_entry(
@@ -90,6 +94,42 @@ impl CacheManager {
                             status: CacheStatus::Updating,
                         }
                     }
+                    FillLockDecision::ReadLocal { state: _state }
+                        if expired
+                            && stale_allowed_for_entry(
+                                policy,
+                                entry,
+                                now,
+                                request_forces_revalidation,
+                            ) =>
+                    {
+                        LookupDecision::Stale {
+                            key,
+                            entry: entry.clone(),
+                            status: CacheStatus::Updating,
+                        }
+                    }
+                    FillLockDecision::ReadExternal { state: _state }
+                        if expired
+                            && stale_allowed_for_entry(
+                                policy,
+                                entry,
+                                now,
+                                request_forces_revalidation,
+                            ) =>
+                    {
+                        LookupDecision::Stale {
+                            key,
+                            entry: entry.clone(),
+                            status: CacheStatus::Updating,
+                        }
+                    }
+                    FillLockDecision::ReadLocal { state } => {
+                        LookupDecision::ReadWhileFillLocal { state }
+                    }
+                    FillLockDecision::ReadExternal { state } => {
+                        LookupDecision::ReadWhileFillExternal { state }
+                    }
                     FillLockDecision::WaitLocal { waiter } => {
                         LookupDecision::Wait { strategy: LookupWait::Local { waiter } }
                     }
@@ -98,7 +138,12 @@ impl CacheManager {
                     }
                 }
             }
-            None => match zone.fill_lock_decision(base_key, now, policy.lock_age) {
+            None => match zone.fill_lock_decision(
+                base_key,
+                now,
+                policy.lock_age,
+                Some(&share_fingerprint),
+            ) {
                 FillLockDecision::Acquired(fill_guard) => LookupDecision::Miss {
                     key: base_key.to_string(),
                     base_key: base_key.to_string(),
@@ -106,6 +151,12 @@ impl CacheManager {
                     fill_guard: Some(fill_guard),
                     cache_status: CacheStatus::Miss,
                 },
+                FillLockDecision::ReadLocal { state } => {
+                    LookupDecision::ReadWhileFillLocal { state }
+                }
+                FillLockDecision::ReadExternal { state } => {
+                    LookupDecision::ReadWhileFillExternal { state }
+                }
                 FillLockDecision::WaitLocal { waiter } => {
                     LookupDecision::Wait { strategy: LookupWait::Local { waiter } }
                 }
@@ -241,44 +292,4 @@ impl CacheManager {
         }
         Some(with_cache_status(response, status))
     }
-}
-
-fn matching_variant_key(
-    index: &CacheIndex,
-    base_key: &str,
-    request: &CacheRequest,
-) -> Option<String> {
-    if !index.variants.contains_key(base_key)
-        && index
-            .entries
-            .get(base_key)
-            .is_some_and(|entry| matches_vary_headers(request, &entry.vary))
-    {
-        return Some(base_key.to_string());
-    }
-    index
-        .variants
-        .get(base_key)
-        .into_iter()
-        .flatten()
-        .find(|candidate_key| {
-            index
-                .entries
-                .get(*candidate_key)
-                .is_some_and(|entry| matches_vary_headers(request, &entry.vary))
-        })
-        .cloned()
-}
-
-fn stale_allowed_for_entry(
-    policy: &RouteCachePolicy,
-    entry: &CacheIndexEntry,
-    now: u64,
-    request_forces_revalidation: bool,
-) -> bool {
-    !request_forces_revalidation
-        && !entry.requires_revalidation
-        && !entry.must_revalidate
-        && (policy.use_stale.contains(&rginx_core::CacheUseStaleCondition::Updating)
-            || entry.stale_while_revalidate_until_unix_ms.is_some_and(|until| now <= until))
 }

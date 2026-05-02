@@ -5,6 +5,7 @@ use tokio::fs;
 use super::temp::{cleanup_failed_write, next_temp_suffix, sibling_temp_path};
 use super::*;
 
+#[cfg(test)]
 pub(in crate::cache) async fn write_cache_entry(
     paths: &CachePaths,
     metadata: &CacheMetadata,

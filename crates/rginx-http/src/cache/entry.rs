@@ -20,11 +20,14 @@ mod temp;
 mod write;
 
 use response::cached_headers;
-pub(in crate::cache) use response::finalize_response_for_request;
+pub(in crate::cache) use response::{
+    DownstreamRangeTrimPlan, downstream_range_trim_plan, finalize_response_for_request,
+};
 pub(in crate::cache) use signature::{cache_key_hash, cache_variant_key, unix_time_ms};
+#[cfg(test)]
+pub(in crate::cache) use write::write_cache_entry;
 pub(in crate::cache) use write::{
-    cache_entry_temp_body_path, commit_cache_entry_temp_body, write_cache_entry,
-    write_cache_metadata,
+    cache_entry_temp_body_path, commit_cache_entry_temp_body, write_cache_metadata,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

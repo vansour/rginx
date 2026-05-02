@@ -1,18 +1,23 @@
 use std::path::PathBuf;
 
+use bytes::Bytes;
 use http::StatusCode;
 use http::header::HeaderMap;
 use hyper::body::Body as _;
 use tokio::fs::{self, File};
+use tokio::sync::mpsc;
 
 mod body;
 mod finalize;
 
-use super::buffered::passthrough_response;
+use super::super::entry::DownstreamRangeTrimPlan;
+use super::super::fill::{CacheFillReadState, inflight_fill_body};
+use super::range::build_downstream_response;
 use super::*;
-use crate::handler::boxed_body;
-use body::StreamingCacheBody;
-use finalize::store_empty_streaming_response;
+use body::{StreamingCacheBody, spawn_streaming_origin_fill};
+use finalize::spawn_streaming_cache_writer;
+
+const STREAMING_CACHE_WRITE_QUEUE_DEPTH: usize = 8;
 
 struct StreamingCachePlan {
     zone: Arc<CacheZoneRuntime>,
@@ -26,46 +31,62 @@ struct StreamingCachePlan {
     hash: String,
     paths: super::super::entry::CachePaths,
     body_tmp: PathBuf,
-    body_size_bytes: usize,
+    max_entry_bytes: usize,
+    expected_body_bytes: Option<usize>,
     revalidating: bool,
     replaced_entry: Option<(String, CacheIndexEntry)>,
     _fill_guard: Option<super::super::CacheFillGuard>,
+    fill_state: Option<Arc<CacheFillReadState>>,
 }
 
-pub(super) struct EmptyStreamingCachePlan {
-    final_key: String,
-    vary: Vec<super::super::CachedVaryHeaderValue>,
-    hash: String,
-    paths: super::super::entry::CachePaths,
-    now: u64,
-    replaced_entry: Option<(String, CacheIndexEntry)>,
-    status: StatusCode,
-    headers: HeaderMap,
-    freshness: super::super::policy::ResponseFreshness,
+pub(super) enum StreamingCacheWriteMessage {
+    Data(Bytes),
+    Finish { trailers: Option<HeaderMap> },
+    Abort,
 }
 
-pub(super) struct ActiveStreamingCache {
-    file: File,
-    pending_write: Option<PendingCacheWrite>,
-    finalize_after_pending_frame: bool,
-    plan: StreamingCachePlan,
+pub(super) struct StreamingCacheWriter {
+    tx: mpsc::Sender<StreamingCacheWriteMessage>,
+    fill_state: Option<Arc<CacheFillReadState>>,
 }
 
-struct PendingCacheWrite {
-    bytes: bytes::Bytes,
-    written: usize,
-}
-
-pub(super) type StreamingCacheFinalize =
-    std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>;
-
-impl PendingCacheWrite {
-    fn new(bytes: bytes::Bytes) -> Self {
-        Self { bytes, written: 0 }
+impl StreamingCacheWriter {
+    fn new(
+        tx: mpsc::Sender<StreamingCacheWriteMessage>,
+        fill_state: Option<Arc<CacheFillReadState>>,
+    ) -> Self {
+        Self { tx, fill_state }
     }
 
-    fn remaining(&self) -> &[u8] {
-        &self.bytes[self.written..]
+    fn try_send_data(&self, bytes: Bytes) -> bool {
+        self.tx.try_send(StreamingCacheWriteMessage::Data(bytes)).is_ok()
+    }
+
+    fn abort(&self, reason: &str) {
+        if let Some(fill_state) = self.fill_state.as_ref() {
+            fill_state.fail(reason);
+        }
+        let _ = self.tx.try_send(StreamingCacheWriteMessage::Abort);
+    }
+
+    fn try_finish(&self, trailers: Option<HeaderMap>) -> bool {
+        let sent = self.tx.try_send(StreamingCacheWriteMessage::Finish { trailers }).is_ok();
+        if sent && let Some(fill_state) = self.fill_state.as_ref() {
+            fill_state.mark_upstream_complete();
+        }
+        sent
+    }
+
+    async fn send_data(&self, bytes: Bytes) -> bool {
+        self.tx.send(StreamingCacheWriteMessage::Data(bytes)).await.is_ok()
+    }
+
+    async fn finish(self, trailers: Option<HeaderMap>) -> bool {
+        let sent = self.tx.send(StreamingCacheWriteMessage::Finish { trailers }).await.is_ok();
+        if sent && let Some(fill_state) = self.fill_state.as_ref() {
+            fill_state.mark_upstream_complete();
+        }
+        sent
     }
 }
 
@@ -73,10 +94,17 @@ pub(super) async fn store_streaming_response(
     context: CacheStoreContext,
     parts: http::response::Parts,
     body: HttpBody,
+    storable: bool,
+    no_cache: bool,
+    downstream_range_trim: Option<DownstreamRangeTrimPlan>,
 ) -> HttpResponse {
+    if !storable || no_cache {
+        return build_downstream_response(parts, body, downstream_range_trim);
+    }
+
     let freshness = response_freshness(&context, parts.status, &parts.headers);
     if !freshness_is_cacheable(&freshness) {
-        return passthrough_response(parts, body);
+        return build_downstream_response(parts, body, downstream_range_trim);
     }
 
     let vary = cache_vary_values(&context, &context.request, &parts.headers);
@@ -84,9 +112,11 @@ pub(super) async fn store_streaming_response(
     let admission =
         record_cache_admission_attempt(&context.zone, &final_key, context.policy.min_uses).await;
     if !admission.admitted {
-        return passthrough_response(parts, body);
+        return build_downstream_response(parts, body, downstream_range_trim);
     }
 
+    let upstream_status = parts.status;
+    let upstream_headers = parts.headers.clone();
     let now = unix_time_ms(SystemTime::now());
     let hash = context
         .cached_entry
@@ -95,30 +125,16 @@ pub(super) async fn store_streaming_response(
         .map(|entry| entry.hash.clone())
         .unwrap_or_else(|| cache_key_hash(&final_key));
     let paths = cache_paths_for_zone(context.zone.config.as_ref(), &hash);
+    let max_entry_bytes = context.zone.config.max_entry_bytes;
     let replaced_entry = context
         .cached_entry
         .as_ref()
         .filter(|_| context.key != final_key)
         .map(|entry| (context.key.clone(), entry.clone()));
     let size_hint = body.size_hint();
-
-    if size_hint.exact() == Some(0) {
-        store_empty_streaming_response(
-            &context,
-            EmptyStreamingCachePlan {
-                final_key,
-                vary,
-                hash,
-                paths,
-                now,
-                replaced_entry,
-                status: parts.status,
-                headers: parts.headers.clone(),
-                freshness,
-            },
-        )
-        .await;
-        return passthrough_response(parts, body);
+    let expected_body_bytes = size_hint.exact().and_then(|exact| usize::try_from(exact).ok());
+    if expected_body_bytes.is_some_and(|body_size_bytes| body_size_bytes > max_entry_bytes) {
+        return build_downstream_response(parts, body, downstream_range_trim);
     }
 
     if let Err(error) = fs::create_dir_all(&paths.dir).await {
@@ -129,7 +145,7 @@ pub(super) async fn store_streaming_response(
             "failed to prepare cache directory for streaming store"
         );
         context.zone.record_write_error();
-        return passthrough_response(parts, body);
+        return build_downstream_response(parts, body, downstream_range_trim);
     }
 
     let body_tmp = cache_entry_temp_body_path(&paths);
@@ -143,35 +159,59 @@ pub(super) async fn store_streaming_response(
                 "failed to create temporary cache body file"
             );
             context.zone.record_write_error();
-            return passthrough_response(parts, body);
+            return build_downstream_response(parts, body, downstream_range_trim);
         }
     };
-
-    let body = boxed_body(StreamingCacheBody::new(
-        body,
-        size_hint,
-        ActiveStreamingCache {
-            file: body_file,
-            pending_write: None,
-            finalize_after_pending_frame: false,
-            plan: StreamingCachePlan {
-                zone: context.zone,
-                base_key: context.base_key,
-                final_key,
-                vary,
-                status: parts.status,
-                headers: parts.headers.clone(),
-                freshness,
-                now,
-                hash,
-                paths,
-                body_tmp,
-                body_size_bytes: 0,
-                revalidating: context.revalidating,
-                replaced_entry,
-                _fill_guard: context._fill_guard,
-            },
+    let fill_state = context._fill_guard.as_ref().and_then(|fill_guard| {
+        context.zone.attach_fill_read_state(
+            &fill_guard.key,
+            fill_guard.generation,
+            Arc::new(CacheFillReadState::new(
+                upstream_status,
+                upstream_headers.clone(),
+                body_tmp.clone(),
+                paths.body.clone(),
+                fill_guard.notify.clone(),
+                fill_guard.external_state.clone(),
+            )),
+        )
+    });
+    let writer = spawn_streaming_cache_writer(
+        StreamingCachePlan {
+            zone: context.zone,
+            base_key: context.base_key,
+            final_key,
+            vary,
+            status: upstream_status,
+            headers: upstream_headers,
+            freshness,
+            now,
+            hash,
+            paths,
+            body_tmp,
+            max_entry_bytes,
+            expected_body_bytes,
+            revalidating: context.revalidating,
+            replaced_entry,
+            _fill_guard: context._fill_guard,
+            fill_state: fill_state.clone(),
         },
-    ));
-    http::Response::from_parts(parts, body)
+        body_file,
+        STREAMING_CACHE_WRITE_QUEUE_DEPTH,
+    );
+    match (fill_state, downstream_range_trim) {
+        (Some(fill_state_for_body), Some(trim_plan)) => {
+            spawn_streaming_origin_fill(body, writer, Some(fill_state_for_body.clone()));
+            build_downstream_response(
+                parts,
+                inflight_fill_body(fill_state_for_body),
+                Some(trim_plan),
+            )
+        }
+        (_, trim_plan) => build_downstream_response(
+            parts,
+            StreamingCacheBody::new(body, size_hint, writer, max_entry_bytes),
+            trim_plan,
+        ),
+    }
 }
