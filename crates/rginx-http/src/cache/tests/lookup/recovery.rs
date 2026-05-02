@@ -170,10 +170,17 @@ async fn cache_manager_serves_head_hit_without_reading_body_file() {
         .status(StatusCode::OK)
         .body(full_body("cached body"))
         .expect("response should build");
-    let _ = manager.store_response(context, response).await;
+    let _ = drain_response(manager.store_response(context, response).await).await;
 
     let hash = cache_key_hash("https:example.com:/head");
     let paths = cache_paths(temp.path(), &hash);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !paths.body.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("body file should appear after streaming cache store completes");
     tokio::fs::remove_file(paths.body).await.expect("body file should be removable");
 
     let head_request = Request::builder()

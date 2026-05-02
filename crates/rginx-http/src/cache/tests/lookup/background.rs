@@ -206,7 +206,7 @@ async fn head_background_refresh_stores_revalidated_body() {
         .header(CACHE_CONTROL, "max-age=60")
         .body(full_body("fresh"))
         .expect("response should build");
-    let _ = manager.store_response(context, response).await;
+    let _ = drain_response(manager.store_response(context, response).await).await;
 
     let get_request = Request::builder()
         .method(Method::GET)
@@ -214,16 +214,28 @@ async fn head_background_refresh_stores_revalidated_body() {
         .header("host", "example.com")
         .body(full_body(Bytes::new()))
         .expect("request should build");
-    match manager.lookup(CacheRequest::from_request(&get_request), "https", &policy).await {
-        CacheLookup::Hit(response) => {
-            let body = http_body_util::BodyExt::collect(response.into_body())
-                .await
-                .expect("body should collect")
-                .to_bytes();
-            assert_eq!(body.as_ref(), b"fresh");
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            match manager.lookup(CacheRequest::from_request(&get_request), "https", &policy).await {
+                CacheLookup::Hit(response) => {
+                    let body = http_body_util::BodyExt::collect(response.into_body())
+                        .await
+                        .expect("body should collect")
+                        .to_bytes();
+                    if body.as_ref() == b"fresh" {
+                        break;
+                    }
+                }
+                CacheLookup::Miss(_) | CacheLookup::Updating(_, _) => {}
+                CacheLookup::Bypass(status) => {
+                    panic!("cacheable request should not bypass: {status:?}")
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        _ => panic!("background refresh from HEAD should update cached body"),
-    }
+    })
+    .await
+    .expect("background refresh from HEAD should update cached body");
 }
 
 #[tokio::test]

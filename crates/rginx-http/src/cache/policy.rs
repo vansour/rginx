@@ -33,6 +33,7 @@ pub(super) struct ResponseFreshness {
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ResponseBodySize {
     exact: Option<u64>,
+    lower: u64,
     upper: Option<u64>,
 }
 
@@ -91,7 +92,8 @@ pub(super) fn response_is_storable_with_size(
     {
         return false;
     }
-    if !matches!(body_size.upper, Some(upper) if upper <= context.zone.config.max_entry_bytes as u64)
+    if body_size.lower > context.zone.config.max_entry_bytes as u64
+        || body_size.upper.is_some_and(|upper| upper > context.zone.config.max_entry_bytes as u64)
     {
         return false;
     }
@@ -223,14 +225,12 @@ fn parse_content_length(headers: &HeaderMap) -> Option<usize> {
 
 impl ResponseBodySize {
     fn from_response(response: &HttpResponse) -> Self {
-        Self {
-            exact: response.body().size_hint().exact(),
-            upper: response.body().size_hint().upper(),
-        }
+        let size_hint = response.body().size_hint();
+        Self { exact: size_hint.exact(), lower: size_hint.lower(), upper: size_hint.upper() }
     }
 
     pub(super) fn exact(body_size_bytes: usize) -> Self {
         let body_size_bytes = body_size_bytes as u64;
-        Self { exact: Some(body_size_bytes), upper: Some(body_size_bytes) }
+        Self { exact: Some(body_size_bytes), lower: body_size_bytes, upper: Some(body_size_bytes) }
     }
 }

@@ -10,8 +10,6 @@
   - Rust 源文件的单文件单职责规则、文件大小阈值和 modularization gate
 - `ARCHITECTURE_MODULE_LAYOUT_GUIDE.md`
   - 目录门面、命名、测试布局和模块说明约定
-- `NEZHA_DASHBOARD.md`
-  - Nezha Dashboard HTTPS、WebSocket、h2c gRPC 反向代理示例
 
 ## 维护约定
 

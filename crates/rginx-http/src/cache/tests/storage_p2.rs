@@ -35,6 +35,7 @@ async fn shared_index_sync_shares_entries_between_managers() {
         .expect("response should build");
     let stored = manager_a.store_response(context, response).await;
     assert_eq!(stored.headers().get(CACHE_STATUS_HEADER).unwrap(), "MISS");
+    let _ = drain_response(stored).await;
 
     match manager_b.lookup(CacheRequest::from_request(&request), "https", &policy).await {
         CacheLookup::Hit(response) => {
@@ -72,7 +73,7 @@ async fn shared_index_sync_shares_admission_counts_between_managers() {
         .header(CACHE_CONTROL, "max-age=60")
         .body(full_body("shared min uses"))
         .expect("response should build");
-    let _ = manager_a.store_response(context_a, response_a).await;
+    let _ = drain_response(manager_a.store_response(context_a, response_a).await).await;
 
     let context_b =
         match manager_b.lookup(CacheRequest::from_request(&request), "https", &policy).await {
@@ -84,7 +85,7 @@ async fn shared_index_sync_shares_admission_counts_between_managers() {
         .header(CACHE_CONTROL, "max-age=60")
         .body(full_body("shared min uses"))
         .expect("response should build");
-    let _ = manager_b.store_response(context_b, response_b).await;
+    let _ = drain_response(manager_b.store_response(context_b, response_b).await).await;
 
     match manager_a.lookup(CacheRequest::from_request(&request), "https", &policy).await {
         CacheLookup::Hit(response) => {
@@ -118,7 +119,7 @@ async fn shared_index_sync_keeps_local_hits_when_shared_metadata_db_is_corrupted
         .header(CACHE_CONTROL, "max-age=60")
         .body(full_body("shared"))
         .expect("response should build");
-    let _ = manager_a.store_response(context, response).await;
+    let _ = drain_response(manager_a.store_response(context, response).await).await;
 
     match manager_b.lookup(CacheRequest::from_request(&request), "https", &policy).await {
         CacheLookup::Hit(response) => {
@@ -174,7 +175,7 @@ async fn shared_index_sync_propagates_purged_entries_between_managers() {
         .header(CACHE_CONTROL, "max-age=60")
         .body(full_body("purged"))
         .expect("response should build");
-    let _ = manager_a.store_response(context, response).await;
+    let _ = drain_response(manager_a.store_response(context, response).await).await;
 
     match manager_b.lookup(CacheRequest::from_request(&request), "https", &policy).await {
         CacheLookup::Hit(_) => {}
@@ -340,7 +341,7 @@ async fn head_requests_can_populate_get_cache_entries_when_convert_head_is_enabl
         .header(CACHE_CONTROL, "max-age=60")
         .body(full_body("from get upstream"))
         .expect("response should build");
-    let _ = manager.store_response(context, response).await;
+    let _ = drain_response(manager.store_response(context, response).await).await;
 
     let get_request = Request::builder()
         .method(Method::GET)

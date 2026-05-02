@@ -390,9 +390,28 @@ async fn status_snapshot_reports_cache_zone_stats() {
         .header(CACHE_CONTROL, "max-age=60")
         .body(full_body("cached"))
         .expect("response should build");
-    let _ = active.cache.store_response(context, response).await;
+    let _ = http_body_util::BodyExt::collect(
+        active.cache.store_response(context, response).await.into_body(),
+    )
+    .await
+    .expect("stored response body should collect");
 
-    let status = shared.status_snapshot().await;
+    let status = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let status = shared.status_snapshot().await;
+            if status
+                .cache
+                .zones
+                .first()
+                .is_some_and(|zone| zone.entry_count == 1 && zone.current_size_bytes == 6)
+            {
+                break status;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("status snapshot should reflect the committed store");
     assert_eq!(status.cache.zones.len(), 1);
     assert_eq!(status.cache.zones[0].zone_name, "default");
     assert_eq!(status.cache.zones[0].entry_count, 1);

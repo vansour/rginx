@@ -119,6 +119,8 @@ async fn forward_request_serves_stale_for_configured_429() {
     .await;
     assert_eq!(first.status(), StatusCode::OK);
     assert_eq!(first.headers().get("x-cache").unwrap(), "MISS");
+    let first_body = first.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(first_body.as_ref(), b"ok");
 
     let second = tokio::time::timeout(Duration::from_secs(1), async {
         loop {

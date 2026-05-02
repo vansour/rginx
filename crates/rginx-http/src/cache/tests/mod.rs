@@ -168,3 +168,32 @@ fn test_metadata_input(
         body_size_bytes,
     }
 }
+
+async fn drain_response(response: crate::handler::HttpResponse) -> bytes::Bytes {
+    http_body_util::BodyExt::collect(response.into_body())
+        .await
+        .expect("response body should collect")
+        .to_bytes()
+}
+
+async fn wait_for_hit(
+    manager: &CacheManager,
+    request: &http::Request<crate::handler::HttpBody>,
+    policy: &RouteCachePolicy,
+) -> crate::handler::HttpResponse {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            match manager.lookup(CacheRequest::from_request(request), "https", policy).await {
+                CacheLookup::Hit(response) => return response,
+                CacheLookup::Miss(_) | CacheLookup::Updating(_, _) => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                CacheLookup::Bypass(status) => {
+                    panic!("cacheable request should not bypass while waiting for hit: {status:?}")
+                }
+            }
+        }
+    })
+    .await
+    .expect("cache hit should become visible")
+}
