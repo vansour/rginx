@@ -40,7 +40,7 @@ pub(super) struct PreparedState {
     retired_listeners: Vec<Listener>,
 }
 
-pub use crate::cache::{CachePurgeResult, CacheZoneRuntimeSnapshot};
+pub use crate::cache::{CacheInvalidationResult, CachePurgeResult, CacheZoneRuntimeSnapshot};
 pub use snapshots::ActiveState;
 pub use snapshots::{
     AcmeManagedCertificateSnapshot, AcmeRuntimeSnapshot, CacheStatsSnapshot, GrpcTrafficSnapshot,

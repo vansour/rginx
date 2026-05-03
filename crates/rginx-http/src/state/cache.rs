@@ -52,6 +52,64 @@ impl SharedState {
         cache.purge_prefix(zone_name, prefix).await
     }
 
+    pub async fn invalidate_cache_zone(
+        &self,
+        zone_name: &str,
+    ) -> std::result::Result<CacheInvalidationResult, String> {
+        let cache = {
+            let state = self.inner.read().await;
+            state.cache.clone()
+        };
+        cache.invalidate_zone(zone_name).await
+    }
+
+    pub async fn invalidate_cache_key(
+        &self,
+        zone_name: &str,
+        key: &str,
+    ) -> std::result::Result<CacheInvalidationResult, String> {
+        let cache = {
+            let state = self.inner.read().await;
+            state.cache.clone()
+        };
+        cache.invalidate_key(zone_name, key).await
+    }
+
+    pub async fn invalidate_cache_prefix(
+        &self,
+        zone_name: &str,
+        prefix: &str,
+    ) -> std::result::Result<CacheInvalidationResult, String> {
+        let cache = {
+            let state = self.inner.read().await;
+            state.cache.clone()
+        };
+        cache.invalidate_prefix(zone_name, prefix).await
+    }
+
+    pub async fn invalidate_cache_tag(
+        &self,
+        zone_name: &str,
+        tag: &str,
+    ) -> std::result::Result<CacheInvalidationResult, String> {
+        let cache = {
+            let state = self.inner.read().await;
+            state.cache.clone()
+        };
+        cache.invalidate_tag(zone_name, tag).await
+    }
+
+    pub async fn clear_cache_invalidations(
+        &self,
+        zone_name: &str,
+    ) -> std::result::Result<CacheInvalidationResult, String> {
+        let cache = {
+            let state = self.inner.read().await;
+            state.cache.clone()
+        };
+        cache.clear_invalidations(zone_name).await
+    }
+
     pub(crate) fn sync_cache_versions(&self, config: &ConfigSnapshot) {
         let existing =
             self.cache_component_versions.read().unwrap_or_else(|poisoned| poisoned.into_inner());

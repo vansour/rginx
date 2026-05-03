@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicU64;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use http::{Method, StatusCode};
@@ -18,6 +18,7 @@ mod storage_p1;
 mod storage_p2;
 mod storage_p3;
 mod storage_p4;
+mod storage_p5;
 mod storage_regressions;
 mod stress;
 
@@ -45,16 +46,27 @@ fn test_zone_with_notifier(
         inactive_cleanup_interval: Duration::from_secs(60),
         shared_index: true,
     });
+    let (
+        index,
+        shared_index_store,
+        shared_index_generation,
+        shared_index_store_epoch,
+        shared_index_change_seq,
+    ) = shared::bootstrap_shared_index(config.as_ref())
+        .expect("test shared index should bootstrap");
     Arc::new(CacheZoneRuntime {
         config: config.clone(),
-        index: Mutex::new(CacheIndex::default()),
+        index: RwLock::new(index),
+        hot_entries: RwLock::new(HashMap::new()),
         io_locks: CacheIoLockPool::new(),
         shared_index_sync_lock: AsyncMutex::new(()),
-        shared_index_store: Some(Arc::new(shared::shared_index_store(config.as_ref()))),
+        shared_index_store,
         fill_locks: Arc::new(Mutex::new(HashMap::new())),
         fill_lock_generation: AtomicU64::new(0),
         last_inactive_cleanup_unix_ms: AtomicU64::new(0),
-        shared_index_generation: AtomicU64::new(0),
+        shared_index_generation: AtomicU64::new(shared_index_generation),
+        shared_index_store_epoch: AtomicU64::new(shared_index_store_epoch),
+        shared_index_change_seq: AtomicU64::new(shared_index_change_seq),
         stats: CacheZoneStats::default(),
         change_notifier,
     })
@@ -68,11 +80,16 @@ fn test_index_entry(
     last_access_unix_ms: u64,
 ) -> CacheIndexEntry {
     CacheIndexEntry {
+        kind: CacheIndexEntryKind::Response,
         hash,
         base_key: base_key.to_string(),
+        stored_at_unix_ms: last_access_unix_ms,
         vary: Vec::new(),
+        tags: Vec::new(),
         body_size_bytes,
         expires_at_unix_ms,
+        grace_until_unix_ms: None,
+        keep_until_unix_ms: None,
         stale_if_error_until_unix_ms: None,
         stale_while_revalidate_until_unix_ms: None,
         requires_revalidation: false,
@@ -93,6 +110,9 @@ fn test_store_context(zone: Arc<CacheZoneRuntime>, key: &str) -> CacheStoreConte
             cache_bypass: None,
             no_cache: None,
             stale_if_error: None,
+            grace: None,
+            keep: None,
+            pass_ttl: None,
             use_stale: Vec::new(),
             background_update: false,
             lock_timeout: Duration::from_secs(5),
@@ -114,9 +134,8 @@ fn test_store_context(zone: Arc<CacheZoneRuntime>, key: &str) -> CacheStoreConte
         store_response: true,
         _fill_guard: None,
         cached_entry: None,
-        cached_metadata: None,
+        cached_response_head: None,
         revalidating: false,
-        conditional_headers: None,
         request_forces_revalidation: false,
         read_cached_body: true,
     }
@@ -139,6 +158,9 @@ fn test_policy() -> RouteCachePolicy {
         cache_bypass: None,
         no_cache: None,
         stale_if_error: None,
+        grace: None,
+        keep: None,
+        pass_ttl: None,
         use_stale: Vec::new(),
         background_update: false,
         lock_timeout: Duration::from_secs(5),
@@ -158,10 +180,14 @@ fn test_metadata_input(
     body_size_bytes: usize,
 ) -> CacheMetadataInput {
     CacheMetadataInput {
+        kind: CacheIndexEntryKind::Response,
         base_key: base_key.to_string(),
         vary: Vec::new(),
+        tags: Vec::new(),
         stored_at_unix_ms,
         expires_at_unix_ms,
+        grace_until_unix_ms: None,
+        keep_until_unix_ms: None,
         stale_if_error_until_unix_ms: None,
         stale_while_revalidate_until_unix_ms: None,
         requires_revalidation: false,

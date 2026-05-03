@@ -1,17 +1,19 @@
 use bytes::Bytes;
+use http::StatusCode;
 use http::header::{
     CONNECTION, CONTENT_LENGTH, CONTENT_RANGE, HeaderMap, HeaderName, HeaderValue,
     PROXY_AUTHENTICATE, PROXY_AUTHORIZATION, TE, TRAILER, TRANSFER_ENCODING, UPGRADE,
 };
-use http::{Response, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use tokio::fs;
+use std::sync::Arc;
+use tokio::fs::{self, File};
 
 use crate::handler::{HttpResponse, full_body};
 
 use super::{
-    CACHE_STATUS_HEADER, CacheIndexEntry, CacheRequest, CacheZoneRuntime, CachedVaryHeaderValue,
+    CACHE_STATUS_HEADER, CacheIndexEntry, CacheIndexEntryKind, CacheRequest, CacheZoneRuntime,
+    CachedVaryHeaderValue, PreparedCacheResponseHead, build_conditional_headers,
 };
 
 mod response;
@@ -19,7 +21,7 @@ mod signature;
 mod temp;
 mod write;
 
-use response::cached_headers;
+use response::{CachedFileBody, cached_headers};
 pub(in crate::cache) use response::{
     DownstreamRangeTrimPlan, downstream_range_trim_plan, finalize_response_for_request,
 };
@@ -38,10 +40,18 @@ pub(super) struct CacheMetadata {
     pub(super) base_key: String,
     #[serde(default)]
     pub(super) vary: Vec<CachedVaryHeader>,
+    #[serde(default)]
+    pub(super) tags: Vec<String>,
     pub(super) status: u16,
     pub(super) headers: Vec<CachedHeader>,
     pub(super) stored_at_unix_ms: u64,
     pub(super) expires_at_unix_ms: u64,
+    #[serde(default)]
+    pub(super) kind: CacheIndexEntryKind,
+    #[serde(default)]
+    pub(super) grace_until_unix_ms: Option<u64>,
+    #[serde(default)]
+    pub(super) keep_until_unix_ms: Option<u64>,
     #[serde(default)]
     pub(super) stale_if_error_until_unix_ms: Option<u64>,
     #[serde(default)]
@@ -61,10 +71,18 @@ struct RawCacheMetadata {
     base_key: String,
     #[serde(default)]
     vary: Vec<CachedVaryHeader>,
+    #[serde(default)]
+    tags: Vec<String>,
     status: u16,
     headers: Vec<CachedHeader>,
     stored_at_unix_ms: u64,
     expires_at_unix_ms: u64,
+    #[serde(default)]
+    kind: CacheIndexEntryKind,
+    #[serde(default)]
+    grace_until_unix_ms: Option<u64>,
+    #[serde(default)]
+    keep_until_unix_ms: Option<u64>,
     #[serde(default)]
     stale_if_error_until_unix_ms: Option<u64>,
     #[serde(default)]
@@ -97,10 +115,14 @@ pub(super) struct CachePaths {
 
 #[derive(Debug, Clone)]
 pub(super) struct CacheMetadataInput {
+    pub(super) kind: CacheIndexEntryKind,
     pub(super) base_key: String,
     pub(super) vary: Vec<CachedVaryHeaderValue>,
+    pub(super) tags: Vec<String>,
     pub(super) stored_at_unix_ms: u64,
     pub(super) expires_at_unix_ms: u64,
+    pub(super) grace_until_unix_ms: Option<u64>,
+    pub(super) keep_until_unix_ms: Option<u64>,
     pub(super) stale_if_error_until_unix_ms: Option<u64>,
     pub(super) stale_while_revalidate_until_unix_ms: Option<u64>,
     pub(super) requires_revalidation: bool,
@@ -125,10 +147,14 @@ pub(super) fn cache_metadata(
                 value: header.value,
             })
             .collect(),
+        tags: input.tags,
         status: status.as_u16(),
         headers: cached_headers(headers, input.body_size_bytes),
         stored_at_unix_ms: input.stored_at_unix_ms,
         expires_at_unix_ms: input.expires_at_unix_ms,
+        kind: input.kind,
+        grace_until_unix_ms: input.grace_until_unix_ms,
+        keep_until_unix_ms: input.keep_until_unix_ms,
         stale_if_error_until_unix_ms: input.stale_if_error_until_unix_ms,
         stale_while_revalidate_until_unix_ms: input.stale_while_revalidate_until_unix_ms,
         requires_revalidation: input.requires_revalidation,
@@ -145,6 +171,107 @@ pub(super) async fn read_cached_response_for_request(
     policy: &rginx_core::RouteCachePolicy,
     read_body: bool,
 ) -> std::io::Result<HttpResponse> {
+    if entry.is_hit_for_pass() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "hit-for-pass marker does not have a cacheable response body",
+        ));
+    }
+    if let Some(response_head) = zone.prepared_response_head(key, &entry.hash) {
+        let _io_guard = zone.io_read(&entry.hash).await;
+        let paths = cache_paths_for_zone(zone.config.as_ref(), &entry.hash);
+        return build_cached_response_for_request(
+            &paths.body,
+            response_head.as_ref(),
+            request,
+            policy,
+            read_body,
+        )
+        .await;
+    }
+
+    let _io_guard = zone.io_read(&entry.hash).await;
+    let response_head = load_cached_response_head_locked(zone, key, entry).await?;
+    let paths = cache_paths_for_zone(zone.config.as_ref(), &entry.hash);
+    build_cached_response_for_request(
+        &paths.body,
+        response_head.as_ref(),
+        request,
+        policy,
+        read_body,
+    )
+    .await
+}
+
+pub(super) async fn build_cached_response_for_request(
+    body_path: &Path,
+    response_head: &PreparedCacheResponseHead,
+    request: &CacheRequest,
+    policy: &rginx_core::RouteCachePolicy,
+    read_body: bool,
+) -> std::io::Result<HttpResponse> {
+    if !read_body {
+        return finalize_response_for_request(
+            response_head.status,
+            &response_head.headers,
+            full_body(Bytes::new()),
+            request,
+            policy,
+        );
+    }
+
+    let file = File::open(body_path).await?;
+    let body_size_bytes = usize::try_from(file.metadata().await?.len())
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    if body_size_bytes != response_head.metadata.body_size_bytes {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "cached body length does not match metadata",
+        ));
+    }
+    finalize_response_for_request(
+        response_head.status,
+        &response_head.headers,
+        CachedFileBody::new(file, response_head.metadata.body_size_bytes),
+        request,
+        policy,
+    )
+}
+
+pub(super) async fn load_cached_response_head(
+    zone: &CacheZoneRuntime,
+    key: &str,
+    entry: &CacheIndexEntry,
+) -> std::io::Result<Arc<PreparedCacheResponseHead>> {
+    if entry.is_hit_for_pass() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "hit-for-pass marker does not have cache metadata",
+        ));
+    }
+    if let Some(response_head) = zone.prepared_response_head(key, &entry.hash) {
+        return Ok(response_head);
+    }
+
+    let _io_guard = zone.io_read(&entry.hash).await;
+    load_cached_response_head_locked(zone, key, entry).await
+}
+
+async fn load_cached_response_head_locked(
+    zone: &CacheZoneRuntime,
+    key: &str,
+    entry: &CacheIndexEntry,
+) -> std::io::Result<Arc<PreparedCacheResponseHead>> {
+    if entry.is_hit_for_pass() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "hit-for-pass marker does not have cache metadata",
+        ));
+    }
+    if let Some(response_head) = zone.prepared_response_head(key, &entry.hash) {
+        return Ok(response_head);
+    }
+
     let paths = cache_paths_for_zone(zone.config.as_ref(), &entry.hash);
     let metadata = read_cache_metadata(&paths.metadata).await?;
     if metadata.key != key {
@@ -153,31 +280,27 @@ pub(super) async fn read_cached_response_for_request(
             format!("cached metadata key mismatch: expected `{key}`, found `{}`", metadata.key),
         ));
     }
-    build_cached_response_for_request(&paths.body, &metadata, request, policy, read_body).await
+
+    let response_head = Arc::new(prepare_cached_response_head(&entry.hash, metadata)?);
+    zone.store_prepared_response_head(key, entry.last_access_unix_ms, response_head.clone());
+    Ok(response_head)
 }
 
-pub(super) async fn build_cached_response_for_request(
-    body_path: &Path,
-    metadata: &CacheMetadata,
-    request: &CacheRequest,
-    policy: &rginx_core::RouteCachePolicy,
-    read_body: bool,
-) -> std::io::Result<HttpResponse> {
-    let body = if read_body {
-        let body = fs::read(body_path).await?;
-        if body.len() != metadata.body_size_bytes {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "cached body length does not match metadata",
-            ));
-        }
-        body
-    } else {
-        Vec::new()
-    };
+pub(super) fn prepare_cached_response_head(
+    hash: &str,
+    metadata: CacheMetadata,
+) -> std::io::Result<PreparedCacheResponseHead> {
+    let headers = metadata.headers_map()?;
     let status = StatusCode::from_u16(metadata.status)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-    finalize_response_for_request(status, &metadata.headers_map()?, &body, request, policy)
+    let conditional_headers = build_conditional_headers(&headers);
+    Ok(PreparedCacheResponseHead {
+        hash: hash.to_string(),
+        metadata: Arc::new(metadata),
+        status,
+        headers,
+        conditional_headers,
+    })
 }
 
 pub(super) async fn read_cache_metadata(path: &Path) -> std::io::Result<CacheMetadata> {
@@ -188,10 +311,14 @@ pub(super) async fn read_cache_metadata(path: &Path) -> std::io::Result<CacheMet
         key: raw.key,
         base_key: raw.base_key,
         vary: raw.vary,
+        tags: raw.tags,
         status: raw.status,
         headers: raw.headers,
         stored_at_unix_ms: raw.stored_at_unix_ms,
         expires_at_unix_ms: raw.expires_at_unix_ms,
+        kind: raw.kind,
+        grace_until_unix_ms: raw.grace_until_unix_ms,
+        keep_until_unix_ms: raw.keep_until_unix_ms,
         stale_if_error_until_unix_ms: raw.stale_if_error_until_unix_ms,
         stale_while_revalidate_until_unix_ms: raw.stale_while_revalidate_until_unix_ms,
         requires_revalidation: raw.requires_revalidation.unwrap_or(raw.must_revalidate),

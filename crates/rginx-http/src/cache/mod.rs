@@ -1,9 +1,9 @@
 //! Route-level HTTP response cache for proxied responses.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::SystemTime;
 
 use http::header::{HeaderMap, HeaderValue, IF_MODIFIED_SINCE, IF_NONE_MATCH};
@@ -18,6 +18,7 @@ use crate::handler::{HttpBody, HttpResponse};
 mod entry;
 mod fill;
 mod index;
+mod invalidation;
 mod io;
 mod load;
 mod lookup;
@@ -30,11 +31,14 @@ mod store;
 mod vary;
 
 use entry::{
-    CacheMetadata, build_cached_response_for_request, cache_paths_for_zone, read_cache_metadata,
-    read_cached_response_for_request, unix_time_ms,
+    CacheMetadata, build_cached_response_for_request, cache_paths_for_zone,
+    load_cached_response_head, read_cached_response_for_request, unix_time_ms,
 };
 #[cfg(test)]
-use entry::{cache_key_hash, cache_metadata, cache_paths, cache_variant_key, write_cache_entry};
+use entry::{
+    cache_key_hash, cache_metadata, cache_paths, cache_variant_key, prepare_cached_response_head,
+    read_cache_metadata, write_cache_entry,
+};
 use fill::{CacheFillReadState, ExternalCacheFillReadState, SharedFillExternalStateHandle};
 use io::CacheIoLockPool;
 #[cfg(test)]
@@ -52,8 +56,11 @@ use runtime::{
     remove_cache_files_locked,
 };
 use shared::{SharedIndexStore, bootstrap_shared_index, sync_zone_shared_index_if_needed};
+pub(crate) use store::CacheStoreError;
+#[cfg(test)]
+use store::lock_index;
 use store::{
-    CacheStoreError, cleanup_inactive_entries_in_zone, lock_index, purge_zone_entries,
+    cleanup_inactive_entries_in_zone, purge_zone_entries, read_index,
     refresh_not_modified_response, remove_zone_index_entry_if_matches, store_response,
 };
 
@@ -76,9 +83,8 @@ pub(crate) struct CacheStoreContext {
     store_response: bool,
     _fill_guard: Option<CacheFillGuard>,
     cached_entry: Option<CacheIndexEntry>,
-    cached_metadata: Option<CacheMetadata>,
+    cached_response_head: Option<Arc<PreparedCacheResponseHead>>,
     revalidating: bool,
-    conditional_headers: Option<CacheConditionalHeaders>,
     request_forces_revalidation: bool,
     read_cached_body: bool,
 }
@@ -129,7 +135,9 @@ pub struct CacheZoneRuntimeSnapshot {
     pub write_error_total: u64,
     pub eviction_total: u64,
     pub purge_total: u64,
+    pub invalidation_total: u64,
     pub inactive_cleanup_total: u64,
+    pub active_invalidation_rules: usize,
     pub shared_index_enabled: bool,
     pub shared_index_generation: u64,
 }
@@ -140,6 +148,15 @@ pub struct CachePurgeResult {
     pub scope: String,
     pub removed_entries: usize,
     pub removed_bytes: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheInvalidationResult {
+    pub zone_name: String,
+    pub scope: String,
+    pub affected_entries: usize,
+    pub affected_bytes: usize,
+    pub active_rules: usize,
 }
 
 impl CacheStatus {
@@ -158,7 +175,8 @@ impl CacheStatus {
 
 struct CacheZoneRuntime {
     config: Arc<CacheZone>,
-    index: Mutex<CacheIndex>,
+    index: RwLock<CacheIndex>,
+    hot_entries: RwLock<HashMap<String, Arc<CacheEntryHotState>>>,
     io_locks: CacheIoLockPool,
     shared_index_sync_lock: AsyncMutex<()>,
     shared_index_store: Option<Arc<SharedIndexStore>>,
@@ -166,6 +184,8 @@ struct CacheZoneRuntime {
     fill_lock_generation: AtomicU64,
     last_inactive_cleanup_unix_ms: AtomicU64,
     shared_index_generation: AtomicU64,
+    shared_index_store_epoch: AtomicU64,
+    shared_index_change_seq: AtomicU64,
     stats: CacheZoneStats,
     change_notifier: Option<CacheChangeNotifier>,
 }
@@ -176,21 +196,66 @@ struct CacheIndex {
     hash_ref_counts: HashMap<String, usize>,
     variants: HashMap<String, Vec<String>>,
     admission_counts: HashMap<String, u64>,
+    invalidations: Vec<CacheInvalidationRule>,
     current_size_bytes: usize,
+    maintenance_next_ticket: u64,
+    access_schedule: BTreeSet<CacheAccessScheduleEntry>,
+    access_ticket_by_key: HashMap<String, CacheAccessScheduleTicket>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct CacheAccessScheduleEntry {
+    last_access_unix_ms: u64,
+    ticket: u64,
+    key: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CacheAccessScheduleTicket {
+    last_access_unix_ms: u64,
+    ticket: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CacheIndexEntry {
+    kind: CacheIndexEntryKind,
     hash: String,
     base_key: String,
+    stored_at_unix_ms: u64,
     vary: Vec<CachedVaryHeaderValue>,
+    tags: Vec<String>,
     body_size_bytes: usize,
     expires_at_unix_ms: u64,
+    grace_until_unix_ms: Option<u64>,
+    keep_until_unix_ms: Option<u64>,
     stale_if_error_until_unix_ms: Option<u64>,
     stale_while_revalidate_until_unix_ms: Option<u64>,
     requires_revalidation: bool,
     must_revalidate: bool,
     last_access_unix_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+enum CacheIndexEntryKind {
+    #[default]
+    Response,
+    HitForPass,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CacheInvalidationSelector {
+    All,
+    Exact(String),
+    Prefix(String),
+    Tag(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CacheInvalidationRule {
+    selector: CacheInvalidationSelector,
+    created_at_unix_ms: u64,
 }
 
 #[derive(Default)]
@@ -206,6 +271,7 @@ struct CacheZoneStats {
     write_error_total: AtomicU64,
     eviction_total: AtomicU64,
     purge_total: AtomicU64,
+    invalidation_total: AtomicU64,
     inactive_cleanup_total: AtomicU64,
 }
 
@@ -239,7 +305,27 @@ struct CacheConditionalHeaders {
     if_modified_since: Option<HeaderValue>,
 }
 
+struct CacheEntryHotState {
+    last_access_unix_ms: AtomicU64,
+    response_head: Mutex<Option<Arc<PreparedCacheResponseHead>>>,
+}
+
+struct PreparedCacheResponseHead {
+    hash: String,
+    metadata: Arc<CacheMetadata>,
+    status: StatusCode,
+    headers: HeaderMap,
+    conditional_headers: Option<CacheConditionalHeaders>,
+}
+
 enum LookupDecision {
+    Bypass {
+        status: CacheStatus,
+    },
+    DropEntry {
+        key: String,
+        entry: CacheIndexEntry,
+    },
     FreshHit {
         key: String,
         entry: CacheIndexEntry,

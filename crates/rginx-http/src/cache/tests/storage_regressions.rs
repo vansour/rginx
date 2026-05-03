@@ -106,8 +106,13 @@ async fn refresh_not_modified_response_returns_merged_headers_when_no_cache_poli
     );
     let paths = cache_paths(temp.path(), &hash);
     write_cache_entry(&paths, &cached_metadata, b"cached").await.expect("entry should be written");
-    let cached_entry =
-        test_index_entry(key, hash, 6, now.saturating_sub(1_000), now.saturating_sub(2_000));
+    let cached_entry = test_index_entry(
+        key,
+        hash.clone(),
+        6,
+        now.saturating_sub(1_000),
+        now.saturating_sub(2_000),
+    );
     {
         let mut index = lock_index(&zone.index);
         index.insert_entry(key.to_string(), cached_entry.clone());
@@ -117,7 +122,10 @@ async fn refresh_not_modified_response_returns_merged_headers_when_no_cache_poli
     let mut context = test_store_context(zone.clone(), key);
     context.policy.no_cache = Some(rginx_core::CachePredicate::Status(vec![StatusCode::OK]));
     context.cached_entry = Some(cached_entry);
-    context.cached_metadata = Some(cached_metadata);
+    context.cached_response_head = Some(Arc::new(
+        prepare_cached_response_head(&hash, cached_metadata)
+            .expect("cached response head should prepare"),
+    ));
     context.cache_status = CacheStatus::Expired;
 
     let response = Response::builder()
@@ -162,6 +170,7 @@ async fn remove_cache_entry_if_matches_ignores_last_access_drift() {
         index.insert_entry(key.to_string(), cached_entry.clone());
         index.current_size_bytes = 6;
         index.entries.get_mut(key).expect("entry should exist").last_access_unix_ms = now;
+        index.rebuild_access_schedule();
     }
 
     assert!(remove_cache_entry_if_matches(&zone, key, &cached_entry).await);
@@ -198,6 +207,7 @@ async fn rebucket_store_replaces_entry_after_last_access_update() {
         index.insert_entry(base_key.to_string(), cached_entry.clone());
         index.current_size_bytes = 3;
         index.entries.get_mut(base_key).expect("entry should exist").last_access_unix_ms = now;
+        index.rebuild_access_schedule();
     }
 
     let expected_final_key = cache_variant_key(

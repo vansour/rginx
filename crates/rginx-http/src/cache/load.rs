@@ -7,8 +7,7 @@ use rginx_core::CacheZone;
 use serde::Deserialize;
 
 use super::entry::{cache_key_hash, cache_paths_for_zone};
-use super::store::eviction_candidates;
-use super::{CacheIndex, CacheIndexEntry, CachedVaryHeaderValue};
+use super::{CacheIndex, CacheIndexEntry, CacheIndexEntryKind, CachedVaryHeaderValue};
 
 #[derive(Debug, Deserialize)]
 struct ScannedCacheMetadata {
@@ -19,8 +18,16 @@ struct ScannedCacheMetadata {
     #[serde(default)]
     vary: Vec<ScannedVaryHeader>,
     #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
     stored_at_unix_ms: u64,
     expires_at_unix_ms: u64,
+    #[serde(default)]
+    kind: CacheIndexEntryKind,
+    #[serde(default)]
+    grace_until_unix_ms: Option<u64>,
+    #[serde(default)]
+    keep_until_unix_ms: Option<u64>,
     #[serde(default)]
     stale_if_error_until_unix_ms: Option<u64>,
     #[serde(default)]
@@ -48,9 +55,20 @@ pub(super) fn load_index_from_disk(zone: &CacheZone) -> io::Result<CacheIndex> {
     let mut loader = LoaderState::default();
     scan_cache_dir(zone, zone.path.as_path(), &mut index, &mut loader)?;
 
-    for (key, entry) in eviction_candidates(&mut index, zone.max_size_bytes) {
-        remove_variant_key(&mut index.variants, &entry.base_key, &key);
-        remove_cache_files(zone, &entry.hash);
+    if let Some(max_size_bytes) = zone.max_size_bytes
+        && index.current_size_bytes > max_size_bytes
+    {
+        while index.current_size_bytes > max_size_bytes {
+            let Some((key, _)) = index.pop_oldest_scheduled_entry() else {
+                break;
+            };
+            if let Some(entry) = index.remove_entry(&key) {
+                index.current_size_bytes =
+                    index.current_size_bytes.saturating_sub(entry.body_size_bytes);
+                remove_variant_key(&mut index.variants, &entry.base_key, &key);
+                remove_cache_files(zone, &entry.hash);
+            }
+        }
     }
 
     Ok(index)
@@ -150,8 +168,12 @@ fn load_cache_index_entry(zone: &CacheZone, hash: &str) -> Option<(String, Cache
         key,
         base_key,
         vary,
+        tags,
         stored_at_unix_ms,
         expires_at_unix_ms,
+        kind,
+        grace_until_unix_ms,
+        keep_until_unix_ms,
         stale_if_error_until_unix_ms,
         stale_while_revalidate_until_unix_ms,
         requires_revalidation,
@@ -167,10 +189,15 @@ fn load_cache_index_entry(zone: &CacheZone, hash: &str) -> Option<(String, Cache
         key.clone(),
         CacheIndexEntry {
             hash: hash.to_string(),
+            kind,
             base_key: if base_key.is_empty() { key } else { base_key },
+            stored_at_unix_ms,
             vary,
+            tags,
             body_size_bytes,
             expires_at_unix_ms,
+            grace_until_unix_ms,
+            keep_until_unix_ms,
             stale_if_error_until_unix_ms,
             stale_while_revalidate_until_unix_ms,
             requires_revalidation: requires_revalidation.unwrap_or(must_revalidate),

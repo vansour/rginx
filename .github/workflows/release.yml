@@ -205,6 +205,9 @@ jobs:
           mkdir -p "${INSTALL_DIR}"
           install -m 755 "target/${{ matrix.target }}/release/${{ matrix.bin_name }}" "${INSTALL_DIR}/${{ matrix.bin_name }}"
           cp README.md "${INSTALL_DIR}/README.md"
+          if [[ -f CHANGELOG.md ]]; then
+            cp CHANGELOG.md "${INSTALL_DIR}/CHANGELOG.md"
+          fi
           cp LICENSE "${INSTALL_DIR}/LICENSE"
           cp LICENSE-APACHE "${INSTALL_DIR}/LICENSE-APACHE"
           cp LICENSE-MIT "${INSTALL_DIR}/LICENSE-MIT"
@@ -276,6 +279,7 @@ jobs:
           COMMIT_SHA="${{ needs.verify.outputs.commit_sha }}"
           SHORT_SHA="${COMMIT_SHA::7}"
           COMMIT_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${COMMIT_SHA}"
+          RELEASE_NOTES_PATH="release-notes/${TAG}.md"
           PREVIOUS_TAG="$(git describe --tags --abbrev=0 "${COMMIT_SHA}^" 2>/dev/null || true)"
           CHANGELOG_RANGE="${COMMIT_SHA}"
           CHANGELOG_TITLE="Initial release changes"
@@ -322,37 +326,42 @@ jobs:
             echo "  bash -s -- --mode release --version ${TAG}"
             echo '```'
             echo
-            echo "## Changelog"
-            echo "${CHANGELOG_TITLE}"
-            echo
-            cat dist/changelog.md
-            echo
           } > dist/release-summary.md
 
-          if [[ -n "${PREVIOUS_TAG}" ]]; then
-            gh api \
-              --method POST \
-              -H "Accept: application/vnd.github+json" \
-              "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
-              -f tag_name="${TAG}" \
-              -f target_commitish="${COMMIT_SHA}" \
-              -f previous_tag_name="${PREVIOUS_TAG}" \
-              -f configuration_file_path=".github/release.yml" \
-              --jq '.body' > dist/generated-notes.md
+          if [[ -f "${RELEASE_NOTES_PATH}" ]]; then
+            cat dist/release-summary.md > dist/release-body.md
+            printf '\n' >> dist/release-body.md
+            cat "${RELEASE_NOTES_PATH}" >> dist/release-body.md
+            printf '\n\n## Source Changelog\n%s\n\n' "${CHANGELOG_TITLE}" >> dist/release-body.md
+            cat dist/changelog.md >> dist/release-body.md
           else
-            gh api \
-              --method POST \
-              -H "Accept: application/vnd.github+json" \
-              "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
-              -f tag_name="${TAG}" \
-              -f target_commitish="${COMMIT_SHA}" \
-              -f configuration_file_path=".github/release.yml" \
-              --jq '.body' > dist/generated-notes.md
-          fi
+            if [[ -n "${PREVIOUS_TAG}" ]]; then
+              gh api \
+                --method POST \
+                -H "Accept: application/vnd.github+json" \
+                "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+                -f tag_name="${TAG}" \
+                -f target_commitish="${COMMIT_SHA}" \
+                -f previous_tag_name="${PREVIOUS_TAG}" \
+                -f configuration_file_path=".github/release.yml" \
+                --jq '.body' > dist/generated-notes.md
+            else
+              gh api \
+                --method POST \
+                -H "Accept: application/vnd.github+json" \
+                "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+                -f tag_name="${TAG}" \
+                -f target_commitish="${COMMIT_SHA}" \
+                -f configuration_file_path=".github/release.yml" \
+                --jq '.body' > dist/generated-notes.md
+            fi
 
-          cat dist/release-summary.md > dist/release-body.md
-          printf '\n' >> dist/release-body.md
-          cat dist/generated-notes.md >> dist/release-body.md
+            cat dist/release-summary.md > dist/release-body.md
+            printf '\n## Changelog\n%s\n\n' "${CHANGELOG_TITLE}" >> dist/release-body.md
+            cat dist/changelog.md >> dist/release-body.md
+            printf '\n\n' >> dist/release-body.md
+            cat dist/generated-notes.md >> dist/release-body.md
+          fi
 
       - name: Create Or Update Release
         shell: bash

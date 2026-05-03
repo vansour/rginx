@@ -1,3 +1,5 @@
+use super::invalidation::entry_is_logically_invalid;
+use super::runtime::{CacheEntryLifecyclePhase, lifecycle_phase};
 use super::*;
 
 mod helpers;
@@ -14,23 +16,41 @@ impl CacheManager {
         request_forces_revalidation: bool,
         policy: &RouteCachePolicy,
     ) -> LookupDecision {
-        let mut index = lock_index(&zone.index);
-        let matching_key = matching_variant_key(&index, base_key, request);
+        let matching = {
+            let index = read_index(&zone.index);
+            matching_variant_key(&index, base_key, request).and_then(|key| {
+                index.entries.get(&key).cloned().map(|entry| {
+                    let invalidated = entry_is_logically_invalid(&index, &key, &entry);
+                    (key, entry, invalidated)
+                })
+            })
+        };
         let share_fingerprint = fill_share_fingerprint(request);
 
-        match matching_key {
-            Some(key) => {
-                let entry = index
-                    .entries
-                    .get_mut(&key)
-                    .expect("matching cache key should still be present in the index");
-                entry.last_access_unix_ms = now;
+        match matching {
+            Some((key, entry, invalidated)) => {
+                if invalidated {
+                    return LookupDecision::DropEntry { key, entry };
+                }
+                let phase = lifecycle_phase(&entry, now);
+                if entry.is_hit_for_pass() {
+                    return if phase == CacheEntryLifecyclePhase::Dead {
+                        LookupDecision::DropEntry { key, entry }
+                    } else {
+                        LookupDecision::Bypass { status: CacheStatus::Bypass }
+                    };
+                }
+                if phase == CacheEntryLifecyclePhase::Dead {
+                    return LookupDecision::DropEntry { key, entry };
+                }
 
-                if now <= entry.expires_at_unix_ms
+                zone.record_entry_access(&key, now);
+
+                if phase == CacheEntryLifecyclePhase::Fresh
                     && !entry.requires_revalidation
                     && !request_forces_revalidation
                 {
-                    return LookupDecision::FreshHit { key, entry: entry.clone() };
+                    return LookupDecision::FreshHit { key, entry };
                 }
 
                 let expired = now > entry.expires_at_unix_ms;
@@ -39,7 +59,7 @@ impl CacheManager {
                         if expired
                             && stale_allowed_for_entry(
                                 policy,
-                                entry,
+                                &entry,
                                 now,
                                 request_forces_revalidation,
                             )
@@ -47,14 +67,14 @@ impl CacheManager {
                         {
                             LookupDecision::BackgroundUpdate {
                                 key,
-                                cached_entry: entry.clone(),
+                                cached_entry: entry,
                                 fill_guard,
                             }
                         } else {
                             LookupDecision::Miss {
                                 key,
                                 base_key: entry.base_key.clone(),
-                                cached_entry: Some(entry.clone()),
+                                cached_entry: Some(entry),
                                 fill_guard: Some(fill_guard),
                                 cache_status: if expired {
                                     CacheStatus::Expired
@@ -68,61 +88,45 @@ impl CacheManager {
                         if expired
                             && stale_allowed_for_entry(
                                 policy,
-                                entry,
+                                &entry,
                                 now,
                                 request_forces_revalidation,
                             ) =>
                     {
-                        LookupDecision::Stale {
-                            key,
-                            entry: entry.clone(),
-                            status: CacheStatus::Updating,
-                        }
+                        LookupDecision::Stale { key, entry, status: CacheStatus::Updating }
                     }
                     FillLockDecision::WaitExternal { key: _external_key }
                         if expired
                             && stale_allowed_for_entry(
                                 policy,
-                                entry,
+                                &entry,
                                 now,
                                 request_forces_revalidation,
                             ) =>
                     {
-                        LookupDecision::Stale {
-                            key,
-                            entry: entry.clone(),
-                            status: CacheStatus::Updating,
-                        }
+                        LookupDecision::Stale { key, entry, status: CacheStatus::Updating }
                     }
                     FillLockDecision::ReadLocal { state: _state }
                         if expired
                             && stale_allowed_for_entry(
                                 policy,
-                                entry,
+                                &entry,
                                 now,
                                 request_forces_revalidation,
                             ) =>
                     {
-                        LookupDecision::Stale {
-                            key,
-                            entry: entry.clone(),
-                            status: CacheStatus::Updating,
-                        }
+                        LookupDecision::Stale { key, entry, status: CacheStatus::Updating }
                     }
                     FillLockDecision::ReadExternal { state: _state }
                         if expired
                             && stale_allowed_for_entry(
                                 policy,
-                                entry,
+                                &entry,
                                 now,
                                 request_forces_revalidation,
                             ) =>
                     {
-                        LookupDecision::Stale {
-                            key,
-                            entry: entry.clone(),
-                            status: CacheStatus::Updating,
-                        }
+                        LookupDecision::Stale { key, entry, status: CacheStatus::Updating }
                     }
                     FillLockDecision::ReadLocal { state } => {
                         LookupDecision::ReadWhileFillLocal { state }
@@ -167,56 +171,26 @@ impl CacheManager {
         }
     }
 
-    pub(super) async fn load_lookup_metadata(
+    pub(super) async fn load_lookup_response_head(
         &self,
         zone: &Arc<CacheZoneRuntime>,
         key: &str,
         entry: &CacheIndexEntry,
-    ) -> Option<(CacheMetadata, Option<CacheConditionalHeaders>)> {
-        let metadata = {
-            let _io_guard = zone.io_read(&entry.hash).await;
-            let paths = cache_paths_for_zone(zone.config.as_ref(), &entry.hash);
-            read_cache_metadata(&paths.metadata).await
-        };
-        let metadata = match metadata {
-            Ok(metadata) => metadata,
+    ) -> Option<Arc<PreparedCacheResponseHead>> {
+        match load_cached_response_head(zone, key, entry).await {
+            Ok(response_head) => Some(response_head),
             Err(error) => {
                 tracing::warn!(
                     zone = %zone.config.name,
+                    key = %key,
                     key_hash = %entry.hash,
                     %error,
-                    "failed to read cache metadata; removing entry"
+                    "failed to load cached response head; removing entry"
                 );
                 remove_cache_entry_if_matches(zone, key, entry).await;
-                return None;
+                None
             }
-        };
-        if metadata.key != key {
-            tracing::warn!(
-                zone = %zone.config.name,
-                key = %key,
-                cached_key = %metadata.key,
-                key_hash = %entry.hash,
-                "cache metadata key mismatch; removing entry"
-            );
-            remove_cache_entry_if_matches(zone, key, entry).await;
-            return None;
         }
-        let headers = match metadata.headers_map() {
-            Ok(headers) => headers,
-            Err(error) => {
-                tracing::warn!(
-                    zone = %zone.config.name,
-                    key_hash = %entry.hash,
-                    %error,
-                    "failed to decode cached response headers; removing entry"
-                );
-                remove_cache_entry_if_matches(zone, key, entry).await;
-                return None;
-            }
-        };
-        let conditional_headers = build_conditional_headers(&headers);
-        Some((metadata, conditional_headers))
     }
 
     pub(super) async fn stale_response_from_entry(
@@ -229,36 +203,32 @@ impl CacheManager {
         read_cached_body: bool,
         status: CacheStatus,
     ) -> Option<HttpResponse> {
-        let stale_result = {
-            let _io_guard = zone.io_read(&entry.hash).await;
-            let paths = cache_paths_for_zone(zone.config.as_ref(), &entry.hash);
-            match read_cache_metadata(&paths.metadata).await {
-                Ok(metadata) => Some((
-                    metadata.clone(),
-                    build_cached_response_for_request(
-                        &paths.body,
-                        &metadata,
-                        request,
-                        policy,
-                        read_cached_body,
-                    )
-                    .await,
-                )),
-                Err(error) => {
-                    tracing::warn!(
-                        zone = %zone.config.name,
-                        key = %key,
-                        key_hash = %entry.hash,
-                        %error,
-                        "failed to read stale cache metadata; removing entry"
-                    );
-                    None
-                }
+        let response_head = match load_cached_response_head(zone, key, entry).await {
+            Ok(response_head) => response_head,
+            Err(error) => {
+                tracing::warn!(
+                    zone = %zone.config.name,
+                    key = %key,
+                    key_hash = %entry.hash,
+                    %error,
+                    "failed to load stale cached response head; removing entry"
+                );
+                remove_cache_entry_if_matches(zone, key, entry).await;
+                return None;
             }
         };
-        let Some((metadata, response)) = stale_result else {
-            remove_cache_entry_if_matches(zone, key, entry).await;
-            return None;
+
+        let response = {
+            let _io_guard = zone.io_read(&entry.hash).await;
+            let paths = cache_paths_for_zone(zone.config.as_ref(), &entry.hash);
+            build_cached_response_for_request(
+                &paths.body,
+                response_head.as_ref(),
+                request,
+                policy,
+                read_cached_body,
+            )
+            .await
         };
         let response = match response {
             Ok(response) => response,
@@ -274,17 +244,6 @@ impl CacheManager {
                 return None;
             }
         };
-        if metadata.key != key {
-            tracing::warn!(
-                zone = %zone.config.name,
-                key = %key,
-                cached_key = %metadata.key,
-                key_hash = %entry.hash,
-                "cache metadata key mismatch while serving stale entry; removing entry"
-            );
-            remove_cache_entry_if_matches(zone, key, entry).await;
-            return None;
-        }
         if status == CacheStatus::Updating {
             zone.record_updating();
         } else {

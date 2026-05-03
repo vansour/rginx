@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use super::super::super::shared::{
     SharedIndexOperation, apply_zone_shared_index_operations_locked,
@@ -79,11 +79,13 @@ pub(in crate::cache) async fn remove_zone_index_entry_if_matches(
             SharedIndexOperation::RemoveAdmissionCount { key: key.to_string() },
         ],
     );
+    zone.remove_hot_entry(key);
     zone.notify_changed();
     Some(removed)
 }
 
 pub(in crate::cache) fn eviction_candidates(
+    zone: &CacheZoneRuntime,
     index: &mut CacheIndex,
     max_size_bytes: Option<usize>,
 ) -> Vec<(String, CacheIndexEntry)> {
@@ -94,16 +96,21 @@ pub(in crate::cache) fn eviction_candidates(
         return Vec::new();
     }
 
-    let mut entries =
-        index.entries.iter().map(|(key, entry)| (key.clone(), entry.clone())).collect::<Vec<_>>();
-    entries.sort_by_key(|(_, entry)| entry.last_access_unix_ms);
-
     let mut evicted = Vec::new();
-    for (key, entry) in entries {
-        if index.current_size_bytes <= max_size_bytes {
+    while index.current_size_bytes > max_size_bytes {
+        let Some((key, scheduled_last_access_unix_ms)) = index.pop_oldest_scheduled_entry() else {
             break;
+        };
+        let Some(entry) = index.entries.get(&key).cloned() else {
+            continue;
+        };
+        let effective_last_access_unix_ms = zone.effective_last_access_unix_ms(&key, &entry);
+        if effective_last_access_unix_ms > scheduled_last_access_unix_ms {
+            index.reschedule_entry_access(&key, effective_last_access_unix_ms);
+            continue;
         }
-        if index.remove_entry(&key).is_some() {
+
+        if let Some(entry) = index.remove_entry(&key) {
             index.current_size_bytes =
                 index.current_size_bytes.saturating_sub(entry.body_size_bytes);
             index.admission_counts.remove(&key);
@@ -113,10 +120,63 @@ pub(in crate::cache) fn eviction_candidates(
     evicted
 }
 
-pub(in crate::cache) fn lock_index(
-    mutex: &Mutex<CacheIndex>,
-) -> std::sync::MutexGuard<'_, CacheIndex> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+pub(in crate::cache) fn inactive_cleanup_candidates(
+    zone: &CacheZoneRuntime,
+    index: &mut CacheIndex,
+    now: u64,
+    inactive_ms: u64,
+    batch_size: usize,
+) -> (Vec<(String, CacheIndexEntry)>, bool) {
+    if batch_size == 0 {
+        return (Vec::new(), false);
+    }
+
+    let inactive_cutoff_last_access_unix_ms = now.saturating_sub(inactive_ms);
+    let mut removed = Vec::new();
+    while removed.len() < batch_size {
+        let Some(oldest_last_access_unix_ms) = index.oldest_scheduled_access_unix_ms() else {
+            break;
+        };
+        if oldest_last_access_unix_ms >= inactive_cutoff_last_access_unix_ms {
+            break;
+        }
+
+        let Some((key, scheduled_last_access_unix_ms)) = index.pop_oldest_scheduled_entry() else {
+            break;
+        };
+        let Some(entry) = index.entries.get(&key).cloned() else {
+            continue;
+        };
+        let effective_last_access_unix_ms = zone.effective_last_access_unix_ms(&key, &entry);
+        if effective_last_access_unix_ms > scheduled_last_access_unix_ms {
+            index.reschedule_entry_access(&key, effective_last_access_unix_ms);
+            continue;
+        }
+        if now.saturating_sub(effective_last_access_unix_ms) <= inactive_ms {
+            index.reschedule_entry_access(&key, effective_last_access_unix_ms);
+            continue;
+        }
+
+        if let Some(entry) = index.remove_entry(&key) {
+            index.current_size_bytes =
+                index.current_size_bytes.saturating_sub(entry.body_size_bytes);
+            index.admission_counts.remove(&key);
+            removed.push((key, entry));
+        }
+    }
+
+    let has_more_due = index.oldest_scheduled_access_unix_ms().is_some_and(|last_access_unix_ms| {
+        last_access_unix_ms < inactive_cutoff_last_access_unix_ms
+    });
+    (removed, has_more_due)
+}
+
+pub(in crate::cache) fn read_index(index: &RwLock<CacheIndex>) -> RwLockReadGuard<'_, CacheIndex> {
+    index.read().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+pub(in crate::cache) fn lock_index(index: &RwLock<CacheIndex>) -> RwLockWriteGuard<'_, CacheIndex> {
+    index.write().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 pub(super) fn add_variant_key(

@@ -1,8 +1,12 @@
 use std::io;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 
-use super::{META_GENERATION_KEY, META_SCHEMA_VERSION_KEY, SHARED_INDEX_SCHEMA_VERSION, io_error};
+use super::{
+    META_GENERATION_KEY, META_SCHEMA_VERSION_KEY, META_STORE_EPOCH_KEY,
+    SHARED_INDEX_SCHEMA_VERSION, io_error,
+};
 
 const CREATE_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS metadata (
         key TEXT PRIMARY KEY NOT NULL,
@@ -15,9 +19,23 @@ const CREATE_SCHEMA_SQL: &str = "CREATE TABLE IF NOT EXISTS metadata (
     CREATE TABLE IF NOT EXISTS admission_counts (
         key TEXT PRIMARY KEY NOT NULL,
         uses INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS invalidations (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        rule_json BLOB NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS changes (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        generation INTEGER NOT NULL,
+        op_kind INTEGER NOT NULL,
+        key TEXT NOT NULL,
+        entry_json BLOB,
+        uses INTEGER
     );";
 const DROP_SCHEMA_SQL: &str = "DROP TABLE IF EXISTS admission_counts;
+    DROP TABLE IF EXISTS invalidations;
     DROP TABLE IF EXISTS entries;
+    DROP TABLE IF EXISTS changes;
     DROP TABLE IF EXISTS metadata;";
 
 pub(super) fn initialize_schema(connection: &Connection) -> io::Result<()> {
@@ -98,6 +116,12 @@ fn seed_metadata_connection(connection: &Connection) -> io::Result<()> {
             params![META_GENERATION_KEY],
         )
         .map_err(io_error)?;
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO metadata (key, int_value) VALUES (?1, ?2)",
+            params![META_STORE_EPOCH_KEY, current_store_epoch()],
+        )
+        .map_err(io_error)?;
     Ok(())
 }
 
@@ -114,5 +138,20 @@ fn seed_metadata_tx(transaction: &Transaction<'_>) -> io::Result<()> {
             params![META_GENERATION_KEY],
         )
         .map_err(io_error)?;
+    transaction
+        .execute(
+            "INSERT OR IGNORE INTO metadata (key, int_value) VALUES (?1, ?2)",
+            params![META_STORE_EPOCH_KEY, current_store_epoch()],
+        )
+        .map_err(io_error)?;
     Ok(())
+}
+
+fn current_store_epoch() -> u64 {
+    let epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .min(u128::from(u64::MAX)) as u64;
+    epoch.max(1)
 }

@@ -12,7 +12,7 @@ mod sqlite;
 
 pub(in crate::cache) use sqlite::SharedIndexStore;
 
-const SHARED_INDEX_SCHEMA_VERSION: u64 = 1;
+const SHARED_INDEX_SCHEMA_VERSION: u64 = 2;
 const SHARED_INDEX_FILENAME: &str = ".rginx-index.sqlite3";
 const LEGACY_SHARED_INDEX_FILENAME: &str = ".rginx-index.json";
 const SHARED_FILL_LOCK_PREFIX: &str = ".rginx-fill-";
@@ -20,10 +20,31 @@ const SHARED_FILL_LOCK_SUFFIX: &str = ".lock";
 const SHARED_FILL_STATE_SUFFIX: &str = ".state.json";
 const META_SCHEMA_VERSION_KEY: &str = "schema_version";
 const META_GENERATION_KEY: &str = "generation";
+const META_STORE_EPOCH_KEY: &str = "store_epoch";
 
 pub(super) struct LoadedSharedIndex {
     pub(super) index: CacheIndex,
     pub(super) generation: u64,
+    pub(super) store_epoch: u64,
+    pub(super) last_change_seq: u64,
+}
+
+pub(super) struct LoadedSharedIndexChanges {
+    pub(super) generation: u64,
+    pub(super) store_epoch: u64,
+    pub(super) last_change_seq: u64,
+    pub(super) operations: Vec<SharedIndexOperation>,
+}
+
+pub(super) struct AppliedSharedIndexOperations {
+    pub(super) generation: u64,
+    pub(super) store_epoch: u64,
+    pub(super) last_change_seq: u64,
+}
+
+pub(super) struct SharedIndexSyncState {
+    pub(super) generation: u64,
+    pub(super) store_epoch: u64,
 }
 
 pub(in crate::cache) fn shared_fill_lock_path(zone: &rginx_core::CacheZone, key: &str) -> PathBuf {
@@ -79,18 +100,27 @@ pub(super) fn recreate_shared_index_on_disk(
     store: &SharedIndexStore,
     index: &CacheIndex,
     generation: u64,
-) -> io::Result<u64> {
+) -> io::Result<AppliedSharedIndexOperations> {
     store.recreate(index, generation)
 }
 
-pub(super) fn shared_index_generation(store: &SharedIndexStore) -> io::Result<u64> {
-    store.generation()
+pub(super) fn shared_index_sync_state(
+    store: &SharedIndexStore,
+) -> io::Result<SharedIndexSyncState> {
+    store.sync_state()
+}
+
+pub(super) fn load_shared_index_changes_since(
+    store: &SharedIndexStore,
+    after_seq: u64,
+) -> io::Result<LoadedSharedIndexChanges> {
+    store.load_changes_since(after_seq)
 }
 
 pub(super) fn apply_shared_index_operations(
     store: &SharedIndexStore,
     operations: &[SharedIndexOperation],
-) -> io::Result<u64> {
+) -> io::Result<AppliedSharedIndexOperations> {
     store.apply_operations(operations)
 }
 

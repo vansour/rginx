@@ -2,6 +2,7 @@ use std::fmt::Write as _;
 
 use http::header::RANGE;
 
+use super::super::runtime::{CacheEntryLifecyclePhase, lifecycle_phase};
 use super::super::vary::matches_vary_headers;
 use super::super::{CacheIndex, CacheIndexEntry, CacheRequest, RouteCachePolicy};
 
@@ -38,7 +39,9 @@ pub(super) fn stale_allowed_for_entry(
     now: u64,
     request_forces_revalidation: bool,
 ) -> bool {
-    !request_forces_revalidation
+    lifecycle_phase(entry, now) == CacheEntryLifecyclePhase::Grace
+        && !entry.is_hit_for_pass()
+        && !request_forces_revalidation
         && !entry.requires_revalidation
         && !entry.must_revalidate
         && (policy.use_stale.contains(&rginx_core::CacheUseStaleCondition::Updating)

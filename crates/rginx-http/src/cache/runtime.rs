@@ -5,8 +5,8 @@ mod support;
 
 pub(in crate::cache) use support::PurgeSelector;
 pub(in crate::cache) use support::{
-    build_conditional_headers, remove_cache_entry_if_matches, remove_cache_files_if_unreferenced,
-    remove_cache_files_locked,
+    CacheEntryLifecyclePhase, build_conditional_headers, lifecycle_phase,
+    remove_cache_entry_if_matches, remove_cache_files_if_unreferenced, remove_cache_files_locked,
 };
 use support::{stale_if_error_window_open, use_stale_matches_status};
 
@@ -58,7 +58,9 @@ impl CacheStoreContext {
     }
 
     pub(crate) fn apply_conditional_request_headers(&self, headers: &mut HeaderMap) {
-        let Some(conditional_headers) = &self.conditional_headers else {
+        let Some(conditional_headers) =
+            self.cached_response_head.as_ref().and_then(|head| head.conditional_headers.as_ref())
+        else {
             return;
         };
         if let Some(value) = conditional_headers.if_none_match.clone() {
@@ -77,7 +79,10 @@ impl CacheStoreContext {
         let Some(entry) = &self.cached_entry else {
             return false;
         };
-        if self.cached_metadata.is_none() {
+        if self.cached_response_head.is_none() {
+            return false;
+        }
+        if entry.is_hit_for_pass() {
             return false;
         }
         if self.request_forces_revalidation || entry.requires_revalidation || entry.must_revalidate
@@ -86,17 +91,24 @@ impl CacheStoreContext {
         }
 
         let now = unix_time_ms(SystemTime::now());
+        let phase = lifecycle_phase(entry, now);
+        if phase == CacheEntryLifecyclePhase::Dead {
+            return false;
+        }
         match reason {
             CacheStaleReason::Error => {
-                self.policy.use_stale.contains(&rginx_core::CacheUseStaleCondition::Error)
+                (phase == CacheEntryLifecyclePhase::Grace
+                    && self.policy.use_stale.contains(&rginx_core::CacheUseStaleCondition::Error))
                     || stale_if_error_window_open(entry, now)
             }
             CacheStaleReason::Timeout => {
-                self.policy.use_stale.contains(&rginx_core::CacheUseStaleCondition::Timeout)
+                (phase == CacheEntryLifecyclePhase::Grace
+                    && self.policy.use_stale.contains(&rginx_core::CacheUseStaleCondition::Timeout))
                     || stale_if_error_window_open(entry, now)
             }
             CacheStaleReason::Status(status) => {
-                use_stale_matches_status(&self.policy.use_stale, status)
+                (phase == CacheEntryLifecyclePhase::Grace
+                    && use_stale_matches_status(&self.policy.use_stale, status))
                     || (status.is_server_error() && stale_if_error_window_open(entry, now))
             }
         }
@@ -106,7 +118,7 @@ impl CacheStoreContext {
         let Some(entry) = &self.cached_entry else {
             return None;
         };
-        let Some(metadata) = &self.cached_metadata else {
+        let Some(response_head) = &self.cached_response_head else {
             return None;
         };
         let response = {
@@ -114,7 +126,7 @@ impl CacheStoreContext {
             let paths = cache_paths_for_zone(self.zone.config.as_ref(), &entry.hash);
             build_cached_response_for_request(
                 &paths.body,
-                metadata,
+                response_head.as_ref(),
                 &self.request,
                 &self.policy,
                 self.read_cached_body,
@@ -146,7 +158,7 @@ impl CacheStoreContext {
 
 impl CacheZoneRuntime {
     pub(super) fn snapshot(&self) -> CacheZoneRuntimeSnapshot {
-        let index = lock_index(&self.index);
+        let index = read_index(&self.index);
         CacheZoneRuntimeSnapshot {
             zone_name: self.config.name.clone(),
             path: self.config.path.clone(),
@@ -167,10 +179,86 @@ impl CacheZoneRuntime {
             write_error_total: self.stats.write_error_total.load(Ordering::Relaxed),
             eviction_total: self.stats.eviction_total.load(Ordering::Relaxed),
             purge_total: self.stats.purge_total.load(Ordering::Relaxed),
+            invalidation_total: self.stats.invalidation_total.load(Ordering::Relaxed),
             inactive_cleanup_total: self.stats.inactive_cleanup_total.load(Ordering::Relaxed),
+            active_invalidation_rules: index.invalidations.len(),
             shared_index_enabled: self.config.shared_index,
             shared_index_generation: self.shared_index_generation.load(Ordering::Relaxed),
         }
+    }
+
+    fn hot_entry(&self, key: &str) -> Option<Arc<CacheEntryHotState>> {
+        self.hot_entries.read().unwrap_or_else(|poisoned| poisoned.into_inner()).get(key).cloned()
+    }
+
+    fn hot_entry_for_key(&self, key: &str) -> Arc<CacheEntryHotState> {
+        if let Some(entry) = self.hot_entry(key) {
+            return entry;
+        }
+
+        let mut hot_entries =
+            self.hot_entries.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        hot_entries
+            .entry(key.to_string())
+            .or_insert_with(|| {
+                Arc::new(CacheEntryHotState {
+                    last_access_unix_ms: AtomicU64::new(0),
+                    response_head: Mutex::new(None),
+                })
+            })
+            .clone()
+    }
+
+    pub(super) fn record_entry_access(&self, key: &str, now: u64) {
+        self.hot_entry_for_key(key).last_access_unix_ms.fetch_max(now, Ordering::Relaxed);
+    }
+
+    pub(super) fn effective_last_access_unix_ms(&self, key: &str, entry: &CacheIndexEntry) -> u64 {
+        self.hot_entry(key)
+            .map(|hot| hot.last_access_unix_ms.load(Ordering::Relaxed))
+            .map_or(entry.last_access_unix_ms, |hot| hot.max(entry.last_access_unix_ms))
+    }
+
+    pub(super) fn prepared_response_head(
+        &self,
+        key: &str,
+        expected_hash: &str,
+    ) -> Option<Arc<PreparedCacheResponseHead>> {
+        let hot_entry = self.hot_entry(key)?;
+        let response_head = hot_entry
+            .response_head
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()?;
+        (response_head.hash == expected_hash).then_some(response_head)
+    }
+
+    pub(super) fn store_prepared_response_head(
+        &self,
+        key: &str,
+        last_access_unix_ms: u64,
+        response_head: Arc<PreparedCacheResponseHead>,
+    ) {
+        let still_current = read_index(&self.index)
+            .entries
+            .get(key)
+            .is_some_and(|entry| entry.hash == response_head.hash);
+        if !still_current {
+            return;
+        }
+
+        let hot_entry = self.hot_entry_for_key(key);
+        hot_entry.last_access_unix_ms.fetch_max(last_access_unix_ms, Ordering::Relaxed);
+        *hot_entry.response_head.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some(response_head);
+    }
+
+    pub(super) fn remove_hot_entry(&self, key: &str) {
+        self.hot_entries.write().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(key);
+    }
+
+    pub(super) fn clear_hot_entries(&self) {
+        self.hot_entries.write().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
     }
 
     pub(super) fn record_hit(&self) {
@@ -218,6 +306,12 @@ impl CacheZoneRuntime {
     pub(super) fn record_purge(&self, count: usize) {
         if count > 0 {
             self.record_counter(&self.stats.purge_total, count as u64);
+        }
+    }
+
+    pub(super) fn record_invalidation(&self, count: usize) {
+        if count > 0 {
+            self.record_counter(&self.stats.invalidation_total, count as u64);
         }
     }
 

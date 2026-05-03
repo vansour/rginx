@@ -1,5 +1,59 @@
 use super::*;
 
+pub(super) trait ForwardCacheBackend {
+    async fn lookup(
+        &self,
+        request: crate::cache::CacheRequest,
+        downstream_scheme: &str,
+        policy: &rginx_core::RouteCachePolicy,
+    ) -> crate::cache::CacheLookup;
+
+    fn record_bypass_for_zone(&self, zone_name: &str);
+
+    async fn store_response(
+        &self,
+        context: crate::cache::CacheStoreContext,
+        response: HttpResponse,
+    ) -> HttpResponse;
+
+    async fn complete_not_modified(
+        &self,
+        context: crate::cache::CacheStoreContext,
+        response: HttpResponse,
+    ) -> std::result::Result<HttpResponse, crate::cache::CacheStoreError>;
+}
+
+impl ForwardCacheBackend for crate::cache::CacheManager {
+    async fn lookup(
+        &self,
+        request: crate::cache::CacheRequest,
+        downstream_scheme: &str,
+        policy: &rginx_core::RouteCachePolicy,
+    ) -> crate::cache::CacheLookup {
+        crate::cache::CacheManager::lookup(self, request, downstream_scheme, policy).await
+    }
+
+    fn record_bypass_for_zone(&self, zone_name: &str) {
+        crate::cache::CacheManager::record_bypass_for_zone(self, zone_name);
+    }
+
+    async fn store_response(
+        &self,
+        context: crate::cache::CacheStoreContext,
+        response: HttpResponse,
+    ) -> HttpResponse {
+        crate::cache::CacheManager::store_response(self, context, response).await
+    }
+
+    async fn complete_not_modified(
+        &self,
+        context: crate::cache::CacheStoreContext,
+        response: HttpResponse,
+    ) -> std::result::Result<HttpResponse, crate::cache::CacheStoreError> {
+        crate::cache::CacheManager::complete_not_modified(self, context, response).await
+    }
+}
+
 pub(super) struct ForwardCacheContext {
     pub(super) store: Option<Box<crate::cache::CacheStoreContext>>,
     pub(super) status: Option<crate::cache::CacheStatus>,
@@ -11,8 +65,8 @@ pub(super) enum ForwardCacheLookup {
     Proceed(Box<ForwardCacheContext>),
 }
 
-pub(super) async fn lookup_forward_cache(
-    cache_manager: &crate::cache::CacheManager,
+pub(super) async fn lookup_forward_cache<B: ForwardCacheBackend + ?Sized>(
+    cache_backend: &B,
     request: crate::cache::CacheRequest,
     downstream_scheme: &str,
     response_buffering: rginx_core::RouteBufferingPolicy,
@@ -26,14 +80,14 @@ pub(super) async fn lookup_forward_cache(
     };
 
     if response_buffering == rginx_core::RouteBufferingPolicy::Off {
-        cache_manager.record_bypass_for_zone(&policy.zone);
+        cache_backend.record_bypass_for_zone(&policy.zone);
         return ForwardCacheLookup::Proceed(Box::new(ForwardCacheContext {
             store: None,
             status: Some(crate::cache::CacheStatus::Bypass),
         }));
     }
 
-    match cache_manager.lookup(request, downstream_scheme, policy).await {
+    match cache_backend.lookup(request, downstream_scheme, policy).await {
         crate::cache::CacheLookup::Hit(response) => ForwardCacheLookup::Hit(response),
         crate::cache::CacheLookup::Updating(response, context) => {
             let status = context.cache_status();

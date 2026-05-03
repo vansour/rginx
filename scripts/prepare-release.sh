@@ -159,6 +159,16 @@ WORKSPACE_VERSION="$(workspace_version)"
 [[ -n "${WORKSPACE_VERSION}" ]] || die "failed to resolve workspace version from Cargo.toml"
 [[ "${WORKSPACE_VERSION}" == "${VERSION}" ]] || die "workspace version ${WORKSPACE_VERSION} does not match tag ${TAG}"
 
+RELEASE_NOTES_PATH="${ROOT_DIR}/release-notes/${TAG}.md"
+[[ -f "${ROOT_DIR}/CHANGELOG.md" ]] || die "CHANGELOG.md is required for release prep"
+[[ -f "${RELEASE_NOTES_PATH}" ]] || die "missing release notes file: release-notes/${TAG}.md"
+grep -Fq "[${VERSION}]" "${ROOT_DIR}/CHANGELOG.md" \
+    || die "CHANGELOG.md must contain an entry for ${VERSION}"
+for heading in "## New / 新增" "## Update & Improvement / 更新与改进" "## Bug Fixed / 问题修复"; do
+    grep -Fq "${heading}" "${RELEASE_NOTES_PATH}" \
+        || die "release notes file ${RELEASE_NOTES_PATH} must contain section: ${heading}"
+done
+
 run_step cargo fmt --all --check
 run_step ./scripts/test-fast.sh
 run_step ./scripts/run-clippy-gate.sh

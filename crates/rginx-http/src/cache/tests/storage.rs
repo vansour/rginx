@@ -150,7 +150,10 @@ async fn refresh_not_modified_response_serves_body_and_evicts_uncacheable_entry(
 
     let mut context = test_store_context(zone.clone(), key);
     context.cached_entry = Some(cached_entry);
-    context.cached_metadata = Some(cached_metadata);
+    context.cached_response_head = Some(Arc::new(
+        prepare_cached_response_head(&hash.clone(), cached_metadata)
+            .expect("cached response head should prepare"),
+    ));
     context.cache_status = CacheStatus::Expired;
 
     let response = Response::builder()

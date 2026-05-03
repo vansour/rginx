@@ -4,6 +4,14 @@ use tokio::fs;
 
 use super::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::cache) enum CacheEntryLifecyclePhase {
+    Fresh,
+    Grace,
+    Keep,
+    Dead,
+}
+
 pub(in crate::cache) async fn remove_cache_entry_if_matches(
     zone: &Arc<CacheZoneRuntime>,
     key: &str,
@@ -25,7 +33,7 @@ pub(in crate::cache) async fn remove_cache_files_if_unreferenced(
 ) -> bool {
     let _io_guard = zone.io_write(hash).await;
     let referenced = {
-        let index = lock_index(&zone.index);
+        let index = read_index(&zone.index);
         index.hash_is_referenced(hash)
     };
     if referenced {
@@ -46,8 +54,36 @@ pub(in crate::cache) fn build_conditional_headers(
         .then_some(CacheConditionalHeaders { if_none_match, if_modified_since })
 }
 
-pub(super) fn stale_if_error_window_open(entry: &CacheIndexEntry, now: u64) -> bool {
+pub(in crate::cache) fn stale_if_error_window_open(entry: &CacheIndexEntry, now: u64) -> bool {
     entry.stale_if_error_until_unix_ms.is_some_and(|until| now <= until)
+}
+
+pub(in crate::cache) fn stale_while_revalidate_window_open(
+    entry: &CacheIndexEntry,
+    now: u64,
+) -> bool {
+    entry.grace_until_unix_ms.is_some_and(|until| now <= until)
+        || entry.stale_while_revalidate_until_unix_ms.is_some_and(|until| now <= until)
+}
+
+pub(in crate::cache) fn keep_window_open(entry: &CacheIndexEntry, now: u64) -> bool {
+    entry.keep_until_unix_ms.is_none_or(|until| now <= until)
+}
+
+pub(in crate::cache) fn lifecycle_phase(
+    entry: &CacheIndexEntry,
+    now: u64,
+) -> CacheEntryLifecyclePhase {
+    if now <= entry.expires_at_unix_ms {
+        return CacheEntryLifecyclePhase::Fresh;
+    }
+    if stale_while_revalidate_window_open(entry, now) {
+        return CacheEntryLifecyclePhase::Grace;
+    }
+    if keep_window_open(entry, now) {
+        return CacheEntryLifecyclePhase::Keep;
+    }
+    CacheEntryLifecyclePhase::Dead
 }
 
 pub(super) fn use_stale_matches_status(
