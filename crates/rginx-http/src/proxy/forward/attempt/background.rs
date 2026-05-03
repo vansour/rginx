@@ -1,6 +1,6 @@
 use super::*;
 
-struct BackgroundCacheRefreshTask {
+struct BackgroundCacheRefreshTask<B> {
     state: SharedState,
     target: ProxyTarget,
     client_address: ClientAddress,
@@ -8,16 +8,20 @@ struct BackgroundCacheRefreshTask {
     downstream_proto: String,
     request_id: String,
     options: DownstreamRequestOptions,
+    cache_backend: B,
     cache_store: crate::cache::CacheStoreContext,
 }
 
-pub(super) fn spawn_background_cache_refresh(
+pub(super) fn spawn_background_cache_refresh<B>(
     state: &SharedState,
     target: &ProxyTarget,
     client_address: &ClientAddress,
     downstream: &DownstreamRequestContext<'_>,
+    cache_backend: B,
     cache_store: crate::cache::CacheStoreContext,
-) {
+) where
+    B: ForwardCacheBackend + Send + Sync + 'static,
+{
     let task = BackgroundCacheRefreshTask {
         state: state.clone(),
         target: target.clone(),
@@ -26,6 +30,7 @@ pub(super) fn spawn_background_cache_refresh(
         downstream_proto: downstream.downstream_proto.to_string(),
         request_id: format!("{}:cache-update", downstream.request_id),
         options: downstream.options.clone(),
+        cache_backend,
         cache_store,
     };
     state.clone().spawn_background_task(async move {
@@ -33,20 +38,21 @@ pub(super) fn spawn_background_cache_refresh(
     });
 }
 
-async fn run_background_cache_refresh(task: BackgroundCacheRefreshTask) {
+async fn run_background_cache_refresh<B>(task: BackgroundCacheRefreshTask<B>)
+where
+    B: ForwardCacheBackend + Send + Sync + 'static,
+{
     let active = task.state.snapshot().await;
-    let cache_backend = active.cache.clone();
     let clients = active.clients;
-    run_background_cache_refresh_with_backend(task, clients, cache_backend).await;
+    run_background_cache_refresh_with_backend(task, clients).await;
 }
 
-async fn run_background_cache_refresh_with_backend<
-    B: ForwardCacheBackend + Send + Sync + 'static,
->(
-    task: BackgroundCacheRefreshTask,
+async fn run_background_cache_refresh_with_backend<B>(
+    task: BackgroundCacheRefreshTask<B>,
     clients: ProxyClients,
-    cache_backend: B,
-) {
+) where
+    B: ForwardCacheBackend + Send + Sync + 'static,
+{
     let BackgroundCacheRefreshTask {
         state,
         target,
@@ -55,6 +61,7 @@ async fn run_background_cache_refresh_with_backend<
         downstream_proto,
         request_id,
         options,
+        cache_backend,
         cache_store,
     } = task;
     let mut request = cache_store.build_background_request();

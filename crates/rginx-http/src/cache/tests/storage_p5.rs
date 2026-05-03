@@ -139,6 +139,28 @@ async fn invalidation_rule_does_not_match_newer_entry_with_same_tag() {
     assert_eq!(snapshot[0].active_invalidation_rules, 1);
 }
 
+#[test]
+fn invalidation_rule_ignores_entry_created_in_same_millisecond() {
+    let mut entry =
+        test_index_entry("https:example.com:/tagged", "hash".to_string(), 6, 2_000, 1_000);
+    entry.stored_at_unix_ms = 1_000;
+    entry.tags = vec!["news".to_string()];
+
+    let rule = CacheInvalidationRule {
+        selector: CacheInvalidationSelector::Tag("news".to_string()),
+        created_at_unix_ms: 1_000,
+    };
+
+    assert!(
+        !super::super::invalidation::invalidation_rule_matches_entry(
+            &rule,
+            "https:example.com:/tagged",
+            &entry,
+        ),
+        "same-millisecond refills must remain visible"
+    );
+}
+
 #[tokio::test]
 async fn clear_invalidations_restores_visibility_before_lazy_delete() {
     let temp = tempfile::tempdir().expect("cache temp dir should exist");

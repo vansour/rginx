@@ -105,7 +105,7 @@ pub(super) async fn store_streaming_response(
 ) -> HttpResponse {
     let now = unix_time_ms(SystemTime::now());
     if !storable || no_cache {
-        if should_remember_hit_for_pass(&context, &parts.headers, no_cache) {
+        if should_remember_hit_for_pass(&context, &parts.headers) {
             for removed_hash in remember_hit_for_pass(&context, &parts.headers, now).await {
                 remove_cache_files_if_unreferenced(context.zone.as_ref(), &removed_hash).await;
             }
@@ -115,7 +115,7 @@ pub(super) async fn store_streaming_response(
 
     let freshness = response_freshness(&context, parts.status, &parts.headers);
     if !freshness_is_cacheable(&freshness) {
-        if should_remember_hit_for_pass(&context, &parts.headers, false) {
+        if should_remember_hit_for_pass(&context, &parts.headers) {
             for removed_hash in remember_hit_for_pass(&context, &parts.headers, now).await {
                 remove_cache_files_if_unreferenced(context.zone.as_ref(), &removed_hash).await;
             }

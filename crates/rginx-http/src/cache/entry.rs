@@ -143,12 +143,6 @@ async fn load_cached_response_head_locked(
     key: &str,
     entry: &CacheIndexEntry,
 ) -> std::io::Result<Arc<PreparedCacheResponseHead>> {
-    if entry.is_hit_for_pass() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "hit-for-pass marker does not have cache metadata",
-        ));
-    }
     if let Some(response_head) = zone.prepared_response_head(key, &entry.hash) {
         return Ok(response_head);
     }

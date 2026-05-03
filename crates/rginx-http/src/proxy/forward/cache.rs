@@ -1,56 +1,59 @@
+use std::future::Future;
+
 use super::*;
 
 pub(super) trait ForwardCacheBackend {
-    async fn lookup(
+    fn lookup(
         &self,
         request: crate::cache::CacheRequest,
         downstream_scheme: &str,
         policy: &rginx_core::RouteCachePolicy,
-    ) -> crate::cache::CacheLookup;
+    ) -> impl Future<Output = crate::cache::CacheLookup> + Send;
 
     fn record_bypass_for_zone(&self, zone_name: &str);
 
-    async fn store_response(
+    fn store_response(
         &self,
         context: crate::cache::CacheStoreContext,
         response: HttpResponse,
-    ) -> HttpResponse;
+    ) -> impl Future<Output = HttpResponse> + Send;
 
-    async fn complete_not_modified(
+    fn complete_not_modified(
         &self,
         context: crate::cache::CacheStoreContext,
         response: HttpResponse,
-    ) -> std::result::Result<HttpResponse, crate::cache::CacheStoreError>;
+    ) -> impl Future<Output = std::result::Result<HttpResponse, crate::cache::CacheStoreError>> + Send;
 }
 
 impl ForwardCacheBackend for crate::cache::CacheManager {
-    async fn lookup(
+    fn lookup(
         &self,
         request: crate::cache::CacheRequest,
         downstream_scheme: &str,
         policy: &rginx_core::RouteCachePolicy,
-    ) -> crate::cache::CacheLookup {
-        crate::cache::CacheManager::lookup(self, request, downstream_scheme, policy).await
+    ) -> impl Future<Output = crate::cache::CacheLookup> + Send {
+        crate::cache::CacheManager::lookup(self, request, downstream_scheme, policy)
     }
 
     fn record_bypass_for_zone(&self, zone_name: &str) {
         crate::cache::CacheManager::record_bypass_for_zone(self, zone_name);
     }
 
-    async fn store_response(
+    fn store_response(
         &self,
         context: crate::cache::CacheStoreContext,
         response: HttpResponse,
-    ) -> HttpResponse {
-        crate::cache::CacheManager::store_response(self, context, response).await
+    ) -> impl Future<Output = HttpResponse> + Send {
+        crate::cache::CacheManager::store_response(self, context, response)
     }
 
-    async fn complete_not_modified(
+    fn complete_not_modified(
         &self,
         context: crate::cache::CacheStoreContext,
         response: HttpResponse,
-    ) -> std::result::Result<HttpResponse, crate::cache::CacheStoreError> {
-        crate::cache::CacheManager::complete_not_modified(self, context, response).await
+    ) -> impl Future<Output = std::result::Result<HttpResponse, crate::cache::CacheStoreError>> + Send
+    {
+        crate::cache::CacheManager::complete_not_modified(self, context, response)
     }
 }
 

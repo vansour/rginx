@@ -27,7 +27,7 @@ pub(in crate::cache) fn invalidation_rule_matches_entry(
     key: &str,
     entry: &CacheIndexEntry,
 ) -> bool {
-    entry.stored_at_unix_ms <= rule.created_at_unix_ms
+    entry.stored_at_unix_ms < rule.created_at_unix_ms
         && selector_matches_entry(&rule.selector, key, entry)
 }
 

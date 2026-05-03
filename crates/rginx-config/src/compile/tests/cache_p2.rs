@@ -129,11 +129,10 @@ fn compile_cache_policy_supports_disabling_p2_defaults() {
     let snapshot =
         compile_with_base(config, base_dir.path()).expect("p2 cache policy should compile");
     assert!(!snapshot.cache_zones["default"].shared_index);
-    assert!(
-        !snapshot.default_vhost.routes[0]
-            .cache
-            .as_ref()
-            .expect("route cache policy should compile")
-            .convert_head
-    );
+    let cache =
+        snapshot.default_vhost.routes[0].cache.as_ref().expect("route cache policy should compile");
+    assert!(!cache.convert_head);
+    assert_eq!(cache.grace, None);
+    assert_eq!(cache.keep, None);
+    assert_eq!(cache.pass_ttl, None);
 }

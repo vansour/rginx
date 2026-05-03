@@ -214,6 +214,7 @@ async fn inactive_cleanup_reschedules_hot_candidate_and_continues_to_next_due_en
 async fn eviction_reschedules_local_hot_candidate_before_removing_older_entry() {
     let temp = tempfile::tempdir().expect("cache temp dir should exist");
     let manager = test_manager_with_max_size(temp.path().to_path_buf(), 6);
+    let zone = manager.zones.get("default").expect("default zone should exist").clone();
     let policy = test_policy();
     let request_a = Request::builder()
         .method(Method::GET)
@@ -254,8 +255,6 @@ async fn eviction_reschedules_local_hot_candidate_before_removing_older_entry() 
     .await;
     let _ = wait_for_hit(&manager, &request_a, &policy).await;
 
-    tokio::time::sleep(Duration::from_millis(2)).await;
-
     let context_b =
         match manager.lookup(CacheRequest::from_request(&request_b), "https", &policy).await {
             CacheLookup::Miss(context) => *context,
@@ -277,7 +276,6 @@ async fn eviction_reschedules_local_hot_candidate_before_removing_older_entry() 
     let _ = wait_for_hit(&manager, &request_b, &policy).await;
 
     {
-        let zone = manager.zones.get("default").expect("default zone should exist");
         let index = lock_index(&zone.index);
         assert_eq!(
             index.access_schedule.len(),
@@ -291,8 +289,16 @@ async fn eviction_reschedules_local_hot_candidate_before_removing_older_entry() 
                 .collect::<Vec<_>>()
         );
     }
-
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    let reorder_now = unix_time_ms(SystemTime::now());
+    {
+        let mut index = lock_index(&zone.index);
+        index.entries.get_mut("https:example.com:/evict-a").unwrap().last_access_unix_ms =
+            reorder_now.saturating_sub(20);
+        index.entries.get_mut("https:example.com:/evict-b").unwrap().last_access_unix_ms =
+            reorder_now.saturating_sub(10);
+        index.rebuild_access_schedule();
+    }
+    zone.clear_hot_entries();
 
     match manager.lookup(CacheRequest::from_request(&request_a), "https", &policy).await {
         CacheLookup::Hit(response) => {
@@ -301,8 +307,6 @@ async fn eviction_reschedules_local_hot_candidate_before_removing_older_entry() 
         }
         _ => panic!("first key should hit before eviction"),
     }
-
-    tokio::time::sleep(Duration::from_millis(2)).await;
 
     let context_c =
         match manager.lookup(CacheRequest::from_request(&request_c), "https", &policy).await {
@@ -324,7 +328,6 @@ async fn eviction_reschedules_local_hot_candidate_before_removing_older_entry() 
     .await;
     let _ = wait_for_hit(&manager, &request_c, &policy).await;
 
-    let zone = manager.zones.get("default").expect("default zone should exist");
     let index = lock_index(&zone.index);
     assert!(index.entries.contains_key("https:example.com:/evict-a"));
     assert!(

@@ -205,9 +205,11 @@ jobs:
           mkdir -p "${INSTALL_DIR}"
           install -m 755 "target/${{ matrix.target }}/release/${{ matrix.bin_name }}" "${INSTALL_DIR}/${{ matrix.bin_name }}"
           cp README.md "${INSTALL_DIR}/README.md"
-          if [[ -f CHANGELOG.md ]]; then
-            cp CHANGELOG.md "${INSTALL_DIR}/CHANGELOG.md"
-          fi
+          [[ -f CHANGELOG.md ]] || {
+            echo "CHANGELOG.md is required for release packaging" >&2
+            exit 1
+          }
+          cp CHANGELOG.md "${INSTALL_DIR}/CHANGELOG.md"
           cp LICENSE "${INSTALL_DIR}/LICENSE"
           cp LICENSE-APACHE "${INSTALL_DIR}/LICENSE-APACHE"
           cp LICENSE-MIT "${INSTALL_DIR}/LICENSE-MIT"
@@ -283,6 +285,11 @@ jobs:
           PREVIOUS_TAG="$(git describe --tags --abbrev=0 "${COMMIT_SHA}^" 2>/dev/null || true)"
           CHANGELOG_RANGE="${COMMIT_SHA}"
           CHANGELOG_TITLE="Initial release changes"
+          REQUIRED_RELEASE_NOTES_HEADINGS=(
+            "## New / 新增"
+            "## Update & Improvement / 更新与改进"
+            "## Bug Fixed / 问题修复"
+          )
 
           if [[ -n "${PREVIOUS_TAG}" ]]; then
             CHANGELOG_RANGE="${PREVIOUS_TAG}..${COMMIT_SHA}"
@@ -300,6 +307,17 @@ jobs:
           if [[ ! -s dist/changelog.md ]]; then
             echo "- No source changes found in the selected release range." > dist/changelog.md
           fi
+
+          [[ -f "${RELEASE_NOTES_PATH}" ]] || {
+            echo "missing hand-written release notes: ${RELEASE_NOTES_PATH}" >&2
+            exit 1
+          }
+          for heading in "${REQUIRED_RELEASE_NOTES_HEADINGS[@]}"; do
+            grep -Fq "${heading}" "${RELEASE_NOTES_PATH}" || {
+              echo "release notes file ${RELEASE_NOTES_PATH} must contain section: ${heading}" >&2
+              exit 1
+            }
+          done
 
           {
             echo "Release for \`${TAG}\`"
@@ -328,40 +346,11 @@ jobs:
             echo
           } > dist/release-summary.md
 
-          if [[ -f "${RELEASE_NOTES_PATH}" ]]; then
-            cat dist/release-summary.md > dist/release-body.md
-            printf '\n' >> dist/release-body.md
-            cat "${RELEASE_NOTES_PATH}" >> dist/release-body.md
-            printf '\n\n## Source Changelog\n%s\n\n' "${CHANGELOG_TITLE}" >> dist/release-body.md
-            cat dist/changelog.md >> dist/release-body.md
-          else
-            if [[ -n "${PREVIOUS_TAG}" ]]; then
-              gh api \
-                --method POST \
-                -H "Accept: application/vnd.github+json" \
-                "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
-                -f tag_name="${TAG}" \
-                -f target_commitish="${COMMIT_SHA}" \
-                -f previous_tag_name="${PREVIOUS_TAG}" \
-                -f configuration_file_path=".github/release.yml" \
-                --jq '.body' > dist/generated-notes.md
-            else
-              gh api \
-                --method POST \
-                -H "Accept: application/vnd.github+json" \
-                "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
-                -f tag_name="${TAG}" \
-                -f target_commitish="${COMMIT_SHA}" \
-                -f configuration_file_path=".github/release.yml" \
-                --jq '.body' > dist/generated-notes.md
-            fi
-
-            cat dist/release-summary.md > dist/release-body.md
-            printf '\n## Changelog\n%s\n\n' "${CHANGELOG_TITLE}" >> dist/release-body.md
-            cat dist/changelog.md >> dist/release-body.md
-            printf '\n\n' >> dist/release-body.md
-            cat dist/generated-notes.md >> dist/release-body.md
-          fi
+          cat dist/release-summary.md > dist/release-body.md
+          printf '\n' >> dist/release-body.md
+          cat "${RELEASE_NOTES_PATH}" >> dist/release-body.md
+          printf '\n\n## Source Changelog\n%s\n\n' "${CHANGELOG_TITLE}" >> dist/release-body.md
+          cat dist/changelog.md >> dist/release-body.md
 
       - name: Create Or Update Release
         shell: bash

@@ -72,27 +72,35 @@ async fn finalize_streaming_cache(plan: StreamingCachePlan, body_size_bytes: usi
 
     let vary = plan.vary.clone();
     let tags = plan.tags.clone();
-    let response_head = Arc::new(
-        prepare_cached_response_head(
-            &plan.hash,
-            cache_metadata(
-                plan.final_key.clone(),
-                plan.status,
-                &plan.headers,
-                cache_metadata_input(
-                    &plan.base_key,
-                    vary.clone(),
-                    tags.clone(),
-                    plan.now,
-                    plan.grace,
-                    plan.keep,
-                    &plan.freshness,
-                    body_size_bytes,
-                ),
+    let response_head = match prepare_cached_response_head(
+        &plan.hash,
+        cache_metadata(
+            plan.final_key.clone(),
+            plan.status,
+            &plan.headers,
+            cache_metadata_input(
+                &plan.base_key,
+                vary.clone(),
+                tags.clone(),
+                plan.now,
+                plan.grace,
+                plan.keep,
+                &plan.freshness,
+                body_size_bytes,
             ),
-        )
-        .expect("streaming cache metadata should prepare"),
-    );
+        ),
+    ) {
+        Ok(response_head) => Arc::new(response_head),
+        Err(error) => {
+            let error = std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string());
+            record_streaming_cache_write_error(&plan, &error);
+            if let Some(fill_state) = plan.fill_state.as_ref() {
+                fill_state.fail(&error);
+            }
+            let _ = fs::remove_file(&plan.body_tmp).await;
+            return;
+        }
+    };
     let removed_hashes = {
         let _io_guard = plan.zone.io_write(&plan.hash).await;
         match commit_cache_entry_temp_body(

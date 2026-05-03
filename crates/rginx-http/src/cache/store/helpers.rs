@@ -122,20 +122,18 @@ pub(super) fn freshness_is_cacheable(freshness: &ResponseFreshness) -> bool {
 pub(super) fn should_remember_hit_for_pass(
     context: &crate::cache::CacheStoreContext,
     headers: &HeaderMap,
-    no_cache: bool,
 ) -> bool {
     context.policy.pass_ttl.is_some()
-        && (no_cache
-            || (!context.policy.ignore_headers.contains(&CacheIgnoreHeader::CacheControl)
-                && headers.get(CACHE_CONTROL).and_then(|value| value.to_str().ok()).is_some_and(
-                    |value| {
-                        let value = value.to_ascii_lowercase();
-                        value
-                            .split(',')
-                            .map(str::trim)
-                            .any(|token| matches!(token, "no-store" | "private"))
-                    },
-                ))
+        && ((!context.policy.ignore_headers.contains(&CacheIgnoreHeader::CacheControl)
+            && headers.get(CACHE_CONTROL).and_then(|value| value.to_str().ok()).is_some_and(
+                |value| {
+                    let value = value.to_ascii_lowercase();
+                    value
+                        .split(',')
+                        .map(str::trim)
+                        .any(|token| matches!(token, "no-store" | "private"))
+                },
+            ))
             || (!context.policy.ignore_headers.contains(&CacheIgnoreHeader::SetCookie)
                 && headers.contains_key(SET_COOKIE))
             || (!context.policy.ignore_headers.contains(&CacheIgnoreHeader::Vary)

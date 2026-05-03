@@ -139,7 +139,7 @@ pub(in crate::cache) async fn refresh_not_modified_response(
             .map_err(|error| CacheStoreError { source: Box::new(error) })?
         };
         let remember_pass = final_key == context.key
-            && (should_remember_hit_for_pass(&context, &merged_headers, false)
+            && (should_remember_hit_for_pass(&context, &merged_headers)
                 || !freshness_is_cacheable(&freshness));
         let removed_hashes = if remember_pass {
             remember_hit_for_pass(&context, &merged_headers, now).await
