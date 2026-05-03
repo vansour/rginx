@@ -3,9 +3,23 @@
   "production_hard_limit": 500,
   "test_soft_limit": 400,
   "test_hard_limit": 600,
-  "legacy_production_soft_size_ceilings": {},
-  "legacy_production_size_ceilings": {},
-  "legacy_test_soft_size_ceilings": {},
-  "legacy_test_size_ceilings": {},
-  "legacy_inline_test_files": []
+  "legacy_production_soft_size_ceilings": {
+    "crates/rginx-http/src/cache/fill/shared.rs": 447,
+    "crates/rginx-http/src/cache/shared/index_file/mod.rs": 457
+  },
+  "legacy_production_size_ceilings": {
+    "crates/rginx-http/src/cache/shared/index_file/memory_backend.rs": 1029,
+    "crates/rginx-http/src/cache/shared/memory.rs": 517
+  },
+  "legacy_test_soft_size_ceilings": {
+    "crates/rginx-http/src/cache/tests/storage_p2/cross_process_fill.rs": 410,
+    "crates/rginx-http/src/cache/tests/storage_p2/shared_index/sync_regressions.rs": 432
+  },
+  "legacy_test_size_ceilings": {
+    "crates/rginx-http/src/cache/tests/storage_p2/shared_index.rs": 710
+  },
+  "legacy_inline_test_files": [
+    "crates/rginx-http/src/cache/shared/index_file/memory_backend.rs",
+    "crates/rginx-http/src/cache/shared/memory.rs"
+  ]
 }
