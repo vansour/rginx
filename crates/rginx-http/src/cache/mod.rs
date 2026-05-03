@@ -27,6 +27,7 @@ mod policy;
 mod request;
 mod runtime;
 mod shared;
+mod state;
 mod store;
 mod vary;
 
@@ -56,6 +57,14 @@ use runtime::{
     remove_cache_files_locked,
 };
 use shared::{SharedIndexStore, bootstrap_shared_index, sync_zone_shared_index_if_needed};
+pub(crate) use state::CacheStaleReason;
+use state::{
+    CacheAccessScheduleEntry, CacheAccessScheduleTicket, CacheConditionalHeaders,
+    CacheEntryHotState, CacheFillGuard, CacheFillLockState, CacheIndex, CacheIndexEntry,
+    CacheIndexEntryKind, CacheInvalidationRule, CacheInvalidationSelector, CacheZoneRuntime,
+    CacheZoneStats, CachedVaryHeaderValue, FillLockDecision, LookupDecision, LookupWait,
+    PreparedCacheResponseHead,
+};
 pub(crate) use store::CacheStoreError;
 #[cfg(test)]
 use store::lock_index;
@@ -171,211 +180,6 @@ impl CacheStatus {
             Self::Revalidated => "REVALIDATED",
         })
     }
-}
-
-struct CacheZoneRuntime {
-    config: Arc<CacheZone>,
-    index: RwLock<CacheIndex>,
-    hot_entries: RwLock<HashMap<String, Arc<CacheEntryHotState>>>,
-    io_locks: CacheIoLockPool,
-    shared_index_sync_lock: AsyncMutex<()>,
-    shared_index_store: Option<Arc<SharedIndexStore>>,
-    fill_locks: Arc<Mutex<HashMap<String, CacheFillLockState>>>,
-    fill_lock_generation: AtomicU64,
-    last_inactive_cleanup_unix_ms: AtomicU64,
-    shared_index_generation: AtomicU64,
-    shared_index_store_epoch: AtomicU64,
-    shared_index_change_seq: AtomicU64,
-    stats: CacheZoneStats,
-    change_notifier: Option<CacheChangeNotifier>,
-}
-
-#[derive(Default, Clone)]
-struct CacheIndex {
-    entries: HashMap<String, CacheIndexEntry>,
-    hash_ref_counts: HashMap<String, usize>,
-    variants: HashMap<String, Vec<String>>,
-    admission_counts: HashMap<String, u64>,
-    invalidations: Vec<CacheInvalidationRule>,
-    current_size_bytes: usize,
-    maintenance_next_ticket: u64,
-    access_schedule: BTreeSet<CacheAccessScheduleEntry>,
-    access_ticket_by_key: HashMap<String, CacheAccessScheduleTicket>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct CacheAccessScheduleEntry {
-    last_access_unix_ms: u64,
-    ticket: u64,
-    key: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct CacheAccessScheduleTicket {
-    last_access_unix_ms: u64,
-    ticket: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CacheIndexEntry {
-    kind: CacheIndexEntryKind,
-    hash: String,
-    base_key: String,
-    stored_at_unix_ms: u64,
-    vary: Vec<CachedVaryHeaderValue>,
-    tags: Vec<String>,
-    body_size_bytes: usize,
-    expires_at_unix_ms: u64,
-    grace_until_unix_ms: Option<u64>,
-    keep_until_unix_ms: Option<u64>,
-    stale_if_error_until_unix_ms: Option<u64>,
-    stale_while_revalidate_until_unix_ms: Option<u64>,
-    requires_revalidation: bool,
-    must_revalidate: bool,
-    last_access_unix_ms: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-enum CacheIndexEntryKind {
-    #[default]
-    Response,
-    HitForPass,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum CacheInvalidationSelector {
-    All,
-    Exact(String),
-    Prefix(String),
-    Tag(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct CacheInvalidationRule {
-    selector: CacheInvalidationSelector,
-    created_at_unix_ms: u64,
-}
-
-#[derive(Default)]
-struct CacheZoneStats {
-    hit_total: AtomicU64,
-    miss_total: AtomicU64,
-    bypass_total: AtomicU64,
-    expired_total: AtomicU64,
-    stale_total: AtomicU64,
-    updating_total: AtomicU64,
-    revalidated_total: AtomicU64,
-    write_success_total: AtomicU64,
-    write_error_total: AtomicU64,
-    eviction_total: AtomicU64,
-    purge_total: AtomicU64,
-    invalidation_total: AtomicU64,
-    inactive_cleanup_total: AtomicU64,
-}
-
-struct CacheFillGuard {
-    key: String,
-    generation: u64,
-    fill_locks: Weak<Mutex<HashMap<String, CacheFillLockState>>>,
-    notify: Arc<Notify>,
-    external_lock_path: Option<PathBuf>,
-    external_state: Option<SharedFillExternalStateHandle>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CachedVaryHeaderValue {
-    name: http::header::HeaderName,
-    value: Option<String>,
-}
-
-#[derive(Clone)]
-struct CacheFillLockState {
-    notify: Arc<Notify>,
-    acquired_at_unix_ms: u64,
-    generation: u64,
-    share_fingerprint: String,
-    reader_state: Option<Arc<CacheFillReadState>>,
-}
-
-#[derive(Clone)]
-struct CacheConditionalHeaders {
-    if_none_match: Option<HeaderValue>,
-    if_modified_since: Option<HeaderValue>,
-}
-
-struct CacheEntryHotState {
-    last_access_unix_ms: AtomicU64,
-    response_head: Mutex<Option<Arc<PreparedCacheResponseHead>>>,
-}
-
-struct PreparedCacheResponseHead {
-    hash: String,
-    metadata: Arc<CacheMetadata>,
-    status: StatusCode,
-    headers: HeaderMap,
-    conditional_headers: Option<CacheConditionalHeaders>,
-}
-
-enum LookupDecision {
-    Bypass {
-        status: CacheStatus,
-    },
-    DropEntry {
-        key: String,
-        entry: CacheIndexEntry,
-    },
-    FreshHit {
-        key: String,
-        entry: CacheIndexEntry,
-    },
-    Stale {
-        key: String,
-        entry: CacheIndexEntry,
-        status: CacheStatus,
-    },
-    BackgroundUpdate {
-        key: String,
-        cached_entry: CacheIndexEntry,
-        fill_guard: CacheFillGuard,
-    },
-    Miss {
-        key: String,
-        base_key: String,
-        cached_entry: Option<CacheIndexEntry>,
-        fill_guard: Option<CacheFillGuard>,
-        cache_status: CacheStatus,
-    },
-    ReadWhileFillLocal {
-        state: Arc<CacheFillReadState>,
-    },
-    ReadWhileFillExternal {
-        state: ExternalCacheFillReadState,
-    },
-    Wait {
-        strategy: LookupWait,
-    },
-}
-
-enum LookupWait {
-    Local { waiter: OwnedNotified },
-    External { key: String },
-}
-
-enum FillLockDecision {
-    Acquired(CacheFillGuard),
-    ReadLocal { state: Arc<CacheFillReadState> },
-    ReadExternal { state: ExternalCacheFillReadState },
-    WaitLocal { waiter: OwnedNotified },
-    WaitExternal { key: String },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CacheStaleReason {
-    Error,
-    Timeout,
-    Status(StatusCode),
 }
 
 #[cfg(test)]

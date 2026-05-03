@@ -16,12 +16,18 @@ use super::{
     CachedVaryHeaderValue, PreparedCacheResponseHead, build_conditional_headers,
 };
 
+mod metadata;
 mod response;
 mod signature;
 mod temp;
 mod write;
 
-use response::{CachedFileBody, cached_headers};
+pub(in crate::cache) use metadata::{
+    CacheMetadata, CacheMetadataInput, CachedHeader, cache_metadata, prepare_cached_response_head,
+    read_cache_metadata,
+};
+pub(in crate::cache) use response::CachedFileBody;
+use response::cached_headers;
 pub(in crate::cache) use response::{
     DownstreamRangeTrimPlan, downstream_range_trim_plan, finalize_response_for_request,
 };
@@ -32,135 +38,10 @@ pub(in crate::cache) use write::{
     cache_entry_temp_body_path, commit_cache_entry_temp_body, write_cache_metadata,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) struct CacheMetadata {
-    #[serde(default)]
-    pub(super) key: String,
-    #[serde(default)]
-    pub(super) base_key: String,
-    #[serde(default)]
-    pub(super) vary: Vec<CachedVaryHeader>,
-    #[serde(default)]
-    pub(super) tags: Vec<String>,
-    pub(super) status: u16,
-    pub(super) headers: Vec<CachedHeader>,
-    pub(super) stored_at_unix_ms: u64,
-    pub(super) expires_at_unix_ms: u64,
-    #[serde(default)]
-    pub(super) kind: CacheIndexEntryKind,
-    #[serde(default)]
-    pub(super) grace_until_unix_ms: Option<u64>,
-    #[serde(default)]
-    pub(super) keep_until_unix_ms: Option<u64>,
-    #[serde(default)]
-    pub(super) stale_if_error_until_unix_ms: Option<u64>,
-    #[serde(default)]
-    pub(super) stale_while_revalidate_until_unix_ms: Option<u64>,
-    #[serde(default)]
-    pub(super) requires_revalidation: bool,
-    #[serde(default)]
-    pub(super) must_revalidate: bool,
-    pub(super) body_size_bytes: usize,
-}
-
-#[derive(Debug, Deserialize)]
-struct RawCacheMetadata {
-    #[serde(default)]
-    key: String,
-    #[serde(default)]
-    base_key: String,
-    #[serde(default)]
-    vary: Vec<CachedVaryHeader>,
-    #[serde(default)]
-    tags: Vec<String>,
-    status: u16,
-    headers: Vec<CachedHeader>,
-    stored_at_unix_ms: u64,
-    expires_at_unix_ms: u64,
-    #[serde(default)]
-    kind: CacheIndexEntryKind,
-    #[serde(default)]
-    grace_until_unix_ms: Option<u64>,
-    #[serde(default)]
-    keep_until_unix_ms: Option<u64>,
-    #[serde(default)]
-    stale_if_error_until_unix_ms: Option<u64>,
-    #[serde(default)]
-    stale_while_revalidate_until_unix_ms: Option<u64>,
-    #[serde(default)]
-    requires_revalidation: Option<bool>,
-    #[serde(default)]
-    must_revalidate: bool,
-    body_size_bytes: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) struct CachedHeader {
-    name: String,
-    value: Vec<u8>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) struct CachedVaryHeader {
-    name: String,
-    #[serde(default)]
-    value: Option<String>,
-}
-
 pub(super) struct CachePaths {
     pub(super) dir: PathBuf,
     pub(super) metadata: PathBuf,
     pub(super) body: PathBuf,
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct CacheMetadataInput {
-    pub(super) kind: CacheIndexEntryKind,
-    pub(super) base_key: String,
-    pub(super) vary: Vec<CachedVaryHeaderValue>,
-    pub(super) tags: Vec<String>,
-    pub(super) stored_at_unix_ms: u64,
-    pub(super) expires_at_unix_ms: u64,
-    pub(super) grace_until_unix_ms: Option<u64>,
-    pub(super) keep_until_unix_ms: Option<u64>,
-    pub(super) stale_if_error_until_unix_ms: Option<u64>,
-    pub(super) stale_while_revalidate_until_unix_ms: Option<u64>,
-    pub(super) requires_revalidation: bool,
-    pub(super) must_revalidate: bool,
-    pub(super) body_size_bytes: usize,
-}
-
-pub(super) fn cache_metadata(
-    key: String,
-    status: StatusCode,
-    headers: &HeaderMap,
-    input: CacheMetadataInput,
-) -> CacheMetadata {
-    CacheMetadata {
-        key,
-        base_key: input.base_key,
-        vary: input
-            .vary
-            .into_iter()
-            .map(|header| CachedVaryHeader {
-                name: header.name.as_str().to_string(),
-                value: header.value,
-            })
-            .collect(),
-        tags: input.tags,
-        status: status.as_u16(),
-        headers: cached_headers(headers, input.body_size_bytes),
-        stored_at_unix_ms: input.stored_at_unix_ms,
-        expires_at_unix_ms: input.expires_at_unix_ms,
-        kind: input.kind,
-        grace_until_unix_ms: input.grace_until_unix_ms,
-        keep_until_unix_ms: input.keep_until_unix_ms,
-        stale_if_error_until_unix_ms: input.stale_if_error_until_unix_ms,
-        stale_while_revalidate_until_unix_ms: input.stale_while_revalidate_until_unix_ms,
-        requires_revalidation: input.requires_revalidation,
-        must_revalidate: input.must_revalidate,
-        body_size_bytes: input.body_size_bytes,
-    }
 }
 
 pub(super) async fn read_cached_response_for_request(
@@ -286,47 +167,6 @@ async fn load_cached_response_head_locked(
     Ok(response_head)
 }
 
-pub(super) fn prepare_cached_response_head(
-    hash: &str,
-    metadata: CacheMetadata,
-) -> std::io::Result<PreparedCacheResponseHead> {
-    let headers = metadata.headers_map()?;
-    let status = StatusCode::from_u16(metadata.status)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-    let conditional_headers = build_conditional_headers(&headers);
-    Ok(PreparedCacheResponseHead {
-        hash: hash.to_string(),
-        metadata: Arc::new(metadata),
-        status,
-        headers,
-        conditional_headers,
-    })
-}
-
-pub(super) async fn read_cache_metadata(path: &Path) -> std::io::Result<CacheMetadata> {
-    let metadata = fs::read(path).await?;
-    let raw: RawCacheMetadata = serde_json::from_slice(&metadata)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-    Ok(CacheMetadata {
-        key: raw.key,
-        base_key: raw.base_key,
-        vary: raw.vary,
-        tags: raw.tags,
-        status: raw.status,
-        headers: raw.headers,
-        stored_at_unix_ms: raw.stored_at_unix_ms,
-        expires_at_unix_ms: raw.expires_at_unix_ms,
-        kind: raw.kind,
-        grace_until_unix_ms: raw.grace_until_unix_ms,
-        keep_until_unix_ms: raw.keep_until_unix_ms,
-        stale_if_error_until_unix_ms: raw.stale_if_error_until_unix_ms,
-        stale_while_revalidate_until_unix_ms: raw.stale_while_revalidate_until_unix_ms,
-        requires_revalidation: raw.requires_revalidation.unwrap_or(raw.must_revalidate),
-        must_revalidate: raw.must_revalidate,
-        body_size_bytes: raw.body_size_bytes,
-    })
-}
-
 #[cfg(test)]
 pub(super) fn cache_paths(base: &Path, hash: &str) -> CachePaths {
     cache_paths_with_levels(base, &[2], hash)
@@ -354,18 +194,4 @@ fn cache_path_segment(hash: &str, offset: usize, level_len: usize) -> String {
     hash.get(offset..offset.saturating_add(level_len)).map(str::to_string).unwrap_or_else(|| {
         format!("{:0<width$}", hash.get(offset..).unwrap_or(""), width = level_len)
     })
-}
-
-impl CacheMetadata {
-    pub(super) fn headers_map(&self) -> std::io::Result<HeaderMap> {
-        let mut headers = HeaderMap::new();
-        for header in &self.headers {
-            let name = HeaderName::from_bytes(header.name.as_bytes())
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-            let value = HeaderValue::from_bytes(&header.value)
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-            headers.append(name, value);
-        }
-        Ok(headers)
-    }
 }
