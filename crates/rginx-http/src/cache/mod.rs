@@ -56,7 +56,10 @@ use runtime::{
     build_conditional_headers, remove_cache_entry_if_matches, remove_cache_files_if_unreferenced,
     remove_cache_files_locked,
 };
-use shared::{SharedIndexStore, bootstrap_shared_index, sync_zone_shared_index_if_needed};
+use shared::{
+    SharedIndexStore, bootstrap_shared_index, record_zone_shared_entry_access,
+    sync_zone_shared_index_if_needed,
+};
 pub(crate) use state::CacheStaleReason;
 use state::{
     CacheAccessScheduleEntry, CacheAccessScheduleTicket, CacheConditionalHeaders,
@@ -149,6 +152,17 @@ pub struct CacheZoneRuntimeSnapshot {
     pub active_invalidation_rules: usize,
     pub shared_index_enabled: bool,
     pub shared_index_generation: u64,
+    pub shared_index_shm_capacity_bytes: u64,
+    pub shared_index_shm_used_bytes: u64,
+    pub shared_index_entry_count: u64,
+    pub shared_index_current_size_bytes: u64,
+    pub shared_index_operation_ring_capacity: u64,
+    pub shared_index_operation_ring_used: u64,
+    pub shared_index_lock_contention_total: u64,
+    pub shared_index_full_reload_total: u64,
+    pub shared_index_rebuild_total: u64,
+    pub shared_index_stale_fill_lock_cleanup_total: u64,
+    pub shared_index_capacity_rejection_total: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

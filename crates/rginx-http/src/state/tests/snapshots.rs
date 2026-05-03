@@ -186,6 +186,12 @@ async fn cache_snapshot_and_delta_report_zone_changes() {
     assert_eq!(cache.zones[0].write_success_total, 1);
     assert!(cache.zones[0].shared_index_enabled);
     assert!(cache.zones[0].shared_index_generation >= 1);
+    assert!(cache.zones[0].shared_index_shm_capacity_bytes > 0);
+    assert!(cache.zones[0].shared_index_shm_used_bytes > 0);
+    assert!(cache.zones[0].shared_index_entry_count >= 1);
+    assert!(cache.zones[0].shared_index_operation_ring_capacity >= 1);
+    assert!(cache.zones[0].shared_index_operation_ring_used >= 1);
+    assert!(cache.zones[0].shared_index_rebuild_total >= 1);
 
     let delta = shared.snapshot_delta_since(since_version, Some(&[SnapshotModule::Cache]), None);
     assert_eq!(delta.schema_version, 3);

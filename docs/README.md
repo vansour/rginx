@@ -6,6 +6,8 @@
 
 - `CACHE_ARCHITECTURE_GAPS.md`
   - `rginx` 响应缓存当前长期架构差距、实施优先级与默认演进方向
+- `CACHE_SHARED_MEMORY_MIGRATION_PLAN.md`
+  - 响应缓存从 SQLite shared index 迁移到 NGINX-style shared memory 元数据层的分阶段计划
 - `ARCHITECTURE_CODEBASE_MODULARIZATION_POLICY.md`
   - Rust 源文件的单文件单职责规则、文件大小阈值和 modularization gate
 - `ARCHITECTURE_MODULE_LAYOUT_GUIDE.md`

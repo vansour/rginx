@@ -28,6 +28,7 @@ hickory-resolver.workspace = true
 hyper.workspace = true
 hyper-rustls.workspace = true
 hyper-util.workspace = true
+libc.workspace = true
 pin-project-lite.workspace = true
 quinn.workspace = true
 quinn-proto = { version = "0.11.14", default-features = false }
@@ -37,7 +38,6 @@ rasn-pkix = "0.28.13"
 rginx-core = { path = "../rginx-core" }
 rustls.workspace = true
 rustls-native-certs.workspace = true
-rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha1.workspace = true

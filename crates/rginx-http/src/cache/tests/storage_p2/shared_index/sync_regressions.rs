@@ -98,30 +98,125 @@ async fn shared_index_delta_replay_keeps_eviction_schedule_consistent() {
     assert!(index.entries.contains_key("https:example.com:/shared-evict-c"));
 }
 
-#[test]
-fn bootstrap_shared_index_imports_legacy_sidecar_into_shared_metadata_db() {
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn shared_index_remote_hit_access_updates_drive_eviction_order() {
     let temp = tempfile::tempdir().expect("cache temp dir should exist");
-    let zone = CacheZone {
-        name: "default".to_string(),
-        path: temp.path().to_path_buf(),
-        max_size_bytes: Some(1024 * 1024),
-        inactive: Duration::from_secs(60),
-        default_ttl: Duration::from_secs(60),
-        max_entry_bytes: 1024,
-        path_levels: vec![2],
-        loader_batch_entries: 100,
-        loader_sleep: Duration::ZERO,
-        manager_batch_entries: 100,
-        manager_sleep: Duration::ZERO,
-        inactive_cleanup_interval: Duration::from_secs(60),
-        shared_index: true,
-    };
+    let manager_a = test_manager_with_max_size(temp.path().to_path_buf(), 6);
+    let manager_b = test_manager_with_max_size(temp.path().to_path_buf(), 6);
+    let policy = test_policy();
+    let request_a = Request::builder()
+        .method(Method::GET)
+        .uri("/shared-touch-evict-a")
+        .header("host", "example.com")
+        .body(full_body(Bytes::new()))
+        .expect("request should build");
+    let request_b = Request::builder()
+        .method(Method::GET)
+        .uri("/shared-touch-evict-b")
+        .header("host", "example.com")
+        .body(full_body(Bytes::new()))
+        .expect("request should build");
+    let request_c = Request::builder()
+        .method(Method::GET)
+        .uri("/shared-touch-evict-c")
+        .header("host", "example.com")
+        .body(full_body(Bytes::new()))
+        .expect("request should build");
+
+    for (request, body) in [(&request_a, "aaa"), (&request_b, "bbb")] {
+        let context =
+            match manager_a.lookup(CacheRequest::from_request(request), "https", &policy).await {
+                CacheLookup::Miss(context) => *context,
+                _ => panic!("shared key should miss before store"),
+            };
+        let _ = drain_response(
+            manager_a
+                .store_response(
+                    context,
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .header(CACHE_CONTROL, "max-age=60")
+                        .body(full_body(body))
+                        .expect("response should build"),
+                )
+                .await,
+        )
+        .await;
+        let _ = wait_for_hit(&manager_a, request, &policy).await;
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+
+    let zone_a = manager_a.zones.get("default").expect("default zone should exist").clone();
+    let deterministic_now = unix_time_ms(SystemTime::now());
+    {
+        let mut index = lock_index(&zone_a.index);
+        index
+            .entries
+            .get_mut("https:example.com:/shared-touch-evict-a")
+            .expect("first shared entry should exist")
+            .last_access_unix_ms = deterministic_now.saturating_sub(20);
+        index
+            .entries
+            .get_mut("https:example.com:/shared-touch-evict-b")
+            .expect("second shared entry should exist")
+            .last_access_unix_ms = deterministic_now.saturating_sub(10);
+        index.rebuild_access_schedule();
+    }
+    zone_a.clear_hot_entries();
+
+    tokio::time::sleep(Duration::from_millis(2)).await;
+    let _ = wait_for_hit(&manager_b, &request_a, &policy).await;
+
+    let context_c =
+        match manager_a.lookup(CacheRequest::from_request(&request_c), "https", &policy).await {
+            CacheLookup::Miss(context) => *context,
+            _ => panic!("third shared key should miss before store"),
+        };
+    let _ = drain_response(
+        manager_a
+            .store_response(
+                context_c,
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header(CACHE_CONTROL, "max-age=60")
+                    .body(full_body("ccc"))
+                    .expect("response should build"),
+            )
+            .await,
+    )
+    .await;
+    let _ = wait_for_hit(&manager_a, &request_c, &policy).await;
+
+    let index = lock_index(&zone_a.index);
+    assert!(
+        index.entries.contains_key("https:example.com:/shared-touch-evict-a"),
+        "remote shared hit should refresh the first key before eviction: {:?}",
+        index.entries.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        !index.entries.contains_key("https:example.com:/shared-touch-evict-b"),
+        "older untouched shared key should be evicted: {:?}",
+        index.entries.keys().collect::<Vec<_>>()
+    );
+    assert!(index.entries.contains_key("https:example.com:/shared-touch-evict-c"));
+
+    drop(index);
+    let snapshot = manager_b.snapshot_with_shared_sync().await;
+    assert_eq!(snapshot[0].entry_count, 2);
+    assert_eq!(snapshot[0].current_size_bytes, 6);
+}
+
+#[test]
+fn bootstrap_shared_index_imports_legacy_sidecar_into_default_store() {
+    let temp = tempfile::tempdir().expect("cache temp dir should exist");
+    let zone = shared_index_test_zone(temp.path());
+    #[cfg(target_os = "linux")]
+    let _ = shared::unlink_memory_shared_index_for_test(&zone);
     let key = "https:example.com:/legacy-shared";
     let hash = cache_key_hash(key);
     let now = unix_time_ms(SystemTime::now());
     let legacy_path = zone.path.join(".rginx-index.json");
-    let shared_db_path = zone.path.join(".rginx-index.sqlite3");
-
     std::fs::write(
         &legacy_path,
         serde_json::to_vec(&serde_json::json!({
@@ -163,41 +258,34 @@ fn bootstrap_shared_index_imports_legacy_sidecar_into_shared_metadata_db() {
     assert_eq!(entry.base_key, key);
     assert_eq!(entry.body_size_bytes, 6);
     assert!(!legacy_path.exists(), "legacy sidecar should be removed after import");
-    assert!(shared_db_path.exists(), "shared metadata db should be created");
+    assert_eq!(
+        store.as_ref().expect("shared store should exist").path(),
+        zone.path.join(".rginx-index.shm").as_path()
+    );
 
     let (reloaded, reloaded_store, reloaded_generation, reloaded_store_epoch, reloaded_change_seq) =
-        shared::bootstrap_shared_index(&zone).expect("sqlite bootstrap should load after import");
-    assert!(reloaded_store.is_some(), "sqlite-backed store should remain available");
+        shared::bootstrap_shared_index(&zone).expect("default store should load after import");
+    assert!(reloaded_store.is_some(), "default shared store should remain available");
     assert_eq!(reloaded_generation, 7);
     assert_eq!(reloaded_store_epoch, store_epoch);
     assert_eq!(reloaded_change_seq, 0);
     assert_eq!(reloaded.admission_counts.get(key), Some(&3));
-    assert_eq!(reloaded.entries.get(key).expect("sqlite-backed entry should reload").hash, hash);
+    assert_eq!(reloaded.entries.get(key).expect("default store entry should reload").hash, hash);
+
+    #[cfg(target_os = "linux")]
+    shared::unlink_memory_shared_index_for_test(&zone).expect("test shm segment should unlink");
 }
 
 #[test]
 fn bootstrap_shared_index_skips_unreadable_legacy_sidecar_and_rebuilds_from_cache_files() {
     let temp = tempfile::tempdir().expect("cache temp dir should exist");
-    let zone = CacheZone {
-        name: "default".to_string(),
-        path: temp.path().to_path_buf(),
-        max_size_bytes: Some(1024 * 1024),
-        inactive: Duration::from_secs(60),
-        default_ttl: Duration::from_secs(60),
-        max_entry_bytes: 1024,
-        path_levels: vec![2],
-        loader_batch_entries: 100,
-        loader_sleep: Duration::ZERO,
-        manager_batch_entries: 100,
-        manager_sleep: Duration::ZERO,
-        inactive_cleanup_interval: Duration::from_secs(60),
-        shared_index: true,
-    };
+    let zone = shared_index_test_zone(temp.path());
+    #[cfg(target_os = "linux")]
+    let _ = shared::unlink_memory_shared_index_for_test(&zone);
     let key = "https:example.com:/legacy-shared-corrupt";
     let hash = cache_key_hash(key);
     let now = unix_time_ms(SystemTime::now());
     let legacy_path = zone.path.join(".rginx-index.json");
-    let shared_db_path = zone.path.join(".rginx-index.sqlite3");
     let paths = cache_paths_for_zone(&zone, &hash);
 
     std::fs::create_dir_all(&paths.dir).expect("cache dir should be created");
@@ -222,8 +310,123 @@ fn bootstrap_shared_index_skips_unreadable_legacy_sidecar_and_rebuilds_from_cach
     assert!(store_epoch > 0);
     assert_eq!(change_seq, 0);
     assert!(legacy_path.exists(), "corrupt legacy sidecar should be left in place");
-    assert!(shared_db_path.exists(), "shared metadata db should be created");
     let entry = index.entries.get(key).expect("cache file entry should be loaded");
     assert_eq!(entry.hash, hash);
     assert_eq!(entry.body_size_bytes, 6);
+
+    #[cfg(target_os = "linux")]
+    shared::unlink_memory_shared_index_for_test(&zone).expect("test shm segment should unlink");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn bootstrap_shared_index_rebuilds_default_shm_from_cache_files_on_clean_start() {
+    let temp = tempfile::tempdir().expect("cache temp dir should exist");
+    let zone = shared_index_test_zone(temp.path());
+    let _ = shared::unlink_memory_shared_index_for_test(&zone);
+    let key = "https:example.com:/shm-clean-start";
+    let hash = write_cache_file_entry(&zone, key, b"cached");
+    let (index, store, generation, store_epoch, change_seq) =
+        shared::bootstrap_shared_index(&zone).expect("default shm bootstrap should rebuild");
+    assert!(store.is_some(), "default shm store should be initialized");
+    assert_eq!(generation, 1);
+    assert!(store_epoch > 0);
+    assert_eq!(change_seq, 0);
+    assert_eq!(index.entries.get(key).expect("disk entry should load into shm").hash, hash);
+    assert_eq!(
+        store.as_ref().expect("shared store should exist").path(),
+        zone.path.join(".rginx-index.shm").as_path()
+    );
+
+    shared::unlink_memory_shared_index_for_test(&zone).expect("test shm segment should unlink");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn bootstrap_shared_index_attaches_existing_shm_without_disk_scan() {
+    let temp = tempfile::tempdir().expect("cache temp dir should exist");
+    let zone = shared_index_test_zone(temp.path());
+    let _ = shared::unlink_memory_shared_index_for_test(&zone);
+    let key = "https:example.com:/shm-attach";
+    let hash = write_cache_file_entry(&zone, key, b"cached");
+    let paths = cache_paths_for_zone(&zone, &hash);
+
+    let (_, _, _, store_epoch, _) = shared::bootstrap_shared_index(&zone)
+        .expect("initial default shm bootstrap should rebuild");
+    std::fs::remove_file(&paths.metadata).expect("metadata sidecar should be removed");
+
+    let (reloaded, store, generation, reloaded_store_epoch, change_seq) =
+        shared::bootstrap_shared_index(&zone).expect("existing shm should attach");
+    assert!(store.is_some(), "default shm store should be initialized");
+    assert_eq!(generation, 1);
+    assert_eq!(reloaded_store_epoch, store_epoch);
+    assert_eq!(change_seq, 0);
+    assert_eq!(reloaded.entries.get(key).expect("entry should load from shm").hash, hash);
+
+    shared::unlink_memory_shared_index_for_test(&zone).expect("test shm segment should unlink");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn bootstrap_shared_index_rebuilds_when_default_shm_header_is_invalid() {
+    let temp = tempfile::tempdir().expect("cache temp dir should exist");
+    let zone = shared_index_test_zone(temp.path());
+    let _ = shared::unlink_memory_shared_index_for_test(&zone);
+    let key = "https:example.com:/shm-corrupt";
+    let hash = write_cache_file_entry(&zone, key, b"cached");
+    let paths = cache_paths_for_zone(&zone, &hash);
+
+    shared::bootstrap_shared_index(&zone).expect("initial default shm bootstrap should rebuild");
+    shared::corrupt_memory_shared_index_for_test(&zone).expect("test shm segment should corrupt");
+
+    let (rebuilt, store, generation, store_epoch, change_seq) =
+        shared::bootstrap_shared_index(&zone).expect("corrupt shm should rebuild from disk");
+    assert!(store.is_some(), "default shm store should remain initialized");
+    assert_eq!(generation, 1);
+    assert!(store_epoch > 0);
+    assert_eq!(change_seq, 0);
+    assert_eq!(rebuilt.entries.get(key).expect("entry should rebuild from disk").hash, hash);
+    assert!(paths.metadata.exists(), "metadata sidecar should remain intact");
+    assert!(paths.body.exists(), "body file should remain intact");
+
+    shared::unlink_memory_shared_index_for_test(&zone).expect("test shm segment should unlink");
+}
+
+fn shared_index_test_zone(path: &std::path::Path) -> CacheZone {
+    CacheZone {
+        name: "default".to_string(),
+        path: path.to_path_buf(),
+        max_size_bytes: Some(1024 * 1024),
+        inactive: Duration::from_secs(60),
+        default_ttl: Duration::from_secs(60),
+        max_entry_bytes: 1024,
+        path_levels: vec![2],
+        loader_batch_entries: 100,
+        loader_sleep: Duration::ZERO,
+        manager_batch_entries: 100,
+        manager_sleep: Duration::ZERO,
+        inactive_cleanup_interval: Duration::from_secs(60),
+        shared_index: true,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn write_cache_file_entry(zone: &CacheZone, key: &str, body: &[u8]) -> String {
+    let hash = cache_key_hash(key);
+    let now = unix_time_ms(SystemTime::now());
+    let paths = cache_paths_for_zone(zone, &hash);
+    std::fs::create_dir_all(&paths.dir).expect("cache dir should be created");
+    std::fs::write(
+        &paths.metadata,
+        serde_json::to_vec(&cache_metadata(
+            key.to_string(),
+            StatusCode::OK,
+            &http::HeaderMap::new(),
+            test_metadata_input(key, now, now.saturating_add(60_000), body.len()),
+        ))
+        .expect("cache metadata should serialize"),
+    )
+    .expect("cache metadata should be written");
+    std::fs::write(&paths.body, body).expect("cache body should be written");
+    hash
 }

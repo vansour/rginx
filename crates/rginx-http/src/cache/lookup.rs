@@ -244,6 +244,7 @@ impl CacheManager {
                 return None;
             }
         };
+        record_zone_shared_entry_access(zone, key, unix_time_ms(SystemTime::now())).await;
         if status == CacheStatus::Updating {
             zone.record_updating();
         } else {

@@ -90,7 +90,7 @@ pub(super) fn load_legacy_shared_index_bytes(
     path: &Path,
 ) -> io::Result<LoadedSharedIndex> {
     let file: LegacySharedIndexFile = serde_json::from_slice(bytes).map_err(invalid_data_error)?;
-    if file.version != SHARED_INDEX_SCHEMA_VERSION as u8 {
+    if file.version != SHARED_INDEX_SCHEMA_VERSION {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
