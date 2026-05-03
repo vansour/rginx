@@ -1,35 +1,6 @@
 use super::*;
 
-pub(super) fn spawn_background_cache_refresh(
-    state: &SharedState,
-    target: &ProxyTarget,
-    client_address: &ClientAddress,
-    downstream: &DownstreamRequestContext<'_>,
-    cache_store: crate::cache::CacheStoreContext,
-) {
-    let state = state.clone();
-    let target = target.clone();
-    let client_address = client_address.clone();
-    let listener_id = downstream.listener_id.to_string();
-    let downstream_proto = downstream.downstream_proto.to_string();
-    let request_id = format!("{}:cache-update", downstream.request_id);
-    let options = downstream.options.clone();
-    state.clone().spawn_background_task(async move {
-        run_background_cache_refresh(
-            state,
-            target,
-            client_address,
-            listener_id,
-            downstream_proto,
-            request_id,
-            options,
-            cache_store,
-        )
-        .await;
-    });
-}
-
-async fn run_background_cache_refresh(
+struct BackgroundCacheRefreshTask<B> {
     state: SharedState,
     target: ProxyTarget,
     client_address: ClientAddress,
@@ -37,11 +8,62 @@ async fn run_background_cache_refresh(
     downstream_proto: String,
     request_id: String,
     options: DownstreamRequestOptions,
+    cache_backend: B,
     cache_store: crate::cache::CacheStoreContext,
-) {
-    let active = state.snapshot().await;
-    let cache_manager = active.cache.clone();
+}
+
+pub(super) fn spawn_background_cache_refresh<B>(
+    state: &SharedState,
+    target: &ProxyTarget,
+    client_address: &ClientAddress,
+    downstream: &DownstreamRequestContext<'_>,
+    cache_backend: B,
+    cache_store: crate::cache::CacheStoreContext,
+) where
+    B: ForwardCacheBackend + Send + Sync + 'static,
+{
+    let task = BackgroundCacheRefreshTask {
+        state: state.clone(),
+        target: target.clone(),
+        client_address: client_address.clone(),
+        listener_id: downstream.listener_id.to_string(),
+        downstream_proto: downstream.downstream_proto.to_string(),
+        request_id: format!("{}:cache-update", downstream.request_id),
+        options: downstream.options.clone(),
+        cache_backend,
+        cache_store,
+    };
+    state.clone().spawn_background_task(async move {
+        run_background_cache_refresh(task).await;
+    });
+}
+
+async fn run_background_cache_refresh<B>(task: BackgroundCacheRefreshTask<B>)
+where
+    B: ForwardCacheBackend + Send + Sync + 'static,
+{
+    let active = task.state.snapshot().await;
     let clients = active.clients;
+    run_background_cache_refresh_with_backend(task, clients).await;
+}
+
+async fn run_background_cache_refresh_with_backend<B>(
+    task: BackgroundCacheRefreshTask<B>,
+    clients: ProxyClients,
+) where
+    B: ForwardCacheBackend + Send + Sync + 'static,
+{
+    let BackgroundCacheRefreshTask {
+        state,
+        target,
+        client_address,
+        listener_id,
+        downstream_proto,
+        request_id,
+        options,
+        cache_backend,
+        cache_store,
+    } = task;
     let mut request = cache_store.build_background_request();
     cache_store.apply_conditional_request_headers(request.headers_mut());
 
@@ -142,7 +164,7 @@ async fn run_background_cache_refresh(
                     .expect("background cache refresh should keep a cache store context");
                 if cache_store.should_refresh_from_not_modified(response.status()) {
                     if let Err(error) =
-                        cache_manager.complete_not_modified(cache_store, response).await
+                        cache_backend.complete_not_modified(cache_store, response).await
                     {
                         tracing::warn!(
                             %error,
@@ -162,7 +184,7 @@ async fn run_background_cache_refresh(
                     Some(active_peer),
                 );
                 drain_background_cache_refresh_response(
-                    cache_manager.store_response(cache_store, response).await,
+                    cache_backend.store_response(cache_store, response).await,
                     &target.upstream_name,
                     &peer.display_url,
                     &downstream,

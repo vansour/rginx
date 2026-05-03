@@ -3,7 +3,7 @@ use std::time::SystemTime;
 use crate::handler::{BoxError, boxed_body, full_body};
 use bytes::Bytes;
 use futures_util::stream;
-use http::header::{CACHE_CONTROL, CONTENT_TYPE};
+use http::header::{CACHE_CONTROL, CONTENT_TYPE, COOKIE};
 use http::{Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, StreamBody};
 use hyper::body::Frame;
@@ -150,7 +150,10 @@ async fn refresh_not_modified_response_serves_body_and_evicts_uncacheable_entry(
 
     let mut context = test_store_context(zone.clone(), key);
     context.cached_entry = Some(cached_entry);
-    context.cached_metadata = Some(cached_metadata);
+    context.cached_response_head = Some(Arc::new(
+        prepare_cached_response_head(&hash.clone(), cached_metadata)
+            .expect("cached response head should prepare"),
+    ));
     context.cache_status = CacheStatus::Expired;
 
     let response = Response::builder()
@@ -207,6 +210,59 @@ async fn cache_manager_respects_no_cache_status_predicate() {
         CacheLookup::Updating(_, _) => panic!("response should not update"),
         CacheLookup::Bypass(status) => panic!("cacheable request should not bypass: {status:?}"),
     }
+}
+
+#[tokio::test]
+async fn request_scoped_no_cache_does_not_create_hit_for_pass_marker() {
+    let temp = tempfile::tempdir().expect("cache temp dir should exist");
+    let manager = test_manager(temp.path().to_path_buf(), 1024);
+    let mut policy = test_policy();
+    policy.pass_ttl = Some(Duration::from_secs(30));
+    policy.no_cache = Some(rginx_core::CachePredicate::CookieExists("session".to_string()));
+
+    let private_request = Request::builder()
+        .method(Method::GET)
+        .uri("/cookie-private")
+        .header("host", "example.com")
+        .header(COOKIE, "session=abc123")
+        .body(full_body(Bytes::new()))
+        .expect("request should build");
+    let private_context = match manager
+        .lookup(CacheRequest::from_request(&private_request), "https", &policy)
+        .await
+    {
+        CacheLookup::Miss(context) => *context,
+        CacheLookup::Hit(_) => panic!("empty cache should miss"),
+        CacheLookup::Updating(_, _) => panic!("empty cache should not update"),
+        CacheLookup::Bypass(status) => panic!("cacheable request should not bypass: {status:?}"),
+    };
+
+    let private_response = Response::builder()
+        .status(StatusCode::OK)
+        .header(CACHE_CONTROL, "max-age=60")
+        .body(full_body("private"))
+        .expect("response should build");
+    let stored = manager.store_response(private_context, private_response).await;
+    assert_eq!(stored.headers().get(CACHE_STATUS_HEADER).unwrap(), "MISS");
+    let body = stored.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(body.as_ref(), b"private");
+
+    let public_request = Request::builder()
+        .method(Method::GET)
+        .uri("/cookie-private")
+        .header("host", "example.com")
+        .body(full_body(Bytes::new()))
+        .expect("request should build");
+    match manager.lookup(CacheRequest::from_request(&public_request), "https", &policy).await {
+        CacheLookup::Miss(context) => assert_eq!(context.cache_status(), CacheStatus::Miss),
+        CacheLookup::Bypass(status) => {
+            panic!("request-scoped no_cache must not poison shared cache key: {status:?}")
+        }
+        _ => panic!("request-scoped no_cache must not create a hit-for-pass marker"),
+    }
+
+    let zone = manager.zones.get("default").expect("default zone should exist");
+    assert!(lock_index(&zone.index).entries.is_empty());
 }
 
 #[tokio::test]

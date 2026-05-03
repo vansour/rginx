@@ -46,19 +46,24 @@ impl CacheManager {
                 request_forces_revalidation,
                 policy,
             ) {
+                LookupDecision::Bypass { status } => {
+                    zone.record_bypass();
+                    return CacheLookup::Bypass(status);
+                }
+                LookupDecision::DropEntry { key, entry } => {
+                    remove_cache_entry_if_matches(&zone, &key, &entry).await;
+                    continue;
+                }
                 LookupDecision::FreshHit { key, entry } => {
-                    let cached_response = {
-                        let _io_guard = zone.io_read(&entry.hash).await;
-                        read_cached_response_for_request(
-                            &zone,
-                            &key,
-                            &entry,
-                            &request,
-                            policy,
-                            read_cached_body,
-                        )
-                        .await
-                    };
+                    let cached_response = read_cached_response_for_request(
+                        &zone,
+                        &key,
+                        &entry,
+                        &request,
+                        policy,
+                        read_cached_body,
+                    )
+                    .await;
                     match cached_response {
                         Ok(mut response) => {
                             zone.record_hit();
@@ -124,19 +129,16 @@ impl CacheManager {
                         store_response: false,
                         _fill_guard: None,
                         cached_entry: None,
-                        cached_metadata: None,
+                        cached_response_head: None,
                         revalidating: false,
-                        conditional_headers: None,
                         request_forces_revalidation,
                         read_cached_body,
                     }));
                 }
                 LookupDecision::BackgroundUpdate { key, cached_entry, fill_guard } => {
-                    let (cached_metadata, conditional_headers) =
-                        match self.load_lookup_metadata(&zone, &key, &cached_entry).await {
-                            Some((metadata, conditional_headers)) => {
-                                (Some(metadata), conditional_headers)
-                            }
+                    let cached_response_head =
+                        match self.load_lookup_response_head(&zone, &key, &cached_entry).await {
+                            Some(response_head) => Some(response_head),
                             None => {
                                 drop(fill_guard);
                                 continue;
@@ -153,9 +155,8 @@ impl CacheManager {
                         store_response: true,
                         _fill_guard: Some(fill_guard),
                         cached_entry: Some(cached_entry.clone()),
-                        cached_metadata,
+                        cached_response_head,
                         revalidating: true,
-                        conditional_headers,
                         request_forces_revalidation,
                         read_cached_body,
                     });
@@ -182,19 +183,16 @@ impl CacheManager {
                     fill_guard,
                     cache_status,
                 } => {
-                    let (cached_metadata, conditional_headers) = if let Some(entry) = &cached_entry
-                    {
-                        match self.load_lookup_metadata(&zone, &key, entry).await {
-                            Some((metadata, conditional_headers)) => {
-                                (Some(metadata), conditional_headers)
-                            }
+                    let cached_response_head = if let Some(entry) = &cached_entry {
+                        match self.load_lookup_response_head(&zone, &key, entry).await {
+                            Some(response_head) => Some(response_head),
                             None => {
                                 drop(fill_guard);
                                 continue;
                             }
                         }
                     } else {
-                        (None, None)
+                        None
                     };
                     if cache_status == CacheStatus::Miss {
                         zone.record_miss();
@@ -213,9 +211,8 @@ impl CacheManager {
                             || (request.method == Method::HEAD && policy.convert_head),
                         _fill_guard: fill_guard,
                         cached_entry,
-                        cached_metadata,
+                        cached_response_head,
                         revalidating: cache_status == CacheStatus::Revalidated,
-                        conditional_headers,
                         request_forces_revalidation,
                         read_cached_body,
                     }));

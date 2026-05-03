@@ -125,7 +125,7 @@ pub async fn forward_request(
                         response_idle_timeout,
                         grpc_response_deadline,
                         grpc_web_mode: grpc_web_mode.as_ref(),
-                        cache_manager: cache_manager.clone(),
+                        cache_backend: &cache_manager,
                         cache_store: cache.store.take(),
                         cache_status: cache.status,
                     },

@@ -11,6 +11,9 @@ fn cache_policy() -> rginx_core::RouteCachePolicy {
         cache_bypass: None,
         no_cache: None,
         stale_if_error: None,
+        grace: None,
+        keep: None,
+        pass_ttl: None,
         use_stale: Vec::new(),
         background_update: false,
         lock_timeout: Duration::from_secs(5),
@@ -105,6 +108,7 @@ async fn forward_request_serves_stale_for_configured_429() {
     let active = state.snapshot().await;
     let target = proxy_target(upstream);
     let mut policy = cache_policy();
+    policy.grace = Some(Duration::from_secs(30));
     policy.use_stale = vec![rginx_core::CacheUseStaleCondition::Http429];
 
     let first = crate::proxy::forward_request(

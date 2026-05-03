@@ -16,7 +16,11 @@ async fn cache_manager_returns_updating_for_background_refresh() {
         key.to_string(),
         StatusCode::OK,
         &http::HeaderMap::new(),
-        test_metadata_input(key, now.saturating_sub(2_000), now.saturating_sub(1_000), 7),
+        CacheMetadataInput {
+            grace_until_unix_ms: Some(now.saturating_add(60_000)),
+            keep_until_unix_ms: Some(now.saturating_add(60_000)),
+            ..test_metadata_input(key, now.saturating_sub(2_000), now.saturating_sub(1_000), 7)
+        },
     );
     write_cache_entry(&paths, &metadata, b"cached!").await.expect("entry should be written");
     let zone = manager.zones.get("default").expect("zone should exist");
@@ -24,13 +28,17 @@ async fn cache_manager_returns_updating_for_background_refresh() {
         let mut index = lock_index(&zone.index);
         index.insert_entry(
             key.to_string(),
-            test_index_entry(
-                key,
-                hash.clone(),
-                7,
-                now.saturating_sub(1_000),
-                now.saturating_sub(2_000),
-            ),
+            CacheIndexEntry {
+                grace_until_unix_ms: Some(now.saturating_add(60_000)),
+                keep_until_unix_ms: Some(now.saturating_add(60_000)),
+                ..test_index_entry(
+                    key,
+                    hash.clone(),
+                    7,
+                    now.saturating_sub(1_000),
+                    now.saturating_sub(2_000),
+                )
+            },
         );
         index.current_size_bytes = 7;
     }
@@ -166,7 +174,11 @@ async fn head_background_refresh_stores_revalidated_body() {
         key.to_string(),
         StatusCode::OK,
         &http::HeaderMap::new(),
-        test_metadata_input(key, now.saturating_sub(2_000), now.saturating_sub(1_000), 3),
+        CacheMetadataInput {
+            grace_until_unix_ms: Some(now.saturating_add(60_000)),
+            keep_until_unix_ms: Some(now.saturating_add(60_000)),
+            ..test_metadata_input(key, now.saturating_sub(2_000), now.saturating_sub(1_000), 3)
+        },
     );
     write_cache_entry(&paths, &metadata, b"old").await.expect("entry should be written");
     let zone = manager.zones.get("default").expect("zone should exist");
@@ -174,7 +186,17 @@ async fn head_background_refresh_stores_revalidated_body() {
         let mut index = lock_index(&zone.index);
         index.insert_entry(
             key.to_string(),
-            test_index_entry(key, hash, 3, now.saturating_sub(1_000), now.saturating_sub(2_000)),
+            CacheIndexEntry {
+                grace_until_unix_ms: Some(now.saturating_add(60_000)),
+                keep_until_unix_ms: Some(now.saturating_add(60_000)),
+                ..test_index_entry(
+                    key,
+                    hash,
+                    3,
+                    now.saturating_sub(1_000),
+                    now.saturating_sub(2_000),
+                )
+            },
         );
         index.current_size_bytes = 3;
     }

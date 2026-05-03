@@ -142,6 +142,19 @@ pub(super) fn validate_route_cache(
             "{route_scope} cache.stale_if_error_secs must be greater than 0"
         )));
     }
+    if cache.grace_secs.is_some_and(|value| value == 0) {
+        return Err(Error::Config(format!(
+            "{route_scope} cache.grace_secs must be greater than 0"
+        )));
+    }
+    if cache.keep_secs.is_some_and(|value| value == 0) {
+        return Err(Error::Config(format!("{route_scope} cache.keep_secs must be greater than 0")));
+    }
+    if cache.pass_ttl_secs.is_some_and(|value| value == 0) {
+        return Err(Error::Config(format!(
+            "{route_scope} cache.pass_ttl_secs must be greater than 0"
+        )));
+    }
 
     if cache.lock_timeout_secs.is_some_and(|value| value == 0) {
         return Err(Error::Config(format!(

@@ -1,5 +1,5 @@
 use super::*;
-use tokio::fs::File;
+use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 
@@ -44,6 +44,7 @@ fn spawn_cache_task(task: impl std::future::Future<Output = ()> + Send + 'static
 
 async fn finalize_streaming_cache(plan: StreamingCachePlan, body_size_bytes: usize) {
     if body_size_bytes > plan.max_entry_bytes {
+        remember_hit_for_pass_from_plan(&plan).await;
         let _ = fs::remove_file(&plan.body_tmp).await;
         return;
     }
@@ -70,45 +71,83 @@ async fn finalize_streaming_cache(plan: StreamingCachePlan, body_size_bytes: usi
     }
 
     let vary = plan.vary.clone();
-    let metadata = cache_metadata(
-        plan.final_key.clone(),
-        plan.status,
-        &plan.headers,
-        cache_metadata_input(
-            &plan.base_key,
-            vary.clone(),
-            plan.now,
-            &plan.freshness,
-            body_size_bytes,
+    let tags = plan.tags.clone();
+    let response_head = match prepare_cached_response_head(
+        &plan.hash,
+        cache_metadata(
+            plan.final_key.clone(),
+            plan.status,
+            &plan.headers,
+            cache_metadata_input(
+                &plan.base_key,
+                vary.clone(),
+                tags.clone(),
+                plan.now,
+                plan.grace,
+                plan.keep,
+                &plan.freshness,
+                body_size_bytes,
+            ),
         ),
-    );
+    ) {
+        Ok(response_head) => Arc::new(response_head),
+        Err(error) => {
+            let error = std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string());
+            record_streaming_cache_write_error(&plan, &error);
+            if let Some(fill_state) = plan.fill_state.as_ref() {
+                fill_state.fail(&error);
+            }
+            let _ = fs::remove_file(&plan.body_tmp).await;
+            return;
+        }
+    };
     let removed_hashes = {
         let _io_guard = plan.zone.io_write(&plan.hash).await;
-        match commit_cache_entry_temp_body(&plan.paths, &metadata, &plan.body_tmp).await {
+        match commit_cache_entry_temp_body(
+            &plan.paths,
+            response_head.metadata.as_ref(),
+            &plan.body_tmp,
+        )
+        .await
+        {
             Ok(()) => {
                 plan.zone.record_write_success();
                 if plan.revalidating {
                     plan.zone.record_revalidated();
                 }
-                update_index_after_store(
+                let removed_hashes = update_index_after_store(
                     &plan.zone,
                     plan.final_key.clone(),
                     CacheIndexEntry {
+                        kind: response_head.metadata.kind,
                         hash: plan.hash.clone(),
                         base_key: plan.base_key.clone(),
+                        stored_at_unix_ms: response_head.metadata.stored_at_unix_ms,
                         vary,
-                        body_size_bytes: metadata.body_size_bytes,
-                        expires_at_unix_ms: metadata.expires_at_unix_ms,
-                        stale_if_error_until_unix_ms: metadata.stale_if_error_until_unix_ms,
-                        stale_while_revalidate_until_unix_ms: metadata
+                        tags,
+                        body_size_bytes: response_head.metadata.body_size_bytes,
+                        expires_at_unix_ms: response_head.metadata.expires_at_unix_ms,
+                        grace_until_unix_ms: response_head.metadata.grace_until_unix_ms,
+                        keep_until_unix_ms: response_head.metadata.keep_until_unix_ms,
+                        stale_if_error_until_unix_ms: response_head
+                            .metadata
+                            .stale_if_error_until_unix_ms,
+                        stale_while_revalidate_until_unix_ms: response_head
+                            .metadata
                             .stale_while_revalidate_until_unix_ms,
-                        requires_revalidation: metadata.requires_revalidation,
-                        must_revalidate: metadata.must_revalidate,
+                        requires_revalidation: response_head.metadata.requires_revalidation,
+                        must_revalidate: response_head.metadata.must_revalidate,
                         last_access_unix_ms: plan.now,
                     },
                     plan.replaced_entry.clone(),
                 )
-                .await
+                .await;
+                plan.zone.store_prepared_response_head(
+                    &plan.final_key,
+                    plan.now,
+                    response_head.clone(),
+                );
+                removed_hashes
             }
             Err(error) => {
                 record_streaming_cache_write_error(&plan, &error);
@@ -176,4 +215,39 @@ async fn complete_streaming_cache(
     let _ = file.flush().await;
     drop(file);
     let _ = fs::remove_file(&plan.body_tmp).await;
+}
+
+async fn remember_hit_for_pass_from_plan(
+    plan: &StreamingCachePlan,
+) -> std::collections::BTreeSet<String> {
+    let Some(pass_ttl) = plan.pass_ttl else {
+        return std::collections::BTreeSet::new();
+    };
+    let removed_hashes = update_index_after_store(
+        &plan.zone,
+        plan.final_key.clone(),
+        CacheIndexEntry {
+            kind: super::super::super::CacheIndexEntryKind::HitForPass,
+            hash: cache_key_hash(&format!("pass:{}", plan.final_key)),
+            base_key: plan.base_key.clone(),
+            stored_at_unix_ms: plan.now,
+            vary: plan.vary.clone(),
+            tags: plan.tags.clone(),
+            body_size_bytes: 0,
+            expires_at_unix_ms: plan.now.saturating_add(duration_to_ms(pass_ttl)),
+            grace_until_unix_ms: None,
+            keep_until_unix_ms: Some(plan.now.saturating_add(duration_to_ms(pass_ttl))),
+            stale_if_error_until_unix_ms: None,
+            stale_while_revalidate_until_unix_ms: None,
+            requires_revalidation: false,
+            must_revalidate: false,
+            last_access_unix_ms: plan.now,
+        },
+        plan.replaced_entry.clone(),
+    )
+    .await;
+    for removed_hash in &removed_hashes {
+        remove_cache_files_if_unreferenced(plan.zone.as_ref(), removed_hash).await;
+    }
+    removed_hashes
 }

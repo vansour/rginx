@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures_util::stream;
-use http::header::CACHE_CONTROL;
+use http::header::{CACHE_CONTROL, CONTENT_LENGTH, CONTENT_RANGE, RANGE};
 use http::{Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, StreamBody};
 use hyper::body::Frame;
@@ -11,6 +11,8 @@ use tokio::time::timeout;
 use crate::handler::{BoxError, boxed_body, full_body};
 
 use super::*;
+
+mod committed_hits;
 
 #[tokio::test]
 async fn cache_manager_caches_unknown_size_response_after_stream_completion() {

@@ -15,7 +15,7 @@ mod streaming;
 mod success;
 mod types;
 
-use cache::{ForwardCacheContext, ForwardCacheLookup, lookup_forward_cache};
+use cache::{ForwardCacheBackend, ForwardCacheContext, ForwardCacheLookup, lookup_forward_cache};
 use error::{
     bad_gateway, bad_request, downstream_request_body_limit, gateway_timeout, grpc_timeout_message,
     invalid_downstream_request_body_error, payload_too_large, unsupported_media_type,

@@ -152,6 +152,9 @@ pub(super) fn compile_route_cache(
                 cache_bypass: cache.cache_bypass.map(compile_cache_predicate).transpose()?,
                 no_cache: cache.no_cache.map(compile_cache_predicate).transpose()?,
                 stale_if_error: cache.stale_if_error_secs.map(Duration::from_secs),
+                grace: cache.grace_secs.map(Duration::from_secs),
+                keep: cache.keep_secs.map(Duration::from_secs),
+                pass_ttl: cache.pass_ttl_secs.map(Duration::from_secs),
                 use_stale: dedup_preserving_order(
                     cache
                         .use_stale

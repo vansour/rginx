@@ -46,6 +46,12 @@ pub struct CacheRouteConfig {
     #[serde(default)]
     pub stale_if_error_secs: Option<u64>,
     #[serde(default)]
+    pub grace_secs: Option<u64>,
+    #[serde(default)]
+    pub keep_secs: Option<u64>,
+    #[serde(default)]
+    pub pass_ttl_secs: Option<u64>,
+    #[serde(default)]
     pub use_stale: Option<Vec<CacheUseStaleConditionConfig>>,
     #[serde(default)]
     pub background_update: Option<bool>,

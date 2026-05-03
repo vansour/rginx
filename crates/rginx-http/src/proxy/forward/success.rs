@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) struct UpstreamSuccessContext<'a> {
+pub(super) struct UpstreamSuccessContext<'a, B: ForwardCacheBackend + ?Sized> {
     pub(super) state: &'a SharedState,
     pub(super) downstream_upgrade: Option<OnUpgrade>,
     pub(super) listener_id: &'a str,
@@ -10,14 +10,14 @@ pub(super) struct UpstreamSuccessContext<'a> {
     pub(super) response_idle_timeout: Duration,
     pub(super) grpc_response_deadline: Option<super::response::GrpcResponseDeadline>,
     pub(super) grpc_web_mode: Option<&'a GrpcWebMode>,
-    pub(super) cache_manager: crate::cache::CacheManager,
+    pub(super) cache_backend: &'a B,
     pub(super) cache_store: Option<Box<crate::cache::CacheStoreContext>>,
     pub(super) cache_status: Option<crate::cache::CacheStatus>,
 }
 
-pub(super) async fn finalize_upstream_success(
+pub(super) async fn finalize_upstream_success<B: ForwardCacheBackend + ?Sized>(
     response: Response<HttpBody>,
-    context: UpstreamSuccessContext<'_>,
+    context: UpstreamSuccessContext<'_, B>,
 ) -> HttpResponse {
     if context
         .cache_store
@@ -25,7 +25,7 @@ pub(super) async fn finalize_upstream_success(
         .is_some_and(|cache_store| cache_store.should_refresh_from_not_modified(response.status()))
     {
         return match context
-            .cache_manager
+            .cache_backend
             .complete_not_modified(
                 *context.cache_store.expect("cache store should be present for revalidation"),
                 response,
@@ -81,7 +81,7 @@ pub(super) async fn finalize_upstream_success(
             context.grpc_web_mode,
             None,
         );
-        return apply_cache_store(&context.cache_manager, None, context.cache_status, response)
+        return apply_cache_store(context.cache_backend, None, context.cache_status, response)
             .await;
     }
 
@@ -94,18 +94,18 @@ pub(super) async fn finalize_upstream_success(
         context.grpc_web_mode,
         Some(context.active_peer),
     );
-    apply_cache_store(&context.cache_manager, context.cache_store, context.cache_status, response)
+    apply_cache_store(context.cache_backend, context.cache_store, context.cache_status, response)
         .await
 }
 
-async fn apply_cache_store(
-    cache_manager: &crate::cache::CacheManager,
+async fn apply_cache_store<B: ForwardCacheBackend + ?Sized>(
+    cache_backend: &B,
     cache_store: Option<Box<crate::cache::CacheStoreContext>>,
     cache_status: Option<crate::cache::CacheStatus>,
     response: HttpResponse,
 ) -> HttpResponse {
     if let Some(cache_store) = cache_store {
-        cache_manager.store_response(*cache_store, response).await
+        cache_backend.store_response(*cache_store, response).await
     } else if let Some(cache_status) = cache_status {
         crate::cache::with_cache_status(response, cache_status)
     } else {

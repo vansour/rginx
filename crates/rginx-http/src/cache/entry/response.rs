@@ -1,4 +1,11 @@
+use super::super::store::range::build_downstream_response;
 use super::*;
+use crate::handler::BoxError;
+use bytes::Bytes;
+use http::Response;
+use hyper::body::Body;
+
+mod body;
 
 struct CachedContentRange {
     start: u64,
@@ -13,17 +20,27 @@ pub(in crate::cache) struct DownstreamRangeTrimPlan {
     emit_bytes: usize,
 }
 
-pub(in crate::cache) fn finalize_response_for_request(
+pub(in crate::cache) use body::CachedFileBody;
+
+pub(in crate::cache) fn finalize_response_for_request<B>(
     status: StatusCode,
     headers: &HeaderMap,
-    body: &[u8],
+    body: B,
     request: &CacheRequest,
     policy: &rginx_core::RouteCachePolicy,
-) -> std::io::Result<HttpResponse> {
-    let Some(plan) = downstream_range_trim_plan(status, headers, request, policy)? else {
-        return build_response(status, headers, body.to_vec());
-    };
-    build_response(StatusCode::PARTIAL_CONTENT, plan.headers(), plan.trim_body(body)?)
+) -> std::io::Result<HttpResponse>
+where
+    B: Body<Data = Bytes> + Send + 'static,
+    B::Error: Into<BoxError> + 'static,
+{
+    let trim_plan = downstream_range_trim_plan(status, headers, request, policy)?;
+    let mut response = Response::builder().status(status);
+    *response.headers_mut().expect("response builder should expose headers") = headers.clone();
+    let (parts, _) = response
+        .body(crate::handler::full_body(Bytes::new()))
+        .map_err(|error| std::io::Error::other(error.to_string()))?
+        .into_parts();
+    Ok(build_downstream_response(parts, body, trim_plan))
 }
 
 pub(in crate::cache) fn downstream_range_trim_plan(
@@ -181,18 +198,6 @@ fn update_downstream_range_headers(
     Ok(())
 }
 
-fn build_response(
-    status: StatusCode,
-    headers: &HeaderMap,
-    body: Vec<u8>,
-) -> std::io::Result<HttpResponse> {
-    let mut response = Response::builder().status(status);
-    *response.headers_mut().expect("response builder should expose headers") = headers.clone();
-    response
-        .body(full_body(Bytes::from(body)))
-        .map_err(|error| std::io::Error::other(error.to_string()))
-}
-
 fn remove_cache_hop_by_hop_headers(headers: &mut HeaderMap) {
     let mut extra_headers = Vec::new();
     for value in headers.get_all(CONNECTION) {
@@ -235,22 +240,5 @@ impl DownstreamRangeTrimPlan {
 
     pub(in crate::cache) fn emit_bytes(&self) -> usize {
         self.emit_bytes
-    }
-
-    fn trim_body(&self, body: &[u8]) -> std::io::Result<Vec<u8>> {
-        let end = self.skip_bytes.checked_add(self.emit_bytes).ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "requested range exceeds cached slice body bounds",
-            )
-        })?;
-        body.get(self.skip_bytes..end)
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "requested range exceeds cached slice body bounds",
-                )
-            })
-            .map(|trimmed| trimmed.to_vec())
     }
 }

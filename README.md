@@ -23,7 +23,7 @@
 - 仅支持 Linux
 - 源码构建要求 Rust `1.94.1`
 - GitHub Release 提供 `linux-amd64` 和 `linux-arm64` 归档
-- release archive 包含 `rginx`、`configs/`、`scripts/` 以及 `deploy/systemd` / `deploy/supervisor` 示例
+- release archive 包含 `rginx`、`README.md`、`CHANGELOG.md`、`configs/`、`scripts/` 以及 `deploy/systemd` / `deploy/supervisor` 示例
 
 ## Workspace 结构
 

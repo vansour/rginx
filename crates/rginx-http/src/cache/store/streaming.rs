@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
 use bytes::Bytes;
 use http::StatusCode;
@@ -24,6 +25,7 @@ struct StreamingCachePlan {
     base_key: String,
     final_key: String,
     vary: Vec<super::super::CachedVaryHeaderValue>,
+    tags: Vec<String>,
     status: StatusCode,
     headers: HeaderMap,
     freshness: super::super::policy::ResponseFreshness,
@@ -32,6 +34,9 @@ struct StreamingCachePlan {
     paths: super::super::entry::CachePaths,
     body_tmp: PathBuf,
     max_entry_bytes: usize,
+    grace: Option<Duration>,
+    keep: Option<Duration>,
+    pass_ttl: Option<Duration>,
     expected_body_bytes: Option<usize>,
     revalidating: bool,
     replaced_entry: Option<(String, CacheIndexEntry)>,
@@ -98,17 +103,28 @@ pub(super) async fn store_streaming_response(
     no_cache: bool,
     downstream_range_trim: Option<DownstreamRangeTrimPlan>,
 ) -> HttpResponse {
+    let now = unix_time_ms(SystemTime::now());
     if !storable || no_cache {
+        if should_remember_hit_for_pass(&context, &parts.headers) {
+            for removed_hash in remember_hit_for_pass(&context, &parts.headers, now).await {
+                remove_cache_files_if_unreferenced(context.zone.as_ref(), &removed_hash).await;
+            }
+        }
         return build_downstream_response(parts, body, downstream_range_trim);
     }
 
     let freshness = response_freshness(&context, parts.status, &parts.headers);
     if !freshness_is_cacheable(&freshness) {
+        if should_remember_hit_for_pass(&context, &parts.headers) {
+            for removed_hash in remember_hit_for_pass(&context, &parts.headers, now).await {
+                remove_cache_files_if_unreferenced(context.zone.as_ref(), &removed_hash).await;
+            }
+        }
         return build_downstream_response(parts, body, downstream_range_trim);
     }
 
-    let vary = cache_vary_values(&context, &context.request, &parts.headers);
-    let final_key = cache_variant_key(&context.base_key, &vary);
+    let (final_key, vary, tags) =
+        cache_final_key_for_response(&context, &context.request, &parts.headers);
     let admission =
         record_cache_admission_attempt(&context.zone, &final_key, context.policy.min_uses).await;
     if !admission.admitted {
@@ -117,7 +133,6 @@ pub(super) async fn store_streaming_response(
 
     let upstream_status = parts.status;
     let upstream_headers = parts.headers.clone();
-    let now = unix_time_ms(SystemTime::now());
     let hash = context
         .cached_entry
         .as_ref()
@@ -134,6 +149,9 @@ pub(super) async fn store_streaming_response(
     let size_hint = body.size_hint();
     let expected_body_bytes = size_hint.exact().and_then(|exact| usize::try_from(exact).ok());
     if expected_body_bytes.is_some_and(|body_size_bytes| body_size_bytes > max_entry_bytes) {
+        for removed_hash in remember_hit_for_pass(&context, &upstream_headers, now).await {
+            remove_cache_files_if_unreferenced(context.zone.as_ref(), &removed_hash).await;
+        }
         return build_downstream_response(parts, body, downstream_range_trim);
     }
 
@@ -182,6 +200,7 @@ pub(super) async fn store_streaming_response(
             base_key: context.base_key,
             final_key,
             vary,
+            tags,
             status: upstream_status,
             headers: upstream_headers,
             freshness,
@@ -190,6 +209,9 @@ pub(super) async fn store_streaming_response(
             paths,
             body_tmp,
             max_entry_bytes,
+            grace: context.policy.grace,
+            keep: context.policy.keep,
+            pass_ttl: context.policy.pass_ttl,
             expected_body_bytes,
             revalidating: context.revalidating,
             replaced_entry,
