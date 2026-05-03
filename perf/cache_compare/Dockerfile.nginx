@@ -2,6 +2,10 @@ FROM debian:trixie-slim
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends nginx ca-certificates curl \
+    && mkdir -p /cache /run/nginx /var/lib/nginx /var/log/nginx \
+    && chown -R www-data:www-data /cache /run/nginx /var/lib/nginx /var/log/nginx \
     && rm -rf /var/lib/apt/lists/*
+
+USER www-data
 
 ENTRYPOINT ["nginx", "-g", "daemon off;", "-c", "/etc/nginx/nginx.conf"]

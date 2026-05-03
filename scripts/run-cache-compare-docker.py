@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import http.client
 import json
+import logging
 import re
 import shutil
 import statistics
@@ -500,8 +501,8 @@ def sample_memory(project_dir: Path, service: str, stop: threading.Event, sample
                     cwd=project_dir,
                 )
                 samples.append(parse_mem_usage_mb(stats.stdout.strip()))
-        except Exception:
-            pass
+        except (OSError, subprocess.CalledProcessError, ValueError) as error:
+            logging.debug("memory sampling failed for %s: %s", service, error)
         stop.wait(1.0)
 
 
@@ -637,6 +638,8 @@ def prepare_workspace(project_root: Path, temp_root: Path, profile: Profile, bod
     (work_dir / "rginx" / "cache").mkdir(parents=True, exist_ok=True)
     (work_dir / "nginx" / "cache").mkdir(parents=True, exist_ok=True)
     (work_dir / "wrk").mkdir(parents=True, exist_ok=True)
+    (work_dir / "rginx" / "cache").chmod(0o777)
+    (work_dir / "nginx" / "cache").chmod(0o777)
     write_file(
         work_dir / "compose.yaml",
         compose_yaml(project_root, work_dir),

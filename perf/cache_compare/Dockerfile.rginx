@@ -10,8 +10,13 @@ FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates libssl3 \
     && mkdir -p /run/rginx /cache \
+    && groupadd -r -g 1001 rginx \
+    && useradd -r -u 1001 -g rginx -d /nonexistent -s /usr/sbin/nologin rginx \
+    && chown -R rginx:rginx /run/rginx /cache \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /src/target/release/rginx /usr/local/bin/rginx
+
+USER rginx
 
 ENTRYPOINT ["/usr/local/bin/rginx"]

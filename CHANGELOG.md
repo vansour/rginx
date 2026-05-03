@@ -25,7 +25,7 @@ Older release history remains available in GitHub Releases.
 
 ### 更新与改进
 
-- 共享缓存索引从旧 sidecar 文件升级为 SQLite shared metadata database，并带 generation、change log 与 delta replay 机制。跨进程同步不再总是依赖整份重载，本地 hot metadata 的保留也更稳。
+- 共享缓存索引从 SQLite 后端迁移到 NGINX 风格的 per-zone 共享内存（SHM）后端，并保留 generation、change log 与 delta replay 语义；跨进程 fill 锁也改为基于 SHM 协调，本地 hot metadata 仍会在命中路径保留。
 - 缓存 I/O 并发控制从 zone 级单锁改成更细粒度的 striped I/O locks，热点 keyset 下的并发命中与填充冲突更少。
 - 缓存内部模块边界被进一步拆清，fill、maintenance、shared index、streaming store、range path 等逻辑已经分层，便于继续向可插拔 backend 演进。
 - 在 `proxy/forward` 边界引入了第一层 `ForwardCacheBackend` trait，lookup、store、304 refresh 与 background refresh 不再直接硬耦合到 concrete `CacheManager`。
@@ -57,11 +57,11 @@ This prerelease focuses on two major tracks: shipping end-to-end ACME managed ce
 
 ### Update & Improvement
 
-- Upgraded the shared cache index from the old sidecar file to a SQLite shared metadata database with generation, change-log, and delta replay support, reducing full reload dependence and preserving local hot metadata more reliably.
+- Migrated the shared cache index from SQLite to an NGINX-style per-zone shared memory (SHM) backend with SHM-backed cross-process fill locks while preserving generation, change-log, delta replay, and local hot metadata retention semantics.
 - Replaced the zone-wide cache I/O lock with finer-grained striped I/O locks to reduce contention for hot keysets under concurrent hits and fills.
 - Further modularized cache internals across fill, maintenance, shared index, streaming store, and range paths, creating a cleaner foundation for future pluggable backends.
 - Introduced a first-layer `ForwardCacheBackend` trait at the `proxy/forward` boundary so lookup, store, 304 refresh, and background refresh are no longer hard-wired to the concrete `CacheManager`.
-- Expanded the cache verification matrix with new shared index, cross-process fill, streaming, range, termination, stress, regression, and proxy stale test groups, substantially broadening pre-release correctness coverage.
+- Expanded the cache verification matrix with new shared index, cross-process fill, streaming, range, termination, stress, regression, and proxy stale test groups, substantially broadening prerelease correctness coverage.
 - Improved `check`, `status`, admin snapshot, and runtime status outputs with new ACME data, richer cache runtime snapshots, clearer summary output, and better links to long-lived architecture guidance.
 - Tightened repository documentation around “long-lived docs + versioned release notes,” adding a long-term cache architecture gaps document and removing docs that no longer matched the long-lived maintenance model.
 - The release process now supports hand-written bilingual release notes and fuller changelog archiving, avoiding the short and formulaic style produced by pure GitHub auto-generated notes.

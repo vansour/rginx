@@ -2,6 +2,10 @@ FROM debian:trixie-slim
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends wrk ca-certificates \
+    && groupadd -r -g 1001 wrk \
+    && useradd -r -u 1001 -g wrk -d /nonexistent -s /usr/sbin/nologin wrk \
     && rm -rf /var/lib/apt/lists/*
+
+USER wrk
 
 ENTRYPOINT ["wrk"]

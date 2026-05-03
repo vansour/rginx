@@ -1,4 +1,5 @@
 use super::*;
+use crate::cache::shared::SHARED_ACCESS_TOUCH_PUBLISH_INTERVAL_MS;
 use crate::cache::shared::run_blocking;
 
 impl CacheZoneRuntime {
@@ -68,6 +69,7 @@ impl CacheZoneRuntime {
             .or_insert_with(|| {
                 Arc::new(CacheEntryHotState {
                     last_access_unix_ms: AtomicU64::new(0),
+                    shared_touch_published_unix_ms: AtomicU64::new(0),
                     response_head: Mutex::new(None),
                 })
             })
@@ -76,6 +78,25 @@ impl CacheZoneRuntime {
 
     pub(in crate::cache) fn record_entry_access(&self, key: &str, now: u64) {
         self.hot_entry_for_key(key).last_access_unix_ms.fetch_max(now, Ordering::Relaxed);
+    }
+
+    pub(in crate::cache) fn should_publish_shared_entry_access(&self, key: &str, now: u64) -> bool {
+        let hot_entry = self.hot_entry_for_key(key);
+        loop {
+            let last_published = hot_entry.shared_touch_published_unix_ms.load(Ordering::Relaxed);
+            if last_published != 0
+                && now.saturating_sub(last_published) < SHARED_ACCESS_TOUCH_PUBLISH_INTERVAL_MS
+            {
+                return false;
+            }
+            if hot_entry
+                .shared_touch_published_unix_ms
+                .compare_exchange(last_published, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                return true;
+            }
+        }
     }
 
     pub(in crate::cache) fn effective_last_access_unix_ms(

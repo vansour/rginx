@@ -36,6 +36,7 @@ pub(in crate::cache) use index_file::{
 };
 
 type SharedIndexBootstrap = (CacheIndex, Option<Arc<SharedIndexStore>>, u64, u64, u64);
+pub(super) const SHARED_ACCESS_TOUCH_PUBLISH_INTERVAL_MS: u64 = 1_000;
 
 #[derive(Clone)]
 pub(super) enum SharedIndexOperation {
@@ -160,6 +161,10 @@ pub(super) async fn record_zone_shared_entry_access(
     key: &str,
     last_access_unix_ms: u64,
 ) {
+    zone.record_entry_access(key, last_access_unix_ms);
+    if !zone.should_publish_shared_entry_access(key, last_access_unix_ms) {
+        return;
+    }
     let _sync_guard = zone.shared_index_sync_lock.lock().await;
     let should_publish = {
         let mut index = lock_index(&zone.index);
