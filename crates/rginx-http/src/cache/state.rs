@@ -134,6 +134,7 @@ pub(super) struct CacheConditionalHeaders {
 
 pub(super) struct CacheEntryHotState {
     pub(super) last_access_unix_ms: AtomicU64,
+    pub(super) shared_touch_published_unix_ms: AtomicU64,
     pub(super) response_head: Mutex<Option<Arc<PreparedCacheResponseHead>>>,
 }
 

@@ -7,7 +7,13 @@ pub(in crate::cache) fn bootstrap_shared_index(
         return Ok((load_index_from_disk(zone)?, None, 0, 0, 0));
     }
 
-    let store = Arc::new(shared_index_store(zone));
+    bootstrap_shared_index_with_store(zone, Arc::new(shared_index_store(zone)))
+}
+
+fn bootstrap_shared_index_with_store(
+    zone: &rginx_core::CacheZone,
+    store: Arc<SharedIndexStore>,
+) -> io::Result<SharedIndexBootstrap> {
     match run_blocking(|| load_shared_index_from_disk(store.as_ref())) {
         Ok(loaded) if shared_index_loaded(&loaded.index, loaded.generation) => {
             let _ = delete_legacy_shared_index_file(zone);
@@ -23,7 +29,7 @@ pub(in crate::cache) fn bootstrap_shared_index(
         Err(error) => {
             tracing::warn!(
                 zone = %zone.name,
-                path = %shared_index_path(zone).display(),
+                path = %store.path().display(),
                 %error,
                 "failed to load shared cache index metadata; rebuilding from cache files"
             );
@@ -53,7 +59,7 @@ fn bootstrap_shared_index_from_cache_files(
         Err(error) => {
             tracing::warn!(
                 zone = %zone.name,
-                path = %shared_index_path(zone).display(),
+                path = %legacy_shared_index_path(zone).display(),
                 %error,
                 "failed to import legacy shared cache index; rebuilding from cache files"
             );

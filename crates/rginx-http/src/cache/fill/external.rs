@@ -13,8 +13,7 @@ use super::common::{
     size_hint_from_headers,
 };
 use super::shared::{
-    ExternalCacheFillReadState, header_map_from_shared_headers,
-    read_shared_fill_state_record_for_nonce,
+    ExternalCacheFillReadState, header_map_from_shared_headers, read_external_fill_state_record,
 };
 use crate::handler::{BoxError, full_body};
 
@@ -95,14 +94,13 @@ async fn stream_external_fill_body(
     state: ExternalCacheFillReadState,
     tx: mpsc::Sender<std::result::Result<Frame<Bytes>, BoxError>>,
 ) {
-    let mut current_state =
-        match read_shared_fill_state_record_for_nonce(&state.state_path, &state.nonce) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                let _ = tx.send(Err(error.into())).await;
-                return;
-            }
-        };
+    let mut current_state = match read_external_fill_state_record(&state.source) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            let _ = tx.send(Err(error.into())).await;
+            return;
+        }
+    };
     let mut file = match open_external_fill_body_file(&state, current_state.finished).await {
         Ok(file) => file,
         Err(error) => {
@@ -113,7 +111,7 @@ async fn stream_external_fill_body(
     let mut offset = 0u64;
 
     loop {
-        match read_shared_fill_state_record_for_nonce(&state.state_path, &state.nonce) {
+        match read_external_fill_state_record(&state.source) {
             Ok(snapshot) => current_state = snapshot,
             Err(error) if current_state.finished || current_state.error.is_some() => {
                 tracing::debug!(%error, "shared fill state disappeared after completion");

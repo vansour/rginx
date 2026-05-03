@@ -4,7 +4,7 @@ use std::time::SystemTime;
 
 use super::*;
 
-enum SharedFillLockState {
+enum FileSharedFillLockState {
     Missing,
     Fresh,
     Stale,
@@ -32,36 +32,72 @@ impl CacheZoneRuntime {
         }
 
         let (external_lock_path, external_state) = if self.config.shared_index {
-            match self.try_acquire_shared_fill_lock(key, lock_age) {
-                Some(lock_path) => match super::super::fill::create_shared_external_fill_handle(
-                    self.config.as_ref(),
+            if let Some(store) = self.shared_index_store.as_ref()
+                && store.supports_shared_fill_locks()
+            {
+                match super::super::fill::create_memory_shared_external_fill_handle(
+                    store.clone(),
                     key,
-                    &lock_path,
                     now,
+                    lock_age,
                     share_fingerprint,
                 ) {
-                    Ok(state) => (Some(lock_path), Some(state)),
+                    Ok(Some(state)) => (None, Some(state)),
+                    Ok(None) => {
+                        if let Some(state) = super::super::fill::load_memory_external_fill_state(
+                            store.clone(),
+                            key,
+                            share_fingerprint,
+                        ) {
+                            return FillLockDecision::ReadExternal { state };
+                        }
+                        return FillLockDecision::WaitExternal { key: key.to_string() };
+                    }
                     Err(error) => {
                         tracing::warn!(
                             zone = %self.config.name,
                             key = %key,
-                            path = %lock_path.display(),
+                            path = %store.path().display(),
                             %error,
-                            "failed to initialize external shared fill state; falling back to local fill coordination"
+                            "failed to initialize shm shared fill state; falling back to local fill coordination"
                         );
-                        let _ = std::fs::remove_file(&lock_path);
                         (None, None)
                     }
-                },
-                None => {
-                    if let Some(state) = super::super::fill::load_external_fill_state(
-                        self.config.as_ref(),
-                        key,
-                        share_fingerprint,
-                    ) {
-                        return FillLockDecision::ReadExternal { state };
+                }
+            } else {
+                match self.try_acquire_file_shared_fill_lock(key, lock_age) {
+                    Some(lock_path) => {
+                        match super::super::fill::create_file_shared_external_fill_handle(
+                            self.config.as_ref(),
+                            key,
+                            &lock_path,
+                            now,
+                            share_fingerprint,
+                        ) {
+                            Ok(state) => (Some(lock_path), Some(state)),
+                            Err(error) => {
+                                tracing::warn!(
+                                    zone = %self.config.name,
+                                    key = %key,
+                                    path = %lock_path.display(),
+                                    %error,
+                                    "failed to initialize external shared fill state; falling back to local fill coordination"
+                                );
+                                let _ = std::fs::remove_file(&lock_path);
+                                (None, None)
+                            }
+                        }
                     }
-                    return FillLockDecision::WaitExternal { key: key.to_string() };
+                    None => {
+                        if let Some(state) = super::super::fill::load_file_external_fill_state(
+                            self.config.as_ref(),
+                            key,
+                            share_fingerprint,
+                        ) {
+                            return FillLockDecision::ReadExternal { state };
+                        }
+                        return FillLockDecision::WaitExternal { key: key.to_string() };
+                    }
                 }
             }
         } else {
@@ -95,19 +131,27 @@ impl CacheZoneRuntime {
         lock_timeout: std::time::Duration,
         lock_age: std::time::Duration,
     ) -> bool {
+        if let Some(store) = self.shared_index_store.as_ref()
+            && store.supports_shared_fill_locks()
+        {
+            return self
+                .wait_for_memory_shared_fill_lock(store.as_ref(), key, lock_timeout, lock_age)
+                .await;
+        }
+
         let lock_path = shared::shared_fill_lock_path(self.config.as_ref(), key);
         let deadline = tokio::time::Instant::now() + lock_timeout;
         loop {
-            match self.shared_fill_lock_state(&lock_path, lock_age) {
-                SharedFillLockState::Missing => return true,
-                SharedFillLockState::Stale => match std::fs::remove_file(&lock_path) {
+            match self.file_shared_fill_lock_state(&lock_path, lock_age) {
+                FileSharedFillLockState::Missing => return true,
+                FileSharedFillLockState::Stale => match std::fs::remove_file(&lock_path) {
                     Ok(()) => return true,
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                         return true;
                     }
                     Err(_) => {}
                 },
-                SharedFillLockState::Fresh => {}
+                FileSharedFillLockState::Fresh => {}
             }
 
             let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now())
@@ -118,7 +162,40 @@ impl CacheZoneRuntime {
         }
     }
 
-    fn try_acquire_shared_fill_lock(
+    async fn wait_for_memory_shared_fill_lock(
+        &self,
+        store: &SharedIndexStore,
+        key: &str,
+        lock_timeout: std::time::Duration,
+        lock_age: std::time::Duration,
+    ) -> bool {
+        let deadline = tokio::time::Instant::now() + lock_timeout;
+        loop {
+            let now = unix_time_ms(SystemTime::now());
+            match super::super::fill::memory_shared_fill_lock_state(store, key, now, lock_age) {
+                Ok(shared::SharedFillLockStatus::Missing) => return true,
+                Ok(shared::SharedFillLockStatus::Stale) => {
+                    match super::super::fill::clear_stale_memory_shared_fill_lock(
+                        store, key, now, lock_age,
+                    ) {
+                        Ok(true) => return true,
+                        Ok(false) => {}
+                        Err(_) => {}
+                    }
+                }
+                Ok(shared::SharedFillLockStatus::Fresh) => {}
+                Err(_) => return false,
+            }
+
+            let Some(remaining) = deadline.checked_duration_since(tokio::time::Instant::now())
+            else {
+                return false;
+            };
+            tokio::time::sleep(remaining.min(std::time::Duration::from_millis(25))).await;
+        }
+    }
+
+    fn try_acquire_file_shared_fill_lock(
         &self,
         key: &str,
         lock_age: std::time::Duration,
@@ -128,8 +205,8 @@ impl CacheZoneRuntime {
             match std::fs::OpenOptions::new().write(true).create_new(true).open(&lock_path) {
                 Ok(_) => return Some(lock_path),
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    match self.shared_fill_lock_state(&lock_path, lock_age) {
-                        SharedFillLockState::Missing | SharedFillLockState::Stale => {
+                    match self.file_shared_fill_lock_state(&lock_path, lock_age) {
+                        FileSharedFillLockState::Missing | FileSharedFillLockState::Stale => {
                             match std::fs::remove_file(&lock_path) {
                                 Ok(()) => continue,
                                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -138,7 +215,7 @@ impl CacheZoneRuntime {
                                 Err(_) => return None,
                             }
                         }
-                        SharedFillLockState::Fresh => return None,
+                        FileSharedFillLockState::Fresh => return None,
                     }
                 }
                 Err(_) => return None,
@@ -163,27 +240,27 @@ impl CacheZoneRuntime {
         Some(state)
     }
 
-    fn shared_fill_lock_state(
+    fn file_shared_fill_lock_state(
         &self,
         lock_path: &Path,
         lock_age: std::time::Duration,
-    ) -> SharedFillLockState {
+    ) -> FileSharedFillLockState {
         let metadata = match std::fs::metadata(lock_path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return SharedFillLockState::Missing;
+                return FileSharedFillLockState::Missing;
             }
-            Err(_) => return SharedFillLockState::Fresh,
+            Err(_) => return FileSharedFillLockState::Fresh,
         };
         let Ok(modified) = metadata.modified() else {
-            return SharedFillLockState::Fresh;
+            return FileSharedFillLockState::Fresh;
         };
         if unix_time_ms(SystemTime::now()).saturating_sub(unix_time_ms(modified))
             > lock_age.as_millis() as u64
         {
-            SharedFillLockState::Stale
+            FileSharedFillLockState::Stale
         } else {
-            SharedFillLockState::Fresh
+            FileSharedFillLockState::Fresh
         }
     }
 }
@@ -196,7 +273,9 @@ impl Drop for CacheFillGuard {
                 fill_locks.remove(&self.key);
             }
         }
-        if let Some(external_lock_path) = &self.external_lock_path {
+        if let Some(external_state) = &self.external_state {
+            external_state.release();
+        } else if let Some(external_lock_path) = &self.external_lock_path {
             let _ = std::fs::remove_file(external_lock_path);
         }
         self.notify.notify_waiters();

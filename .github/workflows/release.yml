@@ -286,9 +286,12 @@ jobs:
           CHANGELOG_RANGE="${COMMIT_SHA}"
           CHANGELOG_TITLE="Initial release changes"
           REQUIRED_RELEASE_NOTES_HEADINGS=(
-            "## New / 新增"
-            "## Update & Improvement / 更新与改进"
-            "## Bug Fixed / 问题修复"
+            "## 新增"
+            "## 更新与改进"
+            "## 问题修复"
+            "## New"
+            "## Update & Improvement"
+            "## Bug Fixed"
           )
 
           if [[ -n "${PREVIOUS_TAG}" ]]; then

@@ -49,6 +49,14 @@ pub(super) fn apply_shared_index_delta(
                     remove_variant_key(&mut index.variants, &removed.base_key, key);
                 }
             }
+            SharedIndexOperation::TouchEntry { key, last_access_unix_ms } => {
+                if let Some(entry) = index.entries.get_mut(key)
+                    && entry.last_access_unix_ms < *last_access_unix_ms
+                {
+                    entry.last_access_unix_ms = *last_access_unix_ms;
+                    index.reschedule_entry_access(key, *last_access_unix_ms);
+                }
+            }
             SharedIndexOperation::SetAdmissionCount { key, uses } => {
                 index.admission_counts.insert(key.clone(), *uses);
             }

@@ -1,8 +1,18 @@
 use super::*;
+use crate::cache::shared::SHARED_ACCESS_TOUCH_PUBLISH_INTERVAL_MS;
+use crate::cache::shared::run_blocking;
 
 impl CacheZoneRuntime {
     pub(in crate::cache) fn snapshot(&self) -> CacheZoneRuntimeSnapshot {
-        let index = read_index(&self.index);
+        let (entry_count, current_size_bytes, active_invalidation_rules) = {
+            let index = read_index(&self.index);
+            (index.entries.len(), index.current_size_bytes, index.invalidations.len())
+        };
+        let shared_index_metrics = self
+            .shared_index_store
+            .as_ref()
+            .and_then(|store| run_blocking(|| store.metrics()).ok())
+            .unwrap_or_default();
         CacheZoneRuntimeSnapshot {
             zone_name: self.config.name.clone(),
             path: self.config.path.clone(),
@@ -10,8 +20,8 @@ impl CacheZoneRuntime {
             inactive_secs: self.config.inactive.as_secs(),
             default_ttl_secs: self.config.default_ttl.as_secs(),
             max_entry_bytes: self.config.max_entry_bytes,
-            entry_count: index.entries.len(),
-            current_size_bytes: index.current_size_bytes,
+            entry_count,
+            current_size_bytes,
             hit_total: self.stats.hit_total.load(Ordering::Relaxed),
             miss_total: self.stats.miss_total.load(Ordering::Relaxed),
             bypass_total: self.stats.bypass_total.load(Ordering::Relaxed),
@@ -25,9 +35,21 @@ impl CacheZoneRuntime {
             purge_total: self.stats.purge_total.load(Ordering::Relaxed),
             invalidation_total: self.stats.invalidation_total.load(Ordering::Relaxed),
             inactive_cleanup_total: self.stats.inactive_cleanup_total.load(Ordering::Relaxed),
-            active_invalidation_rules: index.invalidations.len(),
+            active_invalidation_rules,
             shared_index_enabled: self.config.shared_index,
             shared_index_generation: self.shared_index_generation.load(Ordering::Relaxed),
+            shared_index_shm_capacity_bytes: shared_index_metrics.shm_capacity_bytes,
+            shared_index_shm_used_bytes: shared_index_metrics.shm_used_bytes,
+            shared_index_entry_count: shared_index_metrics.entry_count,
+            shared_index_current_size_bytes: shared_index_metrics.current_size_bytes,
+            shared_index_operation_ring_capacity: shared_index_metrics.operation_ring_capacity,
+            shared_index_operation_ring_used: shared_index_metrics.operation_ring_used,
+            shared_index_lock_contention_total: shared_index_metrics.lock_contention_total,
+            shared_index_full_reload_total: shared_index_metrics.full_reload_total,
+            shared_index_rebuild_total: shared_index_metrics.rebuild_total,
+            shared_index_stale_fill_lock_cleanup_total: shared_index_metrics
+                .stale_fill_lock_cleanup_total,
+            shared_index_capacity_rejection_total: shared_index_metrics.capacity_rejection_total,
         }
     }
 
@@ -47,6 +69,7 @@ impl CacheZoneRuntime {
             .or_insert_with(|| {
                 Arc::new(CacheEntryHotState {
                     last_access_unix_ms: AtomicU64::new(0),
+                    shared_touch_published_unix_ms: AtomicU64::new(0),
                     response_head: Mutex::new(None),
                 })
             })
@@ -55,6 +78,25 @@ impl CacheZoneRuntime {
 
     pub(in crate::cache) fn record_entry_access(&self, key: &str, now: u64) {
         self.hot_entry_for_key(key).last_access_unix_ms.fetch_max(now, Ordering::Relaxed);
+    }
+
+    pub(in crate::cache) fn should_publish_shared_entry_access(&self, key: &str, now: u64) -> bool {
+        let hot_entry = self.hot_entry_for_key(key);
+        loop {
+            let last_published = hot_entry.shared_touch_published_unix_ms.load(Ordering::Relaxed);
+            if last_published != 0
+                && now.saturating_sub(last_published) < SHARED_ACCESS_TOUCH_PUBLISH_INTERVAL_MS
+            {
+                return false;
+            }
+            if hot_entry
+                .shared_touch_published_unix_ms
+                .compare_exchange(last_published, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                return true;
+            }
+        }
     }
 
     pub(in crate::cache) fn effective_last_access_unix_ms(

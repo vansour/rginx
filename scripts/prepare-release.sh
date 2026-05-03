@@ -164,7 +164,7 @@ RELEASE_NOTES_PATH="${ROOT_DIR}/release-notes/${TAG}.md"
 [[ -f "${RELEASE_NOTES_PATH}" ]] || die "missing release notes file: release-notes/${TAG}.md"
 grep -Fq "[${VERSION}]" "${ROOT_DIR}/CHANGELOG.md" \
     || die "CHANGELOG.md must contain an entry for ${VERSION}"
-for heading in "## New / 新增" "## Update & Improvement / 更新与改进" "## Bug Fixed / 问题修复"; do
+for heading in "## 新增" "## 更新与改进" "## 问题修复" "## New" "## Update & Improvement" "## Bug Fixed"; do
     grep -Fq "${heading}" "${RELEASE_NOTES_PATH}" \
         || die "release notes file ${RELEASE_NOTES_PATH} must contain section: ${heading}"
 done

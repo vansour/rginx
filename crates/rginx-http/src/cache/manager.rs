@@ -66,6 +66,12 @@ impl CacheManager {
                     .await;
                     match cached_response {
                         Ok(mut response) => {
+                            record_zone_shared_entry_access(
+                                &zone,
+                                &key,
+                                unix_time_ms(SystemTime::now()),
+                            )
+                            .await;
                             zone.record_hit();
                             response
                                 .headers_mut()

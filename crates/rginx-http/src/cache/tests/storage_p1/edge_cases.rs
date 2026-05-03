@@ -71,7 +71,7 @@ async fn cleanup_inactive_entries_honors_manager_batch_entries() {
 }
 
 #[tokio::test]
-async fn recent_hit_keeps_old_durable_entry_out_of_inactive_cleanup() {
+async fn recent_hit_keeps_entry_out_of_inactive_cleanup_without_rewriting_metadata() {
     let temp = tempfile::tempdir().expect("cache temp dir should exist");
     let config = Arc::new(CacheZone {
         name: "default".to_string(),
@@ -131,6 +131,8 @@ async fn recent_hit_keeps_old_durable_entry_out_of_inactive_cleanup() {
     );
     let paths = cache_paths_for_zone(zone.config.as_ref(), &hash);
     write_cache_entry(&paths, &metadata, b"cached").await.expect("entry should be written");
+    let metadata_sidecar_before_hit =
+        tokio::fs::read(&paths.metadata).await.expect("metadata sidecar should be readable");
     {
         let mut index = lock_index(&zone.index);
         index.insert_entry(
@@ -154,14 +156,19 @@ async fn recent_hit_keeps_old_durable_entry_out_of_inactive_cleanup() {
         _ => panic!("expected cache hit before cleanup"),
     }
 
-    assert_eq!(
+    assert!(
         lock_index(&zone.index)
             .entries
             .get(key)
             .expect("entry should remain indexed after hit")
-            .last_access_unix_ms,
-        old_last_access,
-        "lookup should not write-touch durable last_access",
+            .last_access_unix_ms
+            >= now,
+        "lookup should publish the recent access time to the shared index mirror",
+    );
+    assert_eq!(
+        tokio::fs::read(&paths.metadata).await.expect("metadata sidecar should remain readable"),
+        metadata_sidecar_before_hit,
+        "lookup should not rewrite the durable metadata sidecar",
     );
 
     cleanup_inactive_entries_in_zone(&zone).await;
