@@ -188,20 +188,20 @@ async fn shared_index_remote_hit_access_updates_drive_eviction_order() {
     .await;
     let _ = wait_for_hit(&manager_a, &request_c, &policy).await;
 
-    let index = lock_index(&zone_a.index);
-    assert!(
-        index.entries.contains_key("https:example.com:/shared-touch-evict-a"),
-        "remote shared hit should refresh the first key before eviction: {:?}",
-        index.entries.keys().collect::<Vec<_>>()
-    );
-    assert!(
-        !index.entries.contains_key("https:example.com:/shared-touch-evict-b"),
-        "older untouched shared key should be evicted: {:?}",
-        index.entries.keys().collect::<Vec<_>>()
-    );
-    assert!(index.entries.contains_key("https:example.com:/shared-touch-evict-c"));
-
-    drop(index);
+    {
+        let index = lock_index(&zone_a.index);
+        assert!(
+            index.entries.contains_key("https:example.com:/shared-touch-evict-a"),
+            "remote shared hit should refresh the first key before eviction: {:?}",
+            index.entries.keys().collect::<Vec<_>>()
+        );
+        assert!(
+            !index.entries.contains_key("https:example.com:/shared-touch-evict-b"),
+            "older untouched shared key should be evicted: {:?}",
+            index.entries.keys().collect::<Vec<_>>()
+        );
+        assert!(index.entries.contains_key("https:example.com:/shared-touch-evict-c"));
+    }
     let snapshot = manager_b.snapshot_with_shared_sync().await;
     assert_eq!(snapshot[0].entry_count, 2);
     assert_eq!(snapshot[0].current_size_bytes, 6);
