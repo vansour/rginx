@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import http.client
 import json
 import logging
@@ -672,10 +673,8 @@ def ensure_origin(project_dir: Path) -> None:
 
 
 def down(project_dir: Path) -> None:
-    try:
+    with contextlib.suppress(subprocess.CalledProcessError):
         docker_compose(project_dir, "down", "--remove-orphans", "--volumes")
-    except subprocess.CalledProcessError:
-        pass
 
 
 def run_wrk(project_dir: Path, target: str, profile: Profile, scenario: Scenario, timeout_s: int) -> str:

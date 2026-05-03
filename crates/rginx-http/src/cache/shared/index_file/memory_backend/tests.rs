@@ -1,6 +1,6 @@
 use std::io;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -145,18 +145,20 @@ fn memory_backend_metrics_track_reloads_contention_and_ring_usage() {
     let loaded = store.load().expect("full reload should succeed");
     assert!(loaded.index.entries.contains_key("https:example.com:/metrics"));
 
+    let (lock_acquired_tx, lock_acquired_rx) = mpsc::channel();
     let holder = {
         let store = store.clone();
         thread::spawn(move || {
             store
                 .with_document_lock(|_, _| {
+                    lock_acquired_tx.send(()).expect("lock acquisition should signal");
                     thread::sleep(Duration::from_millis(50));
                     Ok(())
                 })
                 .expect("lock holder should succeed");
         })
     };
-    thread::sleep(Duration::from_millis(10));
+    lock_acquired_rx.recv().expect("lock holder should acquire lock");
     let metrics = store.metrics().expect("metrics should load");
     holder.join().expect("lock holder should join");
 
