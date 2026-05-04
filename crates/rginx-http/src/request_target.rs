@@ -5,6 +5,9 @@ pub(crate) struct NormalizedRequestTarget {
     pub(crate) path_and_query: String,
 }
 
+#[cfg(test)]
+mod tests;
+
 pub(crate) fn normalize_request_target(uri: &Uri) -> NormalizedRequestTarget {
     let path = normalize_request_path(uri.path());
     let path_and_query = match uri.query() {
@@ -16,6 +19,10 @@ pub(crate) fn normalize_request_target(uri: &Uri) -> NormalizedRequestTarget {
 }
 
 pub(crate) fn normalize_request_path(path: &str) -> String {
+    if path == "*" {
+        return "*".to_string();
+    }
+
     let path = if path.is_empty() { "/" } else { path };
     let absolute = path.starts_with('/');
     let trailing_slash = path.ends_with('/');
