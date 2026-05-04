@@ -134,16 +134,22 @@ pub(super) fn log_access_event(format: Option<&AccessLogFormat>, context: Access
             .and_then(|identity| identity.serial_number.as_deref())
             .unwrap_or("-"),
         cache_status = context.cache_status.unwrap_or("-"),
-        upstream_name = context.upstream.map(|upstream| upstream.upstream_name.as_str()).unwrap_or("-"),
-        upstream_addr = context.upstream.map(|upstream| upstream.upstream_addr.as_str()).unwrap_or("-"),
+        upstream_name = context
+            .upstream
+            .map(|upstream| upstream.upstream_name.as_str())
+            .unwrap_or("-"),
+        upstream_addr = context
+            .upstream
+            .map(|upstream| upstream.upstream_addr.as_str())
+            .unwrap_or("-"),
         upstream_status = context
             .upstream
-            .map(|upstream| upstream.upstream_status)
-            .unwrap_or(0),
+            .map(|upstream| upstream.upstream_status.to_string())
+            .unwrap_or_else(|| "-".to_string()),
         upstream_response_time_ms = context
             .upstream
-            .map(|upstream| upstream.upstream_response_time_ms)
-            .unwrap_or(0),
+            .map(|upstream| upstream.upstream_response_time_ms.to_string())
+            .unwrap_or_else(|| "-".to_string()),
         tls_client_san_dns_names = joined_tls_client_san_dns_names(context.tls_client_identity)
             .as_deref()
             .unwrap_or("-"),

@@ -38,7 +38,9 @@ pub(crate) fn normalize_request_path(path: &str) -> String {
         match segment {
             "" | "." => {}
             ".." => {
-                normalized_segments.pop();
+                if normalized_segments.pop().is_none() {
+                    return "/".to_string();
+                }
             }
             _ => normalized_segments.push(segment),
         }

@@ -112,7 +112,8 @@ impl PeerHealthRegistry {
                     &endpoint.endpoint_key,
                     &endpoint.logical_peer_url,
                 );
-                let active_requests = self.active_requests(&upstream.name, &endpoint.endpoint_key);
+                let active_requests =
+                    self.active_requests(&upstream.name, &endpoint.logical_peer_url);
                 if self.endpoint_is_selectable(&upstream.name, &endpoint, active_requests) {
                     available.push((active_requests, order, endpoint));
                 } else {
@@ -159,8 +160,8 @@ impl PeerHealthRegistry {
                 );
             }
             endpoints.sort_by(|left, right| {
-                self.active_requests(&upstream.name, &left.endpoint_key)
-                    .cmp(&self.active_requests(&upstream.name, &right.endpoint_key))
+                self.active_requests(&upstream.name, &left.logical_peer_url)
+                    .cmp(&self.active_requests(&upstream.name, &right.logical_peer_url))
                     .then(left.dial_authority.cmp(&right.dial_authority))
             });
 
@@ -171,7 +172,8 @@ impl PeerHealthRegistry {
                     &endpoint.endpoint_key,
                     &endpoint.logical_peer_url,
                 );
-                let active_requests = self.active_requests(&upstream.name, &endpoint.endpoint_key);
+                let active_requests =
+                    self.active_requests(&upstream.name, &endpoint.logical_peer_url);
                 if self.endpoint_is_selectable(&upstream.name, &endpoint, active_requests) {
                     available.push(endpoint);
                 } else {
