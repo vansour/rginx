@@ -228,6 +228,17 @@ fn trailing_wildcard_server_names_match_suffix_segments() {
     assert_eq!(match_server_name("mail.*", "mail"), None);
 }
 
+#[test]
+fn more_specific_leading_wildcard_beats_dot_wildcard() {
+    let selected = super::super::best_matching_server_name_pattern(
+        [".example.com", "*.api.example.com"],
+        "foo.api.example.com",
+    )
+    .expect("wildcard pattern should match");
+
+    assert_eq!(selected.0, "*.api.example.com");
+}
+
 fn route(path: &str) -> Route {
     Route {
         id: format!("test|exact:{path}"),

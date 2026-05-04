@@ -120,23 +120,19 @@ fn spawn_response_server(body: &'static str) -> SocketAddr {
     let listen_addr = listener.local_addr().expect("listener addr should be available");
 
     thread::spawn(move || {
-        loop {
-            let Ok((mut stream, _)) = listener.accept() else {
-                break;
-            };
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
 
-            thread::spawn(move || {
-                let mut buffer = [0u8; 1024];
-                let _ = stream.read(&mut buffer);
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: text/plain; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                let _ = stream.write_all(response.as_bytes());
-                let _ = stream.flush();
-            });
-        }
+        let mut buffer = [0u8; 1024];
+        let _ = stream.read(&mut buffer);
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/plain; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.flush();
     });
 
     listen_addr

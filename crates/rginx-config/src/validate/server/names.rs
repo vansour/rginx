@@ -14,6 +14,12 @@ pub(super) fn validate_server_names(
             return Err(Error::Config(format!("{owner_label} server_name must not be empty")));
         }
 
+        if normalized == "." || normalized.ends_with('.') {
+            return Err(Error::Config(format!(
+                "{owner_label} server_name `{name}` must not end with a bare `.`"
+            )));
+        }
+
         if has_unsupported_wildcard(&normalized) {
             return Err(Error::Config(format!(
                 "{owner_label} server_name `{name}` uses unsupported wildcard syntax; supported forms are exact names, `.example.com`, leading `*.` wildcards, and trailing `.*` wildcards"

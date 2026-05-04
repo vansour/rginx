@@ -34,6 +34,15 @@ fn preferred_prefix_route_matcher_preserves_prefix_semantics() {
 }
 
 #[test]
+fn trailing_slash_prefix_matches_directory_children() {
+    let matcher = RouteMatcher::Prefix("/assets/".to_string());
+
+    assert!(matcher.matches("/assets/logo.svg"));
+    assert!(matcher.matches("/assets/"));
+    assert!(!matcher.matches("/assets-v2/logo.svg"));
+}
+
+#[test]
 fn regex_route_matcher_uses_equal_priority_for_declaration_order() {
     let broad = RouteMatcher::Regex(
         super::super::RouteRegexMatcher::new("^/api/.*$".to_string(), false)

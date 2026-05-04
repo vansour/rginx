@@ -7,7 +7,7 @@ use rginx_core::RouteAction;
 
 use crate::client_ip::{ConnectionPeerAddrs, TlsClientIdentity, resolve_client_address};
 use crate::compression::ResponseCompressionOptions;
-use crate::request_target::normalize_request_target;
+use crate::request_target::{normalize_request_target, raw_request_target};
 use crate::router;
 use crate::state::SharedState;
 
@@ -95,8 +95,8 @@ pub async fn handle(
     let tls_client_identity = request.extensions().get::<TlsClientIdentity>().cloned();
     let early_data =
         request.extensions().get::<EarlyDataFlag>().map(|flag| flag.0).unwrap_or(false);
+    let path = raw_request_target(request.uri());
     let normalized_target = normalize_request_target(request.uri());
-    let path = normalized_target.path_and_query.clone();
     let request_path = normalized_target.path;
     let grpc_request = grpc_request_metadata(&request_headers, &request_path);
     let route_match_context = route_match_context(&request_path, grpc_request);

@@ -157,7 +157,13 @@ fn prefix_matches(prefix: &str, path: &str) -> bool {
         return true;
     }
 
-    path == prefix || path.strip_prefix(prefix).is_some_and(|remainder| remainder.starts_with('/'))
+    if path == prefix {
+        return true;
+    }
+
+    path.strip_prefix(prefix).is_some_and(|remainder| {
+        if prefix.ends_with('/') { true } else { remainder.starts_with('/') }
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

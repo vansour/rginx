@@ -63,9 +63,9 @@ impl RateLimiters {
                     route = route,
                     client_ip = %client_ip,
                     %error,
-                    "shared rate-limit check failed; falling back to local limiter state"
+                    "shared rate-limit check failed; denying request to preserve shared semantics"
                 );
-                self.local.check(route, client_ip, policy)
+                false
             });
         }
 

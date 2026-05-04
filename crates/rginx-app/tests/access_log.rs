@@ -119,6 +119,7 @@ fn upstream_access_log_format_emits_upstream_fields() {
         logs.contains(&format!("UPSTREAM name=backend addr=http://{upstream_addr} status=200")),
         "expected upstream access log line in stderr, got {logs:?}"
     );
+    assert!(logs.contains(" elapsed="), "expected upstream elapsed field in stderr, got {logs:?}");
 }
 
 fn return_config(listen_addr: SocketAddr) -> String {

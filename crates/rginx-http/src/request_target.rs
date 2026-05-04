@@ -18,6 +18,12 @@ pub(crate) fn normalize_request_target(uri: &Uri) -> NormalizedRequestTarget {
     NormalizedRequestTarget { path, path_and_query }
 }
 
+pub(crate) fn raw_request_target(uri: &Uri) -> String {
+    uri.path_and_query()
+        .map(|value| value.as_str().to_string())
+        .unwrap_or_else(|| uri.path().to_string())
+}
+
 pub(crate) fn normalize_request_path(path: &str) -> String {
     if path == "*" {
         return "*".to_string();

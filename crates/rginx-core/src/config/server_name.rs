@@ -10,7 +10,7 @@ impl ServerNameMatch {
     pub fn priority(self) -> (u8, usize) {
         match self {
             Self::Exact => (4, 0),
-            Self::DotWildcard { suffix_len } => (3, suffix_len),
+            Self::DotWildcard { suffix_len } => (2, suffix_len),
             Self::LeadingWildcard { suffix_len } => (2, suffix_len),
             Self::TrailingWildcard { prefix_len } => (1, prefix_len),
         }
