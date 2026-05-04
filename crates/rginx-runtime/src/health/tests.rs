@@ -128,6 +128,7 @@ fn peer(url: &str) -> UpstreamPeer {
         authority: authority.to_string(),
         weight: 1,
         backup: false,
+        max_conns: None,
     }
 }
 

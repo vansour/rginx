@@ -42,8 +42,11 @@ pub(in crate::handler) fn select_route_for_request<'a>(
     uri: &Uri,
 ) -> Option<&'a rginx_core::Route> {
     use super::super::grpc::grpc_request_metadata;
+    use crate::request_target::normalize_request_target;
 
     let vhost = select_vhost_for_request(config, headers, uri);
-    let context = route_match_context(uri.path(), grpc_request_metadata(headers, uri.path()));
+    let normalized = normalize_request_target(uri);
+    let context =
+        route_match_context(&normalized.path, grpc_request_metadata(headers, &normalized.path));
     router::select_route_in_vhost_with_context(vhost, &context)
 }

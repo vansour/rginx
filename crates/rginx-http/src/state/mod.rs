@@ -149,7 +149,7 @@ impl SharedState {
         )?;
         let revision = 0u64;
         let (revisions, _rx) = watch::channel(revision);
-        let rate_limiters = RateLimiters::default();
+        let rate_limiters = RateLimiters::for_runtime(config_path.as_deref());
         let listener_active_connections = prepared
             .config
             .listeners

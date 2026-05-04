@@ -40,6 +40,7 @@ fn proxy_clients_can_select_insecure_and_custom_ca_modes() {
             authority: "localhost:9443".to_string(),
             weight: 1,
             backup: false,
+            max_conns: None,
         }],
         UpstreamTls::Insecure,
         upstream_settings(UpstreamProtocol::Auto),
@@ -57,6 +58,7 @@ fn proxy_clients_can_select_insecure_and_custom_ca_modes() {
             authority: "localhost:9443".to_string(),
             weight: 1,
             backup: false,
+            max_conns: None,
         }],
         UpstreamTls::CustomCa { ca_cert_path: path.clone() },
         upstream_settings(UpstreamProtocol::Auto),
@@ -84,6 +86,7 @@ fn proxy_clients_cache_distinguishes_server_name_override() {
         authority: "127.0.0.1:9443".to_string(),
         weight: 1,
         backup: false,
+        max_conns: None,
     };
     let first = Upstream::new(
         "first".to_string(),
@@ -134,6 +137,7 @@ fn proxy_clients_cache_distinguishes_server_name_toggle() {
         authority: "127.0.0.1:9443".to_string(),
         weight: 1,
         backup: false,
+        max_conns: None,
     };
     let default_sni = Upstream::new(
         "default-sni".to_string(),
@@ -172,6 +176,7 @@ fn proxy_clients_cache_distinguishes_upstream_protocol() {
         authority: "127.0.0.1:9443".to_string(),
         weight: 1,
         backup: false,
+        max_conns: None,
     };
     let auto = Upstream::new(
         "auto".to_string(),
@@ -205,6 +210,7 @@ fn proxy_clients_cache_distinguishes_upstream_protocol() {
             authority: "127.0.0.1:9080".to_string(),
             weight: 1,
             backup: false,
+            max_conns: None,
         }],
         UpstreamTls::Insecure,
         upstream_settings(UpstreamProtocol::H2c),
@@ -230,6 +236,7 @@ fn proxy_clients_cache_distinguishes_tls_versions() {
         authority: "127.0.0.1:9443".to_string(),
         weight: 1,
         backup: false,
+        max_conns: None,
     };
     let tls12 = Upstream::new(
         "tls12".to_string(),
@@ -286,6 +293,7 @@ fn proxy_clients_cache_distinguishes_client_identity() {
         authority: "127.0.0.1:9443".to_string(),
         weight: 1,
         backup: false,
+        max_conns: None,
     };
     let first = Upstream::new(
         "first".to_string(),

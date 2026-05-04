@@ -174,6 +174,7 @@ async fn run_background_cache_refresh_with_backend<B>(
                     return;
                 }
 
+                let upstream_status = response.status().as_u16();
                 let response = build_downstream_response(
                     response,
                     &target.upstream_name,
@@ -182,6 +183,12 @@ async fn run_background_cache_refresh_with_backend<B>(
                     grpc_response_deadline,
                     grpc_web_mode.as_ref(),
                     Some(active_peer),
+                    Some(crate::handler::UpstreamAccessLog {
+                        upstream_name: target.upstream_name.clone(),
+                        upstream_addr: peer.display_url.clone(),
+                        upstream_status,
+                        upstream_response_time_ms: 0,
+                    }),
                 );
                 drain_background_cache_refresh_response(
                     cache_backend.store_response(cache_store, response).await,

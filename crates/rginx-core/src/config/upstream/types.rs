@@ -141,6 +141,7 @@ pub struct UpstreamPeer {
     pub authority: String,
     pub weight: u32,
     pub backup: bool,
+    pub max_conns: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

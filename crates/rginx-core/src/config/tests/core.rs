@@ -198,9 +198,45 @@ fn match_server_name_prefers_exact_and_rejects_root_for_wildcards() {
     );
     assert_eq!(
         match_server_name("*.example.com", "api.example.com"),
-        Some(super::super::ServerNameMatch::Wildcard { suffix_len: "example.com".len() })
+        Some(super::super::ServerNameMatch::LeadingWildcard { suffix_len: "example.com".len() })
     );
     assert_eq!(match_server_name("*.example.com", "example.com"), None);
+}
+
+#[test]
+fn dot_wildcard_server_names_match_root_and_subdomains() {
+    assert_eq!(
+        match_server_name(".example.com", "example.com"),
+        Some(super::super::ServerNameMatch::DotWildcard { suffix_len: "example.com".len() })
+    );
+    assert_eq!(
+        match_server_name(".example.com", "api.example.com"),
+        Some(super::super::ServerNameMatch::DotWildcard { suffix_len: "example.com".len() })
+    );
+}
+
+#[test]
+fn trailing_wildcard_server_names_match_suffix_segments() {
+    assert_eq!(
+        match_server_name("mail.*", "mail.example"),
+        Some(super::super::ServerNameMatch::TrailingWildcard { prefix_len: "mail".len() })
+    );
+    assert_eq!(
+        match_server_name("mail.*", "mail.example.com"),
+        Some(super::super::ServerNameMatch::TrailingWildcard { prefix_len: "mail".len() })
+    );
+    assert_eq!(match_server_name("mail.*", "mail"), None);
+}
+
+#[test]
+fn more_specific_leading_wildcard_beats_dot_wildcard() {
+    let selected = super::super::best_matching_server_name_pattern(
+        [".example.com", "*.api.example.com"],
+        "foo.api.example.com",
+    )
+    .expect("wildcard pattern should match");
+
+    assert_eq!(selected.0, "*.api.example.com");
 }
 
 fn route(path: &str) -> Route {

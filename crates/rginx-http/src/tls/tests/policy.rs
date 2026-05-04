@@ -118,3 +118,47 @@ fn build_tls_acceptor_enables_session_tickets_when_requested() {
 
     remove_test_cert_pair(cert_path, key_path, temp_dir);
 }
+
+#[test]
+fn cloned_tls_acceptors_share_session_storage() {
+    let (cert_path, key_path, temp_dir) = write_test_cert_pair("rginx-server-tls-shared-session");
+    let tls = ServerTls {
+        cert_path: cert_path.clone(),
+        key_path: key_path.clone(),
+        additional_certificates: Vec::new(),
+        versions: None,
+        cipher_suites: None,
+        key_exchange_groups: None,
+        alpn_protocols: None,
+        ocsp_staple_path: None,
+        ocsp: rginx_core::OcspConfig::default(),
+        session_resumption: Some(true),
+        session_tickets: Some(false),
+        session_cache_size: Some(8),
+        session_ticket_count: None,
+        client_auth: None,
+    };
+    let default_vhost = VirtualHost {
+        id: "server".to_string(),
+        server_names: vec!["localhost".to_string()],
+        routes: Vec::new(),
+        tls: None,
+    };
+
+    let acceptor = build_tls_acceptor(Some(&tls), None, true, &default_vhost, &[])
+        .expect("TLS acceptor should load")
+        .expect("TLS acceptor should exist");
+    let cloned = acceptor.clone();
+
+    assert!(acceptor.config().session_storage.put(vec![0x11], vec![0x22]));
+    assert_eq!(
+        cloned
+            .config()
+            .session_storage
+            .get(&[0x11])
+            .expect("cloned acceptor should observe shared session state"),
+        vec![0x22]
+    );
+
+    remove_test_cert_pair(cert_path, key_path, temp_dir);
+}

@@ -33,6 +33,13 @@ pub(super) fn validate_upstream_name_and_peers(
                 upstream.name, peer.url
             )));
         }
+
+        if peer.max_conns.is_some_and(|max_conns| max_conns == 0) {
+            return Err(Error::Config(format!(
+                "upstream `{}` peer `{}` max_conns must be greater than 0",
+                upstream.name, peer.url
+            )));
+        }
     }
 
     Ok(())

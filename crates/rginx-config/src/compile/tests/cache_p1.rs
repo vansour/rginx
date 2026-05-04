@@ -51,6 +51,7 @@ fn compile_cache_policy_supports_p1_controls() {
                 url: "http://127.0.0.1:9000".to_string(),
                 weight: 1,
                 backup: false,
+                max_conns: None,
             }],
             tls: None,
             dns: None,

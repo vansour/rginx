@@ -57,6 +57,7 @@ pub(crate) fn snapshot_with_upstream(listen: &str) -> ConfigSnapshot {
                 authority: "127.0.0.1:9000".to_string(),
                 weight: 1,
                 backup: false,
+                max_conns: None,
             }],
             UpstreamTls::NativeRoots,
             UpstreamSettings {

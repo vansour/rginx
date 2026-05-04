@@ -73,7 +73,9 @@ fn compile_upstreams_with_names(
 
             let peers = peers
                 .into_iter()
-                .map(|peer| peer::compile_peer(&name, peer.url, peer.weight, peer.backup))
+                .map(|peer| {
+                    peer::compile_peer(&name, peer.url, peer.weight, peer.backup, peer.max_conns)
+                })
                 .collect::<Result<Vec<_>>>()?;
             let compiled_tls = tls::compile_tls(&name, tls, base_dir)?;
             let protocol = settings::compile_protocol(&name, protocol, &peers)?;

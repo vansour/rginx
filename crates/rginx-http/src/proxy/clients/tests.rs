@@ -52,6 +52,7 @@ async fn peer_health_snapshot_delegates_to_registry() {
             authority: "127.0.0.1:9000".to_string(),
             weight: 1,
             backup: false,
+            max_conns: None,
         }],
         UpstreamTls::NativeRoots,
         UpstreamSettings {

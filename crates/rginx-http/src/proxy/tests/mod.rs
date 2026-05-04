@@ -108,6 +108,7 @@ fn peer_with_role(url: &str, weight: u32, backup: bool) -> UpstreamPeer {
         authority: uri.authority().expect("peer should have authority").to_string(),
         weight,
         backup,
+        max_conns: None,
     }
 }
 
@@ -134,6 +135,7 @@ fn resolved_peer_from_url(url: &str) -> ResolvedUpstreamPeer {
         server_name: host,
         weight: 1,
         backup: false,
+        max_conns: None,
     }
 }
 
@@ -147,6 +149,7 @@ fn resolved_peer(peer: &UpstreamPeer) -> ResolvedUpstreamPeer {
     resolved.dial_authority = peer.authority.clone();
     resolved.weight = peer.weight;
     resolved.backup = peer.backup;
+    resolved.max_conns = peer.max_conns;
     resolved
 }
 

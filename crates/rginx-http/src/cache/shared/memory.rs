@@ -15,7 +15,7 @@ const SHM_NAME_PREFIX: &str = "/rginx-cache-";
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct SharedMemoryHeader {
+pub(crate) struct SharedMemoryHeader {
     pub(super) magic: u64,
     pub(super) abi_version: u32,
     pub(super) header_len: u32,
@@ -33,7 +33,7 @@ pub(super) struct SharedMemoryHeader {
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct SharedMemorySegmentConfig {
+pub(crate) struct SharedMemorySegmentConfig {
     pub(super) name: String,
     pub(super) zone_name_hash: u64,
     pub(super) capacity_bytes: usize,
@@ -48,12 +48,12 @@ impl SharedMemorySegmentConfig {
         Self::new(format!("{SHM_NAME_PREFIX}{zone_name_hash:016x}"), zone_name_hash, capacity_bytes)
     }
 
-    pub(super) fn for_identity(identity: &str, capacity_bytes: usize) -> Self {
+    pub(crate) fn for_identity(identity: &str, capacity_bytes: usize) -> Self {
         let zone_name_hash = stable_hash(identity.as_bytes());
         Self::new(format!("{SHM_NAME_PREFIX}{zone_name_hash:016x}"), zone_name_hash, capacity_bytes)
     }
 
-    pub(super) fn new(name: impl Into<String>, zone_name_hash: u64, capacity_bytes: usize) -> Self {
+    pub(crate) fn new(name: impl Into<String>, zone_name_hash: u64, capacity_bytes: usize) -> Self {
         Self {
             name: name.into(),
             zone_name_hash,
@@ -64,12 +64,12 @@ impl SharedMemorySegmentConfig {
         }
     }
 
-    pub(super) fn with_hash_bucket_count(mut self, hash_bucket_count: u64) -> Self {
+    pub(crate) fn with_hash_bucket_count(mut self, hash_bucket_count: u64) -> Self {
         self.hash_bucket_count = hash_bucket_count;
         self
     }
 
-    pub(super) fn with_operation_ring_capacity(mut self, operation_ring_capacity: u64) -> Self {
+    pub(crate) fn with_operation_ring_capacity(mut self, operation_ring_capacity: u64) -> Self {
         self.operation_ring_capacity = operation_ring_capacity;
         self
     }
@@ -133,7 +133,7 @@ impl SharedMemorySegmentConfig {
 }
 
 #[derive(Debug)]
-pub(super) struct SharedMemorySegment {
+pub(crate) struct SharedMemorySegment {
     name: CString,
     fd: RawFd,
     ptr: NonNull<u8>,
@@ -144,7 +144,7 @@ unsafe impl Send for SharedMemorySegment {}
 unsafe impl Sync for SharedMemorySegment {}
 
 impl SharedMemorySegment {
-    pub(super) fn create_or_reset(config: &SharedMemorySegmentConfig) -> io::Result<Self> {
+    pub(crate) fn create_or_reset(config: &SharedMemorySegmentConfig) -> io::Result<Self> {
         config.validate_capacity()?;
         let name = config.shm_name()?;
         let fd = shm_open(&name, libc::O_CREAT | libc::O_RDWR, 0o600)?;
@@ -164,7 +164,7 @@ impl SharedMemorySegment {
         Ok(segment)
     }
 
-    pub(super) fn attach(config: &SharedMemorySegmentConfig) -> io::Result<Self> {
+    pub(crate) fn attach(config: &SharedMemorySegmentConfig) -> io::Result<Self> {
         config.validate_capacity()?;
         let name = config.shm_name()?;
         let fd = shm_open(&name, libc::O_RDWR, 0o600)?;
@@ -199,7 +199,7 @@ impl SharedMemorySegment {
         Ok(segment)
     }
 
-    pub(super) fn unlink(config: &SharedMemorySegmentConfig) -> io::Result<()> {
+    pub(crate) fn unlink(config: &SharedMemorySegmentConfig) -> io::Result<()> {
         let name = config.shm_name()?;
         let result = unsafe { libc::shm_unlink(name.as_ptr()) };
         if result == 0 {
@@ -209,15 +209,15 @@ impl SharedMemorySegment {
         if error.kind() == io::ErrorKind::NotFound { Ok(()) } else { Err(error) }
     }
 
-    pub(super) fn header(&self) -> SharedMemoryHeader {
+    pub(crate) fn header(&self) -> SharedMemoryHeader {
         unsafe { self.header_ptr().read() }
     }
 
-    pub(super) fn payload_capacity(&self) -> usize {
+    pub(crate) fn payload_capacity(&self) -> usize {
         self.capacity_bytes.saturating_sub(size_of::<SharedMemoryHeader>())
     }
 
-    pub(super) fn write_payload(&self, offset: usize, bytes: &[u8]) -> io::Result<()> {
+    pub(crate) fn write_payload(&self, offset: usize, bytes: &[u8]) -> io::Result<()> {
         self.validate_payload_range(offset, bytes.len())?;
         unsafe {
             std::ptr::copy_nonoverlapping(
@@ -229,7 +229,7 @@ impl SharedMemorySegment {
         Ok(())
     }
 
-    pub(super) fn read_payload(&self, offset: usize, len: usize) -> io::Result<Vec<u8>> {
+    pub(crate) fn read_payload(&self, offset: usize, len: usize) -> io::Result<Vec<u8>> {
         self.validate_payload_range(offset, len)?;
         let mut bytes = vec![0; len];
         unsafe {
@@ -264,7 +264,7 @@ impl SharedMemorySegment {
         }
     }
 
-    pub(super) fn write_header(&self, header: SharedMemoryHeader) {
+    pub(crate) fn write_header(&self, header: SharedMemoryHeader) {
         unsafe {
             self.header_ptr().write(header);
         }

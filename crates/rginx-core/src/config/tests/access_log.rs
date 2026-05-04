@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn access_log_format_renders_nginx_style_variables() {
     let format = AccessLogFormat::parse(
-        "reqid=$request_id remote=$remote_addr request=\"$request\" status=$status bytes=$body_bytes_sent elapsed=$request_time_ms ua=\"$http_user_agent\" referer=\"$http_referer\" grpc=$grpc_protocol svc=$grpc_service rpc=$grpc_method grpc_status=$grpc_status grpc_message=\"$grpc_message\"",
+        "reqid=$request_id remote=$remote_addr request=\"$request\" status=$status bytes=$body_bytes_sent elapsed=$request_time_ms ua=\"$http_user_agent\" referer=\"$http_referer\" grpc=$grpc_protocol svc=$grpc_service rpc=$grpc_method grpc_status=$grpc_status grpc_message=\"$grpc_message\" upstream=$upstream_name addr=$upstream_addr upstream_status=$upstream_status upstream_elapsed=$upstream_response_time_ms",
     )
     .expect("access log format should parse");
 
@@ -40,11 +40,15 @@ fn access_log_format_renders_nginx_style_variables() {
         grpc_status: Some("0"),
         grpc_message: Some("ok"),
         cache_status: Some("HIT"),
+        upstream_name: Some("backend"),
+        upstream_addr: Some("http://127.0.0.1:9000"),
+        upstream_status: Some(200),
+        upstream_response_time_ms: Some(12),
     });
 
     assert_eq!(
         rendered,
-        "reqid=rginx-0000000000000042 remote=203.0.113.10 request=\"GET /hello?name=rginx HTTP/1.1\" status=200 bytes=12 elapsed=7 ua=\"curl/8.7.1\" referer=\"-\" grpc=grpc-web svc=grpc.health.v1.Health rpc=Check grpc_status=0 grpc_message=\"ok\""
+        "reqid=rginx-0000000000000042 remote=203.0.113.10 request=\"GET /hello?name=rginx HTTP/1.1\" status=200 bytes=12 elapsed=7 ua=\"curl/8.7.1\" referer=\"-\" grpc=grpc-web svc=grpc.health.v1.Health rpc=Check grpc_status=0 grpc_message=\"ok\" upstream=backend addr=http://127.0.0.1:9000 upstream_status=200 upstream_elapsed=12"
     );
 }
 
@@ -93,6 +97,10 @@ fn access_log_format_supports_braced_variables_and_literal_dollar() {
         grpc_status: None,
         grpc_message: None,
         cache_status: None,
+        upstream_name: None,
+        upstream_addr: None,
+        upstream_status: None,
+        upstream_response_time_ms: None,
     });
 
     assert_eq!(rendered, "$ req-1 204");
@@ -138,6 +146,10 @@ fn access_log_format_renders_tls_client_identity_variables() {
         grpc_status: None,
         grpc_message: None,
         cache_status: None,
+        upstream_name: None,
+        upstream_addr: None,
+        upstream_status: None,
+        upstream_response_time_ms: None,
     });
 
     assert_eq!(
@@ -184,6 +196,10 @@ fn access_log_format_renders_cache_status_variable() {
         grpc_status: None,
         grpc_message: None,
         cache_status: Some("REVALIDATED"),
+        upstream_name: None,
+        upstream_addr: None,
+        upstream_status: None,
+        upstream_response_time_ms: None,
     });
 
     assert_eq!(rendered, "cache=REVALIDATED");

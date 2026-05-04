@@ -65,6 +65,7 @@ async fn reuses_http3_session_for_sequential_requests() {
             authority: format!("127.0.0.1:{}", listen_addr.port()),
             weight: 1,
             backup: false,
+            max_conns: None,
         }],
         UpstreamTls::Insecure,
         UpstreamSettings {
@@ -154,6 +155,7 @@ async fn streams_http3_response_body_without_full_buffering() {
             authority: format!("127.0.0.1:{}", listen_addr.port()),
             weight: 1,
             backup: false,
+            max_conns: None,
         }],
         UpstreamTls::Insecure,
         UpstreamSettings {

@@ -1,5 +1,6 @@
 use super::*;
 
+mod preferred_prefix;
 mod regex;
 
 #[test]
@@ -297,7 +298,7 @@ fn compile_generates_distinct_route_and_vhost_ids() {
 }
 
 #[test]
-fn compile_prioritizes_grpc_constrained_routes_with_same_path_matcher() {
+fn compile_preserves_grpc_route_constraints_without_reordering_routes() {
     let config = Config {
         acme: None,
         cache_zones: Vec::new(),
@@ -356,14 +357,14 @@ fn compile_prioritizes_grpc_constrained_routes_with_same_path_matcher() {
     let snapshot = compile(config).expect("gRPC route constraints should compile");
     let routes = &snapshot.default_vhost.routes;
     assert_eq!(routes.len(), 2);
+    assert!(routes[0].grpc_match.is_none());
     assert_eq!(
-        routes[0].grpc_match.as_ref().and_then(|grpc| grpc.service.as_deref()),
+        routes[1].grpc_match.as_ref().and_then(|grpc| grpc.service.as_deref()),
         Some("grpc.health.v1.Health")
     );
     assert_eq!(
-        routes[0].grpc_match.as_ref().and_then(|grpc| grpc.method.as_deref()),
+        routes[1].grpc_match.as_ref().and_then(|grpc| grpc.method.as_deref()),
         Some("Check")
     );
-    assert!(routes[0].id.contains("grpc:service=grpc.health.v1.Health,method=Check"));
-    assert!(routes[1].grpc_match.is_none());
+    assert!(routes[1].id.contains("grpc:service=grpc.health.v1.Health,method=Check"));
 }

@@ -38,7 +38,6 @@
 | `configs/` | 默认边缘代理配置 |
 | `docs/` | 当前生效的仓库治理文档 |
 | `deploy/` | systemd / supervisor 示例 |
-| `fuzz/` | `cargo-fuzz` targets、seed corpus、dictionary 与 coverage 入口 |
 | `scripts/` | 安装、测试与验证脚本 |
 
 ## 快速开始
@@ -127,25 +126,12 @@ scripts/run-clippy-gate.sh
 scripts/run-tls-gate.sh
 scripts/run-http3-gate.sh
 scripts/run-http3-release-gate.sh --soak-iterations 1
-scripts/run-fuzz-smoke.sh --seconds 10
-scripts/run-fuzz-coverage.sh --target certificate_inspect
 ```
-
-当前 fuzz harness 覆盖 5 个高风险输入面：
-
-- `proxy_protocol`
-- `config_preprocess`
-- `ocsp_response`
-- `certificate_inspect`
-- `ocsp_responder_discovery`
-
-版本化 `*.seed` 是 smoke / coverage 的默认输入，target-specific 字典和 libFuzzer 参数位于 `fuzz/dictionaries/` 与 `fuzz/options/`。详细说明见 `fuzz/README.md`。
 
 ## 文档
 
 - [docs/README.md](docs/README.md) 汇总当前生效的仓库治理文档
 - [docs/CACHE_ARCHITECTURE_GAPS.md](docs/CACHE_ARCHITECTURE_GAPS.md) 记录缓存当前长期架构差距与演进方向
-- [fuzz/README.md](fuzz/README.md) 说明 fuzz target、seed、smoke 和 coverage 流程
 
 ## 许可证
 

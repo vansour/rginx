@@ -7,6 +7,7 @@ use rginx_core::RouteAction;
 
 use crate::client_ip::{ConnectionPeerAddrs, TlsClientIdentity, resolve_client_address};
 use crate::compression::ResponseCompressionOptions;
+use crate::request_target::{normalize_request_target, raw_request_target};
 use crate::router;
 use crate::state::SharedState;
 
@@ -94,12 +95,9 @@ pub async fn handle(
     let tls_client_identity = request.extensions().get::<TlsClientIdentity>().cloned();
     let early_data =
         request.extensions().get::<EarlyDataFlag>().map(|flag| flag.0).unwrap_or(false);
-    let path = request
-        .uri()
-        .path_and_query()
-        .map(|value| value.as_str().to_string())
-        .unwrap_or_else(|| request.uri().path().to_string());
-    let request_path = request.uri().path().to_string();
+    let path = raw_request_target(request.uri());
+    let normalized_target = normalize_request_target(request.uri());
+    let request_path = normalized_target.path;
     let grpc_request = grpc_request_metadata(&request_headers, &request_path);
     let route_match_context = route_match_context(&request_path, grpc_request);
     let started = Instant::now();
@@ -222,6 +220,8 @@ pub async fn handle(
         .get("x-cache")
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
+    let upstream =
+        finalized.response.extensions().get::<crate::handler::UpstreamAccessLog>().cloned();
     state.record_downstream_response(
         listener_id,
         &selected_vhost_id,
@@ -252,6 +252,7 @@ pub async fn handle(
             body_bytes_sent,
             tls_client_identity: tls_client_identity.clone(),
             cache_status: cache_status.clone(),
+            upstream: upstream.clone(),
         };
         return wrap_grpc_observability_response(
             response,
@@ -289,6 +290,7 @@ pub async fn handle(
             tls_client_identity: tls_client_identity.as_ref(),
             grpc: None,
             cache_status: cache_status.as_deref(),
+            upstream: upstream.as_ref(),
         },
     );
 

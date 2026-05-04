@@ -20,6 +20,7 @@ mod dispatch;
 mod grpc;
 mod response;
 
+pub(crate) use access_log::UpstreamAccessLog;
 pub use dispatch::handle;
 pub(crate) use grpc::{GrpcStatusCode, grpc_error_response};
 pub(crate) use response::{full_body, text_response};

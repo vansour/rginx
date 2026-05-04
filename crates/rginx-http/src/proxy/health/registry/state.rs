@@ -169,12 +169,8 @@ impl PeerHealthRegistry {
             .or_default()
             .entry(endpoint_key.to_string())
             .or_insert_with(|| {
-                if endpoint_key == logical_peer_url {
-                    self.get_logical_peer(upstream_name, logical_peer_url)
-                        .unwrap_or_else(|| Arc::new(PeerHealth::default()))
-                } else {
-                    Arc::new(PeerHealth::default())
-                }
+                self.get_logical_peer(upstream_name, logical_peer_url)
+                    .unwrap_or_else(|| Arc::new(PeerHealth::default()))
             })
             .clone()
     }

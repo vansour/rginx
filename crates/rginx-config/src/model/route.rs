@@ -57,6 +57,7 @@ pub struct LocationConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub enum MatcherConfig {
     Exact(String),
+    PreferredPrefix(String),
     Prefix(String),
     Regex {
         pattern: String,

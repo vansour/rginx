@@ -57,7 +57,8 @@ pub(crate) fn best_matching_wildcard_certificates<'a>(
     by_name
         .iter()
         .filter_map(|(pattern, certs)| match match_server_name(pattern, server_name) {
-            Some(ServerNameMatch::Wildcard { suffix_len }) => Some((suffix_len, pattern, certs)),
+            Some(ServerNameMatch::Exact) => None,
+            Some(matched) => Some((matched.priority(), pattern, certs)),
             _ => None,
         })
         .max_by(|left, right| left.0.cmp(&right.0).then_with(|| right.1.cmp(left.1)))

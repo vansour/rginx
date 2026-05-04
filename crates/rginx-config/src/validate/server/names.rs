@@ -14,13 +14,15 @@ pub(super) fn validate_server_names(
             return Err(Error::Config(format!("{owner_label} server_name must not be empty")));
         }
 
-        if normalized.contains('*')
-            && (!normalized.starts_with("*.")
-                || normalized[2..].is_empty()
-                || normalized[2..].contains('*'))
-        {
+        if normalized == "." || normalized.ends_with('.') {
             return Err(Error::Config(format!(
-                "{owner_label} server_name `{name}` uses unsupported wildcard syntax; only leading `*.` patterns are supported"
+                "{owner_label} server_name `{name}` must not end with a bare `.`"
+            )));
+        }
+
+        if has_unsupported_wildcard(&normalized) {
+            return Err(Error::Config(format!(
+                "{owner_label} server_name `{name}` uses unsupported wildcard syntax; supported forms are exact names, `.example.com`, leading `*.` wildcards, and trailing `.*` wildcards"
             )));
         }
 
@@ -38,4 +40,20 @@ pub(super) fn validate_server_names(
     }
 
     Ok(())
+}
+
+fn has_unsupported_wildcard(name: &str) -> bool {
+    if !name.contains('*') {
+        return false;
+    }
+
+    if let Some(suffix) = name.strip_prefix("*.") {
+        return suffix.is_empty() || suffix.contains('*');
+    }
+
+    if let Some(prefix) = name.strip_suffix(".*") {
+        return prefix.is_empty() || prefix.contains('*');
+    }
+
+    true
 }

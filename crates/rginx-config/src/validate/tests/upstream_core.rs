@@ -99,3 +99,12 @@ fn validate_rejects_zero_peer_weight() {
     let error = validate(&config).expect_err("zero peer weight should be rejected");
     assert!(error.to_string().contains("weight must be greater than 0"));
 }
+
+#[test]
+fn validate_rejects_zero_peer_max_conns() {
+    let mut config = base_config();
+    config.upstreams[0].peers[0].max_conns = Some(0);
+
+    let error = validate(&config).expect_err("zero peer max_conns should be rejected");
+    assert!(error.to_string().contains("max_conns must be greater than 0"));
+}

@@ -3,8 +3,10 @@ use std::fmt::Write as _;
 use crate::{Error, Result};
 
 mod helpers;
+mod variables;
 
 use helpers::{fallback_access_log_option, fallback_access_log_value, is_access_log_variable_char};
+use variables::{AccessLogVariable, parse_access_log_variable};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccessLogFormat {
@@ -16,42 +18,6 @@ pub struct AccessLogFormat {
 enum AccessLogSegment {
     Literal(String),
     Variable(AccessLogVariable),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AccessLogVariable {
-    RequestId,
-    RemoteAddr,
-    PeerAddr,
-    Method,
-    Host,
-    Path,
-    Request,
-    Status,
-    BodyBytesSent,
-    ElapsedMs,
-    ClientIpSource,
-    Vhost,
-    Route,
-    Scheme,
-    HttpVersion,
-    TlsVersion,
-    TlsAlpn,
-    UserAgent,
-    Referer,
-    TlsClientAuthenticated,
-    TlsClientSubject,
-    TlsClientIssuer,
-    TlsClientSerial,
-    TlsClientSanDnsNames,
-    TlsClientChainLength,
-    TlsClientChainSubjects,
-    GrpcProtocol,
-    GrpcService,
-    GrpcMethod,
-    GrpcStatus,
-    GrpcMessage,
-    CacheStatus,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -88,6 +54,10 @@ pub struct AccessLogValues<'a> {
     pub grpc_status: Option<&'a str>,
     pub grpc_message: Option<&'a str>,
     pub cache_status: Option<&'a str>,
+    pub upstream_name: Option<&'a str>,
+    pub upstream_addr: Option<&'a str>,
+    pub upstream_status: Option<u16>,
+    pub upstream_response_time_ms: Option<u64>,
 }
 
 impl AccessLogFormat {
@@ -248,48 +218,30 @@ impl AccessLogFormat {
                     AccessLogVariable::CacheStatus => {
                         rendered.push_str(fallback_access_log_option(values.cache_status))
                     }
+                    AccessLogVariable::UpstreamName => {
+                        rendered.push_str(fallback_access_log_option(values.upstream_name))
+                    }
+                    AccessLogVariable::UpstreamAddr => {
+                        rendered.push_str(fallback_access_log_option(values.upstream_addr))
+                    }
+                    AccessLogVariable::UpstreamStatus => {
+                        if let Some(status) = values.upstream_status {
+                            let _ = write!(rendered, "{status}");
+                        } else {
+                            rendered.push('-');
+                        }
+                    }
+                    AccessLogVariable::UpstreamResponseTimeMs => {
+                        if let Some(value) = values.upstream_response_time_ms {
+                            let _ = write!(rendered, "{value}");
+                        } else {
+                            rendered.push('-');
+                        }
+                    }
                 },
             }
         }
 
         rendered
-    }
-}
-
-fn parse_access_log_variable(name: &str) -> Result<AccessLogVariable> {
-    match name {
-        "request_id" => Ok(AccessLogVariable::RequestId),
-        "remote_addr" | "client_ip" => Ok(AccessLogVariable::RemoteAddr),
-        "peer_addr" => Ok(AccessLogVariable::PeerAddr),
-        "method" | "request_method" => Ok(AccessLogVariable::Method),
-        "host" => Ok(AccessLogVariable::Host),
-        "path" | "request_uri" => Ok(AccessLogVariable::Path),
-        "request" => Ok(AccessLogVariable::Request),
-        "status" => Ok(AccessLogVariable::Status),
-        "body_bytes_sent" | "bytes_sent" => Ok(AccessLogVariable::BodyBytesSent),
-        "request_time_ms" | "elapsed_ms" => Ok(AccessLogVariable::ElapsedMs),
-        "client_ip_source" => Ok(AccessLogVariable::ClientIpSource),
-        "vhost" | "server_name" => Ok(AccessLogVariable::Vhost),
-        "route" => Ok(AccessLogVariable::Route),
-        "scheme" => Ok(AccessLogVariable::Scheme),
-        "http_version" | "server_protocol" => Ok(AccessLogVariable::HttpVersion),
-        "tls_version" | "ssl_protocol" => Ok(AccessLogVariable::TlsVersion),
-        "tls_alpn" => Ok(AccessLogVariable::TlsAlpn),
-        "http_user_agent" | "user_agent" => Ok(AccessLogVariable::UserAgent),
-        "http_referer" | "referer" => Ok(AccessLogVariable::Referer),
-        "tls_client_authenticated" => Ok(AccessLogVariable::TlsClientAuthenticated),
-        "tls_client_subject" => Ok(AccessLogVariable::TlsClientSubject),
-        "tls_client_issuer" => Ok(AccessLogVariable::TlsClientIssuer),
-        "tls_client_serial" => Ok(AccessLogVariable::TlsClientSerial),
-        "tls_client_san_dns_names" => Ok(AccessLogVariable::TlsClientSanDnsNames),
-        "tls_client_chain_length" => Ok(AccessLogVariable::TlsClientChainLength),
-        "tls_client_chain_subjects" => Ok(AccessLogVariable::TlsClientChainSubjects),
-        "grpc_protocol" => Ok(AccessLogVariable::GrpcProtocol),
-        "grpc_service" => Ok(AccessLogVariable::GrpcService),
-        "grpc_method" => Ok(AccessLogVariable::GrpcMethod),
-        "grpc_status" => Ok(AccessLogVariable::GrpcStatus),
-        "grpc_message" => Ok(AccessLogVariable::GrpcMessage),
-        "cache_status" | "upstream_cache_status" => Ok(AccessLogVariable::CacheStatus),
-        _ => Err(Error::Config(format!("access_log_format variable `${name}` is not supported"))),
     }
 }

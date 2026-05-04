@@ -26,7 +26,7 @@ mod manager;
 mod policy;
 mod request;
 mod runtime;
-mod shared;
+pub(crate) mod shared;
 mod state;
 mod store;
 mod vary;
