@@ -32,6 +32,14 @@ fn validate_rejects_unsupported_server_name_wildcard_syntax() {
 }
 
 #[test]
+fn validate_accepts_dot_and_trailing_server_name_wildcards() {
+    let mut config = base_config();
+    config.server.server_names = vec![".example.com".to_string(), "mail.*".to_string()];
+
+    validate(&config).expect("supported wildcard forms should validate");
+}
+
+#[test]
 fn validate_rejects_duplicate_server_name_between_default_server_and_vhost() {
     let mut config = base_config();
     config.server.server_names = vec!["api.example.com".to_string()];

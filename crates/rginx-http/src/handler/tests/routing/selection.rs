@@ -69,6 +69,51 @@ fn select_route_for_request_supports_wildcard_hosts() {
 }
 
 #[test]
+fn select_route_for_request_supports_dot_wildcard_hosts() {
+    let config = test_config(
+        test_vhost("server", Vec::new(), Vec::new()),
+        vec![test_vhost(
+            "servers[0]",
+            vec![".example.com"],
+            vec![test_route("servers[0]/routes[0]|exact:/", RouteMatcher::Exact("/".to_string()))],
+        )],
+    );
+
+    let root_route =
+        select_route_for_request(&config, &host_headers("example.com"), &request_uri("/"))
+            .expect("dot wildcard should match the root host");
+    assert_eq!(root_route.id, "servers[0]/routes[0]|exact:/");
+
+    let subdomain_route =
+        select_route_for_request(&config, &host_headers("api.example.com"), &request_uri("/"))
+            .expect("dot wildcard should match subdomains");
+    assert_eq!(subdomain_route.id, "servers[0]/routes[0]|exact:/");
+}
+
+#[test]
+fn select_route_for_request_supports_trailing_wildcard_hosts() {
+    let config = test_config(
+        test_vhost("server", Vec::new(), Vec::new()),
+        vec![test_vhost(
+            "servers[0]",
+            vec!["mail.*"],
+            vec![test_route(
+                "servers[0]/routes[0]|exact:/inbox",
+                RouteMatcher::Exact("/inbox".to_string()),
+            )],
+        )],
+    );
+
+    let route = select_route_for_request(
+        &config,
+        &host_headers("mail.example.com"),
+        &request_uri("/inbox"),
+    )
+    .expect("trailing wildcard should match suffix segments");
+    assert_eq!(route.id, "servers[0]/routes[0]|exact:/inbox");
+}
+
+#[test]
 fn select_route_for_request_prefers_exact_host_over_wildcard_host() {
     let config = test_config(
         test_vhost("server", Vec::new(), Vec::new()),
@@ -174,6 +219,81 @@ fn select_route_for_request_prefers_grpc_specific_route() {
         route.id,
         "server/routes[1]|prefix:/|grpc:service=grpc.health.v1.Health,method=Check"
     );
+}
+
+#[test]
+fn select_route_for_request_prefers_regex_over_plain_prefix_without_preferred_prefix() {
+    let config = test_config(
+        test_vhost(
+            "server",
+            Vec::new(),
+            vec![
+                test_route(
+                    "server/routes[0]|prefix:/api",
+                    RouteMatcher::Prefix("/api".to_string()),
+                ),
+                test_route(
+                    "server/routes[1]|regex:^/api/v\\d+/items$",
+                    RouteMatcher::Regex(
+                        rginx_core::RouteRegexMatcher::new("^/api/v\\d+/items$".to_string(), false)
+                            .expect("regex matcher should compile"),
+                    ),
+                ),
+            ],
+        ),
+        Vec::new(),
+    );
+
+    let route = select_route_for_request(&config, &HeaderMap::new(), &request_uri("/api/v1/items"))
+        .expect("regex should be selected ahead of a plain prefix");
+    assert_eq!(route.id, "server/routes[1]|regex:^/api/v\\d+/items$");
+}
+
+#[test]
+fn select_route_for_request_prefers_preferred_prefix_over_regex() {
+    let config = test_config(
+        test_vhost(
+            "server",
+            Vec::new(),
+            vec![
+                test_route(
+                    "server/routes[0]|preferred_prefix:/api/v1",
+                    RouteMatcher::PreferredPrefix("/api/v1".to_string()),
+                ),
+                test_route(
+                    "server/routes[1]|regex:^/api/v\\d+/items$",
+                    RouteMatcher::Regex(
+                        rginx_core::RouteRegexMatcher::new("^/api/v\\d+/items$".to_string(), false)
+                            .expect("regex matcher should compile"),
+                    ),
+                ),
+            ],
+        ),
+        Vec::new(),
+    );
+
+    let route = select_route_for_request(&config, &HeaderMap::new(), &request_uri("/api/v1/items"))
+        .expect("preferred prefix should bypass regex evaluation");
+    assert_eq!(route.id, "server/routes[0]|preferred_prefix:/api/v1");
+}
+
+#[test]
+fn select_route_for_request_uses_normalized_request_path() {
+    let config = test_config(
+        test_vhost(
+            "server",
+            Vec::new(),
+            vec![test_route(
+                "server/routes[0]|exact:/admin",
+                RouteMatcher::Exact("/admin".to_string()),
+            )],
+        ),
+        Vec::new(),
+    );
+
+    let route = select_route_for_request(&config, &HeaderMap::new(), &request_uri("/api/../admin"))
+        .expect("normalized request path should match the exact route");
+    assert_eq!(route.id, "server/routes[0]|exact:/admin");
 }
 
 #[test]

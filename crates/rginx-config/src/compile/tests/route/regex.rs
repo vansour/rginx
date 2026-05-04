@@ -36,6 +36,7 @@ fn compile_attaches_regex_matcher_and_dynamic_proxy_headers() {
                 url: "http://127.0.0.1:8008".to_string(),
                 weight: 1,
                 backup: false,
+                max_conns: None,
             }],
             tls: None,
             dns: None,

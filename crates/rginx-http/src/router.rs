@@ -30,13 +30,92 @@ pub fn select_route_with_context<'a>(
     routes: &'a [Route],
     context: &RouteMatchContext<'_>,
 ) -> Option<&'a Route> {
-    routes.iter().filter(|route| route_matches(route, context)).fold(None, |selected, route| {
-        match selected {
-            None => Some(route),
-            Some(current) if route.priority() > current.priority() => Some(route),
-            Some(current) => Some(current),
+    let mut exact = None::<Candidate<'a>>;
+    let mut prefix = None::<Candidate<'a>>;
+
+    for (index, route) in routes.iter().enumerate() {
+        if !route_matches(route, context) {
+            continue;
         }
-    })
+
+        match &route.matcher {
+            rginx_core::RouteMatcher::Exact(path) => {
+                exact =
+                    select_more_specific(exact, Candidate::new(index, route, path.len(), false));
+            }
+            rginx_core::RouteMatcher::PreferredPrefix(path) => {
+                prefix =
+                    select_more_specific(prefix, Candidate::new(index, route, path.len(), true));
+            }
+            rginx_core::RouteMatcher::Prefix(path) => {
+                prefix =
+                    select_more_specific(prefix, Candidate::new(index, route, path.len(), false));
+            }
+            rginx_core::RouteMatcher::Regex(_) => {}
+        }
+    }
+
+    if let Some(candidate) = exact {
+        return Some(candidate.route);
+    }
+
+    if let Some(candidate) = prefix
+        && candidate.preferred_prefix
+    {
+        return Some(candidate.route);
+    }
+
+    for route in routes {
+        if matches!(route.matcher, rginx_core::RouteMatcher::Regex(_))
+            && route_matches(route, context)
+        {
+            return Some(route);
+        }
+    }
+
+    prefix.map(|candidate| candidate.route)
+}
+
+#[derive(Clone, Copy)]
+struct Candidate<'a> {
+    index: usize,
+    route: &'a Route,
+    match_len: usize,
+    grpc_rank: u8,
+    preferred_prefix: bool,
+}
+
+impl<'a> Candidate<'a> {
+    fn new(index: usize, route: &'a Route, match_len: usize, preferred_prefix: bool) -> Self {
+        Self {
+            index,
+            route,
+            match_len,
+            grpc_rank: route.grpc_match.as_ref().map_or(0, |grpc_match| grpc_match.priority()),
+            preferred_prefix,
+        }
+    }
+}
+
+fn select_more_specific<'a>(
+    current: Option<Candidate<'a>>,
+    candidate: Candidate<'a>,
+) -> Option<Candidate<'a>> {
+    match current {
+        None => Some(candidate),
+        Some(existing) if candidate.match_len > existing.match_len => Some(candidate),
+        Some(existing) if candidate.match_len < existing.match_len => Some(existing),
+        Some(existing) if candidate.preferred_prefix && !existing.preferred_prefix => {
+            Some(candidate)
+        }
+        Some(existing) if !candidate.preferred_prefix && existing.preferred_prefix => {
+            Some(existing)
+        }
+        Some(existing) if candidate.grpc_rank > existing.grpc_rank => Some(candidate),
+        Some(existing) if candidate.grpc_rank < existing.grpc_rank => Some(existing),
+        Some(existing) if candidate.index < existing.index => Some(candidate),
+        Some(existing) => Some(existing),
+    }
 }
 
 /// 根据 Host 选择虚拟主机

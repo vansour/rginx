@@ -36,6 +36,7 @@ fn compile_normalizes_server_name_override() {
                 url: "https://[::1]:9443".to_string(),
                 weight: 1,
                 backup: false,
+                max_conns: None,
             }],
             tls: None,
             dns: None,
@@ -137,6 +138,7 @@ fn compile_preserves_upstream_server_name_toggle() {
                 url: "https://127.0.0.1:9443".to_string(),
                 weight: 1,
                 backup: false,
+                max_conns: None,
             }],
             tls: Some(crate::model::UpstreamTlsConfig {
                 verify: crate::model::UpstreamTlsModeConfig::Insecure,
@@ -244,6 +246,7 @@ fn compile_rejects_invalid_server_name_override() {
                 url: "https://127.0.0.1:9443".to_string(),
                 weight: 1,
                 backup: false,
+                max_conns: None,
             }],
             tls: None,
             dns: None,

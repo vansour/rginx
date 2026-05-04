@@ -85,6 +85,7 @@ pub async fn forward_request(
         let upstream_request = built_request.request;
         state.record_upstream_peer_attempt(&target.upstream_name, &peer.logical_peer_url);
         let active_peer = clients.track_active_request(&target.upstream_name, &peer.endpoint_key);
+        let upstream_started = std::time::Instant::now();
 
         match wait_for_upstream_stage(
             upstream_request_timeout,
@@ -128,6 +129,7 @@ pub async fn forward_request(
                         cache_backend: &cache_manager,
                         cache_store: cache.store.take(),
                         cache_status: cache.status,
+                        upstream_response_time_ms: upstream_started.elapsed().as_millis() as u64,
                     },
                 )
                 .await;

@@ -308,7 +308,12 @@ fn tls_vhost(server_name: &str, cert_path: &str, key_path: &str) -> VirtualHostC
 fn upstream(name: &str, url: &str) -> UpstreamConfig {
     UpstreamConfig {
         name: name.to_string(),
-        peers: vec![UpstreamPeerConfig { url: url.to_string(), weight: 1, backup: false }],
+        peers: vec![UpstreamPeerConfig {
+            url: url.to_string(),
+            weight: 1,
+            backup: false,
+            max_conns: None,
+        }],
         tls: None,
         dns: None,
         protocol: UpstreamProtocolConfig::Auto,

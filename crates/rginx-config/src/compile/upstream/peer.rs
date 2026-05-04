@@ -5,6 +5,7 @@ pub(super) fn compile_peer(
     url: String,
     weight: u32,
     backup: bool,
+    max_conns: Option<u64>,
 ) -> Result<UpstreamPeer> {
     let uri: http::Uri = url.parse()?;
     let scheme = uri.scheme_str().ok_or_else(|| {
@@ -38,5 +39,14 @@ pub(super) fn compile_peer(
         authority: authority.to_string(),
         weight,
         backup,
+        max_conns: max_conns
+            .map(|value| {
+                usize::try_from(value).map_err(|_| {
+                    Error::Config(format!(
+                        "upstream `{upstream_name}` peer `{authority}` max_conns `{value}` does not fit into usize"
+                    ))
+                })
+            })
+            .transpose()?,
     })
 }

@@ -29,6 +29,7 @@ fn resolved_peer(peer: &UpstreamPeer) -> ResolvedUpstreamPeer {
         server_name: socket_addr.ip().to_string(),
         weight: peer.weight,
         backup: peer.backup,
+        max_conns: peer.max_conns,
     }
 }
 
@@ -70,6 +71,7 @@ fn snapshot_reports_passive_and_active_health_state() {
             authority: "127.0.0.1:8080".to_string(),
             weight: 2,
             backup: true,
+            max_conns: None,
         }],
         UpstreamTls::NativeRoots,
         UpstreamSettings {

@@ -17,6 +17,23 @@ fn regex_route_matcher_supports_case_insensitive_path_patterns() {
 }
 
 #[test]
+fn preferred_prefix_route_matcher_preserves_prefix_semantics() {
+    let matcher = RouteMatcher::PreferredPrefix("/assets".to_string());
+
+    assert!(matcher.matches("/assets"));
+    assert!(matcher.matches("/assets/logo.svg"));
+    assert!(!matcher.matches("/assets-v2/logo.svg"));
+    assert!(
+        matcher.priority()
+            > RouteMatcher::Regex(
+                super::super::RouteRegexMatcher::new("^/assets/.*$".to_string(), false)
+                    .expect("regex matcher should compile"),
+            )
+            .priority()
+    );
+}
+
+#[test]
 fn regex_route_matcher_uses_equal_priority_for_declaration_order() {
     let broad = RouteMatcher::Regex(
         super::super::RouteRegexMatcher::new("^/api/.*$".to_string(), false)

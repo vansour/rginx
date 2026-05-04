@@ -40,6 +40,7 @@ fn compile_resolves_custom_ca_relative_to_config_base() {
                 url: "https://localhost:9443".to_string(),
                 weight: 1,
                 backup: false,
+                max_conns: None,
             }],
             tls: Some(UpstreamTlsConfig {
                 verify: crate::model::UpstreamTlsModeConfig::CustomCa {
@@ -170,6 +171,7 @@ fn compile_accepts_https_http3_upstreams() {
                 url: "https://example.com:443".to_string(),
                 weight: 1,
                 backup: false,
+                max_conns: None,
             }],
             tls: None,
             dns: None,
@@ -277,6 +279,7 @@ fn compile_resolves_upstream_mtls_identity_and_tls_versions_relative_to_config_b
                 url: "https://localhost:9443".to_string(),
                 weight: 1,
                 backup: false,
+                max_conns: None,
             }],
             tls: Some(UpstreamTlsConfig {
                 verify: crate::model::UpstreamTlsModeConfig::CustomCa {

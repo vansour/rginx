@@ -20,7 +20,9 @@ pub(super) fn validate_locations(
 
     for location in locations {
         let matcher_label = match &location.matcher {
-            MatcherConfig::Exact(path) | MatcherConfig::Prefix(path) => {
+            MatcherConfig::Exact(path)
+            | MatcherConfig::PreferredPrefix(path)
+            | MatcherConfig::Prefix(path) => {
                 if !path.starts_with('/') {
                     return Err(Error::Config(match scope_label {
                         Some(scope_label) => {

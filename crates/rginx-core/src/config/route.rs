@@ -113,6 +113,7 @@ impl RouteCompressionPolicy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RouteMatcher {
     Exact(String),
+    PreferredPrefix(String),
     Prefix(String),
     Regex(RouteRegexMatcher),
 }
@@ -121,20 +122,15 @@ impl RouteMatcher {
     pub fn matches(&self, path: &str) -> bool {
         match self {
             Self::Exact(expected) => path == expected,
-            Self::Prefix(prefix) if prefix == "/" => true,
-            Self::Prefix(prefix) => {
-                path == prefix
-                    || path.strip_prefix(prefix).is_some_and(|remainder| remainder.starts_with('/'))
-            }
+            Self::PreferredPrefix(prefix) | Self::Prefix(prefix) => prefix_matches(prefix, path),
             Self::Regex(regex) => regex.matches(path),
         }
     }
 
     pub fn priority(&self) -> (u8, usize) {
         match self {
-            Self::Exact(path) => (3, path.len()),
-            // Regex routes keep declaration order among themselves. compile_routes uses a stable
-            // sort, so equal regex priorities do not reorder overlapping regex matchers.
+            Self::Exact(path) => (4, path.len()),
+            Self::PreferredPrefix(path) => (3, path.len()),
             Self::Regex(_) => (2, 0),
             Self::Prefix(path) => (1, path.len()),
         }
@@ -143,6 +139,7 @@ impl RouteMatcher {
     pub fn id_fragment(&self) -> String {
         match self {
             Self::Exact(path) => format!("exact:{path}"),
+            Self::PreferredPrefix(path) => format!("preferred_prefix:{path}"),
             Self::Prefix(path) => format!("prefix:{path}"),
             Self::Regex(regex) => {
                 if regex.case_insensitive() {
@@ -153,6 +150,14 @@ impl RouteMatcher {
             }
         }
     }
+}
+
+fn prefix_matches(prefix: &str, path: &str) -> bool {
+    if prefix == "/" {
+        return true;
+    }
+
+    path == prefix || path.strip_prefix(prefix).is_some_and(|remainder| remainder.starts_with('/'))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

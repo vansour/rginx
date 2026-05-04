@@ -86,6 +86,8 @@ pub struct UpstreamPeerConfig {
     pub weight: u32,
     #[serde(default)]
     pub backup: bool,
+    #[serde(default)]
+    pub max_conns: Option<u64>,
 }
 
 const fn default_upstream_peer_weight() -> u32 {

@@ -10,9 +10,9 @@ use super::{CacheIndex, CacheIndexEntry, CacheInvalidationRule, CacheZoneRuntime
 mod bootstrap;
 mod delta;
 #[cfg(target_os = "linux")]
-pub(super) mod memory;
+pub(crate) mod memory;
 #[cfg(not(target_os = "linux"))]
-pub(super) mod memory {}
+pub(crate) mod memory {}
 mod index_file;
 
 pub(in crate::cache) use bootstrap::bootstrap_shared_index;

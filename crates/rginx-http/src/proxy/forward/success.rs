@@ -13,6 +13,7 @@ pub(super) struct UpstreamSuccessContext<'a, B: ForwardCacheBackend + ?Sized> {
     pub(super) cache_backend: &'a B,
     pub(super) cache_store: Option<Box<crate::cache::CacheStoreContext>>,
     pub(super) cache_status: Option<crate::cache::CacheStatus>,
+    pub(super) upstream_response_time_ms: u64,
 }
 
 pub(super) async fn finalize_upstream_success<B: ForwardCacheBackend + ?Sized>(
@@ -63,6 +64,7 @@ pub(super) async fn finalize_upstream_success<B: ForwardCacheBackend + ?Sized>(
     if let (Some(downstream_upgrade), Some(upstream_upgrade)) =
         (context.downstream_upgrade, upstream_upgrade)
     {
+        let upstream_status = response.status().as_u16();
         let connection_guard = context.state.retain_connection_slot(context.listener_id);
         context.state.spawn_background_task(proxy_upgraded_connection(
             downstream_upgrade,
@@ -80,11 +82,18 @@ pub(super) async fn finalize_upstream_success<B: ForwardCacheBackend + ?Sized>(
             context.grpc_response_deadline,
             context.grpc_web_mode,
             None,
+            Some(crate::handler::UpstreamAccessLog {
+                upstream_name: context.target.upstream_name.clone(),
+                upstream_addr: context.peer.display_url.clone(),
+                upstream_status,
+                upstream_response_time_ms: context.upstream_response_time_ms,
+            }),
         );
         return apply_cache_store(context.cache_backend, None, context.cache_status, response)
             .await;
     }
 
+    let upstream_status = response.status().as_u16();
     let response = build_downstream_response(
         response,
         &context.target.upstream_name,
@@ -93,6 +102,12 @@ pub(super) async fn finalize_upstream_success<B: ForwardCacheBackend + ?Sized>(
         context.grpc_response_deadline,
         context.grpc_web_mode,
         Some(context.active_peer),
+        Some(crate::handler::UpstreamAccessLog {
+            upstream_name: context.target.upstream_name.clone(),
+            upstream_addr: context.peer.display_url.clone(),
+            upstream_status,
+            upstream_response_time_ms: context.upstream_response_time_ms,
+        }),
     );
     apply_cache_store(context.cache_backend, context.cache_store, context.cache_status, response)
         .await

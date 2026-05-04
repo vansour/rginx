@@ -65,6 +65,7 @@ pub(super) fn parse_peer_addressing(peer: &UpstreamPeer) -> Result<PeerAddressin
         logical_peer_url: peer.url.clone(),
         weight: peer.weight,
         backup: peer.backup,
+        max_conns: peer.max_conns,
     })
 }
 
@@ -87,6 +88,7 @@ pub(super) fn build_endpoint(addressing: &PeerAddressing, ip: IpAddr) -> Resolve
         server_name: addressing.host.clone(),
         weight: addressing.weight,
         backup: addressing.backup,
+        max_conns: addressing.max_conns,
     }
 }
 

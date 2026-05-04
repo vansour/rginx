@@ -131,6 +131,66 @@ fn compile_attaches_route_rate_limit() {
 }
 
 #[test]
+fn compile_attaches_preferred_prefix_matcher_without_reordering_routes() {
+    let config = Config {
+        acme: None,
+        cache_zones: Vec::new(),
+        runtime: RuntimeConfig {
+            shutdown_timeout_secs: 10,
+            worker_threads: None,
+            accept_workers: None,
+        },
+        listeners: Vec::new(),
+        server: ServerConfig {
+            listen: Some("127.0.0.1:8080".to_string()),
+            server_header: None,
+            proxy_protocol: None,
+            default_certificate: None,
+            server_names: Vec::new(),
+            trusted_proxies: Vec::new(),
+            client_ip_header: None,
+            keep_alive: None,
+            max_headers: None,
+            max_request_body_bytes: None,
+            max_connections: None,
+            header_read_timeout_secs: None,
+            request_body_read_timeout_secs: None,
+            response_write_timeout_secs: None,
+            access_log_format: None,
+            tls: None,
+            http3: None,
+        },
+        upstreams: Vec::new(),
+        locations: vec![
+            test_location(
+                MatcherConfig::PreferredPrefix("/assets".to_string()),
+                HandlerConfig::Return {
+                    status: 200,
+                    location: String::new(),
+                    body: Some("assets\n".to_string()),
+                },
+            ),
+            test_location(
+                MatcherConfig::Regex {
+                    pattern: "^/assets/.*$".to_string(),
+                    case_insensitive: false,
+                },
+                HandlerConfig::Return {
+                    status: 200,
+                    location: String::new(),
+                    body: Some("regex\n".to_string()),
+                },
+            ),
+        ],
+        servers: Vec::new(),
+    };
+
+    let snapshot = compile(config).expect("preferred prefix route should compile");
+    assert_eq!(snapshot.default_vhost.routes[0].id, "server/routes[0]|preferred_prefix:/assets");
+    assert_eq!(snapshot.default_vhost.routes[1].id, "server/routes[1]|regex:^/assets/.*$");
+}
+
+#[test]
 fn compile_applies_route_transport_policy_defaults_and_overrides() {
     let config = Config {
         acme: None,
@@ -297,7 +357,7 @@ fn compile_generates_distinct_route_and_vhost_ids() {
 }
 
 #[test]
-fn compile_prioritizes_grpc_constrained_routes_with_same_path_matcher() {
+fn compile_preserves_grpc_route_constraints_without_reordering_routes() {
     let config = Config {
         acme: None,
         cache_zones: Vec::new(),
@@ -356,14 +416,14 @@ fn compile_prioritizes_grpc_constrained_routes_with_same_path_matcher() {
     let snapshot = compile(config).expect("gRPC route constraints should compile");
     let routes = &snapshot.default_vhost.routes;
     assert_eq!(routes.len(), 2);
+    assert!(routes[0].grpc_match.is_none());
     assert_eq!(
-        routes[0].grpc_match.as_ref().and_then(|grpc| grpc.service.as_deref()),
+        routes[1].grpc_match.as_ref().and_then(|grpc| grpc.service.as_deref()),
         Some("grpc.health.v1.Health")
     );
     assert_eq!(
-        routes[0].grpc_match.as_ref().and_then(|grpc| grpc.method.as_deref()),
+        routes[1].grpc_match.as_ref().and_then(|grpc| grpc.method.as_deref()),
         Some("Check")
     );
-    assert!(routes[0].id.contains("grpc:service=grpc.health.v1.Health,method=Check"));
-    assert!(routes[1].grpc_match.is_none());
+    assert!(routes[1].id.contains("grpc:service=grpc.health.v1.Health,method=Check"));
 }

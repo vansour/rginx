@@ -26,6 +26,7 @@ pub(crate) struct ResolvedUpstreamPeer {
     pub server_name: String,
     pub weight: u32,
     pub backup: bool,
+    pub max_conns: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -67,6 +68,7 @@ pub(super) struct PeerAddressing {
     pub(super) logical_peer_url: String,
     pub(super) weight: u32,
     pub(super) backup: bool,
+    pub(super) max_conns: Option<usize>,
 }
 
 #[derive(Debug, Clone)]

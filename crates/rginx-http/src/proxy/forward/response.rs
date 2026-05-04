@@ -19,6 +19,7 @@ pub(super) fn build_downstream_response(
     grpc_response_deadline: Option<GrpcResponseDeadline>,
     grpc_web_mode: Option<&GrpcWebMode>,
     active_peer: Option<ActivePeerGuard>,
+    upstream_access_log: Option<crate::handler::UpstreamAccessLog>,
 ) -> HttpResponse {
     let (mut parts, body) = response.into_parts();
     let preserve_upgrade =
@@ -54,6 +55,10 @@ pub(super) fn build_downstream_response(
         )
         .boxed_unsync()
     };
+
+    if let Some(upstream_access_log) = upstream_access_log {
+        parts.extensions.insert(upstream_access_log);
+    }
 
     Response::from_parts(parts, body)
 }

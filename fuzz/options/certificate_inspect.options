@@ -1,4 +1,0 @@
-# Certificate parsing can expand allocations quickly; keep smoke deterministic and CI-friendly.
--max_len=2048
--rss_limit_mb=768
--timeout=5

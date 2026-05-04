@@ -52,6 +52,10 @@ enum AccessLogVariable {
     GrpcStatus,
     GrpcMessage,
     CacheStatus,
+    UpstreamName,
+    UpstreamAddr,
+    UpstreamStatus,
+    UpstreamResponseTimeMs,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -88,6 +92,10 @@ pub struct AccessLogValues<'a> {
     pub grpc_status: Option<&'a str>,
     pub grpc_message: Option<&'a str>,
     pub cache_status: Option<&'a str>,
+    pub upstream_name: Option<&'a str>,
+    pub upstream_addr: Option<&'a str>,
+    pub upstream_status: Option<u16>,
+    pub upstream_response_time_ms: Option<u64>,
 }
 
 impl AccessLogFormat {
@@ -248,6 +256,26 @@ impl AccessLogFormat {
                     AccessLogVariable::CacheStatus => {
                         rendered.push_str(fallback_access_log_option(values.cache_status))
                     }
+                    AccessLogVariable::UpstreamName => {
+                        rendered.push_str(fallback_access_log_option(values.upstream_name))
+                    }
+                    AccessLogVariable::UpstreamAddr => {
+                        rendered.push_str(fallback_access_log_option(values.upstream_addr))
+                    }
+                    AccessLogVariable::UpstreamStatus => {
+                        if let Some(status) = values.upstream_status {
+                            let _ = write!(rendered, "{status}");
+                        } else {
+                            rendered.push('-');
+                        }
+                    }
+                    AccessLogVariable::UpstreamResponseTimeMs => {
+                        if let Some(value) = values.upstream_response_time_ms {
+                            let _ = write!(rendered, "{value}");
+                        } else {
+                            rendered.push('-');
+                        }
+                    }
                 },
             }
         }
@@ -290,6 +318,10 @@ fn parse_access_log_variable(name: &str) -> Result<AccessLogVariable> {
         "grpc_status" => Ok(AccessLogVariable::GrpcStatus),
         "grpc_message" => Ok(AccessLogVariable::GrpcMessage),
         "cache_status" | "upstream_cache_status" => Ok(AccessLogVariable::CacheStatus),
+        "upstream_name" => Ok(AccessLogVariable::UpstreamName),
+        "upstream_addr" => Ok(AccessLogVariable::UpstreamAddr),
+        "upstream_status" => Ok(AccessLogVariable::UpstreamStatus),
+        "upstream_response_time_ms" => Ok(AccessLogVariable::UpstreamResponseTimeMs),
         _ => Err(Error::Config(format!("access_log_format variable `${name}` is not supported"))),
     }
 }

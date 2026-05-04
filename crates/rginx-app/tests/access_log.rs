@@ -97,6 +97,30 @@ fn cache_access_log_format_emits_cache_status() {
     assert!(logs.contains("CACHE cache=HIT"), "expected HIT access log line, got {logs:?}");
 }
 
+#[test]
+fn upstream_access_log_format_emits_upstream_fields() {
+    let listen_addr = reserve_loopback_addr();
+    let upstream_addr = spawn_static_response_server("upstream log ok\n");
+    let mut server = ServerHarness::spawn("rginx-access-log-upstream", |_| {
+        upstream_access_log_config(listen_addr, upstream_addr)
+    });
+    server.wait_for_http_ready(listen_addr, Duration::from_secs(5));
+
+    let response = send_http_request(
+        listen_addr,
+        &format!("GET /api/demo HTTP/1.1\r\nHost: {listen_addr}\r\nConnection: close\r\n\r\n"),
+    )
+    .expect("proxy request should succeed");
+    assert!(response.starts_with("HTTP/1.1 200"));
+
+    server.shutdown_and_wait(Duration::from_secs(5));
+    let logs = server.combined_output();
+    assert!(
+        logs.contains(&format!("UPSTREAM name=backend addr=http://{upstream_addr} status=200")),
+        "expected upstream access log line in stderr, got {logs:?}"
+    );
+}
+
 fn return_config(listen_addr: SocketAddr) -> String {
     format!(
         "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n        access_log_format: Some(\"ACCESS reqid=$request_id status=$status request=\\\"$request\\\" bytes=$body_bytes_sent ua=\\\"$http_user_agent\\\"\"),\n    ),\n    upstreams: [],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/\"),\n            handler: Return(\n                status: 200,\n                location: \"\",\n                body: Some(\"ok\\n\"),\n            ),\n        ),\n    ],\n)\n",
@@ -123,6 +147,15 @@ fn cached_proxy_access_log_config(
     format!(
         "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    cache_zones: [\n        CacheZoneConfig(\n            name: \"default\",\n            path: {:?},\n            max_size_bytes: Some(1048576),\n            inactive_secs: Some(600),\n            default_ttl_secs: Some(60),\n            max_entry_bytes: Some(65536),\n        ),\n    ],\n    server: ServerConfig(\n        listen: {:?},\n        access_log_format: Some(\"CACHE cache=$cache_status\"),\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [\n                UpstreamPeerConfig(\n                    url: {:?},\n                ),\n            ],\n        ),\n    ],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/api/demo\"),\n            handler: Proxy(\n                upstream: \"backend\",\n            ),\n            cache: Some(CacheRouteConfig(\n                zone: \"default\",\n                methods: Some([\"GET\", \"HEAD\"]),\n                statuses: Some([200]),\n                key: Some(\"{{scheme}}:{{host}}:{{uri}}\"),\n                stale_if_error_secs: Some(60),\n            )),\n        ),\n    ],\n)\n",
         cache_dir.display().to_string(),
+        listen_addr.to_string(),
+        format!("http://{upstream_addr}"),
+        ready_route = READY_ROUTE_CONFIG,
+    )
+}
+
+fn upstream_access_log_config(listen_addr: SocketAddr, upstream_addr: SocketAddr) -> String {
+    format!(
+        "Config(\n    runtime: RuntimeConfig(\n        shutdown_timeout_secs: 2,\n    ),\n    server: ServerConfig(\n        listen: {:?},\n        access_log_format: Some(\"UPSTREAM name=$upstream_name addr=$upstream_addr status=$upstream_status elapsed=$upstream_response_time_ms\"),\n    ),\n    upstreams: [\n        UpstreamConfig(\n            name: \"backend\",\n            peers: [\n                UpstreamPeerConfig(\n                    url: {:?},\n                ),\n            ],\n        ),\n    ],\n    locations: [\n{ready_route}        LocationConfig(\n            matcher: Exact(\"/api/demo\"),\n            handler: Proxy(\n                upstream: \"backend\",\n            ),\n        ),\n    ],\n)\n",
         listen_addr.to_string(),
         format!("http://{upstream_addr}"),
         ready_route = READY_ROUTE_CONFIG,
@@ -186,6 +219,10 @@ fn spawn_counting_response_server(body: &'static str) -> (SocketAddr, Arc<Atomic
     });
 
     (listen_addr, hits)
+}
+
+fn spawn_static_response_server(body: &'static str) -> SocketAddr {
+    spawn_counting_response_server(body).0
 }
 
 fn send_https_request(listen_addr: SocketAddr, request: &str) -> Result<String, String> {

@@ -256,6 +256,33 @@ async fn backup_peer_is_selected_when_primary_pool_is_unhealthy() {
 }
 
 #[tokio::test]
+async fn round_robin_skips_peers_that_reach_max_conns() {
+    let upstream = Upstream::new(
+        "backend".to_string(),
+        vec![
+            UpstreamPeer { max_conns: Some(1), ..peer("http://127.0.0.1:9000") },
+            peer("http://127.0.0.1:9001"),
+        ],
+        UpstreamTls::NativeRoots,
+        upstream_settings(UpstreamProtocol::Auto),
+    );
+    let snapshot = snapshot_with_upstream("backend", Arc::new(upstream));
+    let clients = ProxyClients::from_config(&snapshot).expect("clients should build");
+
+    let guard = clients.track_active_request("backend", "http://127.0.0.1:9000");
+    let selected =
+        select(&clients, snapshot.upstreams["backend"].as_ref(), client_ip("198.51.100.10"), 1)
+            .await;
+
+    assert_eq!(
+        selected.peers.iter().map(|peer| peer.url.as_str()).collect::<Vec<_>>(),
+        vec!["http://127.0.0.1:9001"]
+    );
+
+    drop(guard);
+}
+
+#[tokio::test]
 async fn least_conn_prefers_peers_with_fewer_active_requests() {
     let upstream = Upstream::new(
         "backend".to_string(),

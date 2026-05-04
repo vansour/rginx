@@ -29,15 +29,13 @@ pub(super) fn compile_routes_with_local(
     local_upstream_names: &HashMap<String, String>,
     vhost_id: &str,
 ) -> Result<Vec<Route>> {
-    let mut routes = locations
+    let routes = locations
         .into_iter()
         .enumerate()
         .map(|(route_index, location)| {
             compile_route(location, route_index, upstreams, local_upstream_names, vhost_id)
         })
         .collect::<Result<Vec<_>>>()?;
-
-    routes.sort_by_key(|route| std::cmp::Reverse(route.priority()));
 
     Ok(routes)
 }
@@ -70,6 +68,7 @@ fn compile_route(
 
     let matcher = match matcher {
         MatcherConfig::Exact(path) => RouteMatcher::Exact(path),
+        MatcherConfig::PreferredPrefix(path) => RouteMatcher::PreferredPrefix(path),
         MatcherConfig::Prefix(path) => RouteMatcher::Prefix(path),
         MatcherConfig::Regex { pattern, case_insensitive } => RouteMatcher::Regex(
             RouteRegexMatcher::new(pattern, case_insensitive)
@@ -207,7 +206,9 @@ fn compile_route_access_control(
     deny_cidrs: Vec<String>,
 ) -> Result<RouteAccessControl> {
     let matcher_label = match matcher {
-        RouteMatcher::Exact(path) | RouteMatcher::Prefix(path) => path.as_str(),
+        RouteMatcher::Exact(path)
+        | RouteMatcher::PreferredPrefix(path)
+        | RouteMatcher::Prefix(path) => path.as_str(),
         RouteMatcher::Regex(regex) => regex.pattern(),
     };
 
@@ -223,7 +224,9 @@ fn compile_route_rate_limit(
     burst: Option<u32>,
 ) -> Result<Option<RouteRateLimit>> {
     let matcher_label = match matcher {
-        RouteMatcher::Exact(path) | RouteMatcher::Prefix(path) => path.as_str(),
+        RouteMatcher::Exact(path)
+        | RouteMatcher::PreferredPrefix(path)
+        | RouteMatcher::Prefix(path) => path.as_str(),
         RouteMatcher::Regex(regex) => regex.pattern(),
     };
 

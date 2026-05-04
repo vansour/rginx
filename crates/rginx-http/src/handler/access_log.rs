@@ -5,6 +5,14 @@ use crate::client_ip::TlsClientIdentity;
 use http::Version;
 use rginx_core::{AccessLogFormat, AccessLogValues};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UpstreamAccessLog {
+    pub(crate) upstream_name: String,
+    pub(crate) upstream_addr: String,
+    pub(crate) upstream_status: u16,
+    pub(crate) upstream_response_time_ms: u64,
+}
+
 pub(super) struct AccessLogContext<'a> {
     pub(crate) request_id: &'a str,
     pub(crate) method: &'a str,
@@ -25,6 +33,7 @@ pub(super) struct AccessLogContext<'a> {
     pub(crate) tls_client_identity: Option<&'a TlsClientIdentity>,
     pub(crate) grpc: Option<&'a GrpcObservability>,
     pub(crate) cache_status: Option<&'a str>,
+    pub(crate) upstream: Option<&'a UpstreamAccessLog>,
 }
 
 #[derive(Debug, Clone)]
@@ -47,6 +56,7 @@ pub(super) struct OwnedAccessLogContext {
     pub(crate) body_bytes_sent: Option<u64>,
     pub(crate) tls_client_identity: Option<TlsClientIdentity>,
     pub(crate) cache_status: Option<String>,
+    pub(crate) upstream: Option<UpstreamAccessLog>,
 }
 
 impl OwnedAccessLogContext {
@@ -74,6 +84,7 @@ impl OwnedAccessLogContext {
             tls_client_identity: self.tls_client_identity.as_ref(),
             grpc,
             cache_status: self.cache_status.as_deref(),
+            upstream: self.upstream.as_ref(),
         }
     }
 }
@@ -123,6 +134,16 @@ pub(super) fn log_access_event(format: Option<&AccessLogFormat>, context: Access
             .and_then(|identity| identity.serial_number.as_deref())
             .unwrap_or("-"),
         cache_status = context.cache_status.unwrap_or("-"),
+        upstream_name = context.upstream.map(|upstream| upstream.upstream_name.as_str()).unwrap_or("-"),
+        upstream_addr = context.upstream.map(|upstream| upstream.upstream_addr.as_str()).unwrap_or("-"),
+        upstream_status = context
+            .upstream
+            .map(|upstream| upstream.upstream_status)
+            .unwrap_or(0),
+        upstream_response_time_ms = context
+            .upstream
+            .map(|upstream| upstream.upstream_response_time_ms)
+            .unwrap_or(0),
         tls_client_san_dns_names = joined_tls_client_san_dns_names(context.tls_client_identity)
             .as_deref()
             .unwrap_or("-"),
@@ -193,6 +214,12 @@ pub(super) fn render_access_log_line(
         grpc_status: context.grpc.and_then(|grpc| grpc.status.as_deref()),
         grpc_message: context.grpc.and_then(|grpc| grpc.message.as_deref()),
         cache_status: context.cache_status,
+        upstream_name: context.upstream.map(|upstream| upstream.upstream_name.as_str()),
+        upstream_addr: context.upstream.map(|upstream| upstream.upstream_addr.as_str()),
+        upstream_status: context.upstream.map(|upstream| upstream.upstream_status),
+        upstream_response_time_ms: context
+            .upstream
+            .map(|upstream| upstream.upstream_response_time_ms),
     })
 }
 

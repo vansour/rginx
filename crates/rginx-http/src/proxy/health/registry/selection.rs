@@ -112,12 +112,9 @@ impl PeerHealthRegistry {
                     &endpoint.endpoint_key,
                     &endpoint.logical_peer_url,
                 );
-                if self.is_available(&upstream.name, &endpoint.endpoint_key) {
-                    available.push((
-                        self.active_requests(&upstream.name, &endpoint.endpoint_key),
-                        order,
-                        endpoint,
-                    ));
+                let active_requests = self.active_requests(&upstream.name, &endpoint.endpoint_key);
+                if self.endpoint_is_selectable(&upstream.name, &endpoint, active_requests) {
+                    available.push((active_requests, order, endpoint));
                 } else {
                     skipped_unhealthy += 1;
                 }
@@ -174,7 +171,8 @@ impl PeerHealthRegistry {
                     &endpoint.endpoint_key,
                     &endpoint.logical_peer_url,
                 );
-                if self.is_available(&upstream.name, &endpoint.endpoint_key) {
+                let active_requests = self.active_requests(&upstream.name, &endpoint.endpoint_key);
+                if self.endpoint_is_selectable(&upstream.name, &endpoint, active_requests) {
                     available.push(endpoint);
                 } else {
                     skipped_unhealthy += 1;
@@ -205,6 +203,19 @@ impl PeerHealthRegistry {
         }
 
         SelectedPeers { peers: selected, skipped_unhealthy }
+    }
+
+    fn endpoint_is_selectable(
+        &self,
+        upstream_name: &str,
+        endpoint: &ResolvedUpstreamPeer,
+        active_requests: u64,
+    ) -> bool {
+        if !self.is_available(upstream_name, &endpoint.endpoint_key) {
+            return false;
+        }
+
+        endpoint.max_conns.is_none_or(|max_conns| active_requests < max_conns as u64)
     }
 }
 

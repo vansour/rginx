@@ -1,14 +1,18 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ServerNameMatch {
     Exact,
-    Wildcard { suffix_len: usize },
+    DotWildcard { suffix_len: usize },
+    LeadingWildcard { suffix_len: usize },
+    TrailingWildcard { prefix_len: usize },
 }
 
 impl ServerNameMatch {
     pub fn priority(self) -> (u8, usize) {
         match self {
-            Self::Exact => (2, 0),
-            Self::Wildcard { suffix_len } => (1, suffix_len),
+            Self::Exact => (4, 0),
+            Self::DotWildcard { suffix_len } => (3, suffix_len),
+            Self::LeadingWildcard { suffix_len } => (2, suffix_len),
+            Self::TrailingWildcard { prefix_len } => (1, prefix_len),
         }
     }
 }
@@ -33,6 +37,18 @@ pub fn match_server_name(pattern: &str, host: &str) -> Option<ServerNameMatch> {
         return None;
     }
 
+    if let Some(suffix) = pattern.strip_prefix('.') {
+        if suffix.is_empty() {
+            return None;
+        }
+
+        if hostname == suffix || hostname.ends_with(&format!(".{suffix}")) {
+            return Some(ServerNameMatch::DotWildcard { suffix_len: suffix.len() });
+        }
+
+        return None;
+    }
+
     if let Some(suffix) = pattern.strip_prefix("*.") {
         if suffix.is_empty() || hostname == suffix {
             return None;
@@ -40,7 +56,18 @@ pub fn match_server_name(pattern: &str, host: &str) -> Option<ServerNameMatch> {
 
         return hostname
             .ends_with(&format!(".{suffix}"))
-            .then_some(ServerNameMatch::Wildcard { suffix_len: suffix.len() });
+            .then_some(ServerNameMatch::LeadingWildcard { suffix_len: suffix.len() });
+    }
+
+    if let Some(prefix) = pattern.strip_suffix(".*") {
+        if prefix.is_empty() || hostname == prefix {
+            return None;
+        }
+
+        return hostname
+            .strip_prefix(prefix)
+            .filter(|remainder| remainder.starts_with('.') && remainder.len() > 1)
+            .map(|_| ServerNameMatch::TrailingWildcard { prefix_len: prefix.len() });
     }
 
     (hostname == pattern).then_some(ServerNameMatch::Exact)

@@ -5,7 +5,8 @@ pub(super) fn build_proxy_uri(
     original_uri: &Uri,
     strip_prefix: Option<&str>,
 ) -> Result<Uri, http::Error> {
-    let original_path = original_uri.path_and_query().map(|value| value.as_str()).unwrap_or("/");
+    let normalized_target = crate::request_target::normalize_request_target(original_uri);
+    let original_path = normalized_target.path_and_query.as_str();
 
     let path_and_query = if let Some(prefix) = strip_prefix {
         if let Some(stripped) = original_path.strip_prefix(prefix) {
